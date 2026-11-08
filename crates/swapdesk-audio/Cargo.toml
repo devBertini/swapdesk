@@ -1,0 +1,20 @@
+[package]
+name = "swapdesk-audio"
+description = "Audio of Swapdesk (contract C3): Opus encode and decode, audio datagram packets, adaptive jitter buffer with concealment."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+opus.workspace = true
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-netsim = { path = "../swapdesk-netsim" }

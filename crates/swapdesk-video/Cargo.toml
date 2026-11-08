@@ -1,0 +1,23 @@
+[package]
+name = "swapdesk-video"
+description = "Video transport of Swapdesk: one unidirectional QUIC stream per encoded frame, stale-frame resets, keyframe requests and rate control (PROTOCOL.md 4 and 7.1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+quinn.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+swapdesk-trust = { path = "../swapdesk-trust" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-netsim = { path = "../swapdesk-netsim" }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
