@@ -1,0 +1,90 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0-preview"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Platform crates (capture, input, service) opt out of this in their own manifests; every other crate forbids unsafe.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# Owned by the main session: a lane that needs a crate asks; new third-party crates need the owner's yes (docs/DECISIONS.md D14, D18, D19).
+# Each crate adds only the features it uses (`windows` and `windows-sys` features per crate).
+[workspace.dependencies]
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+ring = "0.17.14"
+tokio = { version = "1.54", default-features = false, features = ["rt", "net", "time", "sync"] }
+mdns-sd = { version = "0.21.7", default-features = false }
+windows = { version = "0.62.2", default-features = false }
+windows-sys = { version = "0.61.2", default-features = false }
+accesskit = "0.25.2"
+accesskit_windows = "0.35.2"
+libc = "0.2.191"
+opus = "0.4.0"
+vte = { version = "0.15.0", default-features = false }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+# macOS (D26): framework crates without their default all-features set; each mac crate enables "std" and what it uses.
+objc2 = "0.6.5"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2-foundation = { version = "0.3.2", default-features = false }
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-quartz-core = { version = "0.3.2", default-features = false }
+objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-core-graphics = { version = "0.3.2", default-features = false }
+objc2-core-media = { version = "0.3.2", default-features = false }
+objc2-core-video = { version = "0.3.2", default-features = false }
+objc2-video-toolbox = { version = "0.3.2", default-features = false }
+objc2-av-foundation = { version = "0.3.2", default-features = false }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false }
+objc2-core-audio = { version = "0.3.2", default-features = false }
+objc2-core-audio-types = { version = "0.3.2", default-features = false }
+objc2-security = { version = "0.3.2", default-features = false }
+objc2-system-configuration = { version = "0.3.2", default-features = false }
+
+# Shipping profile (UI, helpers, agents): budgets are measured on it. D15: panic = "abort" here.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
+incremental = false
+
+# D15: the service/daemon isolates a panic to its session, so it is built with this profile (cargo build -p swapdesk-service --profile release-service).
+[profile.release-service]
+inherits = "release"
+panic = "unwind"
+
+# Local performance work, never shipped.
+[profile.profiling]
+inherits = "release"
+debug = true
+
+# The unit loop (reached cases under 30 s).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+[profile.dev.package.proptest]
+opt-level = 2
+
+[profile.dev.build-override]
+opt-level = 0

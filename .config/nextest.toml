@@ -1,0 +1,23 @@
+[profile.default.junit]
+path = "junit.xml"
+
+# CI: run everything, retry once to name flaky tests instead of hiding them, keep the JUnit report.
+[profile.ci]
+fail-fast = false
+retries = 1
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# Tests that drive the GPU's video engines (decode, encode, present) contend for the integrated GPU when several
+# test binaries run at once and then time out: they run one at a time, alongside everything else.
+[test-groups]
+gpu = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui)"
+test-group = "gpu"
+
+[[profile.ci.overrides]]
+filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui)"
+test-group = "gpu"

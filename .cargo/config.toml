@@ -1,0 +1,6 @@
+# libopus is built from C source by opusic-sys (the `opus` crate) and needs CMake on PATH (or CMAKE set to its path).
+
+# The shipped exes link the C runtime statically, so they run on a PC without the Visual C++ redistributable
+# (vcruntime140.dll); the cmake crate builds libopus with the matching /MT runtime. Remove this to link it dynamically.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,8 @@
+/target/
+*.pdb
+/test-results/
+/.claude/*
+!/.claude/rules/
+node_modules/
+/spikes/
+/docs/.flows-state.json
