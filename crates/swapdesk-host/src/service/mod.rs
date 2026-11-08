@@ -1,0 +1,833 @@
+//! The OS-free core of `swapdesk-service.exe` (C2.1, stage 18d-1): the session endpoint as host and as viewer, the
+//! helper links, and the relays between them. It owns a tokio runtime; everything it offers to the binary is a plain
+//! method or a channel, so the UI pipe of the next slice and the Windows supervisor sit on top of it unchanged.
+//!
+//! * [`ServiceCore::start`] binds the session endpoint on the approved interface addresses (LAN guard: physical
+//!   Ethernet and Wi-Fi, on-link peers; `docs/PROTOCOL.md` section 1), runs [`swapdesk_session::HostService`] on it
+//!   and keeps a viewer path ready.
+//! * [`ServiceCore::attach_helper`] drives one helper over C2.4 (a reader thread, a writer path) and reports its
+//!   end as [`CoreEvent::HelperGone`]; relaunching it is the supervisor's job.
+//! * Host sessions: [`host_relay`] (helper frames to the `VideoSender`, input to the right helper, audio to
+//!   datagrams, revocation and end).
+//! * Viewer sessions: [`ServiceCore::connect`] returns a [`ViewerHandle`] and the [`ViewerMessages`] of the C2.4
+//!   `Viewer*` messages (see [`viewer`]).
+
+mod clip_actions;
+mod config;
+mod extras;
+mod files;
+mod helper_link;
+mod host_relay;
+mod pty_proxy;
+mod routing;
+mod shared;
+mod terminal;
+mod viewer;
+
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Duration;
+
+use quinn::{Endpoint, Incoming};
+use swapdesk_extras::chat::{ChatEntry, ChatError};
+use swapdesk_ipc::{IpcRole, Message as Ipc};
+use swapdesk_lan::guard::{Refusal, check_incoming, find_on_link};
+use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
+use swapdesk_platform::{Level, NetInterfaces};
+use swapdesk_proto::{Intent, PermissionSet};
+use swapdesk_session::{
+    ConsentRequest, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest, Registry,
+    StartInfo, ViewerConfig,
+};
+use swapdesk_swap::{SwapHandler, SwapOutcome};
+use swapdesk_trust::{DeviceId, TrustHandle, accept_session, endpoint_from_socket, open_session_endpoint};
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::oneshot;
+
+pub use clip_actions::ClipActionHooks;
+pub use config::{DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceDeps, default_capabilities};
+pub use extras::{ChatNote, ExtrasHooks};
+pub use files::ViewerFiles;
+pub use helper_link::{AttachError, HelperEvent, HelperLink};
+pub use routing::{HelperKind, input_helper, media_helper};
+pub use shared::CoreEvent;
+pub use terminal::TerminalEnv;
+pub use viewer::{
+    ApplyError, ConnectError, StateChange, TermOut, Timeout, ViewerHandle, ViewerMessages, ViewerOut, end_reason,
+};
+
+use clip_actions::{ActionsHost, ClipHooksCell};
+use extras::{ChatRouter, CoreEnv, HooksCell};
+use files::FilesService;
+use host_relay::HostRelays;
+use shared::{Shared, pump};
+use terminal::{EnvCell, HostTerminals};
+
+/// Worker threads of the core's runtime: a session is one connection and a few tasks; the heavy work (capture,
+/// encode) lives in the helpers.
+const WORKERS: usize = 4;
+/// Handshakes in flight at once (PROTOCOL.md 1: 16 per machine); one more is ignored.
+const MAX_HANDSHAKES: usize = 16;
+
+/// Why a core did not start.
+#[derive(Debug)]
+pub enum ServiceError {
+    Runtime(std::io::Error),
+    /// The session endpoint could not be made on `addr`.
+    Bind {
+        addr: SocketAddrV4,
+        error: String,
+    },
+}
+
+impl core::fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Runtime(e) => write!(f, "runtime: {e}"),
+            Self::Bind { addr, error } => write!(f, "cannot listen on {addr}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
+/// What the viewer path needs.
+struct Dialer {
+    cfg_name: String,
+    os: swapdesk_proto::Os,
+    os_version: String,
+    app_version: String,
+    capabilities: swapdesk_proto::Capabilities,
+    identity: Arc<swapdesk_trust::Identity>,
+    trust: Arc<TrustHandle>,
+    clock: Arc<dyn swapdesk_platform::Clock>,
+    wall: Arc<dyn swapdesk_trust::WallClock>,
+    interfaces: Arc<dyn NetInterfaces>,
+    allow_loopback: bool,
+    local_addrs: Vec<SocketAddr>,
+}
+
+/// Opens viewer sessions. Shared by the core and by the swap environment, which opens the new connection of a swap
+/// from a session task.
+pub(crate) struct Connector {
+    dialer: Arc<Dialer>,
+    shared: Arc<Shared>,
+    viewers: Mutex<HashMap<u64, Weak<viewer::Inner>>>,
+    swap: SwapHandler,
+    hooks: Arc<HooksCell>,
+    clip_hooks: Arc<ClipHooksCell>,
+    files: Arc<FilesService>,
+}
+
+impl Connector {
+    /// Opens a session to `addr` as a viewer. The device must be paired (its key is read from the trust store, never
+    /// from the address) and the address must pass the LAN guard. `swap_token` enters a swap (PROTOCOL.md 6.3).
+    pub(crate) async fn connect(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+        extra: PermissionSet,
+        swap_token: Option<[u8; 16]>,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        let d = &self.dialer;
+        let SocketAddr::V4(v4) = addr else { return Err(ConnectError::NotIpv4) };
+        let local = if d.allow_loopback && v4.ip().is_loopback() {
+            // Development only. A session with this machine's own endpoint is still refused (PROTOCOL.md 1).
+            if d.local_addrs.contains(&addr) {
+                return Err(ConnectError::Refused(Refusal::OwnAddress));
+            }
+            Ipv4Addr::LOCALHOST
+        } else {
+            let list = d.interfaces.list().map_err(|_| ConnectError::Refused(Refusal::UnknownLocalAddress))?;
+            find_on_link(&list, *v4.ip()).map_err(ConnectError::Refused)?.local
+        };
+        let spki = d
+            .trust
+            .read(|s| s.devices.iter().find(|p| p.device_id == device).map(|p| p.spki))
+            .ok_or(ConnectError::UnknownDevice)?;
+        let socket = bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(ConnectError::Socket)?;
+        let endpoint = endpoint_from_socket(socket, None)
+            .map_err(|e| ConnectError::Socket(std::io::Error::other(e.to_string())))?;
+        let mut cfg = ViewerConfig::new(
+            &d.cfg_name,
+            d.os,
+            &d.os_version,
+            &d.app_version,
+            d.capabilities.clone(),
+            Arc::clone(&d.clock),
+        );
+        cfg.intent = intent;
+        cfg.requested =
+            if unattended { requested_for(intent).union(PermissionSet::UNATTENDED) } else { requested_for(intent) };
+        cfg.requested = cfg.requested.union(extra);
+        cfg.swap_token = swap_token;
+        let opened = viewer::open(
+            viewer::OpenParams {
+                rt: self.shared.rt.clone(),
+                trace: Arc::clone(&self.shared.trace),
+                wall: Arc::clone(&d.wall),
+                endpoint,
+                identity: Arc::clone(&d.identity),
+                addr,
+                expected: spki,
+                swap: self.swap.clone(),
+                hooks: Arc::clone(&self.hooks),
+                clip_hooks: Arc::clone(&self.clip_hooks),
+                files: self.files.viewer(),
+            },
+            cfg,
+        )
+        .await?;
+        lock(&self.viewers).insert(opened.handle.session_id(), Arc::downgrade(&opened.handle.inner));
+        Ok((opened.handle, opened.messages))
+    }
+}
+
+/// Hands the host's UI calls through, adding what only the core knows: the displays of the media helper.
+struct CoreUi {
+    inner: Arc<dyn HostUi>,
+    shared: Arc<Shared>,
+    files: Arc<FilesService>,
+}
+
+impl HostUi for CoreUi {
+    fn somebody_present(&self) -> bool {
+        self.inner.somebody_present()
+    }
+
+    fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
+        self.inner.prompt(request)
+    }
+
+    fn prompt_closed(&self, request_id: u64, how: PromptEnd) {
+        self.inner.prompt_closed(request_id, how);
+    }
+
+    fn consent(&self, request: ConsentRequest) -> oneshot::Receiver<bool> {
+        self.inner.consent(request)
+    }
+
+    fn consent_closed(&self, request: &ConsentRequest, how: PromptEnd) {
+        self.inner.consent_closed(request, how);
+    }
+
+    fn lock_on_end(&self) -> bool {
+        self.inner.lock_on_end()
+    }
+
+    fn lock_screen(&self) {
+        self.inner.lock_screen();
+    }
+
+    fn start_info(&self) -> StartInfo {
+        let mut info = self.inner.start_info();
+        if info.displays.is_empty() {
+            info.displays = self.shared.media_displays();
+        }
+        info
+    }
+
+    fn event(&self, event: HostEvent) {
+        match &event {
+            HostEvent::SessionStarted { session_id, mode, granted, .. } => {
+                self.shared.log(
+                    Level::Info,
+                    format_args!("session {session_id:#x} started: {mode:?}, grants {:#06x}", granted.bits()),
+                );
+            }
+            HostEvent::Ended { session_id, end, .. } => {
+                self.shared
+                    .log(Level::Info, format_args!("session {session_id:#x} ended: {:?} {:?}", end.kind, end.code));
+            }
+            _ => {}
+        }
+        self.files.host_event(&event);
+        self.inner.event(event);
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the accept loops need to judge an incoming connection.
+struct Gate {
+    interfaces: Arc<dyn NetInterfaces>,
+    allow_loopback: bool,
+    trust: Arc<TrustHandle>,
+    host: HostService,
+    shared: Arc<Shared>,
+    handshakes: AtomicUsize,
+}
+
+/// A place among the handshakes in flight, given back when dropped.
+struct Slot(Arc<Gate>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.handshakes.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Gate {
+    /// PROTOCOL.md 1, before any handshake: on-link in the subnet of the approved interface that owns the local
+    /// address, not loopback, not one of this machine's own addresses. Loopback is let through only when the core
+    /// was built with the development option, and then only between two loopback addresses.
+    fn judge(&self, incoming: &Incoming) -> Result<(), Refusal> {
+        let remote = incoming.remote_address().ip();
+        let local = incoming.local_ip();
+        if self.allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
+            return Ok(());
+        }
+        let list = self.interfaces.list().map_err(|_| Refusal::UnknownLocalAddress)?;
+        let local = local.ok_or(Refusal::UnknownLocalAddress)?;
+        check_incoming(&list, local, remote).map(|_| ())
+    }
+
+    fn reserve(self: &Arc<Self>) -> Option<Slot> {
+        self.handshakes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_HANDSHAKES).then_some(n + 1))
+            .ok()?;
+        Some(Slot(Arc::clone(self)))
+    }
+}
+
+async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
+    while let Some(incoming) = endpoint.accept().await {
+        if let Err(why) = gate.judge(&incoming) {
+            gate.shared
+                .log(Level::Warn, format_args!("refused a connection from {}: {why}", incoming.remote_address()));
+            incoming.refuse();
+            continue;
+        }
+        let Some(slot) = gate.reserve() else {
+            incoming.ignore();
+            continue;
+        };
+        let gate = Arc::clone(&gate);
+        tokio::spawn(async move {
+            let accepted = accept_session(incoming, &*gate.trust).await;
+            drop(slot);
+            match accepted {
+                Ok((conn, device)) => {
+                    gate.host.serve(conn, device).await;
+                }
+                Err(e) => gate.shared.log(Level::Debug, format_args!("a session handshake failed: {e}")),
+            }
+        });
+    }
+}
+
+/// Why a chat message was not sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatSendError {
+    /// No live session has this id.
+    NoSuchSession,
+    Chat(ChatError),
+}
+
+/// The permissions a viewer asks for with `intent`: what it means to do, plus audio (off until the viewer turns it
+/// on), with control the clipboard, and files for a controlling viewer (stage 44: an unattended session grants the
+/// stored permissions the viewer asked for, so a viewer that did not ask for `FILES` could never use them there). The
+/// host's user decides what is granted.
+pub fn requested_for(intent: Intent) -> PermissionSet {
+    match intent {
+        Intent::View => PermissionSet::VIEW | PermissionSet::AUDIO,
+        // Clipboard sync is asked with control (a copy at the viewer writes the host's clipboard): the host's user
+        // still decides whether it is granted.
+        Intent::Control => {
+            PermissionSet::CONTROL | PermissionSet::AUDIO | PermissionSet::CLIPBOARD | PermissionSet::FILES
+        }
+    }
+}
+
+/// The core of the service. Dropping it ends its sessions, tells the helpers to shut down and stops the runtime.
+pub struct ServiceCore {
+    shared: Arc<Shared>,
+    host: HostService,
+    dialer: Arc<Dialer>,
+    connector: Arc<Connector>,
+    hooks: Arc<HooksCell>,
+    clip_hooks: Arc<ClipHooksCell>,
+    host_clip: Arc<swapdesk_extras::clipboard::ClipboardHandler<crate::proxy::PipeClipboard>>,
+    host_chat: Arc<ChatRouter>,
+    term_env: Arc<EnvCell>,
+    swap: SwapHandler,
+    runtime: Option<Runtime>,
+    endpoints: Vec<Endpoint>,
+    events: Mutex<Option<std::sync::mpsc::Receiver<CoreEvent>>>,
+    win_session: u32,
+}
+
+impl ServiceCore {
+    /// Builds the runtime, binds the session endpoint on every approved interface address (and on
+    /// `cfg.listen_extra`) and starts accepting.
+    pub fn start(mut cfg: ServiceConfig) -> Result<Self, ServiceError> {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(WORKERS)
+            .thread_name("swapdesk-service")
+            .enable_all()
+            .build()
+            .map_err(ServiceError::Runtime)?;
+        let enter = runtime.enter();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared =
+            Arc::new(Shared::new(runtime.handle().clone(), Arc::clone(&cfg.trace), cfg.audio_exclude_pid, events_tx));
+
+        let mut registry = Registry::new();
+        // The registry is empty: this cannot clash. A failure would be a bug of this crate and would show as a session
+        // with no video, so it is logged rather than hidden.
+        if let Err(e) = registry.register(Arc::new(HostRelays { shared: Arc::clone(&shared) })) {
+            shared.log(Level::Error, format_args!("the host relay could not be registered: {e:?}"));
+        }
+        // Swap and chat (stage 41): the same handlers serve the host role here and every viewer session. The hooks
+        // that reach the interface are set after the start, so the environment holds them in a cell.
+        let hooks = Arc::new(HooksCell::default());
+        let env = Arc::new(CoreEnv {
+            ui: Arc::clone(&cfg.ui),
+            trust: Arc::clone(&cfg.trust),
+            host: OnceLock::new(),
+            hooks: Arc::clone(&hooks),
+            connector: OnceLock::new(),
+            shared: Arc::clone(&shared),
+        });
+        let swap = SwapHandler::new(env.clone());
+        let host_chat = ChatRouter::new(Arc::clone(&hooks));
+        // Terminals (stage 43): shells run in the user helper, or, for the administrator terminal, in this process.
+        let term_env = Arc::new(EnvCell::default());
+        let host_terms =
+            HostTerminals::new(Arc::clone(&shared), Arc::clone(&term_env), Arc::clone(&cfg.trust), Arc::clone(&hooks));
+        // Files (stage 44): the host's handler reaches the user's disk through the user helper, behind D13.
+        let files = FilesService::new(Arc::clone(&hooks), Arc::clone(&cfg.trust), Arc::clone(&shared));
+        for (what, result) in [
+            ("swap", registry.register(swap.handler())),
+            ("chat", registry.register(host_chat.clone())),
+            ("terminal", registry.register(host_terms.clone())),
+            ("files", registry.register(files.host_handler())),
+        ] {
+            if let Err(e) = result {
+                shared.log(Level::Error, format_args!("the {what} handler could not be registered: {e:?}"));
+            }
+        }
+        // Clipboard sync and quick actions (stage 42): the OS work runs in the user helper, the handlers here.
+        let clip_hooks = Arc::new(ClipHooksCell::default());
+        let host_cell: Arc<OnceLock<HostService>> = Arc::default();
+        let host_clip = clip_actions::host_clipboard(&shared, &clip_hooks, &host_cell);
+        let actions = ActionsHost::new(&shared, Arc::clone(&cfg.ui), &clip_hooks, cfg.service_actions.take());
+        for (what, result) in
+            [("clipboard", registry.register(host_clip.clone())), ("quick actions", registry.register(actions))]
+        {
+            if let Err(e) = result {
+                shared.log(Level::Error, format_args!("the {what} handler could not be registered: {e:?}"));
+            }
+        }
+        let mut host_cfg =
+            HostConfig::new(&cfg.name, cfg.os, &cfg.os_version, &cfg.app_version, cfg.capabilities.clone());
+        host_cfg.max_live_sessions = 1;
+        let ui =
+            Arc::new(CoreUi { inner: Arc::clone(&cfg.ui), shared: Arc::clone(&shared), files: Arc::clone(&files) });
+        let host = HostService::new(host_cfg, Arc::clone(&cfg.trust), ui, registry, Arc::clone(&cfg.clock));
+        let _ = env.host.set(host.clone());
+        let _ = host_cell.set(host.clone());
+
+        // One endpoint per approved interface address (PROTOCOL.md 1), and the development addresses.
+        let mut sockets = Vec::new();
+        match cfg.interfaces.list() {
+            Ok(list) => {
+                for (addr, socket) in bind_quic_all_approved(&list, cfg.session_port) {
+                    match socket {
+                        Ok(s) => sockets.push(s),
+                        Err(e) => shared
+                            .log(Level::Warn, format_args!("cannot listen on {} ({}): {e}", addr.addr, addr.if_name)),
+                    }
+                }
+            }
+            Err(e) => shared.log(Level::Warn, format_args!("the interface list is unavailable: {e}")),
+        }
+        for addr in &cfg.listen_extra {
+            sockets
+                .push(bind_quic_socket(*addr).map_err(|e| ServiceError::Bind { addr: *addr, error: e.to_string() })?);
+        }
+        let mut endpoints = Vec::new();
+        let mut local_addrs = Vec::new();
+        for socket in sockets {
+            let local = socket.local_addr().map_err(ServiceError::Runtime)?;
+            let endpoint =
+                open_session_endpoint(socket, &cfg.identity, cfg.trust.clone()).map_err(|e| ServiceError::Bind {
+                    addr: match local {
+                        SocketAddr::V4(v4) => v4,
+                        SocketAddr::V6(_) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+                    },
+                    error: e.to_string(),
+                })?;
+            shared.log(Level::Info, format_args!("session endpoint on {local}"));
+            local_addrs.push(local);
+            endpoints.push(endpoint);
+        }
+
+        let gate = Arc::new(Gate {
+            interfaces: Arc::clone(&cfg.interfaces),
+            allow_loopback: cfg.allow_loopback_peers,
+            trust: Arc::clone(&cfg.trust),
+            host: host.clone(),
+            shared: Arc::clone(&shared),
+            handshakes: AtomicUsize::new(0),
+        });
+        for endpoint in &endpoints {
+            runtime.spawn(accept_loop(Arc::clone(&gate), endpoint.clone()));
+        }
+        let dialer = Arc::new(Dialer {
+            cfg_name: cfg.name.clone(),
+            os: cfg.os,
+            os_version: cfg.os_version.clone(),
+            app_version: cfg.app_version.clone(),
+            capabilities: cfg.capabilities.clone(),
+            identity: Arc::clone(&cfg.identity),
+            trust: Arc::clone(&cfg.trust),
+            clock: Arc::clone(&cfg.clock),
+            wall: Arc::clone(&cfg.wall),
+            interfaces: Arc::clone(&cfg.interfaces),
+            allow_loopback: cfg.allow_loopback_peers,
+            local_addrs,
+        });
+        drop(enter);
+        let connector = Arc::new(Connector {
+            dialer: Arc::clone(&dialer),
+            shared: Arc::clone(&shared),
+            viewers: Mutex::new(HashMap::new()),
+            swap: swap.clone(),
+            hooks: Arc::clone(&hooks),
+            clip_hooks: Arc::clone(&clip_hooks),
+            files: Arc::clone(&files),
+        });
+        let _ = env.connector.set(Arc::downgrade(&connector));
+        Ok(Self {
+            shared,
+            host,
+            dialer,
+            connector,
+            hooks,
+            clip_hooks,
+            host_clip,
+            host_chat,
+            term_env,
+            swap,
+            runtime: Some(runtime),
+            endpoints,
+            events: Mutex::new(Some(events_rx)),
+            win_session: cfg.win_session,
+        })
+    }
+
+    fn handle(&self) -> &tokio::runtime::Handle {
+        &self.shared.rt
+    }
+
+    /// The core's runtime, for the owner's own async work (the UI pipe tasks of the next slice).
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.shared.rt
+    }
+
+    /// The addresses the session endpoint listens on.
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.dialer.local_addrs
+    }
+
+    /// The host service: the banner's and Permissões' calls (`set_session_grants`, `disconnect`, `sessions`, ...).
+    pub fn host(&self) -> &HostService {
+        &self.host
+    }
+
+    /// The core's events, once: the owner reads them (a supervisor thread, the UI dispatcher).
+    pub fn take_events(&self) -> Option<std::sync::mpsc::Receiver<CoreEvent>> {
+        lock(&self.events).take()
+    }
+
+    // ---------- helpers ----------
+
+    /// Attaches a helper: the service side of the C2.4 handshake on `reader` / `writer`, then a reader thread and a
+    /// writer path. `role` is what the caller expects (the pipe it created for that helper); a `Hello` with another
+    /// role is refused. A second helper of the same kind replaces the first, which is told to shut down. Blocks until
+    /// the helper's `Hello` arrives: call it from the supervisor's thread. The end of the pipe is reported as
+    /// `CoreEvent::HelperGone`.
+    pub fn attach_helper<R, W>(&self, role: IpcRole, reader: R, writer: W) -> Result<HelperKind, AttachError>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        let helper_link::Attached { link, events } = helper_link::attach(role, self.win_session, reader, writer)?;
+        let link = Arc::new(link);
+        let kind = link.kind();
+        if let Some(old) = self.shared.install(Arc::clone(&link)) {
+            old.send_blocking(Ipc::Shutdown);
+        }
+        self.shared.log(Level::Info, format_args!("{kind:?} helper attached (pid {})", link.pid()));
+        self.shared.emit(CoreEvent::HelperAttached { kind, pid: link.pid() });
+        self.handle().spawn(pump(Arc::clone(&self.shared), self.host.clone(), link, events));
+        self.shared.wake_all();
+        Ok(kind)
+    }
+
+    /// The attached helper of `kind`, if its pipe is open.
+    pub fn helper(&self, kind: HelperKind) -> Option<Arc<HelperLink>> {
+        self.shared.helper(kind)
+    }
+
+    /// The host user's mute: the media helper sends header-only datagrams with the MUTED flag, and the viewers are told
+    /// (`HostMute`).
+    pub fn set_audio_muted(&self, muted: bool) {
+        let shared = Arc::clone(&self.shared);
+        self.handle().spawn(async move {
+            if let Some((_, helper)) = shared.media() {
+                helper.send(Ipc::SetAudioMuted { muted }).await;
+            }
+            shared.mute_all(muted);
+        });
+    }
+
+    // ---------- viewer ----------
+
+    /// Opens a session to `addr` as a viewer, with `intent`. The device must be paired (its key is read from the
+    /// trust store, never from the address) and the address must pass the LAN guard. Blocks until the host decided
+    /// (up to the prompt's 20 s plus the handshake): call it from a thread that is not on the runtime; async callers
+    /// use [`ServiceCore::connect_async`].
+    pub fn connect(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.connect_with(addr, device, intent, false)
+    }
+
+    /// [`ServiceCore::connect`] with `unattended`: the viewer also asks for `UNATTENDED` (entry without a prompt,
+    /// F-SESS-02). Whether the caller may ask is the caller's check (an administrator connection, D10); the host
+    /// grants it only when the device holds it.
+    pub fn connect_with(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.handle().block_on(self.connect_with_async(addr, device, intent, unattended))
+    }
+
+    pub async fn connect_async(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.connect_with_async(addr, device, intent, false).await
+    }
+
+    pub async fn connect_with_async(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.connector.connect(addr, device, intent, unattended, PermissionSet::EMPTY, None).await
+    }
+
+    /// [`ServiceCore::connect_with`] asking for `extra` permissions too: an unattended entry grants only what was asked
+    /// for (`stored & requested`), so a viewer that means to use the terminal in one asks for `TERMINAL`; a viewer
+    /// whose user is a local administrator may ask for `ADMIN_TERMINAL` (D10), which the host grants only when the
+    /// device holds it. The caller (the UI hub) makes the administrator check.
+    pub fn connect_asking(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+        extra: PermissionSet,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.handle().block_on(self.connector.connect(addr, device, intent, unattended, extra, None))
+    }
+
+    /// The live viewer session `session_id`.
+    pub fn viewer(&self, session_id: u64) -> Option<ViewerHandle> {
+        let mut viewers = lock(&self.connector.viewers);
+        viewers.retain(|_, w| w.strong_count() > 0);
+        viewers.get(&session_id).and_then(Weak::upgrade).map(|inner| ViewerHandle { inner })
+    }
+
+    /// Applies a C2.4 message the UI sent for a viewer session (`ViewerInput`, `ViewerKeyframe`, `ViewerReport`),
+    /// finding the session by the id it carries.
+    pub fn viewer_message(&self, msg: Ipc) -> Result<(), ApplyError> {
+        let session_id = match &msg {
+            Ipc::ViewerInput { session_id, .. }
+            | Ipc::ViewerKeyframe { session_id, .. }
+            | Ipc::ViewerReport { session_id, .. } => *session_id,
+            _ => return Err(ApplyError::NotAViewerRequest),
+        };
+        self.viewer(session_id).ok_or(ApplyError::NoSuchSession)?.apply(msg)
+    }
+
+    // ---------- terminals (stage 43) ----------
+
+    /// Gives the core what only the machine knows about terminals: who is logged in at the console, and the
+    /// administrator spawner (the service's own SYSTEM token). Once: a second call is ignored. Until it is called
+    /// nobody is logged in (user terminals are refused `NOBODY_PRESENT`) and there is no administrator terminal.
+    pub fn set_terminal_env(&self, env: Arc<dyn TerminalEnv>) -> bool {
+        self.term_env.set(env)
+    }
+
+    // ---------- swap, chat (stage 41) ----------
+
+    /// Gives the core the interface it reports swap questions and chat to (the UI hub does it in `bind_core`). Once:
+    /// a second call is ignored. Until it is called a swap question is declined and chat events are dropped.
+    pub fn set_extras(&self, hooks: Arc<dyn ExtrasHooks>) -> bool {
+        self.hooks.set(hooks)
+    }
+
+    /// The session of either role, for the swap and chat calls.
+    fn session_ctx(&self, session_id: u64) -> Option<swapdesk_session::SessionCtx> {
+        self.viewer(session_id).map(|v| v.ctx()).or_else(|| self.host.session(session_id))
+    }
+
+    /// "Inverter": asks the other side of session `session_id` (either role) to swap. The future owns what it needs, so
+    /// a task can run it without holding the core; it resolves with how the swap ended (up to 22 s).
+    pub fn swap_request(
+        &self,
+        session_id: u64,
+    ) -> Result<impl Future<Output = SwapOutcome> + Send + 'static, ApplyError> {
+        let ctx = self.session_ctx(session_id).ok_or(ApplyError::NoSuchSession)?;
+        let swap = self.swap.clone();
+        Ok(async move { swap.request(&ctx).await })
+    }
+
+    /// [`swap_request`](Self::swap_request), awaited.
+    pub async fn request_swap(&self, session_id: u64) -> Result<SwapOutcome, ApplyError> {
+        Ok(self.swap_request(session_id)?.await)
+    }
+
+    /// Whether a swap is in flight on the session.
+    pub fn swap_pending(&self, session_id: u64) -> bool {
+        self.session_ctx(session_id).is_some_and(|ctx| self.swap.pending(&ctx))
+    }
+
+    /// Sends a chat message in session `session_id` (either role); the future resolves with it as stored.
+    pub fn chat_send_task(
+        &self,
+        session_id: u64,
+        text: String,
+    ) -> Result<impl Future<Output = Result<ChatEntry, ChatError>> + Send + 'static, ApplyError> {
+        let ctx = self.session_ctx(session_id).ok_or(ApplyError::NoSuchSession)?;
+        let now = self.dialer.wall.unix_ms();
+        let (viewer, router) = (self.viewer(session_id), Arc::clone(&self.host_chat));
+        Ok(async move {
+            match viewer {
+                Some(v) => v.chat_send(&text).await,
+                None => router.send(&ctx, &text, now).await,
+            }
+        })
+    }
+
+    /// [`chat_send_task`](Self::chat_send_task), awaited.
+    pub async fn chat_send(&self, session_id: u64, text: &str) -> Result<ChatEntry, ChatSendError> {
+        let task = self.chat_send_task(session_id, text.to_owned()).map_err(|_| ChatSendError::NoSuchSession)?;
+        task.await.map_err(ChatSendError::Chat)
+    }
+
+    /// The chat panel shows everything the peer sent: the future tells the peer (`ChatRead`).
+    pub fn chat_read_task(&self, session_id: u64) -> Result<impl Future<Output = ()> + Send + 'static, ApplyError> {
+        let ctx = self.session_ctx(session_id).ok_or(ApplyError::NoSuchSession)?;
+        let (viewer, router) = (self.viewer(session_id), Arc::clone(&self.host_chat));
+        Ok(async move {
+            match viewer {
+                Some(v) => v.chat_mark_read().await,
+                None => router.mark_read(&ctx).await,
+            }
+        })
+    }
+
+    /// [`chat_read_task`](Self::chat_read_task), awaited.
+    pub async fn chat_mark_read(&self, session_id: u64) -> Result<(), ApplyError> {
+        self.chat_read_task(session_id)?.await;
+        Ok(())
+    }
+
+    /// The messages of session `session_id` so far (empty after it ends).
+    pub fn chat_entries(&self, session_id: u64) -> Vec<ChatEntry> {
+        match self.viewer(session_id) {
+            Some(v) => v.chat_entries(),
+            None => self.host_chat.session(session_id).map(|h| h.entries()).unwrap_or_default(),
+        }
+    }
+
+    // ---------- clipboard and quick actions (stage 42) ----------
+
+    /// Gives the core what it needs from the interface for the clipboard and quick actions (the UI hub does it in
+    /// `bind_core`). Once: a second call is ignored. Until it is called a viewer session's clipboard has no UI to
+    /// serve it and nothing is audited.
+    pub fn set_clip_actions(&self, hooks: Arc<dyn ClipActionHooks>) -> bool {
+        self.clip_hooks.set(hooks)
+    }
+
+    /// "Copiar e colar" of session `session_id` (either role): this side's flag; the peer is told.
+    pub fn set_clipboard_sync(&self, session_id: u64, on: bool) -> Result<(), ApplyError> {
+        if let Some(v) = self.viewer(session_id) {
+            v.set_clipboard_sync(on);
+            return Ok(());
+        }
+        let ctx = self.host.session(session_id).ok_or(ApplyError::NoSuchSession)?;
+        self.host_clip.set_enabled(&ctx, on);
+        Ok(())
+    }
+
+    /// Whether this side's clipboard sync is on for session `session_id` (either role).
+    pub fn clipboard_sync_on(&self, session_id: u64) -> bool {
+        match self.viewer(session_id) {
+            Some(v) => v.clipboard_sync_on(),
+            None => self.host_clip.enabled(),
+        }
+    }
+
+    // ---------- end ----------
+
+    /// Ends every session (`Bye { HOST_SHUTDOWN }`), tells the helpers to shut down, closes the endpoints and stops
+    /// the runtime. Call it from a thread that is not on the runtime. Dropping the core does the same.
+    pub fn shutdown(mut self) {
+        self.stop();
+    }
+
+    fn stop(&mut self) {
+        let Some(runtime) = self.runtime.take() else { return };
+        self.host.shutdown();
+        for kind in [HelperKind::System, HelperKind::User] {
+            if let Some(h) = self.shared.helper(kind) {
+                h.send_now(Ipc::Shutdown);
+            }
+        }
+        // The sessions say their `Bye` on their own tasks: give them a moment before the runtime goes.
+        let host = self.host.clone();
+        runtime.block_on(async move {
+            let until = tokio::time::Instant::now() + Duration::from_secs(1);
+            while !host.sessions().is_empty() && tokio::time::Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        for e in &self.endpoints {
+            e.close(quinn::VarInt::from_u32(0), b"service stopped");
+        }
+        runtime.shutdown_timeout(Duration::from_secs(2));
+    }
+}
+
+impl Drop for ServiceCore {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "swapdesk-helper"
+description = "swapdesk-helper.exe: the capture, encode, input and audio process the service starts in the console session (C2.1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "swapdesk-helper"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+swapdesk-files = { path = "../swapdesk-files" }
+swapdesk-host = { path = "../swapdesk-host" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-sys-win = { path = "../swapdesk-sys-win" }
+swapdesk-capture-win = { path = "../swapdesk-capture-win" }
+swapdesk-codec-win = { path = "../swapdesk-codec-win" }
+swapdesk-input-win = { path = "../swapdesk-input-win" }
+swapdesk-audio-win = { path = "../swapdesk-audio-win" }

@@ -1,0 +1,578 @@
+//! The file messages of C2.4 ("Files", stage 44): the disk proxy a process that owns the user's files serves to the
+//! service (`FsRequest` 0x80 and `FsReply` 0x81, on the user helper's pipe for the host side and on the UI pipe for
+//! the viewer side), the UI ops 40 to 45 and the notifications 20 and 21.
+//!
+//! Every path and name on the wire is a [`Text`] (its `Debug` prints a length) and every body of bytes a [`Bytes`], so
+//! no `Debug` of this module shows a path or file content. Every length is checked against its limit before
+//! anything is allocated. The paths are virtual: relative to a root the process that owns the disk chose (see
+//! CONTRACTS.md C2.4 "Files"); this module only carries them.
+
+use swapdesk_proto::{CodecError, ErrorCode, Reader, Wire, Writer};
+
+use crate::error::IpcError;
+use crate::redact::{Bytes, Text};
+use crate::types::ApiCode;
+
+type CResult<T> = core::result::Result<T, CodecError>;
+
+/// Longest virtual path of a call, a `FileOffer.dest` and a listing (the proto limit of `DirRequest.path`).
+pub const MAX_FS_PATH: usize = 1024;
+/// Longest file name (PROTOCOL.md 5.3).
+pub const MAX_FS_NAME: usize = 255;
+/// Most bytes one `PartAppend`, `PartRead`, `ReadAt` or `MetaWrite` moves: the same as `swapdesk_files::MAX_IO`.
+pub const MAX_FS_IO: usize = 1 << 20;
+/// Most entries one `ListDir` answers (PROTOCOL.md 5.3 `DirListing`).
+pub const MAX_FS_LIST: usize = 2000;
+/// Most bytes `MetaRead` answers.
+pub const MAX_FS_META: usize = 1024;
+/// Limit of `FsRequest` and `FsReply`: a full chunk plus the path, the name and the numbers around it.
+pub const MAX_FS_MESSAGE: usize = MAX_FS_IO + 4096;
+/// Most files one `FilesSend` carries.
+pub const MAX_PICKS: usize = 64;
+
+wire_enum! {
+    /// Which of a receiver's two side files a call is about.
+    FsKind { Part = 0, Meta = 1 }
+}
+
+/// One disk call, the `Fs` trait of `swapdesk-files` one for one. The first byte of the body is the call number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsCall {
+    /// 1.
+    ListDir { path: Text, max_entries: u32 },
+    /// 2.
+    Stat { path: Text, follow: bool },
+    /// 3.
+    OpenRead { path: Text },
+    /// 4.
+    ReadAt { id: u64, offset: u64, len: u32 },
+    /// 5.
+    ReadStat { id: u64 },
+    /// 6. Fire and forget: no reply.
+    CloseRead { id: u64 },
+    /// 7.
+    StatFile { dir: Text, name: Text, kind: FsKind },
+    /// 8.
+    PartCreate { dir: Text, name: Text },
+    /// 9.
+    PartTruncate { dir: Text, name: Text, len: u64 },
+    /// 10. `data` is the rest of the body (at most [`MAX_FS_IO`]); the part file must be exactly `offset` long.
+    PartAppend { dir: Text, name: Text, offset: u64, data: Bytes },
+    /// 11.
+    PartLen { dir: Text, name: Text },
+    /// 12.
+    PartRead { dir: Text, name: Text, offset: u64, len: u32 },
+    /// 13.
+    PartSync { dir: Text, name: Text, final_mtime_ms: Option<u64> },
+    /// 14.
+    PartRename { dir: Text, name: Text, target_name: Text },
+    /// 15.
+    RemoveFile { dir: Text, name: Text, kind: FsKind },
+    /// 16.
+    MetaRead { dir: Text, name: Text },
+    /// 17. `data` is the rest of the body (at most [`MAX_FS_META`]).
+    MetaWrite { dir: Text, name: Text, data: Bytes },
+}
+
+impl FsCall {
+    /// The call number (first byte of the body).
+    pub const fn code(&self) -> u8 {
+        match self {
+            Self::ListDir { .. } => 1,
+            Self::Stat { .. } => 2,
+            Self::OpenRead { .. } => 3,
+            Self::ReadAt { .. } => 4,
+            Self::ReadStat { .. } => 5,
+            Self::CloseRead { .. } => 6,
+            Self::StatFile { .. } => 7,
+            Self::PartCreate { .. } => 8,
+            Self::PartTruncate { .. } => 9,
+            Self::PartAppend { .. } => 10,
+            Self::PartLen { .. } => 11,
+            Self::PartRead { .. } => 12,
+            Self::PartSync { .. } => 13,
+            Self::PartRename { .. } => 14,
+            Self::RemoveFile { .. } => 15,
+            Self::MetaRead { .. } => 16,
+            Self::MetaWrite { .. } => 17,
+        }
+    }
+
+    /// True for the one call that is answered by nothing.
+    pub const fn is_fire_and_forget(&self) -> bool {
+        matches!(self, Self::CloseRead { .. })
+    }
+
+    pub(crate) fn put(&self, w: &mut Writer) -> CResult<()> {
+        w.put_u8(self.code());
+        let path = |w: &mut Writer, t: &Text| t.put(w, MAX_FS_PATH);
+        let name = |w: &mut Writer, t: &Text| t.put(w, MAX_FS_NAME);
+        match self {
+            Self::ListDir { path: p, max_entries } => {
+                path(w, p)?;
+                w.put_u32(*max_entries);
+            }
+            Self::Stat { path: p, follow } => {
+                path(w, p)?;
+                w.put_bool(*follow);
+            }
+            Self::OpenRead { path: p } => path(w, p)?,
+            Self::ReadAt { id, offset, len } => {
+                w.put_u64(*id);
+                w.put_u64(*offset);
+                w.put_u32(*len);
+            }
+            Self::ReadStat { id } | Self::CloseRead { id } => w.put_u64(*id),
+            Self::StatFile { dir, name: n, kind } | Self::RemoveFile { dir, name: n, kind } => {
+                path(w, dir)?;
+                name(w, n)?;
+                kind.put(w, 0)?;
+            }
+            Self::PartCreate { dir, name: n } | Self::PartLen { dir, name: n } | Self::MetaRead { dir, name: n } => {
+                path(w, dir)?;
+                name(w, n)?;
+            }
+            Self::PartTruncate { dir, name: n, len } => {
+                path(w, dir)?;
+                name(w, n)?;
+                w.put_u64(*len);
+            }
+            Self::PartAppend { dir, name: n, offset, data } => {
+                path(w, dir)?;
+                name(w, n)?;
+                w.put_u64(*offset);
+                if data.0.len() > MAX_FS_IO {
+                    return Err(CodecError::TooLarge { what: "file chunk", limit: MAX_FS_IO as u64 });
+                }
+                w.put_bytes(&data.0);
+            }
+            Self::PartRead { dir, name: n, offset, len } => {
+                path(w, dir)?;
+                name(w, n)?;
+                w.put_u64(*offset);
+                w.put_u32(*len);
+            }
+            Self::PartSync { dir, name: n, final_mtime_ms } => {
+                path(w, dir)?;
+                name(w, n)?;
+                final_mtime_ms.put(w, 0)?;
+            }
+            Self::PartRename { dir, name: n, target_name } => {
+                path(w, dir)?;
+                name(w, n)?;
+                name(w, target_name)?;
+            }
+            Self::MetaWrite { dir, name: n, data } => {
+                path(w, dir)?;
+                name(w, n)?;
+                if data.0.len() > MAX_FS_META {
+                    return Err(CodecError::TooLarge { what: "meta record", limit: MAX_FS_META as u64 });
+                }
+                w.put_bytes(&data.0);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get(r: &mut Reader<'_>) -> CResult<Self> {
+        let code = r.u8()?;
+        let path = |r: &mut Reader<'_>| Text::get(r, MAX_FS_PATH);
+        let name = |r: &mut Reader<'_>| Text::get(r, MAX_FS_NAME);
+        // The rest of the body, after the limit is checked: nothing is copied before.
+        let rest = |r: &mut Reader<'_>, limit: usize, what: &'static str| -> CResult<Bytes> {
+            if r.remaining() > limit {
+                return Err(CodecError::TooLarge { what, limit: limit as u64 });
+            }
+            Ok(Bytes(r.take(r.remaining())?.to_vec()))
+        };
+        Ok(match code {
+            1 => Self::ListDir { path: path(r)?, max_entries: r.u32()? },
+            2 => Self::Stat { path: path(r)?, follow: r.bool()? },
+            3 => Self::OpenRead { path: path(r)? },
+            4 => Self::ReadAt { id: r.u64()?, offset: r.u64()?, len: r.u32()? },
+            5 => Self::ReadStat { id: r.u64()? },
+            6 => Self::CloseRead { id: r.u64()? },
+            7 => Self::StatFile { dir: path(r)?, name: name(r)?, kind: FsKind::get(r, 0)? },
+            8 => Self::PartCreate { dir: path(r)?, name: name(r)? },
+            9 => Self::PartTruncate { dir: path(r)?, name: name(r)?, len: r.u64()? },
+            10 => Self::PartAppend {
+                dir: path(r)?,
+                name: name(r)?,
+                offset: r.u64()?,
+                data: rest(r, MAX_FS_IO, "file chunk")?,
+            },
+            11 => Self::PartLen { dir: path(r)?, name: name(r)? },
+            12 => Self::PartRead { dir: path(r)?, name: name(r)?, offset: r.u64()?, len: r.u32()? },
+            13 => Self::PartSync { dir: path(r)?, name: name(r)?, final_mtime_ms: <Option<u64>>::get(r, 0)? },
+            14 => Self::PartRename { dir: path(r)?, name: name(r)?, target_name: name(r)? },
+            15 => Self::RemoveFile { dir: path(r)?, name: name(r)?, kind: FsKind::get(r, 0)? },
+            16 => Self::MetaRead { dir: path(r)?, name: name(r)? },
+            17 => Self::MetaWrite { dir: path(r)?, name: name(r)?, data: rest(r, MAX_FS_META, "meta record")? },
+            other => return Err(CodecError::UnknownTag { what: "FsRequest call", tag: u64::from(other) }),
+        })
+    }
+}
+
+wire_struct! {
+    /// What an entry is (`FsStat` of `swapdesk-files`).
+    FsStatView { is_dir: bool, is_file: bool, is_reparse: bool, len: u64, mtime_ms: u64 }
+}
+
+wire_struct! {
+    /// A file opened for reading (`ReadHandle`): `id` is meaningful only to the process that opened it.
+    FsHandleView { id: u64, len: u64, mtime_ms: u64 }
+}
+
+wire_struct! {
+    /// A folder entry (`FsEntry`).
+    FsEntryView { name: Text [MAX_FS_NAME], is_dir: bool, size: u64, mtime_ms: u64 }
+}
+
+/// What a successful call answers. The first byte of the body is the variant number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsAnswer {
+    /// 0: `PartCreate`, `PartTruncate`, `PartAppend`, `PartSync`, `PartRename`, `RemoveFile`, `MetaWrite`.
+    Done,
+    /// 1: `ListDir`.
+    Entries { entries: Vec<FsEntryView>, truncated: bool },
+    /// 2: `Stat`, `StatFile`.
+    Stat(Option<FsStatView>),
+    /// 3: `OpenRead`.
+    Handle(FsHandleView),
+    /// 4: `ReadAt`, `PartRead`: the rest of the body.
+    Data(Bytes),
+    /// 5: `ReadStat`.
+    StatNow(FsStatView),
+    /// 6: `PartLen`.
+    Len(u64),
+    /// 7: `MetaRead`: `None` when the file is missing or not a regular file.
+    Meta(Option<Bytes>),
+}
+
+impl FsAnswer {
+    fn put(&self, w: &mut Writer) -> CResult<()> {
+        match self {
+            Self::Done => w.put_u8(0),
+            Self::Entries { entries, truncated } => {
+                w.put_u8(1);
+                w.put_bool(*truncated);
+                entries.put(w, MAX_FS_LIST)?;
+            }
+            Self::Stat(s) => {
+                w.put_u8(2);
+                s.put(w, 0)?;
+            }
+            Self::Handle(h) => {
+                w.put_u8(3);
+                h.put(w, 0)?;
+            }
+            Self::Data(d) => {
+                w.put_u8(4);
+                if d.0.len() > MAX_FS_IO {
+                    return Err(CodecError::TooLarge { what: "file chunk", limit: MAX_FS_IO as u64 });
+                }
+                w.put_bytes(&d.0);
+            }
+            Self::StatNow(s) => {
+                w.put_u8(5);
+                s.put(w, 0)?;
+            }
+            Self::Len(n) => {
+                w.put_u8(6);
+                w.put_u64(*n);
+            }
+            Self::Meta(m) => {
+                w.put_u8(7);
+                match m {
+                    None => w.put_bool(false),
+                    Some(b) => {
+                        if b.0.len() > MAX_FS_META {
+                            return Err(CodecError::TooLarge { what: "meta record", limit: MAX_FS_META as u64 });
+                        }
+                        w.put_bool(true);
+                        w.put_bytes(&b.0);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>) -> CResult<Self> {
+        Ok(match r.u8()? {
+            0 => Self::Done,
+            1 => {
+                let truncated = r.bool()?;
+                Self::Entries { truncated, entries: <Vec<FsEntryView>>::get(r, MAX_FS_LIST)? }
+            }
+            2 => Self::Stat(<Option<FsStatView>>::get(r, 0)?),
+            3 => Self::Handle(FsHandleView::get(r, 0)?),
+            4 => {
+                if r.remaining() > MAX_FS_IO {
+                    return Err(CodecError::TooLarge { what: "file chunk", limit: MAX_FS_IO as u64 });
+                }
+                Self::Data(Bytes(r.take(r.remaining())?.to_vec()))
+            }
+            5 => Self::StatNow(FsStatView::get(r, 0)?),
+            6 => Self::Len(r.u64()?),
+            7 => {
+                if r.bool()? {
+                    if r.remaining() > MAX_FS_META {
+                        return Err(CodecError::TooLarge { what: "meta record", limit: MAX_FS_META as u64 });
+                    }
+                    Self::Meta(Some(Bytes(r.take(r.remaining())?.to_vec())))
+                } else {
+                    Self::Meta(None)
+                }
+            }
+            tag => return Err(CodecError::UnknownTag { what: "FsReply answer", tag: u64::from(tag) }),
+        })
+    }
+}
+
+/// The body of `FsReply` after `req`: `u8` 0 then the answer, or 1 then the `ErrorCode`.
+pub(crate) fn put_result(w: &mut Writer, result: &core::result::Result<FsAnswer, ErrorCode>) -> CResult<()> {
+    match result {
+        Ok(a) => {
+            w.put_u8(0);
+            a.put(w)
+        }
+        Err(code) => {
+            w.put_u8(1);
+            code.put(w, 0)
+        }
+    }
+}
+
+pub(crate) fn get_result(r: &mut Reader<'_>) -> CResult<core::result::Result<FsAnswer, ErrorCode>> {
+    match r.u8()? {
+        0 => Ok(Ok(FsAnswer::get(r)?)),
+        1 => Ok(Err(ErrorCode::get(r, 0)?)),
+        tag => Err(CodecError::UnknownTag { what: "FsReply status", tag: u64::from(tag) }),
+    }
+}
+
+// ---------- the UI ops 40 to 45 ----------
+
+wire_struct! {
+    /// A file the user picked in the UI: the UI process holds the real path under `token`; the service only ever
+    /// sees the token and the name.
+    FilePick { token: u32, name: Text [MAX_FS_NAME] }
+}
+
+/// The UI ops of the files feature (numbers 40 to 49; 46 to 49 are free).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilesOp {
+    /// 40: list a folder of the host of the viewer session (`None` is its home); the reply is a [`FileListing`].
+    List { session_id: u64, path: Option<Text> },
+    /// 41: send the picked files into `remote_dir` of the host (`None` is the host's default receive folder); the
+    /// reply is the transfer numbers, one per pick, in order.
+    Send { session_id: u64, picks: Vec<FilePick>, remote_dir: Option<Text> },
+    /// 42: download `remote_path` of the host into the receive folder the UI holds under `recv_token`; the reply is
+    /// the transfer number.
+    Get { session_id: u64, remote_path: Text, recv_token: u32 },
+    /// 43.
+    Pause { transfer_id: u32 },
+    /// 44: "Retomar".
+    Resume { transfer_id: u32 },
+    /// 45.
+    Cancel { transfer_id: u32 },
+}
+
+impl FilesOp {
+    pub const fn code(&self) -> u16 {
+        match self {
+            Self::List { .. } => 40,
+            Self::Send { .. } => 41,
+            Self::Get { .. } => 42,
+            Self::Pause { .. } => 43,
+            Self::Resume { .. } => 44,
+            Self::Cancel { .. } => 45,
+        }
+    }
+
+    /// True for a code this module owns.
+    pub const fn owns(op: u16) -> bool {
+        matches!(op, 40..=49)
+    }
+
+    pub(crate) fn put_body(&self, w: &mut Writer) -> CResult<()> {
+        match self {
+            Self::List { session_id, path } => {
+                w.put_u64(*session_id);
+                path.put(w, MAX_FS_PATH)?;
+            }
+            Self::Send { session_id, picks, remote_dir } => {
+                w.put_u64(*session_id);
+                picks.put(w, MAX_PICKS)?;
+                remote_dir.put(w, MAX_FS_PATH)?;
+            }
+            Self::Get { session_id, remote_path, recv_token } => {
+                w.put_u64(*session_id);
+                remote_path.put(w, MAX_FS_PATH)?;
+                w.put_u32(*recv_token);
+            }
+            Self::Pause { transfer_id } | Self::Resume { transfer_id } | Self::Cancel { transfer_id } => {
+                w.put_u32(*transfer_id)
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_body(op: u16, r: &mut Reader<'_>) -> core::result::Result<Self, IpcError> {
+        Ok(match op {
+            40 => Self::List { session_id: r.u64()?, path: <Option<Text>>::get(r, MAX_FS_PATH)? },
+            41 => Self::Send {
+                session_id: r.u64()?,
+                picks: <Vec<FilePick>>::get(r, MAX_PICKS)?,
+                remote_dir: <Option<Text>>::get(r, MAX_FS_PATH)?,
+            },
+            42 => Self::Get { session_id: r.u64()?, remote_path: Text::get(r, MAX_FS_PATH)?, recv_token: r.u32()? },
+            43 => Self::Pause { transfer_id: r.u32()? },
+            44 => Self::Resume { transfer_id: r.u32()? },
+            45 => Self::Cancel { transfer_id: r.u32()? },
+            other => {
+                return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiRequest op", tag: u64::from(other) }));
+            }
+        })
+    }
+}
+
+wire_struct! {
+    /// One entry of a [`FileListing`].
+    FileEntry { name: Text [MAX_FS_NAME], is_dir: bool, size: u64, mtime_ms: u64 }
+}
+
+wire_struct! {
+    /// The reply to `FilesOp::List`: the folder as the host spells it (relative to its root, `/` separated, empty for
+    /// the root), its entries (folders first) and whether more existed.
+    FileListing { path: Text [MAX_FS_PATH], entries: Vec<FileEntry> [MAX_FS_LIST], truncated: bool }
+}
+
+// ---------- the notifications 20 and 21 ----------
+
+wire_enum! {
+    /// What a [`FilesNote::Transfer`] says about the transfer's stage; the numbers travel in the note.
+    TransferKind { Queued = 0, Running = 1, Paused = 2, Done = 3, Failed = 4 }
+}
+
+const _: usize = TransferKind::ALL.len();
+
+/// A transfer's state on the wire (the C6 `TransferState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferWire {
+    Queued,
+    Running { done: u64, total: u64, bytes_per_s: u64 },
+    Paused { done: u64, total: u64, why: ApiCode },
+    Done,
+    Failed { reason: ApiCode },
+}
+
+impl Wire for TransferWire {
+    const MIN_SIZE: usize = 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::Queued => TransferKind::Queued.put(w, 0)?,
+            Self::Running { done, total, bytes_per_s } => {
+                TransferKind::Running.put(w, 0)?;
+                w.put_u64(*done);
+                w.put_u64(*total);
+                w.put_u64(*bytes_per_s);
+            }
+            Self::Paused { done, total, why } => {
+                TransferKind::Paused.put(w, 0)?;
+                w.put_u64(*done);
+                w.put_u64(*total);
+                why.put(w, 0)?;
+            }
+            Self::Done => TransferKind::Done.put(w, 0)?,
+            Self::Failed { reason } => {
+                TransferKind::Failed.put(w, 0)?;
+                reason.put(w, 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        Ok(match TransferKind::get(r, 0)? {
+            TransferKind::Queued => Self::Queued,
+            TransferKind::Running => Self::Running { done: r.u64()?, total: r.u64()?, bytes_per_s: r.u64()? },
+            TransferKind::Paused => Self::Paused { done: r.u64()?, total: r.u64()?, why: ApiCode::get(r, 0)? },
+            TransferKind::Done => Self::Done,
+            TransferKind::Failed => Self::Failed { reason: ApiCode::get(r, 0)? },
+        })
+    }
+}
+
+/// The notifications of the files feature (kinds 20 to 24; 22 to 24 are free).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilesNote {
+    /// 20: a transfer of the session changed (progress at most 4 times a second per transfer).
+    Transfer { session_id: u64, transfer_id: u32, name: Text, outgoing: bool, state: TransferWire },
+    /// 21: a received file was saved under `name`, which differs from the offered name because that one was taken
+    /// (files never overwrite: "name (2).ext"). Sent just before the `Done` of the same transfer.
+    SavedAs { session_id: u64, transfer_id: u32, name: Text },
+}
+
+impl FilesNote {
+    pub const fn kind(&self) -> u16 {
+        match self {
+            Self::Transfer { .. } => 20,
+            Self::SavedAs { .. } => 21,
+        }
+    }
+
+    pub const fn owns(kind: u16) -> bool {
+        matches!(kind, 20..=24)
+    }
+
+    pub(crate) fn put_body(&self, w: &mut Writer) -> CResult<()> {
+        match self {
+            Self::Transfer { session_id, transfer_id, name, outgoing, state } => {
+                w.put_u64(*session_id);
+                w.put_u32(*transfer_id);
+                name.put(w, MAX_FS_NAME)?;
+                w.put_bool(*outgoing);
+                state.put(w, 0)?;
+            }
+            Self::SavedAs { session_id, transfer_id, name } => {
+                w.put_u64(*session_id);
+                w.put_u32(*transfer_id);
+                name.put(w, MAX_FS_NAME)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_body(kind: u16, r: &mut Reader<'_>) -> core::result::Result<Self, IpcError> {
+        Ok(match kind {
+            20 => Self::Transfer {
+                session_id: r.u64()?,
+                transfer_id: r.u32()?,
+                name: Text::get(r, MAX_FS_NAME)?,
+                outgoing: r.bool()?,
+                state: TransferWire::get(r, 0)?,
+            },
+            21 => Self::SavedAs { session_id: r.u64()?, transfer_id: r.u32()?, name: Text::get(r, MAX_FS_NAME)? },
+            other => {
+                return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));
+            }
+        })
+    }
+}
+
+pub(crate) fn put_fs_request(w: &mut Writer, req: u32, call: &FsCall) -> CResult<()> {
+    w.put_u32(req);
+    call.put(w)
+}
+
+pub(crate) fn put_fs_reply(
+    w: &mut Writer,
+    req: u32,
+    result: &core::result::Result<FsAnswer, ErrorCode>,
+) -> CResult<()> {
+    w.put_u32(req);
+    put_result(w, result)
+}

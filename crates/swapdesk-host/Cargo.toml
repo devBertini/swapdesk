@@ -1,0 +1,31 @@
+[package]
+name = "swapdesk-host"
+description = "OS-free process logic of the Swapdesk service and helpers (stage 18): the helper loop over the C3 traits and the C2.4 messages."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-audio = { path = "../swapdesk-audio" }
+swapdesk-session = { path = "../swapdesk-session" }
+swapdesk-video = { path = "../swapdesk-video" }
+swapdesk-trust = { path = "../swapdesk-trust" }
+swapdesk-lan = { path = "../swapdesk-lan" }
+swapdesk-ui = { path = "../swapdesk-ui" }
+swapdesk-swap = { path = "../swapdesk-swap" }
+swapdesk-extras = { path = "../swapdesk-extras" }
+swapdesk-files = { path = "../swapdesk-files" }
+swapdesk-term = { path = "../swapdesk-term" }
+quinn.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }

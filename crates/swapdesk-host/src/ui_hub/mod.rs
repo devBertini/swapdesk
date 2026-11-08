@@ -1,0 +1,442 @@
+//! The UI hub (`docs/CONTRACTS.md` C2.4, stage 18d-2): what the service answers on a UI pipe, over any `Read` /
+//! `Write` pair so it needs no OS. One [`UiHub`] serves the whole machine; every interactive session's UI connects
+//! to it ([`UiHub::serve`], one blocking call per connection, after the server handshake).
+//!
+//! * Requests: every stage-18 `UiOp` (1 to 21) is dispatched here, with the checks of C2.3 (`grants` validated as
+//!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL` and `Connect { unattended }`
+//!   only on an administrator connection; no request carries a path).
+//! * Notifications: devices, network, pairing, incoming requests, sessions, displays, stats, alerts and settings go
+//!   to the connections that should see them (host-side items to the console session's UI only).
+//! * Media: a viewer session opened here keeps its `ViewerHandle` on the connection; its video, audio and cursor
+//!   go out as `ViewerVideo`, `ViewerAudio` and `ViewerCursor*`, its input, keyframe requests and reports come in.
+//! * [`UiHub::host_ui`] is the [`swapdesk_session::HostUi`] of the core: a prompt becomes `IncomingRequest` on the
+//!   console session's UI and waits for `AnswerIncoming`; with no UI there it is declined at once.
+//!
+//! Wiring order: build the hub, give `hub.host_ui()` to `ServiceConfig`, start the core, then
+//! [`UiHub::bind_core`]. The hub holds the core weakly, so the owner's `Arc<ServiceCore>` alone keeps it alive.
+
+mod clip_actions;
+mod extras;
+mod files;
+mod host_ui;
+mod ops;
+mod pairing;
+pub mod presence;
+mod queue;
+pub mod store;
+mod terminal;
+mod views;
+
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
+use std::net::SocketAddrV4;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+
+use swapdesk_files::{Pending, PipeCaller};
+use swapdesk_ipc::{ApiCode, FrameReader, FrameWriter, IpcError, Message as Ipc, Notify};
+use swapdesk_platform::{Clock, Level, NetInterfaces, SecretStore, TraceSink};
+use swapdesk_proto::{Desktop, Os};
+use swapdesk_session::HostUi;
+use swapdesk_trust::{DeviceId, Identity, PairingMode, TrustHandle, UserRef, WallClock};
+use tokio::runtime::Handle;
+
+use crate::service::{ServiceCore, ViewerHandle};
+use extras::{HubExtras, PendingSwap, WakeRun, WakeSetup};
+use host_ui::HubHostUi;
+pub use presence::{DnsSdPresence, FakePresence, NoPresence, Presence, PresencePeer};
+use queue::UiQueue;
+pub use store::{AuditLog, FileAuditLog, MachineSettings, load_settings, store_settings};
+
+/// What the hub asks of the machine beyond the C3 traits. Every method has a do-nothing default.
+pub trait SystemHooks: Send + Sync {
+    /// A session is live (or none is) and the "keep awake" setting is on: hold off sleep.
+    fn keep_awake(&self, _on: bool) {}
+    /// "Bloquear ao terminar" (F-SESS-03): lock the workstation.
+    fn lock_screen(&self) {}
+    /// The "service" switch of Ajustes changed.
+    fn service_enabled(&self, _on: bool) {}
+}
+
+/// Hooks that do nothing.
+pub struct NoHooks;
+
+impl SystemHooks for NoHooks {}
+
+/// Development and test options (C2.4 "Development mode"): loopback is accepted as a peer address and the pairing
+/// endpoint also listens on these addresses.
+#[derive(Debug, Clone, Default)]
+pub struct DevOptions {
+    /// Extra pairing listen addresses (the dev counterpart of `ServiceConfig::listen_extra`).
+    pub pair_listen: Vec<SocketAddrV4>,
+}
+
+/// Everything the hub is built from.
+pub struct HubParams {
+    pub os: Os,
+    pub os_version: String,
+    pub identity: Arc<Identity>,
+    pub trust: Arc<TrustHandle>,
+    /// Where `settings.bin` lives.
+    pub secrets: Arc<dyn SecretStore>,
+    /// The machine settings as loaded ([`load_settings`]); the hub keeps and persists changes.
+    pub settings: MachineSettings,
+    pub interfaces: Arc<dyn NetInterfaces>,
+    pub presence: Arc<dyn Presence>,
+    pub audit: Arc<dyn AuditLog>,
+    pub clock: Arc<dyn Clock>,
+    pub wall: Arc<dyn WallClock>,
+    pub trace: Arc<dyn TraceSink>,
+    pub hooks: Arc<dyn SystemHooks>,
+    /// `Some` in development mode and in tests.
+    pub dev: Option<DevOptions>,
+}
+
+/// Who is on the other end of a UI pipe, as the pipe checks established them (C2.1, C2.3).
+#[derive(Debug, Clone)]
+pub struct ConnInfo {
+    /// The Windows session the client runs in.
+    pub session_id: u32,
+    /// The session's user (SID and account name); recorded as the grantor of `UNATTENDED`.
+    pub user: UserRef,
+    /// The impersonation token is elevated with Administrators enabled (C2.3).
+    pub admin: bool,
+}
+
+/// One connected UI.
+pub(crate) struct Conn {
+    pub id: u64,
+    pub info: ConnInfo,
+    pub queue: UiQueue,
+    /// Blocking requests to this UI (the clipboard of the viewer role); its answers come in `dispatch`.
+    pub clip: Arc<crate::rpc::Rpc>,
+    /// The viewer sessions this connection opened, by session id.
+    pub viewers: Mutex<HashMap<u64, Viewer>>,
+    /// The terminals this connection opened: the connection-wide id and the viewer session each runs in.
+    pub terms: Mutex<HashMap<u32, u64>>,
+    /// The disk of this UI (C2.4 "Files"): the service's calls to it wait for the `FsReply` the reader routes back.
+    pub fs: Arc<PipeCaller>,
+}
+
+/// A viewer session on a connection.
+pub(crate) struct Viewer {
+    pub handle: ViewerHandle,
+    pub device: DeviceId,
+    /// The UI asked for view-only: input is not forwarded (a local choice, the host is not told).
+    pub view_only: bool,
+    /// The host's display list as last relayed (`Notify::Displays`); what `ListDisplays` answers.
+    pub displays: Vec<swapdesk_ipc::DisplayView>,
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The state every connection, task and host callback shares.
+pub(crate) struct Hub {
+    pub p: HubParams,
+    core: Mutex<Weak<ServiceCore>>,
+    rt: OnceLock<Handle>,
+    settings: Mutex<MachineSettings>,
+    conns: Mutex<Vec<Arc<Conn>>>,
+    next_conn: AtomicU64,
+    console: Mutex<Option<u32>>,
+    desktop: Mutex<Desktop>,
+    pub mode: Arc<PairingMode>,
+    pairing: pairing::PairState,
+    incoming: Mutex<HashMap<u32, host_ui::Pending>>,
+    next_id: AtomicU32,
+    /// Addresses typed by the user (`AddByAddress`): placeholders for devices not paired yet.
+    manual: Mutex<Vec<views::Manual>>,
+    /// Where the devices paired through a typed address answer (session endpoint), remembered while we run.
+    learned: Mutex<HashMap<DeviceId, SocketAddrV4>>,
+    /// Live sessions in either role, for "keep awake".
+    live_sessions: AtomicUsize,
+    /// Swap questions waiting for this machine's user, by the swap handler's request number.
+    swaps: Mutex<HashMap<u32, PendingSwap>>,
+    /// Wake-on-LAN attempts in flight, by the id of their waking entry.
+    wakes: Mutex<HashMap<u64, WakeRun>>,
+    /// File transfers and listings in flight, for the files ops and notifications.
+    files: Mutex<files::FilesTable>,
+    wake: Mutex<WakeSetup>,
+    /// Host sessions: when they started (Unix ms) and what they hold, for the durations of the audit log and the
+    /// `Active` states.
+    started: Mutex<HashMap<u64, (u64, swapdesk_proto::PermissionSet)>>,
+    shutting: AtomicBool,
+}
+
+impl Hub {
+    pub fn log(&self, level: Level, what: core::fmt::Arguments<'_>) {
+        self.p.trace.log(level, "ui-hub", what);
+    }
+
+    pub fn core(&self) -> Option<Arc<ServiceCore>> {
+        lock(&self.core).upgrade()
+    }
+
+    pub fn rt(&self) -> Option<&Handle> {
+        self.rt.get()
+    }
+
+    pub fn allow_loopback(&self) -> bool {
+        self.p.dev.is_some()
+    }
+
+    pub fn settings(&self) -> MachineSettings {
+        lock(&self.settings).clone()
+    }
+
+    pub fn fresh_id(&self) -> u32 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn conns(&self) -> Vec<Arc<Conn>> {
+        lock(&self.conns).clone()
+    }
+
+    /// The connections of the console session (the host's user: banner, prompts).
+    pub fn console_conns(&self) -> Vec<Arc<Conn>> {
+        let Some(session) = *lock(&self.console) else { return Vec::new() };
+        self.conns().into_iter().filter(|c| c.info.session_id == session).collect()
+    }
+
+    /// To every connection.
+    pub fn notify(&self, n: Notify) {
+        for c in self.conns() {
+            c.queue.control(Ipc::UiNotify(n.clone()));
+        }
+    }
+
+    /// To the console session's connections.
+    pub fn notify_console(&self, n: Notify) {
+        for c in self.console_conns() {
+            c.queue.control(Ipc::UiNotify(n.clone()));
+        }
+    }
+
+    /// `DevicesChanged` with the list as it is now.
+    pub fn devices_changed(&self) {
+        let list = self.device_views();
+        self.notify(Notify::DevicesChanged(list));
+    }
+
+    /// A session went live in either role: apply "keep awake".
+    pub fn session_began(&self) {
+        let n = self.live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
+        self.p.hooks.keep_awake(n > 0 && self.settings().keep_awake);
+    }
+
+    /// A session ended: apply "keep awake".
+    pub fn session_ended(&self) {
+        let before = self
+            .live_sessions
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)))
+            .unwrap_or(0);
+        self.p.hooks.keep_awake(before > 1 && self.settings().keep_awake);
+    }
+
+    pub fn api_error(&self, code: ApiCode, what: &str) -> ApiCode {
+        self.log(Level::Debug, format_args!("refused: {what} ({code:?})"));
+        code
+    }
+}
+
+/// The UI hub of the service. Cheap to clone.
+#[derive(Clone)]
+pub struct UiHub {
+    hub: Arc<Hub>,
+}
+
+impl UiHub {
+    pub fn new(params: HubParams) -> Self {
+        let settings = params.settings.clone();
+        let mode = Arc::new(PairingMode::new(Arc::clone(&params.clock)));
+        let hub = Arc::new(Hub {
+            p: params,
+            core: Mutex::new(Weak::new()),
+            rt: OnceLock::new(),
+            settings: Mutex::new(settings),
+            conns: Mutex::new(Vec::new()),
+            next_conn: AtomicU64::new(1),
+            console: Mutex::new(None),
+            desktop: Mutex::new(Desktop::Default),
+            mode,
+            pairing: pairing::PairState::default(),
+            incoming: Mutex::new(HashMap::new()),
+            next_id: AtomicU32::new(1),
+            manual: Mutex::new(Vec::new()),
+            learned: Mutex::new(HashMap::new()),
+            live_sessions: AtomicUsize::new(0),
+            swaps: Mutex::new(HashMap::new()),
+            wakes: Mutex::new(HashMap::new()),
+            files: Mutex::new(files::FilesTable::default()),
+            wake: Mutex::new(WakeSetup::default()),
+            started: Mutex::new(HashMap::new()),
+            shutting: AtomicBool::new(false),
+        });
+        let weak = Arc::downgrade(&hub);
+        hub.p.presence.set_listener(Arc::new(move || {
+            if let Some(h) = weak.upgrade() {
+                h.devices_changed();
+            }
+        }));
+        Self { hub }
+    }
+
+    /// The `HostUi` for `ServiceConfig::ui`.
+    pub fn host_ui(&self) -> Arc<dyn HostUi> {
+        Arc::new(HubHostUi::new(Arc::clone(&self.hub)))
+    }
+
+    /// The audit sink the pairing code and the host events write to (the same log `ActivityList` reads).
+    pub fn audit_sink(&self) -> Arc<dyn swapdesk_trust::AuditSink> {
+        Arc::new(views::HubAudit { hub: Arc::downgrade(&self.hub) })
+    }
+
+    /// Hands the started core to the hub (weakly) and takes its runtime. Call it once, right after
+    /// `ServiceCore::start`.
+    pub fn bind_core(&self, core: &Arc<ServiceCore>) {
+        *lock(&self.hub.core) = Arc::downgrade(core);
+        let _ = self.hub.rt.set(core.runtime().clone());
+        // Swap questions, the new session of a swap and chat reach the UI through the hub.
+        core.set_extras(Arc::new(HubExtras { hub: Arc::downgrade(&self.hub) }));
+        // The viewer role's clipboard, the clipboard notices and the audit of quick actions.
+        core.set_clip_actions(Arc::new(clip_actions::HubClipActions { hub: Arc::downgrade(&self.hub) }));
+    }
+
+    /// Wake-on-LAN: how the socket of an attempt is made and how long it runs. The default is a UDP socket bound to
+    /// the route with TTL 1 and the 60 s of F-WAKE-01; tests give a recording socket and a short window.
+    pub fn set_wake(&self, binder: extras::WakeBinder, cfg: swapdesk_extras::wake::WakeConfig) {
+        *lock(&self.hub.wake) = WakeSetup { binder, cfg };
+    }
+
+    /// The machine settings as they are now.
+    pub fn settings(&self) -> MachineSettings {
+        self.hub.settings()
+    }
+
+    /// The session whose UI is the host's user (the console session); `None` when nobody is at the machine.
+    /// Prompts and the host banner go to that session's UI only.
+    pub fn set_console_session(&self, session: Option<u32>) {
+        let changed = std::mem::replace(&mut *lock(&self.hub.console), session) != session;
+        if changed {
+            // A UI that connected before the console was known gets what is waiting for it.
+            for c in self.hub.console_conns() {
+                self.hub.send_pending(&c);
+            }
+        }
+    }
+
+    /// The host's desktop state (a lock or a UAC prompt is not "somebody present", PROTOCOL.md 6.2).
+    pub fn set_desktop(&self, desktop: Desktop) {
+        *lock(&self.hub.desktop) = desktop;
+    }
+
+    /// The network changed: the presence re-reads the interfaces and the UIs get the new status and list.
+    pub fn network_changed(&self) {
+        self.hub.p.presence.refresh();
+        let status = self.hub.network_status();
+        self.hub.notify(Notify::NetworkChanged(status));
+        self.hub.devices_changed();
+    }
+
+    /// The addresses the pairing endpoints listen on right now (empty while pairing mode is closed).
+    pub fn pair_local_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.hub.pair_local_addrs()
+    }
+
+    /// Connected UIs.
+    pub fn connections(&self) -> usize {
+        lock(&self.hub.conns).len()
+    }
+
+    /// Ends the pairing mode and refuses new work; running connections end when their pipe does.
+    pub fn shutdown(&self) {
+        self.hub.shutting.store(true, Ordering::SeqCst);
+        self.hub.cancel_pairing();
+        for c in self.hub.conns() {
+            c.queue.control(Ipc::Bye { code: swapdesk_proto::ErrorCode::HostShutdown });
+            c.queue.finish();
+        }
+    }
+
+    /// Serves one UI connection until it ends. The caller did the server handshake (`Handshake::server`, with
+    /// `Hello.role` checked to be the UI) and the pipe checks of C2.1 and C2.3 (`info`). Blocks the calling thread:
+    /// give each connection its own.
+    pub fn serve<R, W>(
+        &self,
+        mut reader: FrameReader<R>,
+        writer: FrameWriter<W>,
+        info: ConnInfo,
+    ) -> Result<(), IpcError>
+    where
+        R: std::io::Read,
+        W: std::io::Write + Send + 'static,
+    {
+        let hub = &self.hub;
+        let queue = UiQueue::new();
+        let writer_thread = queue.spawn_writer(writer)?;
+        let id = hub.next_conn.fetch_add(1, Ordering::Relaxed);
+        let clip = {
+            let q = queue.clone();
+            crate::rpc::Rpc::new(move |m| q.control(m))
+        };
+        let to_ui = queue.clone();
+        let fs = Arc::new(PipeCaller::new(id, Arc::new(Pending::new()), move |msg| to_ui.control(msg)));
+        let conn = Arc::new(Conn {
+            id,
+            info,
+            queue: queue.clone(),
+            clip,
+            viewers: Mutex::new(HashMap::new()),
+            terms: Mutex::new(HashMap::new()),
+            fs,
+        });
+        lock(&hub.conns).push(Arc::clone(&conn));
+        hub.log(
+            Level::Info,
+            format_args!("UI connected (session {}, admin {})", conn.info.session_id, conn.info.admin),
+        );
+        hub.send_pending(&conn);
+        let end = loop {
+            if hub.shutting.load(Ordering::SeqCst) {
+                break Ok(());
+            }
+            match reader.read_message() {
+                Ok(Some(Ipc::Bye { .. })) | Ok(None) => break Ok(()),
+                Ok(Some(msg)) => {
+                    if let Err(e) = hub.dispatch(&conn, msg) {
+                        queue.control(Ipc::Bye { code: swapdesk_proto::ErrorCode::ProtocolViolation });
+                        break Err(e);
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        lock(&hub.conns).retain(|c| c.id != conn.id);
+        // Whoever waits for this UI's clipboard stops waiting.
+        conn.clip.close();
+        // The calls waiting for this UI's disk fail now (its read handles died with it).
+        conn.fs.pending().close();
+        // The UI is gone: its viewer sessions go with it (nobody is left to decode them).
+        let viewers: Vec<Viewer> = lock(&conn.viewers).drain().map(|(_, v)| v).collect();
+        for v in &viewers {
+            v.handle.disconnect();
+        }
+        drop(viewers);
+        queue.finish();
+        let _ = writer_thread.join();
+        queue.close();
+        hub.log(
+            Level::Info,
+            format_args!(
+                "UI disconnected (session {}, {} realtime messages dropped)",
+                conn.info.session_id,
+                queue.dropped()
+            ),
+        );
+        end
+    }
+}

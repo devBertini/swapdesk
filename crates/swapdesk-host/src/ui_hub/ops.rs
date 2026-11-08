@@ -1,0 +1,665 @@
+//! The requests of a UI connection and the relay of its viewer sessions.
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use swapdesk_ipc::{
+    ApiCode, Bytes, DisplayView, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK, SessionState, SettingsUpdate,
+    SpecialKeys, UiOp,
+};
+use swapdesk_lan::guard::{ManualError, validate_manual};
+use swapdesk_platform::Level;
+use swapdesk_proto::{DisplayList, ErrorCode, InputEvent, Intent, Os, PermissionSet, Special, VideoSettings};
+use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
+use tokio::time::Instant;
+
+use super::store::{store_settings, valid_name};
+use super::views::{Manual, api_of, parse_device_id};
+use super::{Conn, Hub, Viewer, lock};
+use crate::service::{
+    ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut,
+};
+
+/// Typed addresses kept at once; the oldest goes first.
+const MAX_MANUAL: usize = 16;
+/// HID usage page of the keyboard.
+const KEYBOARD_PAGE: u16 = 0x07;
+
+type OpResult = Result<ReplyBody, ApiCode>;
+
+pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
+    let (status, body) = match result {
+        Ok(b) => match b.encode() {
+            Ok(bytes) => (STATUS_OK, bytes),
+            Err(_) => (ApiCode::Internal.status(), Vec::new()),
+        },
+        Err(code) => (code.status(), Vec::new()),
+    };
+    conn.queue.control(Ipc::UiReply { req, status, body: Bytes(body) });
+}
+
+fn done(r: Result<(), ApiCode>) -> OpResult {
+    r.map(|()| ReplyBody::Done)
+}
+
+fn apply_code(e: ApplyError) -> ApiCode {
+    match e {
+        ApplyError::NoSuchSession | ApplyError::Closed => ApiCode::NotFound,
+        ApplyError::NotPermitted => ApiCode::NotPermitted,
+        ApplyError::NotAViewerRequest => ApiCode::Invalid,
+    }
+}
+
+fn connect_code(e: &ConnectError) -> ApiCode {
+    use swapdesk_session::OpenError;
+    match e {
+        ConnectError::Refused(_) => ApiCode::Refused,
+        ConnectError::NotIpv4 => ApiCode::Invalid,
+        ConnectError::UnknownDevice => ApiCode::NotFound,
+        ConnectError::Socket(_) => ApiCode::Internal,
+        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => api_of(*c),
+        ConnectError::Open(OpenError::Protocol(_)) => ApiCode::Internal,
+        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ApiCode::Timeout,
+    }
+}
+
+impl Hub {
+    /// One message from a UI connection. An `Err` is a protocol error: the connection closes.
+    pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, msg: Ipc) -> Result<(), IpcError> {
+        match msg {
+            Ipc::UiRequest { req, op } => {
+                self.request(conn, req, op);
+                Ok(())
+            }
+            // The UI's own sessions only: a session id is not a capability on another connection.
+            Ipc::ViewerInput { session_id, events } => {
+                if let Some(v) = lock(&conn.viewers).get(&session_id)
+                    && !v.view_only
+                {
+                    let _ = v.handle.send_input(events.0);
+                }
+                Ok(())
+            }
+            Ipc::ViewerKeyframe { session_id, request } => {
+                if let Some(v) = lock(&conn.viewers).get(&session_id) {
+                    let _ = v.handle.request_keyframe(request);
+                }
+                Ok(())
+            }
+            Ipc::ViewerReport { session_id, report } => {
+                if let Some(v) = lock(&conn.viewers).get(&session_id) {
+                    let _ = v.handle.report(report);
+                }
+                Ok(())
+            }
+            // The answer to a clipboard call the service made on this UI's pipe.
+            reply @ Ipc::ClipReply { .. } => {
+                conn.clip.resolve(reply);
+                Ok(())
+            }
+            // The UI's own terminals only, like the sessions above.
+            Ipc::TermInput { term_id, bytes } => {
+                self.term_input(conn, term_id, bytes.0);
+                Ok(())
+            }
+            // The answer to a disk call this service made to the UI (C2.4 "Files"): it goes to the call that waits.
+            Ipc::FsReply { req, result } => {
+                conn.fs.pending().complete(req, result);
+                Ok(())
+            }
+            other => Err(IpcError::UnknownType(other.type_code())),
+        }
+    }
+
+    fn request(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
+        // The ops that answer when their work is done (or at once, with the work going on) reply themselves.
+        match op {
+            UiOp::RequestSwap { session_id } => self.request_swap(conn, req, session_id),
+            UiOp::ChatSend { session_id, text } => self.chat_send(conn, req, session_id, text),
+            UiOp::ChatMarkRead { session_id } => self.chat_read(conn, req, session_id),
+            UiOp::Wake { device_id, intent } => self.wake(conn, req, &device_id, intent),
+            UiOp::RunAction { session_id, action } => self.run_action(conn, req, session_id, action),
+            // The open answers when the shell runs or was refused, which can wait for the host's user.
+            UiOp::TermOpen { session_id, cols, rows, admin } => {
+                self.term_open(conn, req, session_id, cols, rows, admin)
+            }
+            UiOp::Files(op) => self.files_op(conn, req, op),
+            op => self.request_other(conn, req, op),
+        }
+    }
+
+    fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
+        if let UiOp::Connect { device_id, intent, unattended } = op {
+            // Entry without a prompt needs an administrator connection (D10); the host decides the rest.
+            if unattended && !conn.info.admin {
+                return reply(conn, req, Err(ApiCode::NeedsAdmin));
+            }
+            let (me, conn) = (Arc::clone(self), Arc::clone(conn));
+            // The call waits for the host's user (up to 20 s): not on the reader thread, not on the runtime.
+            if let Err(e) = std::thread::Builder::new().name("ui-hub-connect".into()).spawn(move || {
+                let r = me.connect(&conn, &device_id, intent, unattended);
+                reply(&conn, req, r);
+            }) {
+                self.log(Level::Warn, format_args!("cannot start a connect thread: {e}"));
+            }
+            return;
+        }
+        reply(conn, req, self.op(conn, op));
+    }
+
+    pub(super) fn is_console(&self, conn: &Conn) -> bool {
+        self.console_conns().iter().any(|c| c.id == conn.id)
+    }
+
+    fn op(self: &Arc<Self>, conn: &Arc<Conn>, op: UiOp) -> OpResult {
+        match op {
+            UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
+            UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
+            UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
+            UiOp::AddByAddress { ipv4 } => self.add_by_address(&ipv4).map(ReplyBody::Device),
+            UiOp::PairOpen { device_id } => self.pair_open(device_id).map(ReplyBody::PairingId),
+            UiOp::PairStart { pairing_id, device_id } => done(self.pair_start(pairing_id, &device_id)),
+            UiOp::PairConfirm { pairing_id, matches } => done(self.pair_confirm(pairing_id, matches)),
+            UiOp::PairCancel { pairing_id } => done(self.pair_cancel(pairing_id)),
+            UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
+            UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
+            UiOp::Connect { .. } => Err(ApiCode::Internal),
+            UiOp::Disconnect { session_id } => done(self.disconnect(conn, session_id)),
+            UiOp::AnswerIncoming { request_id, decision, grants } => {
+                // Validated before use, whatever the decision (PROTOCOL.md 6.1).
+                let grants = PermissionSet::from_bits(grants).ok_or(ApiCode::Invalid)?;
+                if !self.is_console(conn) {
+                    return Err(self.api_error(ApiCode::NotPermitted, "answer from a UI that is not the console's"));
+                }
+                done(self.answer_incoming(request_id, decision, grants))
+            }
+            UiOp::SelectDisplay { session_id, display } => {
+                done(self.with_viewer(conn, session_id, |v| v.handle.select_display(display).map_err(apply_code)))
+            }
+            UiOp::ListDisplays { session_id } => {
+                self.with_viewer(conn, session_id, |v| Ok(v.displays.clone())).map(ReplyBody::Displays)
+            }
+            UiOp::SetQuality { session_id, quality } => {
+                let settings =
+                    VideoSettings { preset: quality, max_fps: 60, max_kbps: 0, view_width: 0, view_height: 0 };
+                done(self.with_viewer(conn, session_id, |v| v.handle.set_video_settings(settings).map_err(apply_code)))
+            }
+            UiOp::SetAudio { session_id, on } => {
+                done(self.with_viewer(conn, session_id, |v| v.handle.set_audio(on).map_err(apply_code)))
+            }
+            UiOp::SetViewOnly { session_id, on } => done(self.set_view_only(conn, session_id, on)),
+            UiOp::SendKeys { session_id, keys } => done(self.send_keys(conn, session_id, keys)),
+            UiOp::GetSettings => Ok(ReplyBody::Settings(self.settings_view())),
+            UiOp::SetSettings(update) => done(self.set_settings(&update)),
+            UiOp::ActivityList { before_ms, limit } => {
+                Ok(ReplyBody::Activity(self.activity(before_ms, usize::try_from(limit).unwrap_or(usize::MAX))))
+            }
+            UiOp::AnswerSwap { request_id, accept } => done(self.answer_swap(conn, request_id, accept)),
+            UiOp::SetClipboardSync { session_id, on } => done(self.set_clipboard_sync(conn, session_id, on)),
+            UiOp::TermResize { term_id, cols, rows } => done(self.term_resize(conn, term_id, cols, rows)),
+            UiOp::TermClose { term_id } => done(self.term_close(conn, term_id)),
+            // Answered by `request`, which never sends them here.
+            UiOp::RequestSwap { .. }
+            | UiOp::ChatSend { .. }
+            | UiOp::ChatMarkRead { .. }
+            | UiOp::Wake { .. }
+            | UiOp::RunAction { .. }
+            | UiOp::TermOpen { .. }
+            | UiOp::Files(_) => Err(ApiCode::Internal),
+        }
+    }
+
+    fn with_viewer<T>(
+        &self,
+        conn: &Conn,
+        session_id: u64,
+        f: impl FnOnce(&mut Viewer) -> Result<T, ApiCode>,
+    ) -> Result<T, ApiCode> {
+        let mut viewers = lock(&conn.viewers);
+        f(viewers.get_mut(&session_id).ok_or(ApiCode::NotFound)?)
+    }
+
+    // ---------- devices ----------
+
+    /// F-FIND-03: an IPv4 literal on-link; off-link, loopback and this machine's own addresses are refused. In
+    /// development mode `a.b.c.d:port` also names another instance on this PC (its session port).
+    fn add_by_address(&self, text: &str) -> Result<swapdesk_ipc::DeviceView, ApiCode> {
+        let text = text.trim();
+        let (ip_text, port) = match text.split_once(':') {
+            Some((ip, port)) if self.allow_loopback() => (ip, Some(port.parse::<u16>().map_err(|_| ApiCode::Invalid)?)),
+            Some(_) => return Err(ApiCode::Invalid),
+            None => (text, None),
+        };
+        let ip: Ipv4Addr = ip_text.parse().map_err(|_| ApiCode::Invalid)?;
+        let session_port = port.unwrap_or(DEFAULT_SESSION_PORT);
+        if self.allow_loopback() && ip.is_loopback() {
+            // Development only. An instance still never pairs with its own endpoint.
+            if self.core().is_some_and(|c| c.local_addrs().contains(&SocketAddr::from((ip, session_port)))) {
+                return Err(ApiCode::Refused);
+            }
+        } else {
+            let list = self.p.interfaces.list().map_err(|_| ApiCode::Internal)?;
+            validate_manual(&list, ip_text).map_err(|e| match e {
+                ManualError::Syntax => ApiCode::Invalid,
+                ManualError::Refused(_) => ApiCode::Refused,
+            })?;
+        }
+        // An address that is a device seen on the network is that device.
+        if let Some(p) =
+            self.p.presence.peers().iter().find(|p| p.addrs.contains(&ip) && p.session_port == session_port)
+        {
+            let id = device_id_hex(&p.device_id);
+            return self.device_views().into_iter().find(|d| d.id == id).ok_or(ApiCode::NotFound);
+        }
+        let m = Manual { addr: ip, session_port };
+        let view = self.manual_view(&m);
+        {
+            let mut manual = lock(&self.manual);
+            manual.retain(|x| x != &m);
+            manual.push(m);
+            if manual.len() > MAX_MANUAL {
+                manual.remove(0);
+            }
+        }
+        self.devices_changed();
+        Ok(view)
+    }
+
+    /// `SetGrants`: `grants` validated, `UNATTENDED` and `ADMIN_TERMINAL` only added from an administrator
+    /// connection (C2.3, D7); taking them away is open to any (it narrows).
+    fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
+        let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
+        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        let old = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.grants_here)).ok_or(ApiCode::NotFound)?;
+        let admin_only = PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL;
+        if new.bits() & !old.bits() & admin_only != 0 && !conn.info.admin {
+            return Err(self.api_error(
+                ApiCode::NeedsAdmin,
+                "granting UNATTENDED or ADMIN_TERMINAL from a connection that is not elevated",
+            ));
+        }
+        let user = conn.info.user.clone();
+        self.p
+            .trust
+            .update(|s| {
+                if let Some(d) = s.devices.iter_mut().find(|d| d.device_id == id) {
+                    d.grants_here = new;
+                    // D13: who granted the entry without a prompt.
+                    if !new.contains(PermissionSet::UNATTENDED) {
+                        d.unattended_granted_by = None;
+                    } else if !old.contains(PermissionSet::UNATTENDED) {
+                        d.unattended_granted_by = Some(user.clone());
+                    }
+                }
+            })
+            .map_err(|e| {
+                self.log(Level::Warn, format_args!("the trust store was not written: {e}"));
+                ApiCode::Internal
+            })?;
+        self.p.audit.append(AuditEntry {
+            time_ms: self.p.wall.unix_ms(),
+            device: DeviceRef::Known(id),
+            event: AuditEvent::GrantsChanged { from: old, to: new, by: user },
+            duration_s: None,
+        });
+        if let Some(core) = self.core() {
+            core.host().stored_grants_changed(&id);
+        }
+        self.devices_changed();
+        Ok(())
+    }
+
+    /// F-PAIR-04: the key and grants go, the device's sessions end, its tokens die.
+    fn forget_device(&self, device_id: &str) -> Result<(), ApiCode> {
+        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        let removed = self.p.trust.update(|s| s.forget(&id)).map_err(|_| ApiCode::Internal)?;
+        if !removed {
+            return Err(ApiCode::NotFound);
+        }
+        self.p.audit.append(AuditEntry {
+            time_ms: self.p.wall.unix_ms(),
+            device: DeviceRef::Known(id),
+            event: AuditEvent::Forgotten,
+            duration_s: None,
+        });
+        if let Some(core) = self.core() {
+            core.host().forget_device(&id);
+        }
+        // Sessions this machine runs as a viewer to that device end too.
+        for c in self.conns_of_device(&id) {
+            for v in lock(&c.viewers).values().filter(|v| v.device == id) {
+                v.handle.disconnect();
+            }
+        }
+        lock(&self.learned).remove(&id);
+        self.devices_changed();
+        Ok(())
+    }
+
+    pub(super) fn conns_of_device(&self, id: &DeviceId) -> Vec<Arc<Conn>> {
+        self.conns().into_iter().filter(|c| lock(&c.viewers).values().any(|v| &v.device == id)).collect()
+    }
+
+    // ---------- sessions ----------
+
+    /// `Disconnect`: a viewer session of this connection, or (console UI only) a session of this machine as host.
+    fn disconnect(&self, conn: &Conn, session_id: u64) -> Result<(), ApiCode> {
+        // The waking entry of "Acordar" is not a session: cancelling it stops the attempt.
+        if self.cancel_wake(conn, session_id) {
+            return Ok(());
+        }
+        if let Some(v) = lock(&conn.viewers).get(&session_id) {
+            v.handle.disconnect();
+            return Ok(());
+        }
+        if !self.is_console(conn) {
+            return Err(ApiCode::NotFound);
+        }
+        match self.core() {
+            Some(core) if core.host().disconnect(session_id) => Ok(()),
+            _ => Err(ApiCode::NotFound),
+        }
+    }
+
+    /// `SetViewOnly`: on a viewer session the UI stops forwarding input (nothing is told to the host); on a hosted
+    /// session (console UI) the grants lose or regain `CONTROL`.
+    fn set_view_only(&self, conn: &Conn, session_id: u64, on: bool) -> Result<(), ApiCode> {
+        if let Some(v) = lock(&conn.viewers).get_mut(&session_id) {
+            v.view_only = on;
+            return Ok(());
+        }
+        if !self.is_console(conn) {
+            return Err(ApiCode::NotFound);
+        }
+        let core = self.core().ok_or(ApiCode::ServiceDown)?;
+        let ctx = core.host().session(session_id).ok_or(ApiCode::NotFound)?;
+        let bits = ctx.granted().bits();
+        let bits = if on { bits & !PermissionSet::BIT_CONTROL } else { bits | PermissionSet::BIT_CONTROL };
+        if core.host().set_session_grants(session_id, PermissionSet::closure(bits)) {
+            Ok(())
+        } else {
+            Err(ApiCode::NotFound)
+        }
+    }
+
+    /// `SendKeys`: Ctrl+Alt+Del is the secure attention sequence and only an `UNATTENDED` session may send it (the
+    /// host's service sends it); the other keys are ordinary input and need `CONTROL`.
+    fn send_keys(&self, conn: &Conn, session_id: u64, keys: SpecialKeys) -> Result<(), ApiCode> {
+        let viewers = lock(&conn.viewers);
+        let v = viewers.get(&session_id).ok_or(ApiCode::NotFound)?;
+        let granted = v.handle.granted();
+        if keys == SpecialKeys::CtrlAltDel {
+            if !granted.contains(PermissionSet::UNATTENDED) {
+                return Err(self.api_error(ApiCode::NotPermitted, "SAS without an UNATTENDED session"));
+            }
+            return v
+                .handle
+                .ctx()
+                .try_send(swapdesk_proto::SendSpecial { key: Special::SecureAttention })
+                .map_err(|_| ApiCode::NotFound);
+        }
+        if v.view_only {
+            return Err(ApiCode::NotPermitted);
+        }
+        let host_is_mac = self.p.trust.read(|s| s.find_by_id(&v.device).map(|d| d.os)) == Some(Os::MacOs);
+        let events = key_events(keys, host_is_mac);
+        v.handle.send_input(events).map_err(apply_code)
+    }
+
+    /// `Connect`: opens a viewer session and starts relaying it. Blocks until the host decided.
+    pub(super) fn connect(
+        self: &Arc<Self>,
+        conn: &Arc<Conn>,
+        device_id: &str,
+        intent: Intent,
+        unattended: bool,
+    ) -> OpResult {
+        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
+            return Err(ApiCode::NotFound);
+        }
+        let addr = self.address_of(&id).ok_or(ApiCode::NotFound)?;
+        let core = self.core().ok_or(ApiCode::ServiceDown)?;
+        let rt = self.rt().ok_or(ApiCode::ServiceDown)?.clone();
+        // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
+        // at the host), and an administrator connection also asks for the administrator terminal (D10).
+        let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };
+        if conn.info.admin {
+            extra = extra.union(PermissionSet::ADMIN_TERMINAL);
+        }
+        let (handle, messages) =
+            core.connect_asking(SocketAddr::V4(addr), id, intent, unattended, extra).map_err(|e| {
+                self.log(Level::Info, format_args!("connect to {}: {e}", device_id_hex(&id)));
+                connect_code(&e)
+            })?;
+        if conn.queue.is_closed() {
+            // The UI went away while the host was deciding: nobody is left to decode this session.
+            handle.disconnect();
+            return Err(ApiCode::ServiceDown);
+        }
+        let session_id = handle.session_id();
+        let mode = if unattended { swapdesk_proto::GrantMode::Unattended } else { swapdesk_proto::GrantMode::Prompted };
+        handle.files().bind(conn.fs.clone());
+        lock(&conn.viewers)
+            .insert(session_id, Viewer { handle: handle.clone(), device: id, view_only: false, displays: Vec::new() });
+        let (me, c) = (Arc::clone(self), Arc::clone(conn));
+        rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode).await });
+        Ok(ReplyBody::SessionId(session_id))
+    }
+
+    /// Relays one viewer session to its UI: media out, states and displays as notifications, a `Stats` each second.
+    pub(super) async fn pump_viewer(
+        self: Arc<Self>,
+        conn: Arc<Conn>,
+        session_id: u64,
+        device: DeviceId,
+        handle: ViewerHandle,
+        mut messages: ViewerMessages,
+        mode: swapdesk_proto::GrantMode,
+    ) {
+        let device_hex = device_id_hex(&device);
+        let started = self.p.wall.unix_ms();
+        let (mut frames, mut bytes) = (0u32, 0u64);
+        let mut next_tick = Instant::now() + Duration::from_secs(1);
+        let mut began = false;
+        let mut reconnecting = false;
+        let mut end_code = ErrorCode::NoError;
+        loop {
+            let item = match tokio::time::timeout_at(next_tick, messages.recv()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    let latency_ms = handle.ctx().rtt().map_or(0, |d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX));
+                    let kbps = u32::try_from(bytes * 8 / 1000).unwrap_or(u32::MAX);
+                    conn.queue.control(Ipc::UiNotify(Notify::Stats {
+                        session_id,
+                        latency_ms,
+                        fps: u16::try_from(frames).unwrap_or(u16::MAX),
+                        kbps,
+                    }));
+                    (frames, bytes) = (0, 0);
+                    next_tick += Duration::from_secs(1);
+                    continue;
+                }
+            };
+            match item {
+                ViewerOut::Message(m) => match &m {
+                    Ipc::ViewerVideo { payload, .. } => {
+                        frames = frames.saturating_add(1);
+                        bytes = bytes.saturating_add(payload.0.len() as u64);
+                        if !conn.queue.video(m).await {
+                            break;
+                        }
+                    }
+                    // Realtime: a UI that falls behind loses audio and cursor moves.
+                    _ => {
+                        conn.queue.realtime(m);
+                    }
+                },
+                ViewerOut::Displays { session_id: sid, list } => {
+                    let views = display_views(&list);
+                    // Kept for `ListDisplays`, which a UI sends once per session and may send after this arrived.
+                    if let Some(v) = lock(&conn.viewers).get_mut(&sid) {
+                        v.displays = views.clone();
+                    }
+                    conn.queue.control(Ipc::UiNotify(Notify::Displays { session_id: sid, list: views }));
+                }
+                // Terminal bytes wait for room (a slow UI slows the shell); the end follows the last bytes.
+                ViewerOut::Term(TermOut::Output { term_id, bytes }) => {
+                    if !conn.queue.term(Ipc::TermOutput { term_id, bytes }).await {
+                        break;
+                    }
+                }
+                ViewerOut::Term(TermOut::Exited { term_id, code }) => {
+                    if !self.term_exited(&conn, term_id, code).await {
+                        break;
+                    }
+                }
+                ViewerOut::State(change) => {
+                    // Before the host grants there is no session id to show; the reply to `Connect` is the news.
+                    if change.session_id == 0 {
+                        continue;
+                    }
+                    let ended = matches!(change.state, SessionState::Ended { .. });
+                    match change.state {
+                        SessionState::Reconnecting { .. } => reconnecting = true,
+                        // The connection is back: what was in flight is offered again and continues (F-FILE-01).
+                        SessionState::Active { .. } if reconnecting => {
+                            reconnecting = false;
+                            self.files_reissue(session_id, &handle);
+                        }
+                        _ => {}
+                    }
+                    if matches!(change.state, SessionState::Active { .. }) && !began {
+                        began = true;
+                        let granted = handle.granted();
+                        self.p.audit.append(AuditEntry {
+                            time_ms: started,
+                            device: DeviceRef::Known(device),
+                            event: AuditEvent::SessionStarted {
+                                direction: Direction::Outgoing,
+                                mode,
+                                granted,
+                                desktop: swapdesk_proto::Desktop::Default,
+                            },
+                            duration_s: None,
+                        });
+                        self.session_began();
+                    }
+                    conn.queue.control(Ipc::UiNotify(Notify::Session {
+                        session_id: change.session_id,
+                        device_id: device_hex.clone(),
+                        state: change.state,
+                    }));
+                    if ended {
+                        end_code = change.end.map_or(ErrorCode::NoError, |e| e.code);
+                        break;
+                    }
+                }
+            }
+        }
+        self.files_session_ended(session_id);
+        if lock(&conn.viewers).remove(&session_id).is_some() && !began {
+            // Ended without ever going active (the connection broke at once).
+            conn.queue.control(Ipc::UiNotify(Notify::Session {
+                session_id,
+                device_id: device_hex.clone(),
+                state: SessionState::Ended { reason: Some(ApiCode::Timeout) },
+            }));
+        }
+        if began {
+            let now = self.p.wall.unix_ms();
+            let duration = u32::try_from(now.saturating_sub(started) / 1000).unwrap_or(u32::MAX);
+            self.p.audit.append(AuditEntry {
+                time_ms: now,
+                device: DeviceRef::Known(device),
+                event: AuditEvent::SessionEnded(end_code),
+                duration_s: Some(duration),
+            });
+            self.session_ended();
+            self.devices_changed();
+        }
+    }
+
+    fn set_settings(&self, update: &SettingsUpdate) -> Result<(), ApiCode> {
+        if !valid_name(&update.name) {
+            return Err(ApiCode::Invalid);
+        }
+        let (before, after) = {
+            let mut s = lock(&self.settings);
+            let before = s.clone();
+            s.name = update.name.clone();
+            s.service_enabled = update.service_enabled;
+            s.lock_on_end = update.lock_on_end;
+            s.keep_awake = update.keep_awake;
+            if let Err(e) = store_settings(&*self.p.secrets, &s) {
+                *s = before;
+                self.log(Level::Warn, format_args!("settings were not written: {e}"));
+                return Err(ApiCode::Internal);
+            }
+            (before, s.clone())
+        };
+        if before.service_enabled != after.service_enabled {
+            self.p.hooks.service_enabled(after.service_enabled);
+        }
+        if before.keep_awake != after.keep_awake {
+            self.p
+                .hooks
+                .keep_awake(after.keep_awake && self.live_sessions.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        }
+        self.notify(Notify::SettingsChanged(self.settings_view()));
+        Ok(())
+    }
+}
+
+fn display_views(list: &DisplayList) -> Vec<DisplayView> {
+    list.displays
+        .iter()
+        .take(swapdesk_ipc::MAX_DISPLAYS)
+        .map(|d| DisplayView {
+            id: d.id,
+            name: d.name.clone(),
+            width: d.width,
+            height: d.height,
+            scale_milli: d.scale_milli,
+            primary: d.primary,
+        })
+        .collect()
+}
+
+/// The input records of a special key: each key goes down and up, with the HID modifier byte after each event.
+pub(super) fn key_events(keys: SpecialKeys, host_is_mac: bool) -> Vec<InputEvent> {
+    const L_ALT: (u16, u8) = (0xE2, 1 << 2);
+    const L_GUI: (u16, u8) = (0xE3, 1 << 3);
+    let key = |usage: u16, down: bool, modifiers: u8| InputEvent::Key {
+        usage_page: KEYBOARD_PAGE,
+        usage,
+        down,
+        modifiers,
+        locks: 0,
+    };
+    // `held`: a modifier kept down around the tap of `usage`.
+    let chord = |held: Option<(u16, u8)>, usage: u16| {
+        let mods = held.map_or(0, |h| h.1);
+        let mut v = Vec::new();
+        if let Some((u, m)) = held {
+            v.push(key(u, true, m));
+        }
+        v.push(key(usage, true, mods));
+        v.push(key(usage, false, mods));
+        if let Some((u, _)) = held {
+            v.push(key(u, false, 0));
+        }
+        v
+    };
+    match keys {
+        // Not input: the caller sent the secure attention sequence instead.
+        SpecialKeys::CtrlAltDel => Vec::new(),
+        SpecialKeys::AltTab => chord(Some(L_ALT), 0x2B),
+        SpecialKeys::WinOrCmd => chord(None, L_GUI.0),
+        SpecialKeys::AltF4OrCmdQ if host_is_mac => chord(Some(L_GUI), 0x14),
+        SpecialKeys::AltF4OrCmdQ => chord(Some(L_ALT), 0x3D),
+        SpecialKeys::PrintScreen => chord(None, 0x46),
+    }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "swapdesk-ipc"
+description = "Local message set and framing between the Swapdesk service, helpers and UI (C2.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+
+[dev-dependencies]
+proptest.workspace = true
