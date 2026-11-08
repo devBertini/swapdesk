@@ -1,0 +1,36 @@
+[package]
+name = "swapdesk-net-win"
+description = "NetInterfaces for Windows (contract C3): GetAdaptersAddresses, adapter classification, network category (NLM) and firewall state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (Win32 and COM calls). The workspace lints are repeated here
+# without `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+] }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_Networking_NetworkListManager",
+    "Win32_System_Com",
+] }

@@ -1,0 +1,46 @@
+[package]
+name = "swapdesk-sys-win"
+description = "Windows system glue of Swapdesk (contracts C2.1, C2.3, C3): named pipes with explicit DACLs, helper launch, session watcher, service control, keep-awake, SendSAS, trace log."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: the only place besides the other *-win crates where `unsafe` is allowed.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+# Only for the `Desktop` type that `ConsoleState` and `SessionEvent` carry (C3); a workspace crate, not a third-party one.
+swapdesk-proto = { path = "../swapdesk-proto" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_Shutdown",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,0 +1,43 @@
+[package]
+name = "swapdesk-codec-win"
+description = "VideoEncoder and VideoDecoder for Windows (contract C3): H.264 through Media Foundation MFTs (NVIDIA, Intel Quick Sync, the Windows software MFT) with D3D11 input and output."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (COM, Media Foundation and D3D11 calls). The workspace lints are
+# repeated here without `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+# The 30 s real-capture NVENC test and its measurement: frames of DISPLAY5 through DXGI Desktop Duplication.
+swapdesk-capture-win = { path = "../swapdesk-capture-win" }
