@@ -1,0 +1,40 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-11-07T15:00:00Z"},
+  "title": "Swapdesk design",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1200, "h": 760, "title": "1. Dispositivos"},
+    "Pareamento.dc.html": {"x": 1280, "y": 0, "w": 1200, "h": 760, "title": "2. Pareamento"},
+    "Permissoes.dc.html": {"x": 2560, "y": 0, "w": 1200, "h": 760, "title": "3. Permissões por direção"},
+    "PedidoEntrada.dc.html": {"x": 0, "y": 1140, "w": 1200, "h": 760, "title": "4. Pedido de conexão (anfitrião)"},
+    "Visualizador.dc.html": {"x": 1280, "y": 1140, "w": 1200, "h": 760, "title": "5. Visualizador"},
+    "Banner.dc.html": {"x": 2560, "y": 1140, "w": 1200, "h": 760, "title": "6. Sendo controlado (anfitrião)"},
+    "Inversao.dc.html": {"x": 0, "y": 2280, "w": 1200, "h": 760, "title": "7. Inverter controle"},
+    "Terminal.dc.html": {"x": 1280, "y": 2280, "w": 1200, "h": 760, "title": "8. Terminal e ações rápidas"},
+    "Arquivos.dc.html": {"x": 2560, "y": 2280, "w": 1200, "h": 760, "title": "9. Arquivos"},
+    "Chat.dc.html": {"x": 3840, "y": 2280, "w": 1200, "h": 760, "title": "10. Chat e copiar e colar"},
+    "Estados.dc.html": {"x": 0, "y": 3420, "w": 1200, "h": 760, "title": "11. Erros e estados"},
+    "Ajustes.dc.html": {"x": 1280, "y": 3420, "w": 1200, "h": 760, "title": "12. Ajustes"},
+    "Atividade.dc.html": {"x": 2560, "y": 3420, "w": 1200, "h": 760, "title": "13. Atividade"},
+    "MainEscuro.dc.html": {"x": 0, "y": 4560, "w": 1200, "h": 760, "title": "14. Dispositivos, escuro"},
+    "VisualizadorEscuro.dc.html": {"x": 1280, "y": 4560, "w": 1200, "h": 760, "title": "15. Visualizador, escuro"}
+  },
+  "order": [
+    "Main.dc.html", "Pareamento.dc.html", "Permissoes.dc.html",
+    "PedidoEntrada.dc.html", "Visualizador.dc.html", "Banner.dc.html",
+    "Inversao.dc.html", "Terminal.dc.html", "Arquivos.dc.html", "Chat.dc.html",
+    "Estados.dc.html", "Ajustes.dc.html", "Atividade.dc.html",
+    "MainEscuro.dc.html", "VisualizadorEscuro.dc.html"
+  ],
+  "notes": {
+    "t1": {"x": 0, "y": -260, "text": "Encontrar e parear", "kind": "title1", "maxW": 3760},
+    "t2": {"x": 0, "y": 880, "text": "Sessão", "kind": "title1", "maxW": 3760},
+    "t3": {"x": 0, "y": 2020, "text": "Inverter e ferramentas", "kind": "title1", "maxW": 5040},
+    "t4": {"x": 0, "y": 3160, "text": "Estados e ajustes", "kind": "title1", "maxW": 3760},
+    "t5": {"x": 0, "y": 4300, "text": "Modo escuro", "kind": "title1", "maxW": 2480},
+    "n1": {"x": 3840, "y": 0, "w": 420, "text": "Swapdesk: acesso remoto só na rede local, Windows e Mac nos dois sentidos.\n\nVersão 2 do design. Uma estrutura só: barra lateral com os computadores e o detalhe à direita; o visualizador ocupa a janela com uma barra flutuante de ícones. O elemento marcante é a faixa do par: os dois computadores ligados por um fio, com a seta de quem controla quem, que vira ao inverter. Azul-sinal só para conexão e ações, verde só para online, vermelho só para desconectar e esquecer. Instrument Sans em tudo, mono só no terminal.\n\nTodas as telas têm o ajuste Tema (claro/escuro) em Tweaks. Textos em pt-BR; o app também terá inglês.", "fill": "teal", "size": "m"}
+  },
+  "designSystems": []
+}

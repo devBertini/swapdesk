@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Ajustes</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .btn.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line);font-weight:600}
+.sd .btn:focus-visible,.sd .dev:focus-visible,.sd .switch:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--line);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:block;font-size:12px;color:var(--soft)}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:52px;padding:0 18px;border-top:1px solid var(--line)}
+.sd .row:first-child{border-top:0}
+.sd .row .lb{flex:1}
+.sd .row .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;width:220px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.sd .group{display:flex;flex-direction:column;gap:10px}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
+  <nav aria-label="Dispositivos" style="width: 272px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px; background: var(--sunken); border-right: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 0 10px">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg>
+      <span style="font-size: 16px; font-weight: 700; letter-spacing: -0.01em">Swapdesk</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Este computador</h2>
+      <div class="dev" style="cursor: default"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">Notebook da sala</span><span class="st">Pronto para receber</span></span></div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Pareados</h2>
+      <button class="dev"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">MacBook do escritório</span><span class="st">Online, macOS 15</span></span></button>
+      <button class="dev"><span class="dot" style="background: var(--line)"></span><span><span class="nm">Desktop do escritório</span><span class="st">Dormindo, Windows 11</span></span></button>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Na rede</h2>
+      <button class="dev"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span><span><span class="nm">MacBook Air</span><span class="st">Não pareado</span></span></button>
+    </div>
+    <div style="flex: 1"></div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <button class="btn quiet" style="justify-content: flex-start">Atividade</button>
+      <button class="btn sel" aria-current="page" style="justify-content: flex-start">Ajustes</button>
+    </div>
+    <p class="soft" style="padding: 0 10px; font-size: 12px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p>
+  </nav>
+
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 28px; padding: 32px 40px; background: var(--canvas)">
+    <h1>Ajustes</h1>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start">
+      <div style="display: flex; flex-direction: column; gap: 24px">
+        <section class="group" aria-labelledby="g1">
+          <h2 id="g1">Este computador</h2>
+          <div class="panel">
+            <div class="row"><label for="nome" class="lb">Nome</label><input id="nome" class="field" value="Notebook da sala" style="width: 190px"></div>
+            <div class="row"><label for="lang" class="lb">Idioma</label><select id="lang" class="field" style="width: 190px"><option>Português (Brasil)</option><option>English</option></select></div>
+            <div class="row"><span class="lb">Abrir ao ligar o computador</span><button class="switch" aria-label="Abrir ao ligar o computador" aria-pressed="true"><span></span></button></div>
+          </div>
+        </section>
+        <section class="group" aria-labelledby="g2">
+          <h2 id="g2">Sem ninguém na frente</h2>
+          <div class="panel">
+            <div class="row"><span class="lb">Serviço do Swapdesk<span class="hint">Permite entrar na tela de login e no bloqueio</span></span><span style="color: var(--ok); font-weight: 600">Ativo</span></div>
+            <div class="row"><span class="lb">Bloquear ao terminar a sessão</span><button class="switch" aria-label="Bloquear ao terminar a sessão" aria-pressed="true"><span></span></button></div>
+            <div class="row"><span class="lb">Não suspender durante a sessão</span><button class="switch" aria-label="Não suspender durante a sessão" aria-pressed="true"><span></span></button></div>
+          </div>
+        </section>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 24px">
+        <section class="group" aria-labelledby="g3">
+          <h2 id="g3">Imagem</h2>
+          <div class="panel">
+            <div class="row"><label for="q" class="lb">Qualidade</label><select id="q" class="field" style="width: 170px"><option>Automática</option><option>Texto nítido</option><option>Movimento fluido</option></select></div>
+            <div class="row"><span class="lb">Mostrar latência e quadros</span><button class="switch" aria-label="Mostrar latência e quadros" aria-pressed="false"><span></span></button></div>
+          </div>
+        </section>
+        <section class="group" aria-labelledby="g4">
+          <h2 id="g4">Teclado</h2>
+          <div class="panel">
+            <div class="row"><label for="kb" class="lb">Enviar teclas<span class="hint">Automático troca para texto quando os teclados são diferentes</span></label><select id="kb" class="field" style="width: 150px"><option>Automático</option><option>Teclas físicas</option><option>Texto</option></select></div>
+            <div class="row"><span class="lb">Trocar Ctrl e Cmd no Mac</span><button class="switch" aria-label="Trocar Ctrl e Cmd no Mac" aria-pressed="true"><span></span></button></div>
+          </div>
+        </section>
+        <section class="group" aria-labelledby="g5">
+          <h2 id="g5">Rede</h2>
+          <div class="panel">
+            <div class="row"><span class="lb">Wi-Fi, 192.168.0.12<span class="hint">WSL, Docker e VPN ficam de fora</span></span></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

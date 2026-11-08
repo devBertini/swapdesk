@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Erros e estados</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button{font:inherit;cursor:pointer}
+.sd h1{margin:0;font-size:24px;font-weight:600;letter-spacing:-0.015em}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .msg{display:flex;flex-direction:column;gap:10px;padding:20px 22px;border-radius:12px;background:var(--surface);border:1px solid var(--line)}
+.sd .ico{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.sd .msg .btn{align-self:flex-start;margin-top:auto}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; border-radius: 12px; overflow: hidden">
+  <div style="display: flex; flex-direction: column; gap: 6px">
+    <h1>Quando algo impede a conexão</h1>
+    <p class="soft">Cada aviso diz o que aconteceu e o que fazer. Aparece no lugar do conteúdo, nunca em cima.</p>
+  </div>
+  <div style="flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 20px">
+    <section class="msg" aria-labelledby="e1">
+      <span class="ico" style="background: var(--danger-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0M12 19.5h.01"></path></svg></span>
+      <h2 id="e1">O Windows marcou esta rede como Pública</h2>
+      <p class="soft">Em rede pública ninguém consegue se conectar a este computador. Marque o Wi-Fi Casa como rede Privada.</p>
+      <button class="btn primary">Abrir configurações de rede</button>
+    </section>
+    <section class="msg" aria-labelledby="e2">
+      <span class="ico" style="background: var(--danger-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg></span>
+      <h2 id="e2">O serviço do Swapdesk espera aprovação no Mac</h2>
+      <p class="soft">Sem ele o Mac não aparece na rede. Ligue o Swapdesk em Ajustes do Sistema, Geral, Itens de Início.</p>
+      <button class="btn primary">Abrir Ajustes do Sistema</button>
+    </section>
+    <section class="msg" aria-labelledby="e3">
+      <span class="ico" style="background: var(--link-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"></path></svg></span>
+      <h2 id="e3">Faltam 2 permissões no Mac</h2>
+      <p class="soft">Acessibilidade, para mexer o mouse e o teclado. Monitoramento de Entrada, para enviar atalhos como Cmd+Tab.</p>
+      <button class="btn primary">Conceder permissões</button>
+    </section>
+    <section class="msg" aria-labelledby="e4" style="background: var(--remote); border-color: var(--remote); color: #E9EBF0">
+      <span class="ico" style="border: 3px solid #8C9BFF; border-top-color: transparent" aria-hidden="true"></span>
+      <h2 id="e4">Reconectando ao MacBook</h2>
+      <p style="color: #A0A7B4">O Wi-Fi caiu. A tela volta sozinha quando a rede voltar. Tentativa 2.</p>
+      <button class="btn" style="background: transparent; border-color: #4A5160; color: #E9EBF0">Desconectar</button>
+    </section>
+    <section class="msg" aria-labelledby="e5">
+      <span class="ico" style="background: var(--link-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"></path></svg></span>
+      <h2 id="e5">Acordando o Desktop do escritório</h2>
+      <p class="soft">O sinal foi enviado. A conexão abre assim que ele aparecer na rede, em até 1 minuto.</p>
+      <div style="height: 6px; border-radius: 3px; background: var(--line); overflow: hidden"><div style="width: 40%; height: 6px; background: var(--link)"></div></div>
+      <button class="btn">Cancelar</button>
+    </section>
+    <section class="msg" aria-labelledby="e6">
+      <span class="ico" style="background: var(--sunken); border: 1px solid var(--line)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--soft)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h11l-3-3M17 17H6l3 3"></path></svg></span>
+      <h2 id="e6">O MacBook não aceitou inverter</h2>
+      <p class="soft">Ninguém respondeu em 20 segundos. Você continua controlando o MacBook.</p>
+      <button class="btn">Fechar</button>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

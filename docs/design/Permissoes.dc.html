@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Permissões</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .btn:focus-visible,.sd .dev:focus-visible,.sd .switch:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--line);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left}
+.sd .dev.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:block;font-size:12px;color:var(--soft)}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:50px;padding:0 20px;border-top:1px solid var(--line)}
+.sd .row .lb{flex:1}
+.sd .row .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
+  <nav aria-label="Dispositivos" style="width: 272px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px; background: var(--sunken); border-right: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 0 10px">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg>
+      <span style="font-size: 16px; font-weight: 700; letter-spacing: -0.01em">Swapdesk</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Este computador</h2>
+      <div class="dev" style="cursor: default"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">Notebook da sala</span><span class="st">Pronto para receber</span></span></div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Pareados</h2>
+      <button class="dev sel" aria-current="true"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">MacBook do escritório</span><span class="st">Online, macOS 15</span></span></button>
+      <button class="dev"><span class="dot" style="background: var(--line)"></span><span><span class="nm">Desktop do escritório</span><span class="st">Dormindo, Windows 11</span></span></button>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Na rede</h2>
+      <button class="dev"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span><span><span class="nm">MacBook Air</span><span class="st">Não pareado</span></span></button>
+    </div>
+    <div style="flex: 1"></div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <button class="btn quiet" style="justify-content: flex-start">Atividade</button>
+      <button class="btn quiet" style="justify-content: flex-start">Ajustes</button>
+    </div>
+    <p class="soft" style="padding: 0 10px; font-size: 12px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p>
+  </nav>
+
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 28px; padding: 32px 40px; background: var(--canvas)">
+    <header style="display: flex; align-items: flex-start; gap: 16px">
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+        <h1>MacBook do escritório</h1>
+        <p class="soft">Online em 192.168.0.21, resposta em 3 ms</p>
+      </div>
+      <button class="btn">Só ver</button>
+      <button class="btn primary">Controlar</button>
+    </header>
+    <nav class="tabs" aria-label="Seções do dispositivo">
+      <button class="tab" aria-selected="false">Visão geral</button>
+      <button class="tab" aria-selected="true">Permissões</button>
+      <button class="tab" aria-selected="false">Histórico</button>
+    </nav>
+
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start">
+      <section aria-labelledby="here" style="display: flex; flex-direction: column; gap: 10px">
+        <h2 id="here">O MacBook pode, neste computador</h2>
+        <div class="panel">
+          <div class="row" style="border-top: 0"><span class="lb">Ver a tela</span><button class="switch" aria-label="Ver a tela" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Controlar mouse e teclado</span><button class="switch" aria-label="Controlar mouse e teclado" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Ouvir o áudio</span><button class="switch" aria-label="Ouvir o áudio" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Terminal como o usuário conectado</span><button class="switch" aria-label="Terminal como o usuário conectado" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Terminal de administrador<span class="hint">Comandos como sistema</span></span><button class="switch" aria-label="Terminal de administrador" aria-pressed="false"><span></span></button></div>
+          <div class="row"><span class="lb">Arquivos</span><button class="switch" aria-label="Arquivos" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Área de transferência</span><button class="switch" aria-label="Área de transferência" aria-pressed="true"><span></span></button></div>
+          <div class="row"><span class="lb">Entrar sem perguntar<span class="hint">Inclui a tela de login e o bloqueio</span></span><button class="switch" aria-label="Entrar sem perguntar" aria-pressed="true"><span></span></button></div>
+        </div>
+      </section>
+      <section aria-labelledby="there" style="display: flex; flex-direction: column; gap: 10px">
+        <h2 id="there">Este computador pode, no MacBook</h2>
+        <div class="panel" style="background: var(--sunken)">
+          <div class="row" style="border-top: 0"><span class="lb">Ver a tela</span><span style="color: var(--ok); font-weight: 600">Sim</span></div>
+          <div class="row"><span class="lb">Controlar mouse e teclado</span><span style="color: var(--ok); font-weight: 600">Sim</span></div>
+          <div class="row"><span class="lb">Ouvir o áudio</span><span style="color: var(--ok); font-weight: 600">Sim</span></div>
+          <div class="row"><span class="lb">Terminal</span><span class="soft">Não</span></div>
+          <div class="row"><span class="lb">Arquivos</span><span style="color: var(--ok); font-weight: 600">Sim</span></div>
+          <div class="row"><span class="lb">Área de transferência</span><span style="color: var(--ok); font-weight: 600">Sim</span></div>
+          <div class="row"><span class="lb">Entrar sem perguntar</span><span class="soft">Não</span></div>
+        </div>
+        <p class="soft" style="font-size: 13px">Quem decide é o MacBook. Para inverter, o lado que passa a ser controlado precisa ter liberado “Controlar” para o outro.</p>
+        <button class="btn danger" style="align-self: flex-start; margin-top: 8px">Esquecer este dispositivo</button>
+      </section>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

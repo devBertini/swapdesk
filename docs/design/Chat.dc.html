@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Chat e copiar e colar</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.icon{width:40px;padding:0;border-color:transparent;background:transparent}
+.sd .btn:focus-visible,.sd .tab:focus-visible,.sd .switch:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .tabs{display:flex;gap:2px;padding:0 12px}
+.sd .tab{height:44px;padding:0 10px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .drawer{width:448px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface);border-left:1px solid var(--line)}
+.sd .them{align-self:flex-start;max-width:80%;padding:10px 14px;border-radius:14px 14px 14px 4px;background:var(--sunken);border:1px solid var(--line)}
+.sd .me{align-self:flex-end;max-width:80%;padding:10px 14px;border-radius:14px 14px 4px 14px;background:var(--link);color:var(--link-ink)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--line);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
+  <div style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--line)">
+    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--ok)"></span>
+    <span style="font-weight: 600">MacBook do escritório</span>
+    <span class="soft">você controla há 21 min</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex">
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 16px; padding: 20px; background: var(--remote)">
+      <div aria-label="Tela do MacBook" style="width: 100%; aspect-ratio: 16 / 10; border-radius: 4px; background: #46586A"></div>
+      <section aria-label="Copiar e colar" style="display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 10px; background: var(--surface)">
+        <div style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+          <h2>Copiar e colar entre os dois</h2>
+          <p class="soft" style="font-size: 13px">Texto e imagens. Senhas copiadas de gerenciadores ficam de fora.</p>
+        </div>
+        <button class="switch" aria-label="Copiar e colar entre os dois" aria-pressed="true"><span></span></button>
+      </section>
+    </div>
+    <aside class="drawer" aria-label="Ferramentas da sessão">
+      <div style="display: flex; align-items: center; border-bottom: 1px solid var(--line)">
+        <nav class="tabs" role="tablist" aria-label="Ferramentas" style="flex: 1">
+          <button class="tab" role="tab" aria-selected="false">Terminal</button>
+          <button class="tab" role="tab" aria-selected="false">Arquivos</button>
+          <button class="tab" role="tab" aria-selected="true">Chat</button>
+          <button class="tab" role="tab" aria-selected="false">Copiar e colar</button>
+        </nav>
+        <button class="btn icon" aria-label="Fechar painel" style="margin-right: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+      </div>
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 20px">
+        <p class="soft" style="font-size: 13px; text-align: center">As mensagens somem quando a sessão termina.</p>
+        <div class="them">Pode fechar o Xcode? Vou reiniciar o Mac.</div>
+        <div class="me">Pode, já salvei tudo.</div>
+        <p class="soft" style="align-self: flex-end; font-size: 12px">Lida às 15:24</p>
+        <p style="align-self: center; padding: 6px 12px; border-radius: 999px; background: var(--link-tint); font-size: 12px; font-weight: 600">Controle invertido às 15:25</p>
+        <div class="them">Agora é você que vê meu Mac. Abre o Farol?</div>
+        <div style="flex: 1"></div>
+      </div>
+      <div style="display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--line)">
+        <label for="msg" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Mensagem</label>
+        <input id="msg" placeholder="Escreva uma mensagem" style="flex: 1; height: 40px; padding: 0 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface)">
+        <button class="btn primary">Enviar</button>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

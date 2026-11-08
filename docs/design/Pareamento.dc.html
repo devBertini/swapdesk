@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Pareamento</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .win{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.sd .bar{height:40px;display:flex;align-items:center;gap:8px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--sunken);font-size:13px;font-weight:600}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 48px; padding: 56px 64px; border-radius: 12px">
+  <section class="win" aria-label="No Notebook da sala">
+    <div class="bar"><span class="soft" style="font-weight: 500">Swapdesk no</span>Notebook da sala</div>
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 20px; padding: 36px 40px">
+      <p class="soft" style="font-size: 13px">Modo de pareamento aberto por 2 minutos nos dois computadores</p>
+      <h1>Parear com MacBook Air</h1>
+      <p class="soft" style="max-width: 400px">Confira se o código abaixo é igual ao que aparece agora no MacBook Air.</p>
+      <p aria-label="Código 482 913" style="font-size: 64px; font-weight: 600; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; color: var(--link); line-height: 1; margin: 12px 0">482 913</p>
+      <p class="soft" style="font-size: 13px; max-width: 400px">Se forem diferentes, cancele: outro aparelho pode estar tentando se passar pelo MacBook Air.</p>
+      <div style="flex: 1"></div>
+      <div style="display: flex; gap: 10px">
+        <button class="btn primary">Os códigos são iguais</button>
+        <button class="btn">São diferentes</button>
+      </div>
+    </div>
+  </section>
+  <section class="win" aria-label="No MacBook Air">
+    <div class="bar"><span class="soft" style="font-weight: 500">Swapdesk no</span>MacBook Air</div>
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 20px; padding: 36px 40px">
+      <p class="soft" style="font-size: 13px">Modo de pareamento aberto por 2 minutos nos dois computadores</p>
+      <h1>Parear com Notebook da sala</h1>
+      <p class="soft" style="max-width: 400px">Confira se o código abaixo é igual ao que aparece agora no Notebook da sala.</p>
+      <p aria-label="Código 482 913" style="font-size: 64px; font-weight: 600; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; color: var(--link); line-height: 1; margin: 12px 0">482 913</p>
+      <p class="soft" style="font-size: 13px; max-width: 400px">Se forem diferentes, cancele: outro aparelho pode estar tentando se passar pelo Notebook da sala.</p>
+      <div style="flex: 1"></div>
+      <div style="display: flex; gap: 10px">
+        <button class="btn primary">Os códigos são iguais</button>
+        <button class="btn">São diferentes</button>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

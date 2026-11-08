@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Atividade</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button{font:inherit;color:inherit;cursor:pointer}
+.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .btn.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line);font-weight:600}
+.sd .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger);font-weight:600}
+.sd .btn:focus-visible,.sd .dev:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:block;font-size:12px;color:var(--soft)}
+.sd table{width:100%;border-collapse:collapse}
+.sd th{height:40px;padding:0 18px;text-align:left;font-size:12px;font-weight:600;color:var(--soft);border-bottom:1px solid var(--line)}
+.sd td{height:50px;padding:0 18px;border-bottom:1px solid var(--line);vertical-align:middle}
+.sd tr:last-child td{border-bottom:0}
+.sd .num{font-variant-numeric:tabular-nums;white-space:nowrap}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
+  <nav aria-label="Dispositivos" style="width: 272px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px; background: var(--sunken); border-right: 1px solid var(--line)">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 0 10px">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg>
+      <span style="font-size: 16px; font-weight: 700; letter-spacing: -0.01em">Swapdesk</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Este computador</h2>
+      <div class="dev" style="cursor: default"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">Notebook da sala</span><span class="st">Pronto para receber</span></span></div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Pareados</h2>
+      <button class="dev"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">MacBook do escritório</span><span class="st">Online, macOS 15</span></span></button>
+      <button class="dev"><span class="dot" style="background: var(--line)"></span><span><span class="nm">Desktop do escritório</span><span class="st">Dormindo, Windows 11</span></span></button>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h2 class="gh">Na rede</h2>
+      <button class="dev"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span><span><span class="nm">MacBook Air</span><span class="st">Não pareado</span></span></button>
+    </div>
+    <div style="flex: 1"></div>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <button class="btn sel" aria-current="page" style="justify-content: flex-start">Atividade</button>
+      <button class="btn quiet" style="justify-content: flex-start">Ajustes</button>
+    </div>
+    <p class="soft" style="padding: 0 10px; font-size: 12px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p>
+  </nav>
+
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 24px; padding: 32px 40px; background: var(--canvas)">
+    <header style="display: flex; align-items: flex-start; gap: 16px">
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+        <h1>Atividade</h1>
+        <p class="soft">Cada conexão com este computador. O registro fica só aqui.</p>
+      </div>
+      <button class="btn">Exportar registro</button>
+    </header>
+
+    <div role="alert" style="display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 12px; background: var(--danger-tint)">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink: 0"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"></path><path d="M12 9v4M12 16h.01"></path></svg>
+      <p style="flex: 1"><span style="font-weight: 600">Um aparelho desconhecido tentou parear hoje às 14:02.</span> Os códigos não foram confirmados e nada foi liberado.</p>
+      <button class="btn danger">Bloquear 192.168.0.57</button>
+    </div>
+
+    <section class="panel" aria-label="Registro" style="overflow: hidden">
+      <table>
+        <thead><tr><th style="width: 130px">Quando</th><th style="width: 200px">Dispositivo</th><th>O que aconteceu</th><th style="width: 100px">Duração</th></tr></thead>
+        <tbody>
+          <tr><td class="num">Hoje, 15:25</td><td>MacBook do escritório</td><td>Inverteu o controle: este computador passou a controlar o MacBook</td><td class="soft">agora</td></tr>
+          <tr><td class="num">Hoje, 15:08</td><td>MacBook do escritório</td><td>Controlou este computador e enviou 3 arquivos</td><td class="num soft">17 min</td></tr>
+          <tr><td class="num">Hoje, 14:02</td><td style="color: var(--danger); font-weight: 600">Desconhecido</td><td>Pareamento cancelado: códigos não confirmados</td><td class="soft">–</td></tr>
+          <tr><td class="num">Ontem, 23:40</td><td>MacBook do escritório</td><td>Entrou sem perguntar, na tela de login</td><td class="num soft">6 min</td></tr>
+          <tr><td class="num">Ontem, 19:12</td><td>MacBook do escritório</td><td>Só viu a tela</td><td class="num soft">4 min</td></tr>
+          <tr><td class="num">05/11, 10:30</td><td>MacBook do escritório</td><td>Pareado com códigos confirmados nos dois</td><td class="soft">–</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

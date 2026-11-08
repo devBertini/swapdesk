@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Pedido de conexão</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; align-items: center; justify-content: center; border-radius: 12px; overflow: hidden; background: var(--remote)">
+  <div role="dialog" aria-labelledby="req" style="width: 520px; padding: 32px; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 80px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 24px">
+    <div style="display: flex; align-items: center; gap: 14px" aria-hidden="true">
+      <svg width="44" height="44" viewBox="0 0 64 64" fill="none" stroke="var(--link)" stroke-width="3" stroke-linejoin="round"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
+      <span style="flex: 1; display: flex; align-items: center"><span style="flex: 1; height: 3px; border-radius: 2px; background: var(--link)"></span><svg width="12" height="14" viewBox="0 0 16 18"><path d="M0 0l16 9-16 9z" fill="var(--link)"></path></svg></span>
+      <svg width="44" height="44" viewBox="0 0 64 64" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linejoin="round"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <h1 id="req">MacBook do escritório quer controlar este computador</h1>
+      <p class="soft">Pareado desde 05/11. Recusa automática em 18 s.</p>
+    </div>
+    <fieldset style="margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px">
+      <legend style="margin-bottom: 8px; font-weight: 600">Permitir nesta sessão</legend>
+      <label class="chk"><input type="checkbox" checked>Controlar</label>
+      <label class="chk"><input type="checkbox" checked>Ouvir o áudio</label>
+      <label class="chk"><input type="checkbox" checked>Arquivos</label>
+      <label class="chk"><input type="checkbox" checked>Área de transferência</label>
+      <label class="chk"><input type="checkbox">Terminal</label>
+    </fieldset>
+    <label class="chk" style="padding-top: 16px; border-top: 1px solid var(--line)"><input type="checkbox">Deixar entrar sem perguntar da próxima vez</label>
+    <div style="display: flex; gap: 10px">
+      <button class="btn quiet" style="margin-right: auto; padding-left: 0">Recusar</button>
+      <button class="btn">Só deixar ver</button>
+      <button class="btn primary">Aceitar</button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Terminal</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd,.sd *{box-sizing:border-box}
+.sd button{font:inherit;cursor:pointer}
+.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd p{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .btn{height:40px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger);font-weight:600}
+.sd .btn.icon{width:40px;padding:0;border-color:transparent;background:transparent}
+.sd .btn:focus-visible,.sd .tab:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .tabs{display:flex;gap:2px;padding:0 12px;border-bottom:1px solid var(--line)}
+.sd .tab{height:44px;padding:0 10px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .drawer{width:448px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface);border-left:1px solid var(--line)}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
+  <div style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--line)">
+    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--ok)"></span>
+    <span style="font-weight: 600">MacBook do escritório</span>
+    <span class="soft">você controla há 15 min</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex">
+    <div style="flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--remote)">
+      <div aria-label="Tela do MacBook" style="width: 100%; aspect-ratio: 16 / 10; border-radius: 4px; background: #46586A"></div>
+    </div>
+    <aside class="drawer" aria-label="Ferramentas da sessão">
+      <div style="display: flex; align-items: center">
+        <nav class="tabs" role="tablist" aria-label="Ferramentas" style="flex: 1; border-bottom: 0">
+          <button class="tab" role="tab" aria-selected="true">Terminal</button>
+          <button class="tab" role="tab" aria-selected="false">Arquivos</button>
+          <button class="tab" role="tab" aria-selected="false">Chat</button>
+          <button class="tab" role="tab" aria-selected="false">Copiar e colar</button>
+        </nav>
+        <button class="btn icon" aria-label="Fechar painel" style="margin-right: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+      </div>
+      <div style="height: 1px; background: var(--line)"></div>
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; padding: 18px 20px">
+        <p class="soft">Comandos rodam no MacBook como o usuário claudio.</p>
+        <div style="flex: 1; min-height: 0; padding: 14px 16px; border-radius: 10px; background: #15181E; color: #D6DAE0; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.7; white-space: pre-line; overflow: hidden">claudio@MacBook ~ % uptime
+15:21  up 3 days, 2:14, load 1.42
+claudio@MacBook ~ % df -h /
+/dev/disk3s1  460Gi  212Gi  231Gi  48%
+claudio@MacBook ~ % git -C ~/Projetos/Farol status -s
+ M Sources/Farol/Mar.swift
+claudio@MacBook ~ % ▍</div>
+        <h2>Ações rápidas</h2>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+          <button class="btn">Bloquear a tela</button>
+          <button class="btn">Monitor de Atividade</button>
+          <button class="btn">Suspender</button>
+          <button class="btn danger">Reiniciar</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>
