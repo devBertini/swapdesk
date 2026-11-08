@@ -1,0 +1,49 @@
+[package]
+name = "swapdesk-shell-mac"
+description = "macOS shell of Swapdesk: AppKit (objc2) windows for every screen of swapdesk-ui, the viewer window with its toolbar and the slots the render and input lanes plug into."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: the only `unsafe` of the macOS UI lives here (every other lint stays the workspace's).
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-ui = { path = "../swapdesk-ui" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+dispatch2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+workspace = true
+features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSLocale", "NSNotification", "NSObject", "NSString", "NSTimer", "NSTimeZone", "NSRange", "NSRunLoop", "NSDate", "NSThread", "NSURL", "NSValue"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+workspace = true
+features = [
+    "std", "objc2-quartz-core", "objc2-core-foundation", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle",
+    "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols",
+    "NSAppearance", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
+    "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
+    "NSPanel", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
+    "NSStackView", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
+    "NSView", "NSVisualEffectView", "NSWindow", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
+]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
+workspace = true
+features = ["std", "CALayer", "objc2-core-foundation"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+workspace = true
+features = ["std", "CFCGTypes"]

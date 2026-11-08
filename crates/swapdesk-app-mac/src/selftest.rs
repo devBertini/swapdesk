@@ -1,0 +1,66 @@
+//! `Swapdesk --selftest <file>`: development check that the app really came up under launchd / `open`.
+//!
+//! A few seconds after the run loop starts, a block on the main queue writes what the process sees to `<file>` (one
+//! `key=value` per line, written to a temporary name and renamed so a reader never sees half of it) and asks the app
+//! to quit. A watchdog thread ends the process with status 3 if the run loop never gets there. The launch check in
+//! `tests/launch.rs` reads the file.
+//!
+//! Lines: `selftest=ok`, `pid`, `windows` (count), `window.<n>=<title>|visible=<bool>`, `service_addrs`,
+//! `pipeline.attached` (the viewer window's video view exists: false without a session), `pipeline.input_session`,
+//! `activation_policy`.
+//!
+//! Apple documentation: `NSApplication.windows`, `NSWindow.isVisible` / `title`, `NSApplication.terminate(_:)`,
+//! `NSApplication.activationPolicy()` (developer.apple.com/documentation/appkit/nsapplication).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use dispatch2::{DispatchQueue, DispatchTime};
+use objc2_app_kit::NSApplication;
+use objc2_foundation::MainThreadMarker;
+
+use crate::pipeline::MacViewer;
+
+/// How long the run loop has to reach the check before the watchdog ends the process.
+const WATCHDOG: Duration = Duration::from_secs(30);
+
+/// Queues the check `delay` after the run loop starts.
+pub fn schedule(file: PathBuf, delay: Duration, service_addrs: String, viewer: Arc<MacViewer>) {
+    let watchdog_file = file.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(WATCHDOG);
+        let _ = std::fs::write(watchdog_file.with_extension("watchdog"), "the run loop did not reach the self-test\n");
+        std::process::exit(3);
+    });
+    let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let report = report(mtm, &service_addrs, &viewer);
+        let tmp = file.with_extension("tmp");
+        if std::fs::write(&tmp, report).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
+            std::process::exit(4);
+        }
+        NSApplication::sharedApplication(mtm).terminate(None);
+    });
+    if queued.is_err() {
+        std::process::exit(5);
+    }
+}
+
+fn report(mtm: MainThreadMarker, service_addrs: &str, viewer: &MacViewer) -> String {
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    let mut out = String::from("selftest=ok\n");
+    out.push_str(&format!("pid={}\n", std::process::id()));
+    out.push_str(&format!("activation_policy={:?}\n", app.activationPolicy()));
+    out.push_str(&format!("windows={}\n", windows.count()));
+    for (i, w) in windows.to_vec().iter().enumerate() {
+        out.push_str(&format!("window.{i}={}|visible={}\n", w.title(), w.isVisible()));
+    }
+    out.push_str(&format!("service_addrs={service_addrs}\n"));
+    let stats = viewer.stats();
+    out.push_str(&format!("pipeline.attached={}\n", stats.attached));
+    out.push_str(&format!("pipeline.input_session={}\n", viewer.input_session()));
+    out
+}

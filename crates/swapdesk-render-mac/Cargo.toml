@@ -1,0 +1,45 @@
+[package]
+name = "swapdesk-render-mac"
+description = "Renderer for macOS (contract C3): decoded pictures enqueued on an AVSampleBufferDisplayLayer placed under the shell's toolbar layer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (Objective-C message sends, CoreMedia and CoreVideo calls). The
+# workspace lints are repeated here without `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, features = ["std"] }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSObject", "NSString"] }
+objc2-quartz-core = { workspace = true, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-av-foundation = { workspace = true, features = [
+    "std",
+    "AVAnimation",
+    "AVQueuedSampleBufferRendering",
+    "AVSampleBufferDisplayLayer",
+    "AVSampleBufferVideoRenderer",
+    "objc2-core-media",
+    "objc2-core-video",
+    "objc2-quartz-core",
+] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { workspace = true, features = ["std", "CGColor", "CGColorSpace", "CGDataProvider", "CGImage"] }
+objc2-core-media = { workspace = true, features = ["std", "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-video = { workspace = true, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+
+# Tests: the decoder's NV12 pictures go through the renderer too.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
+swapdesk-proto = { path = "../swapdesk-proto" }

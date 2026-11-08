@@ -1,0 +1,25 @@
+[package]
+name = "swapdesk-secret-mac"
+description = "macOS SecretStore of Swapdesk (contract C3, C5): identity and trust records as generic-password items of the login keychain (Security framework), and the C5 folder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (Security and CoreFoundation calls, geteuid).
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+objc2-core-foundation = { workspace = true, features = ["std", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-security = { workspace = true, features = ["std", "SecItem", "SecBase", "SecKeychain"] }

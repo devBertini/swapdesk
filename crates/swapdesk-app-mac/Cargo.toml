@@ -1,0 +1,74 @@
+[package]
+name = "swapdesk-app-mac"
+description = "Swapdesk.app: the macOS program. The AppKit shell, the in-process ServiceCore and UI hub (D27) and the viewer pipeline (VideoToolbox decode, AVSampleBufferDisplayLayer render, Core Audio, CGEventTap input)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the one `unsafe` of this lane (a decoded picture moved to the main thread). The workspace lints
+# are repeated here without `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[lib]
+name = "swapdesk_app_mac"
+path = "src/lib.rs"
+
+# Not named "Swapdesk": on Windows `Swapdesk.exe` is swapdesk-app's, and two bins of one name collide in a shared target
+# folder. scripts/mac/build-app.sh copies this binary into Swapdesk.app as Contents/MacOS/Swapdesk (CFBundleExecutable).
+[[bin]]
+name = "swapdesk-app-mac"
+path = "src/main.rs"
+
+[dependencies]
+# The OS-free half of the viewer pipeline (mailbox, feedback, cursor, audio player, output side) is the Windows app's.
+swapdesk-app = { path = "../swapdesk-app" }
+swapdesk-audio = { path = "../swapdesk-audio" }
+swapdesk-core-mac = { path = "../swapdesk-core-mac" }
+swapdesk-host = { path = "../swapdesk-host" }
+swapdesk-input-mac = { path = "../swapdesk-input-mac" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-keys = { path = "../swapdesk-keys" }
+swapdesk-lan = { path = "../swapdesk-lan" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-render-mac = { path = "../swapdesk-render-mac" }
+swapdesk-session = { path = "../swapdesk-session" }
+swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
+swapdesk-trust = { path = "../swapdesk-trust" }
+swapdesk-ui = { path = "../swapdesk-ui" }
+tokio.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+swapdesk-audio-mac = { path = "../swapdesk-audio-mac" }
+swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
+swapdesk-net-mac = { path = "../swapdesk-net-mac" }
+swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
+dispatch2.workspace = true
+objc2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+workspace = true
+features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+workspace = true
+features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
+workspace = true
+features = ["std", "CALayer", "objc2-core-foundation"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+workspace = true
+features = ["std", "CFCGTypes"]
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
