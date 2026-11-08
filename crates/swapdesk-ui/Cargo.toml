@@ -1,0 +1,18 @@
+[package]
+name = "swapdesk-ui"
+description = "View state, commands, events, strings (pt-BR, en), design tokens and AccessKit trees of the Swapdesk interface (contract C6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+accesskit.workspace = true
+swapdesk-files = { path = "../swapdesk-files" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
