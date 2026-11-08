@@ -1,0 +1,347 @@
+﻿<#
+.SYNOPSIS
+  Removes Swapdesk from this PC and checks that nothing is left (F-SYS-01).
+
+.DESCRIPTION
+  Asks for administrator rights once (UAC), then:
+    1. stops the service SwapdeskService and any Swapdesk process running from the install folder;
+    2. deletes the service;
+    3. removes the firewall rules of the group Swapdesk;
+    4. removes the all-users Start menu shortcut;
+    5. restores SoftwareSASGeneration to the value saved by install.ps1 (or removes it when it was absent), only when
+       the install recorded that it set it (install -EnableSas) and unless someone changed it since (then it is left
+       and reported); removes HKLM\SOFTWARE\Swapdesk;
+    6. deletes the files install.ps1 put in %ProgramFiles%\Swapdesk, then the folder if it is empty;
+    7. deletes the data folder %ProgramData%\Swapdesk (identity, trust store, settings, audit and trace logs) unless
+       -KeepData is given. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
+       then the folder if it is empty. A folder that is a reparse point is never entered.
+  Then it writes one Application event (id 1001), removes the Event Log source Swapdesk, and queries the service, the rules, the folders, the shortcut, the registry key and the processes, and exits
+  with 1 when something is left.
+
+.PARAMETER KeepData
+  Keeps %ProgramData%\Swapdesk (this PC stays paired with its devices). Default: the data is removed.
+
+.PARAMETER Force
+  Deletes the install folder and the data folder with everything in them, also files this script does not know.
+
+.PARAMETER DryRun
+  Prints every action without doing any of it. Needs no administrator rights and does not elevate.
+
+.PARAMETER LogFile
+  Internal: the elevated copy of this script writes what it prints here so the first window can show it.
+
+.NOTES
+  Exit codes: 0 clean, 1 failed or something left, 1223 the UAC prompt was cancelled.
+  Never reads, prints or copies a secret (the data files are deleted, never opened). No network access.
+#>
+[CmdletBinding()]
+param(
+    [switch]$KeepData,
+    [switch]$Force,
+    [switch]$DryRun,
+    [string]$LogFile
+)
+
+$ErrorActionPreference = 'Stop'
+
+# ---------------------------------------------------------------- constants (keep equal to install.ps1)
+$ServiceName   = 'SwapdeskService'
+$FirewallGroup = 'Swapdesk'
+$RuleNames     = @('Swapdesk-UDP-Session-Pairing', 'Swapdesk-UDP-mDNS')
+$ShortcutName  = 'Swapdesk.lnk'
+$SasKey        = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+$SasValue      = 'SoftwareSASGeneration'
+$OwnRoot       = 'HKLM:\SOFTWARE\Swapdesk'
+$OwnKey        = 'HKLM:\SOFTWARE\Swapdesk\Installer'
+$InstalledFiles = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe', 'LICENSE-MIT', 'LICENSE-APACHE')
+# CONTRACTS C5.2: identity.bin, trust.bin, settings.bin, audit-sessions.log, audit-network.log, trace.log
+# (rotation keeps <name>.1; a file that does not decode is set aside as <name>.damaged-<ms>; writes go through <name>.tmp).
+$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log')
+$ProcessNames  = @('Swapdesk', 'swapdesk-helper', 'swapdesk-service')
+$EventSource   = 'Swapdesk'
+$EventLogName  = 'Application'
+
+$PfBase = $env:ProgramW6432
+if (-not $PfBase) { $PfBase = $env:ProgramFiles }
+$InstallDir = Join-Path $PfBase 'Swapdesk'
+$DataDir    = Join-Path $env:ProgramData 'Swapdesk'
+$Shortcut   = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $ShortcutName
+# A path is inside the install folder only when it starts with "<folder>\": Swapdesk-other\ never matches.
+$InstallPrefix = $InstallDir.TrimEnd('\') + '\'
+
+# ---------------------------------------------------------------- output
+function Say([string]$Text) {
+    Write-Host $Text
+    if ($LogFile) { try { Add-Content -LiteralPath $LogFile -Value $Text -Encoding UTF8 } catch { } }
+}
+
+function Test-Admin {
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([System.Security.Principal.WindowsPrincipal]$id).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# ---------------------------------------------------------------- self-elevation (skipped in a dry run)
+if (-not $DryRun -and -not (Test-Admin)) {
+    $log = Join-Path $env:TEMP ('swapdesk-uninstall-{0}.log' -f [guid]::NewGuid().ToString('N'))
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath), '-LogFile', ('"{0}"' -f $log))
+    if ($KeepData) { $argList += '-KeepData' }
+    if ($Force) { $argList += '-Force' }
+    Write-Host 'Swapdesk uninstall needs administrator rights: approve the Windows (UAC) prompt.'
+    try {
+        $p = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $argList -Verb RunAs -Wait -PassThru
+    } catch {
+        Write-Host 'The elevation was cancelled or refused: nothing was changed.'
+        exit 1223
+    }
+    if (Test-Path -LiteralPath $log) {
+        Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    exit $p.ExitCode
+}
+
+# ---------------------------------------------------------------- helpers
+function Step([string]$Text, [scriptblock]$Do) {
+    if ($DryRun) { Say ('[dry-run] would: ' + $Text); return }
+    Say ('-> ' + $Text)
+    & $Do
+}
+
+function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $out = & $Exe @Arguments 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $saved
+    if ($code -ne 0) { throw ("{0} {1} failed with exit code {2}: {3}" -f $Exe, ($Arguments -join ' '), $code, $out.Trim()) }
+}
+
+function Get-Svc { Get-Service -Name $ServiceName -ErrorAction SilentlyContinue }
+
+function Test-ReparsePoint([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    return ($null -ne $item) -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Get-RunningFromInstallDir {
+    $found = @()
+    foreach ($p in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $ProcessNames -contains $_.ProcessName })) {
+        $path = $null
+        try { $path = $p.Path } catch { }
+        if ($path -and $path.StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $found += $p }
+    }
+    return $found
+}
+
+# Deletes the known files of a folder (no recursion, never through a reparse point), then the folder if it is empty.
+# With -Everything the folder goes with all it holds. Returns the list of names that stayed.
+function Remove-KnownFolder([string]$Dir, [string[]]$Names, [bool]$Everything) {
+    if (-not (Test-Path -LiteralPath $Dir)) { return @() }
+    if (Test-ReparsePoint $Dir) {
+        Say ("   WARNING: {0} is a reparse point (a link): not entered, not deleted. Remove it by hand after checking where it points." -f $Dir)
+        return @($Dir)
+    }
+    if ($Everything) {
+        Remove-Item -LiteralPath $Dir -Recurse -Force
+        return @()
+    }
+    foreach ($file in (Get-ChildItem -LiteralPath $Dir -Force -File)) {
+        $known = $false
+        foreach ($n in $Names) {
+            if ($file.Name -eq $n -or $file.Name -eq ($n + '.1') -or $file.Name -eq ($n + '.tmp') -or $file.Name.StartsWith($n + '.damaged-', [System.StringComparison]::Ordinal)) { $known = $true }
+        }
+        if ($known) {
+            Remove-Item -LiteralPath $file.FullName -Force
+            Say ("   deleted {0}" -f $file.FullName)
+        }
+    }
+    $left = @(Get-ChildItem -LiteralPath $Dir -Force | ForEach-Object { $_.Name })
+    if ($left.Count -eq 0) {
+        Remove-Item -LiteralPath $Dir -Force
+        Say ("   removed the empty folder {0}" -f $Dir)
+    }
+    return $left
+}
+
+# ---------------------------------------------------------------- main
+$leftovers = @()
+try {
+    Say ('Swapdesk uninstall{0}' -f $(if ($DryRun) { ' (DRY RUN: nothing is changed)' } else { '' }))
+    Say ('  install folder : {0}' -f $InstallDir)
+    Say ('  data folder    : {0} ({1})' -f $DataDir, $(if ($KeepData) { 'kept: -KeepData' } else { 'removed' }))
+
+    # ---- 1. stop
+    $svc = Get-Svc
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Step ("Stop-Service {0}" -f $ServiceName) {
+            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+            (Get-Svc).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(40))
+        }
+    } elseif ($svc) {
+        Say '  the service is already stopped'
+    } else {
+        Say '  no service named SwapdeskService'
+    }
+    foreach ($p in (Get-RunningFromInstallDir)) {
+        $proc = $p
+        Step ("stop process {0} (pid {1}) running from the install folder" -f $proc.ProcessName, $proc.Id) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+        }
+    }
+
+    # ---- 2. delete the service
+    if ($svc) {
+        Step ("sc.exe delete {0}" -f $ServiceName) {
+            Invoke-Native 'sc.exe' @('delete', $ServiceName)
+            # The SCM removes it when the last handle closes; wait for that.
+            $until = (Get-Date).AddSeconds(20)
+            while ((Get-Svc) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
+        }
+    }
+
+    # ---- 3. firewall
+    $rules = @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue)
+    foreach ($n in $RuleNames) {
+        if (-not ($rules | Where-Object { $_.Name -eq $n })) {
+            $r = Get-NetFirewallRule -Name $n -ErrorAction SilentlyContinue
+            if ($r) { $rules += $r }
+        }
+    }
+    if ($rules.Count -gt 0) {
+        $names = ($rules | ForEach-Object { $_.Name }) -join ', '
+        $toRemove = $rules
+        Step ("Remove-NetFirewallRule {0}" -f $names) { $toRemove | Remove-NetFirewallRule }
+    } else {
+        Say '  no Swapdesk firewall rules'
+    }
+
+    # ---- 4. shortcut
+    if (Test-Path -LiteralPath $Shortcut) {
+        Step ("delete the shortcut {0}" -f $Shortcut) { Remove-Item -LiteralPath $Shortcut -Force }
+    } else {
+        Say '  no Start menu shortcut'
+    }
+
+    # ---- 5. SoftwareSASGeneration
+    if (Test-Path -LiteralPath $OwnKey) {
+        $own = Get-Item -LiteralPath $OwnKey
+        $saved = $own.GetValue('SasSaved', $null)
+        $marker = $own.GetValue('SasSetValue', $null)   # written by install -EnableSas only, after it set the value
+        if ($null -ne $saved -and $null -ne $marker) {
+            $had = [int]$own.GetValue('SasHadValue', 0)
+            $old = [int]$own.GetValue('SasOldValue', 0)
+            $ours = [int]$own.GetValue('SasSetValue', 1)
+            $now = (Get-Item -LiteralPath $SasKey).GetValue($SasValue, $null)
+            if ($null -ne $now -and [int]$now -ne $ours) {
+                Say ("  {0} is {1} now, not the {2} install.ps1 set: left alone" -f $SasValue, $now, $ours)
+            } elseif ($had -eq 1) {
+                Step ("restore {0}\{1} = {2} (the value before the install)" -f $SasKey, $SasValue, $old) {
+                    New-ItemProperty -Path $SasKey -Name $SasValue -Value $old -PropertyType DWord -Force | Out-Null
+                }
+            } else {
+                Step ("remove {0}\{1} (it did not exist before the install)" -f $SasKey, $SasValue) {
+                    Remove-ItemProperty -Path $SasKey -Name $SasValue -ErrorAction SilentlyContinue
+                }
+            }
+        } else {
+            Say '  the install did not set SoftwareSASGeneration (no -EnableSas marker): left alone'
+        }
+        Step ("remove the registry key {0}" -f $OwnRoot) { Remove-Item -LiteralPath $OwnRoot -Recurse -Force }
+    } else {
+        Say ('  no saved SoftwareSASGeneration value ({0} absent): policy left alone' -f $OwnKey)
+    }
+
+    # ---- 5b. Event Log: one event, then the source goes
+    $sourceExists = $false
+    try { $sourceExists = [System.Diagnostics.EventLog]::SourceExists($EventSource) } catch { }
+    if ($sourceExists) {
+        Step ("Write-EventLog -LogName {0} -Source {1} -EventId 1001 (uninstall)" -f $EventLogName, $EventSource) {
+            try { Write-EventLog -LogName $EventLogName -Source $EventSource -EventId 1001 -EntryType Information -Message ('Swapdesk uninstalled from {0}.{1}' -f $InstallDir, $(if ($KeepData) { ' Data kept.' } else { ' Data removed.' })) }
+            catch { Say ("   WARNING: the Event Log entry was not written: {0}" -f $_.Exception.Message) }
+        }
+        Step ("Remove-EventLog -Source {0}" -f $EventSource) { Remove-EventLog -Source $EventSource }
+    } else {
+        Say ('  no Event Log source {0}' -f $EventSource)
+    }
+
+    # ---- 6. install folder
+    if (Test-Path -LiteralPath $InstallDir) {
+        $installDirLeft = @()
+        if ($DryRun) {
+            Say ('[dry-run] would: delete {0} from {1}{2}, then the folder if empty' -f ($InstalledFiles -join ', '), $InstallDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
+        } else {
+            Say ("-> delete the installed files in {0}" -f $InstallDir)
+            $installDirLeft = @(Remove-KnownFolder $InstallDir $InstalledFiles ([bool]$Force))
+            foreach ($l in $installDirLeft) { $leftovers += ("{0}: {1}" -f $InstallDir, $l) }
+        }
+    } else {
+        Say '  no install folder'
+    }
+
+    # ---- 7. data
+    if ($KeepData) {
+        Say ('  data kept: {0}' -f $DataDir)
+    } elseif (Test-Path -LiteralPath $DataDir) {
+        if ($DryRun) {
+            Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from {1}{2}, then the folder if empty' -f ($DataFiles -join ', '), $DataDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
+        } else {
+            Say ("-> delete the data files in {0}" -f $DataDir)
+            $dataLeft = @(Remove-KnownFolder $DataDir $DataFiles ([bool]$Force))
+            foreach ($l in $dataLeft) { $leftovers += ("{0}: {1}" -f $DataDir, $l) }
+        }
+    } else {
+        Say '  no data folder'
+    }
+
+    # ---- checks
+    Say ''
+    if ($DryRun) {
+        Say 'Dry run finished: nothing was changed.'
+    } else {
+        Say 'Check that nothing is left:'
+        $problems = @()
+        if (Get-Svc) { $problems += 'the service SwapdeskService still exists (marked for deletion until every handle to it closes: close services.msc, then check again)' }
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & sc.exe query $ServiceName *> $null
+        $scCode = $LASTEXITCODE            # 1060 = "the specified service does not exist as an installed service"
+        $ErrorActionPreference = $savedEap
+        if ($scCode -ne 1060) { $problems += ("sc.exe query {0} exited with {1}, not 1060 (service does not exist)" -f $ServiceName, $scCode) }
+        if (@(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue).Count -gt 0) { $problems += 'firewall rules of the group Swapdesk remain' }
+        foreach ($n in $RuleNames) { if (Get-NetFirewallRule -Name $n -ErrorAction SilentlyContinue) { $problems += ("firewall rule {0} remains" -f $n) } }
+        if (Test-Path -LiteralPath $Shortcut) { $problems += ("shortcut {0} remains" -f $Shortcut) }
+        if (Test-Path -LiteralPath $OwnRoot) { $problems += ("registry key {0} remains" -f $OwnRoot) }
+        $srcLeft = $false
+        try { $srcLeft = [System.Diagnostics.EventLog]::SourceExists($EventSource) } catch { }
+        if ($srcLeft) { $problems += ("Event Log source {0} remains" -f $EventSource) }
+        if (Test-Path -LiteralPath $InstallDir) { $problems += ("folder {0} remains" -f $InstallDir) }
+        if (-not $KeepData -and (Test-Path -LiteralPath $DataDir)) { $problems += ("folder {0} remains" -f $DataDir) }
+        $still = @(Get-RunningFromInstallDir)
+        if ($still.Count -gt 0) { $problems += 'a Swapdesk process still runs from the install folder' }
+        foreach ($l in $leftovers) { $problems += ("left: {0}" -f $l) }
+
+        Say ("  service query        : {0} (sc.exe query exit code {1}; 1060 = does not exist)" -f $(if (Get-Svc) { 'STILL THERE' } else { 'not found (good)' }), $scCode)
+        Say ("  firewall rule query  : {0} rule(s) of the group {1}" -f @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue).Count, $FirewallGroup)
+        Say ("  install folder       : {0}" -f $(if (Test-Path -LiteralPath $InstallDir) { 'STILL THERE' } else { 'gone' }))
+        Say ("  data folder          : {0}" -f $(if ($KeepData) { 'kept on request' } elseif (Test-Path -LiteralPath $DataDir) { 'STILL THERE' } else { 'gone' }))
+        Say ("  shortcut             : {0}" -f $(if (Test-Path -LiteralPath $Shortcut) { 'STILL THERE' } else { 'gone' }))
+        Say ("  registry key         : {0}" -f $(if (Test-Path -LiteralPath $OwnRoot) { 'STILL THERE' } else { 'gone' }))
+        $sasNow = (Get-Item -LiteralPath $SasKey).GetValue($SasValue, $null)
+        Say ("  {0} : {1}" -f $SasValue, $(if ($null -eq $sasNow) { '(absent)' } else { $sasNow }))
+        Say ''
+        if ($problems.Count -gt 0) {
+            Say 'NOT CLEAN:'
+            foreach ($pr in $problems) { Say ('  - ' + $pr) }
+            Say 'Run uninstall again, or with -Force to delete unknown files in the two folders.'
+            exit 1
+        }
+        Say 'Swapdesk is removed and nothing is left.'
+    }
+} catch {
+    Say ''
+    Say ('FAILED: {0}' -f $_.Exception.Message)
+    Say 'Run uninstall again (it is safe to repeat).'
+    exit 1
+}
+exit 0
