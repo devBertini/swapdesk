@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.swapdesk.probe</string>
+	<key>CFBundleName</key>
+	<string>SwapdeskProbe</string>
+	<key>CFBundleDisplayName</key>
+	<string>Swapdesk Probe</string>
+	<key>CFBundleExecutable</key>
+	<string>swapdesk-probe</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>O Swapdesk Probe testa a conexão com outro computador da sua rede local.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_swapdesk._udp</string>
+	</array>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>O Swapdesk Probe testa a captura da tela deste Mac.</string>
+</dict>
+</plist>

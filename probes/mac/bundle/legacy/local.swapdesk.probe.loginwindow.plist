@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Legacy plist for /Library/LaunchAgents (P5 and P6): root:wheel 0644, absolute path, LoginWindow and Aqua
+     (TN2083: first an instance in the loginwindow context, then a second one after login). The agent logs to
+     /Library/Logs/SwapdeskProbe/loginwindow.log (euid 0 and the name loginwindow). It reads
+     /Library/Logs/SwapdeskProbe/loginwindow.conf each cycle, so the checklist changes tests without editing this file.
+     Shape follows RustDesk's agent.plist (LimitLoadToSessionType, AssociatedBundleIdentifiers, ProcessType). -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.swapdesk.probe.loginwindow</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Applications/SwapdeskProbe.app/Contents/Helpers/SwapdeskProbeAgent.app/Contents/MacOS/swapdesk-probe</string>
+		<string>agent-run</string>
+		<string>--name</string>
+		<string>loginwindow</string>
+		<string>--tests</string>
+		<string>info,tcc,sck,inject</string>
+		<string>--text</string>
+		<string>swapdesk</string>
+		<string>--inject-delay</string>
+		<string>30</string>
+		<string>--every</string>
+		<string>15</string>
+	</array>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>local.swapdesk.probe</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<array>
+		<string>LoginWindow</string>
+		<string>Aqua</string>
+	</array>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+</dict>
+</plist>

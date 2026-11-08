@@ -1,0 +1,38 @@
+[workspace]
+
+[package]
+name = "swapdesk-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway M0-mac probe (docs/research/macos.md section 12). Not part of the main workspace."
+
+[features]
+# Adds `-sectcreate __CGPreLoginApp __cgpreloginapp /dev/null` (probe P6, variant B).
+prelogin-section = []
+
+[[bin]]
+name = "swapdesk-probe"
+path = "src/main.rs"
+
+# Mac-only dependencies: the net-echo and wol subcommands build on Windows with std only.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError", "NSArray", "NSDictionary", "NSProcessInfo", "NSObject", "NSEnumerator", "NSURL"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFString", "CFDictionary", "CFRunLoop", "CFMachPort", "CFNumber", "CFArray"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "libc", "objc2", "block2", "dispatch2", "CGDirectDisplay", "CGDisplayStream", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation", "CGWindow", "CGError", "CGGeometry", "CGImage", "CGSession", "objc2-io-surface"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMTime", "CMAttachment", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVBase"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "objc2-core-graphics", "SCShareableContent", "SCStream", "SCError"] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation", "block2"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement"] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "objc2", "libc"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTSession", "VTErrors", "objc2-core-media", "objc2-core-video"] }
+
+[profile.release]
+opt-level = 2
+debug = false
+strip = false

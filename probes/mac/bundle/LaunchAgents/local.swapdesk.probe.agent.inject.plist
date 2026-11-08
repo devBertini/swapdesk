@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Second Aqua agent for P4.6: injection while the screen is locked. Separate label, separate log (agent-inject.log). -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.swapdesk.probe.agent.inject</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/SwapdeskProbeAgent.app/Contents/MacOS/swapdesk-probe</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>swapdesk-probe</string>
+		<string>agent-run</string>
+		<string>--name</string>
+		<string>agent-inject</string>
+		<string>--tests</string>
+		<string>info,tcc,inject</string>
+		<string>--text</string>
+		<string>abc</string>
+		<string>--inject-delay</string>
+		<string>5</string>
+		<string>--every</string>
+		<string>15</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+</dict>
+</plist>

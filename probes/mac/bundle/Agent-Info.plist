@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.swapdesk.probe.agent</string>
+	<key>CFBundleName</key>
+	<string>SwapdeskProbeAgent</string>
+	<key>CFBundleDisplayName</key>
+	<string>Swapdesk Probe Agent</string>
+	<key>CFBundleExecutable</key>
+	<string>swapdesk-probe</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>O agente do Swapdesk Probe testa a captura da tela deste Mac.</string>
+	<!-- Not in the design (macos.md 12c): the agent app also carries the Local Network keys so P8 step 5
+	     (agent traffic to the LAN) is a valid test; TN3179 puts these keys in the app's Info.plist. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>O agente do Swapdesk Probe testa a conexão com outro computador da sua rede local.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_swapdesk._udp</string>
+	</array>
+</dict>
+</plist>

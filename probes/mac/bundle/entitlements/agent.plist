@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Agent app: empty by default. System audio through ScreenCaptureKit needs no microphone entitlement (GUESS, the
+     probe runs under hardened runtime to check it). The Persistent Content Capture entitlement is in
+     agent-persistent-content-capture.plist and is used only when Apple has granted it and AGENT_PROFILE is set. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CARGO_TARGET_DIR: C:\t
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and pack
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build-release.ps1
+      - name: Find the zip
+        id: zip
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path "$env:CARGO_TARGET_DIR\package" -Filter 'Swapdesk-windows-x64-*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'no release zip' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip.FullName).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$($zip.FullName).sha256" -Value "$hash  $($zip.Name)" -Encoding ascii -NoNewline
+          "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+      - name: Provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.zip.outputs.path }}
+      - name: Draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $args = @('release', 'create', '${{ github.ref_name }}', '--draft', '--generate-notes')
+          if ('${{ github.ref_name }}' -like '*-*') { $args += '--prerelease' }
+          $args += @('${{ steps.zip.outputs.path }}', '${{ steps.zip.outputs.path }}.sha256')
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed: $LASTEXITCODE" }

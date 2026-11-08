@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: The other computer does not show up
+    url: https://github.com/devBertini/swapdesk/blob/main/docs/FAQ.md#the-other-computer-does-not-show-up
+    about: Read the checklist first; most cases are the router or the network profile.
+  - name: Security vulnerability
+    url: https://github.com/devBertini/swapdesk/security/advisories/new
+    about: Report privately. Never in a public issue.
+  - name: Questions and ideas
+    url: https://github.com/devBertini/swapdesk/discussions
+    about: Ask in Discussions.

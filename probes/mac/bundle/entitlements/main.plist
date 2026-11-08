@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Main app and daemon program: no entitlements expected (macos.md 8b). Hardened runtime is on (-o runtime).
+     "Don't include an entitlement if the value is false" (Apple, hardened runtime): the dict stays empty.
+     No App Sandbox anywhere. If a probe step is blocked by the hardened runtime, add the one entitlement it names here. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

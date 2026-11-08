@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  NEXTEST_VERSION: "0.9.151"
+  DENY_VERSION: "0.20.2"
+  VET_VERSION: "0.10.3"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # libopus is built with CMake; a short target folder keeps its paths under MAX_PATH.
+      CARGO_TARGET_DIR: C:\t
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
+      - name: Tests (interactive and GPU-only tests are ignored by default)
+        run: cargo nextest run --workspace --locked --profile ci
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the macOS crates
+        run: >
+          cargo check --locked --all-targets
+          -p swapdesk-shell-mac -p swapdesk-codec-mac -p swapdesk-render-mac -p swapdesk-input-mac
+          -p swapdesk-audio-mac -p swapdesk-net-mac -p swapdesk-secret-mac -p swapdesk-core-mac
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
+      - name: Tests of the OS-free crates
+        run: >
+          cargo nextest run --locked --profile ci
+          -p swapdesk-proto -p swapdesk-platform -p swapdesk-keys -p swapdesk-trust -p swapdesk-lan
+          -p swapdesk-session -p swapdesk-video -p swapdesk-audio -p swapdesk-files -p swapdesk-swap
+          -p swapdesk-extras -p swapdesk-host -p swapdesk-ui -p swapdesk-fakes
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version ${{ env.DENY_VERSION }} --locked
+      - name: Advisories, licenses, sources, bans
+        run: cargo deny --locked check
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --version ${{ env.VET_VERSION }} --locked
+      - name: Every dependency audited or exempted (supply-chain/)
+        run: cargo vet --locked
