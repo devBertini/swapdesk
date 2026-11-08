@@ -1,0 +1,23 @@
+[package]
+name = "swapdesk-lan"
+description = "LAN guard and discovery of Swapdesk: approved interfaces, on-link peers, DNS-SD with mdns-sd, QUIC socket setup (TTL 1) and the Wake-on-LAN packet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+mdns-sd.workspace = true
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+
+# The integration tests and the idle measurement read this PC's real adapters.
+[target.'cfg(windows)'.dev-dependencies]
+swapdesk-net-win = { path = "../swapdesk-net-win" }
