@@ -1,0 +1,19 @@
+[package]
+name = "swapdesk-netsim"
+description = "Network impairment for tests (contract C7): ImpairedSocket, a quinn UDP socket with loss, delay, reorder, bandwidth cap and link down."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quinn.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rustls.workspace = true
+ring.workspace = true
