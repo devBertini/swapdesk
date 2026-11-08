@@ -1,0 +1,24 @@
+[package]
+name = "swapdesk-swap"
+description = "Swap of Swapdesk: the state machine of PROTOCOL.md 6.3 (request, accept, arm, new connection with the pinned keys) as a ChannelHandler of the session layer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-session = { path = "../swapdesk-session" }
+swapdesk-trust = { path = "../swapdesk-trust" }
+tokio.workspace = true
+
+[dev-dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-netsim = { path = "../swapdesk-netsim" }
+quinn.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

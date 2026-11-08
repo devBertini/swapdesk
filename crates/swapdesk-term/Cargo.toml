@@ -1,0 +1,18 @@
+[package]
+name = "swapdesk-term"
+description = "Terminal and quick-action relay of Swapdesk (stage 20): PTY bytes to 0x10 stream bytes, TermOpen policy, quick actions, the D13 consent step."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }

@@ -1,0 +1,24 @@
+[package]
+name = "swapdesk-extras"
+description = "Clipboard sync, chat, the Wake-on-LAN sender and the reconnect policy (stage 22)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-session = { path = "../swapdesk-session" }
+swapdesk-lan = { path = "../swapdesk-lan" }
+quinn.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-trust = { path = "../swapdesk-trust" }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

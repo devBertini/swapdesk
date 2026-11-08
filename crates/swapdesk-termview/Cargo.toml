@@ -1,0 +1,14 @@
+[package]
+name = "swapdesk-termview"
+description = "Terminal model of Swapdesk (stage 20, D19): VT parser on vte, cell grid, scrollback, selection, key encoding and the bounded output channel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vte.workspace = true
