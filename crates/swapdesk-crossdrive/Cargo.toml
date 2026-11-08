@@ -1,0 +1,22 @@
+[package]
+name = "swapdesk-crossdrive"
+description = "Development harness for the cross-machine proof (stage 23): the scripted UI drivers of a host and of a headless viewer, generic over the C6 UiBackend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-ui = { path = "../swapdesk-ui" }
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-host = { path = "../swapdesk-host" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-trust = { path = "../swapdesk-trust" }

@@ -1,0 +1,52 @@
+[package]
+name = "swapdesk-app"
+description = "Swapdesk.exe: picks the shell and the backend (MockBackend in development builds)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[features]
+# Development builds: `--mock <scenario>` picks a scripted scenario. A shipping build turns it off once the
+# ServiceBackend exists (stage 18).
+default = ["mock"]
+mock = []
+# `--service-pid` and `--instance` (they replace the check of the pipe server's PID and the pipe name). Always on in debug
+# builds; a release build gets them only with `--features dev`.
+dev = []
+
+[lib]
+name = "swapdesk_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Swapdesk"
+path = "src/main.rs"
+
+[dependencies]
+swapdesk-ui = { path = "../swapdesk-ui" }
+# The OS-free half (`shared`), which the macOS app uses too.
+swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-audio = { path = "../swapdesk-audio" }
+
+# Windows only: the viewer pipeline (decoder, renderer, input, audio) and the service connection.
+[target.'cfg(windows)'.dependencies]
+swapdesk-shell-win = { path = "../swapdesk-shell-win" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
+swapdesk-keys = { path = "../swapdesk-keys" }
+swapdesk-sys-win = { path = "../swapdesk-sys-win" }
+swapdesk-codec-win = { path = "../swapdesk-codec-win" }
+swapdesk-render-win = { path = "../swapdesk-render-win" }
+swapdesk-input-win = { path = "../swapdesk-input-win" }
+swapdesk-audio-win = { path = "../swapdesk-audio-win" }
+
+[target.'cfg(windows)'.dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
+# Stage 23 cross-machine proof: `examples/cross_host_driver.rs`.
+swapdesk-crossdrive = { path = "../swapdesk-crossdrive" }
