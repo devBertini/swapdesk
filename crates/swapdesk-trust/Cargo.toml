@@ -1,0 +1,22 @@
+[package]
+name = "swapdesk-trust"
+description = "Trust of Swapdesk: device identity, TLS 1.3 with pinned keys, pairing by compared codes, trust store, lockout and audit records (PROTOCOL.md 2 and 3, contract C5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+quinn.workspace = true
+rustls.workspace = true
+ring.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+swapdesk-fakes = { path = "../swapdesk-fakes" }
