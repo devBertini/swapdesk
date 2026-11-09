@@ -15,8 +15,12 @@ use swapdesk_platform::TraceSink;
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Command, Ticket, UiBackend, UiEvent};
 
-/// The window's backend while the drive owns the real one: it queues nothing and reports nothing.
-pub struct Silent;
+/// The window's backend while the drive owns the real one: it sends nothing, and it hands the window a copy of every
+/// event the drive drained, so the window shows what a person would see (the host banner among it).
+#[derive(Default)]
+pub struct Silent {
+    mirror: std::sync::Mutex<Vec<UiEvent>>,
+}
 
 impl UiBackend for Silent {
     fn send(&self, _command: Command) -> Ticket {
@@ -24,17 +28,40 @@ impl UiBackend for Silent {
     }
 
     fn drain(&self) -> Vec<UiEvent> {
-        Vec::new()
+        std::mem::take(&mut *self.mirror.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+/// The drive's backend: the real one, with a copy of each drained event put in the window's [`Silent`] and the
+/// window woken for it.
+pub struct Tee {
+    pub real: Arc<ServiceBackend>,
+    pub window: Arc<Silent>,
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl UiBackend for Tee {
+    fn send(&self, command: Command) -> Ticket {
+        self.real.send(command)
+    }
+
+    fn drain(&self) -> Vec<UiEvent> {
+        let events = self.real.drain();
+        if !events.is_empty() {
+            self.window.mirror.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(events.iter().cloned());
+            (self.wake)();
+        }
+        events
     }
 }
 
 #[cfg(not(feature = "dev-harness"))]
-pub fn start(_dir: &Path, _backend: Arc<ServiceBackend>, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(_dir: &Path, _backend: Tee, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
     Err("--drive-host needs a build with the dev-harness feature (scripts/mac/build-app.sh --dev-harness)".into())
 }
 
 #[cfg(feature = "dev-harness")]
-pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), String> {
     use std::io::Write;
     use std::time::Duration;
 
@@ -66,7 +93,7 @@ pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>
                 let _ = f.flush();
             };
             log("HOST_DRIVE_START");
-            let (out, result) = host_drive(&*backend, &cfg, &log);
+            let (out, result) = host_drive(&backend, &cfg, &log);
             let code = match (&result, out.session_active && out.session_ended) {
                 (Ok(()), true) => {
                     log("HOST_RESULT PASS");

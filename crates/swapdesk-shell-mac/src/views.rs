@@ -48,15 +48,21 @@ pub struct Ctx<'a> {
     pub target: &'a AnyObject,
     pub pal: &'static Palette,
     pub actions: &'a mut Vec<Action>,
-    /// 0 for the main window, 1 for the viewer: tags carry it so one controller serves both.
+    /// [`PARITY_MAIN`], [`PARITY_VIEWER`] or [`PARITY_BANNER`]: tags carry it so one controller serves every window.
     pub parity: isize,
     pub fields: &'a mut Vec<(EditId, Retained<NSTextField>)>,
 }
 
+/// A control's tag is `index * WINDOWS + parity`: the index into its window's actions, and which window.
+pub const WINDOWS: isize = 3;
+pub const PARITY_MAIN: isize = 0;
+pub const PARITY_VIEWER: isize = 1;
+pub const PARITY_BANNER: isize = 2;
+
 impl Ctx<'_> {
-    fn tag(&mut self, a: Action) -> isize {
+    pub fn tag(&mut self, a: Action) -> isize {
         self.actions.push(a);
-        (self.actions.len() as isize - 1) * 2 + self.parity
+        (self.actions.len() as isize - 1) * WINDOWS + self.parity
     }
 }
 

@@ -486,3 +486,25 @@ fn renaming_puts_the_action_beside_the_name_and_save_beside_cancel() {
         content(&state).iter().filter_map(|b| if let Block::Text(t) = b { Some(t.clone()) } else { None }).collect();
     assert!(texts.contains(&state.t(MsgKey::RenameEmpty)), "{texts:?}");
 }
+
+#[test]
+fn the_host_banner_says_who_since_when_and_how_to_end_it_and_goes_with_the_session() {
+    // Defect after 1.0: the Mac host showed nothing while the PC controlled it.
+    assert_eq!(banner_model(&shell_state(Scenario::Inicio)), None, "no session, no banner");
+    let mut state = shell_state(Scenario::Banner);
+    let h = state.host_session().expect("the scenario hosts a session").clone();
+    let m = banner_model(&state).expect("banner");
+    let peer = state.device_by_id(&h.device_id).unwrap().name.clone();
+    assert!(m.who.contains(&peer) && m.who.contains("controla"), "{}", m.who);
+    assert!(m.since.contains("12 min"), "{}", m.since);
+    assert_eq!(m.disconnect, "Desconectar");
+    assert_eq!(m.swap.is_some(), state.swap_offered(&h), "swap only where it is offered (D34)");
+    assert_eq!(m.label(), format!("{} {}", m.who, m.since));
+
+    state.apply(UiEvent::Session {
+        session_id: h.id,
+        device_id: h.device_id,
+        state: SessionState::Ended { reason: None },
+    });
+    assert_eq!(banner_model(&state), None, "the banner goes with the session");
+}
