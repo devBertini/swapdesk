@@ -2,11 +2,11 @@
 
 This is a reader's overview. The normative sources are [SPEC.md](SPEC.md) (flows, "Data and architecture"), [CONTRACTS.md](CONTRACTS.md) (C2 processes and IPC, crates) and [PROTOCOL.md](PROTOCOL.md) (the wire). Where this file and those differ, they win. Marks used there: **UNPROVEN** means no primary source settles it yet, **GUESS** means a design number still to confirm.
 
-Status: the Windows side is in development and the macOS side is not built yet (see the status table in the [README](../README.md)). Everything about macOS below is design.
+Status: version 1.0.0 (see the status table in the [README](../README.md)). Windows runs the service, helper and interface processes below. macOS runs everything in one process, Swapdesk.app, as the logged-in user (decisions D27 and D32); the root daemon and agents under "macOS, later" are design.
 
 ## Principles
 
-- The service (Windows) or daemon (macOS) owns every LAN socket, in both the host and the viewer role (decision D6). The device private key never leaves it, the LAN guard lives in one place, a session survives a helper restart, and on macOS no agent or app touches the LAN.
+- On Windows the service owns every LAN socket, in both the host and the viewer role (decision D6). The device private key never leaves it, the LAN guard lives in one place, and a session survives a helper restart. On macOS version 1 the same service core runs inside Swapdesk.app, so the app owns the sockets and the key is a file only its user can read (decision D31).
 - The viewer always runs as the logged-in user, never as SYSTEM or root. Video from a remote peer is decoded only in that user-level process.
 - Anything that needs the user's rights (terminal, files, clipboard, prompted input) runs in a process of the logged-in user.
 - No local IPC message carries a file path to the service. The user-level processes open, read and write files and stream bytes.
@@ -44,7 +44,15 @@ flowchart TB
     SVC <-->|"pipe: ui-session"| UI
 ```
 
-### macOS (CONTRACTS C2.2, design only)
+### macOS in version 1
+
+| Process | Runs as | Does |
+|---|---|---|
+| `Swapdesk.app` | The user | Everything: the service core (LAN sockets, pairing, trust store, sessions), the AppKit interface and viewer (VideoToolbox decode, `AVSampleBufferDisplayLayer`, event-tap key grab, audio playback) and the host side (ScreenCaptureKit video and audio, VideoToolbox encode, `CGEventPost` input). Registers itself as a login item with `SMAppService.mainApp` and stays in the menu bar when its window closes, so it keeps hosting while the user is logged in. |
+
+What this costs against the design below: no administrator terminal on the Mac, no access at the login window, and the device key is protected by the user's file permissions rather than by root.
+
+### macOS, later (CONTRACTS C2.2, design only)
 
 | Process | Runs as | Does |
 |---|---|---|
@@ -53,7 +61,7 @@ flowchart TB
 | `SwapdeskAgent.app` (LoginWindow instance) | root, from a legacy launch agent plist | Capture and input at the login window, for `UNATTENDED` sessions only, within what the macOS probes allow. No LAN. |
 | `Swapdesk.app` | The user | The AppKit interface and the viewer (VideoToolbox decode, `AVSampleBufferDisplayLayer`, event-tap key grab, audio playback). No LAN, no root rights. |
 
-Unattended access on macOS needs macOS 14.4 or later. FileVault pre-boot is out of reach. What works at the login window depends on probes that have not been run yet (stage 8).
+Unattended access on macOS needs macOS 14.4 or later. FileVault pre-boot is out of reach. What works at the login window depends on probes that have not been run yet.
 
 ### Local IPC
 
@@ -93,7 +101,7 @@ Full text: [PROTOCOL.md](PROTOCOL.md).
 
 ## Media pipelines
 
-Host and viewer both go through their own service, so there is one local IPC hop on the viewer path. Its cost against the latency budget is measured in stage 18 (risk R9); if the budget fails, the question goes back to the owner.
+Host and viewer both go through their own service, so there is one local IPC hop on the viewer path. Its cost against the latency budget is risk R9 in the spec.
 
 ```mermaid
 flowchart LR

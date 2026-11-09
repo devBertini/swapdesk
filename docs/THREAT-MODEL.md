@@ -1,6 +1,8 @@
 # Threat model
 
-Status: pre-alpha. This describes the mitigations as designed. It is not a statement that Swapdesk is secure. Some mitigations are implemented and tested in code (the plan's stages 9, 10 and 34 cover discovery, the LAN guard, pairing, the trust store and the fixes from a review of them). Others are written down and not built yet. The security review (stage 28), the protocol fuzzing (stage 29) and the soak test (stage 30) have not happened. There has been no independent audit.
+Status: version 1.0.0. This describes the mitigations as designed and says which are tested. It is not a statement that Swapdesk is secure. Discovery, the LAN guard, pairing, the trust store, TLS and the local IPC are implemented and tested in code, and a focused security review of pairing, the LAN guard, grants, the IPC ACLs and the wire decoder ran before 1.0. Protocol fuzzing and a long soak have not happened. There has been no independent audit.
+
+**macOS in version 1** runs as one app of the logged-in user (README, Architecture): there is no root daemon, so the statements below about a daemon, root-owned sockets and the System keychain describe the later design. On the Mac the device key and trust store are files readable only by that user (mode 0600 in a 0700 folder), the same reach as DPAPI user scope: any process of that user can read them.
 
 Sources: [SPEC.md](SPEC.md) ("Threats", "Data and architecture", flows F-*), [PROTOCOL.md](PROTOCOL.md), [CONTRACTS.md](CONTRACTS.md) (C2 processes and IPC, C5 storage), [DECISIONS.md](DECISIONS.md). Marks as in those files: **UNPROVEN** = no primary source settles it yet and a stage must prove it; **GUESS** = a design number or inference still to confirm.
 
@@ -35,7 +37,7 @@ Capabilities assumed: it can send any packet to the machine's ports, spoof addre
 | An unknown key tries a session | Refused in the handshake, logged (rate-limited), alert shown in Activity with a block action. | SPEC F-PAIR-03 |
 | Altered or replayed packets | QUIC and TLS 1.3 integrity. Swap and resume tokens are single-use, bound to the device, with 10 s and 60 s lifetimes. | SPEC STRIDE row T; PROTOCOL 6.3, 6.4 |
 | Handshake, pairing, stream, transfer or audit-log floods | Caps on handshakes and connections per address, QUIC retry and ignore under load, one stream on the pairing endpoint, explicit receive windows and a buffered-bytes budget per connection, no allocation from a peer-declared length, caps on terminals, transfers and chat, rate-limited unauthenticated audit entries. Most numbers are marked GUESS. | SPEC STRIDE row D; PROTOCOL 1, 9 |
-| Malformed messages reaching a privileged parser | `swapdesk-proto` has no `unsafe`, strict length limits, rejects trailing bytes and unknown types. Fuzzing is planned (stage 29, not done). | SPEC STRIDE row E; PROTOCOL 5.1 |
+| Malformed messages reaching a privileged parser | `swapdesk-proto` has no `unsafe`, strict length limits, rejects trailing bytes and unknown types. Fuzzing is planned, not done. | SPEC STRIDE row E; PROTOCOL 5.1 |
 | Tricking the machine into connecting to itself | Own and loopback addresses are refused. | SPEC F-FIND-02 |
 | A peer from outside the subnet or on a virtual interface | Physical interfaces only, peers must be on-link in the arrival interface's subnet, checked before the TLS handshake. TTL 1 on QUIC. | SPEC F-FIND-02; PROTOCOL 1 |
 | Reading what mDNS announces | Accepted: name, OS and key fingerprint are visible on the LAN, and no secret is in the announcement. | SPEC STRIDE row I |
@@ -94,17 +96,17 @@ These are marked UNPROVEN or GUESS in the design documents. They are risks, not 
 
 | Item | Status | Reference |
 |---|---|---|
-| `quinn` negotiating RFC 7250 raw public keys end to end (fallback is self-signed certificates with key pinning) | UNPROVEN, risk R1, spiked at the start of stage 10 (see the plan for its outcome) | SPEC R1; PROTOCOL 2.2, 2.3 |
-| That a `rustls` or `quinn` default does not re-enable resumption or early data | Risk R11, to be proven by a stage 10 test | SPEC R11; PROTOCOL 2.4 |
+| `quinn` negotiating RFC 7250 raw public keys end to end (fallback is self-signed certificates with key pinning) | Settled: raw public keys are used end to end, Ed25519 only, tested in `swapdesk-trust` | SPEC R1; PROTOCOL 2.2, 2.3 |
+| That a `rustls` or `quinn` default does not re-enable resumption or early data | Settled: resumption and early data are off, asserted by tests in `swapdesk-trust` | SPEC R11; PROTOCOL 2.4 |
 | The `ClientHello` ALPN accessor used to refuse a hello offering both ALPNs | UNPROVEN | PROTOCOL 1 |
 | Default ACL of `%ProgramData%` and whether a standard user could pre-create the folder or a DPAPI blob | UNPROVEN, GUESS | CONTRACTS C5.2 |
-| Whether `WTSQueryUserToken` returns the filtered or the elevated token for an administrator | UNPROVEN, checked in stage 18 | CONTRACTS C2.1 |
+| Whether `WTSQueryUserToken` returns the filtered or the elevated token for an administrator | The user helper was measured not elevated (`TokenElevationType` limited) on an administrator account | CONTRACTS C2.1 |
 | Whether a medium-integrity helper can use the default input desktop (injection for prompted sessions) | UNPROVEN, risk R12 | CONTRACTS C2.1; SPEC R12 |
 | The elevated or authorized connection for admin-only changes (UAC-started instance, Authorization Services) | Risk R14 (UNPROVEN for macOS) | SPEC R14; CONTRACTS C2.3 |
-| `SoftwareSASGeneration` on Windows 11 Home | Risk R5, tested in stage 26 | SPEC R5 |
+| `SoftwareSASGeneration` on Windows 11 Home | Risk R5, not tested yet (unattended access is not in 1.0) | SPEC R5 |
 | Whether launchd or `SMAppService` refuse a modified daemon binary on macOS | UNPROVEN, risk R13 | CONTRACTS C2.2 |
-| macOS peer-token calls and code-signature requirement strings | GUESS and UNPROVEN, settled in stage 24 | CONTRACTS C2.2 |
-| What macOS allows at the login window and lock screen | Probes P4 to P6 not yet run (stage 8) | SPEC R4, F-UNAT-02 |
+| macOS peer-token calls and code-signature requirement strings | Not used in 1.0 (no daemon on macOS) | CONTRACTS C2.2 |
+| What macOS allows at the login window and lock screen | Probes P4 to P6 not yet run; not in 1.0 | SPEC R4, F-UNAT-02 |
 | Whether macOS daemon-owned networking is exempt from Local Network privacy | Assumed from an Apple technical note, risk R10 (probe P8) | SPEC R10 |
 | Rate limits, lockout durations, handshake caps and timeouts | GUESS numbers | PROTOCOL 1, 3; CONTRACTS C5.1 |
-| The whole implementation against these threats | Security review (stage 28) and fuzzing (stage 29) not done | plan stages 28, 29 |
+| The whole implementation against these threats | A focused review ran before 1.0; fuzzing and an independent audit have not | |
