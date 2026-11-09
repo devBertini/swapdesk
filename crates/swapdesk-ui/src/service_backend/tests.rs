@@ -369,7 +369,7 @@ fn produced_events_drive_the_devices_screen() {
     for e in collect(&b, 1) {
         state.apply(e);
     }
-    assert_eq!(state.screen(), Screen::Devices);
+    assert_eq!(state.screen(), Screen::Home, "the window starts on Início");
     assert_eq!(state.devices().len(), 2);
     svc.write(Message::UiNotify(Notify::DevicesChanged(vec![cv::device_to_wire(&device("b"))])));
     for e in collect(&b, 1) {

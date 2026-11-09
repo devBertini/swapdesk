@@ -13,6 +13,7 @@ pub mod a11y;
 pub mod api;
 pub mod debounce;
 pub mod format;
+pub mod home;
 pub mod inflight;
 pub mod interact;
 pub mod list;

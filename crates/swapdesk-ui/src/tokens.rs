@@ -179,7 +179,7 @@ pub mod layout {
     pub const DESIGN_H: f32 = 760.0;
     pub const MIN_W: f32 = 900.0;
     pub const MIN_H: f32 = 620.0;
-    pub const SIDEBAR_W: f32 = 272.0;
+    pub const SIDEBAR_W: f32 = 232.0;
     pub const BUTTON_H: f32 = 40.0;
     /// `--r-control`, `--r-panel`, `--r-dialog`, `--r-inner`.
     pub const BUTTON_RADIUS: f32 = 8.0;
@@ -321,8 +321,8 @@ mod tests {
         assert_eq!((text::BODY.size, text::BODY.line), (14.0, 1.45));
         assert!(main.contains(".sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control)"));
         assert_eq!(layout::BUTTON_H, 40.0);
-        assert!(main.contains("width:272px"));
-        assert_eq!(layout::SIDEBAR_W, 272.0);
+        // D35: the sidebar is 232 px (the boards still say 272 until they are updated).
+        assert_eq!(layout::SIDEBAR_W, 232.0);
         assert!(main.contains(".sd .switch{width:38px;height:22px;border-radius:11px"));
         assert!(main.contains("Instrument Sans"));
         let pair = include_str!("../../../docs/design/Pareamento.dc.html");

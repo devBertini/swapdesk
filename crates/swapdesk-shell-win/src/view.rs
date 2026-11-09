@@ -59,8 +59,6 @@ pub enum Kind {
     Primary,
     Quiet,
     Danger,
-    /// The selected entry of the sidebar's footer ("btn sel").
-    Selected,
     /// The dark toolbar's red solid button on a light card.
     DangerSolid,
 }
@@ -151,15 +149,6 @@ impl<'a> Frame<'a> {
             Kind::Danger => {
                 let bw = p.hairline();
                 p.stroke_rrect(rect.inset(bw / 2.0), radius - bw / 2.0, bw, pal.danger);
-            }
-            Kind::Selected => {
-                let ring = p.hairline();
-                p.fill_rrect(
-                    Rect::new(rect.x - ring, rect.y - ring, rect.w + 2.0 * ring, rect.h + 2.0 * ring),
-                    radius + ring,
-                    pal.line,
-                );
-                p.bordered(rect, radius, pal.line, pal.surface);
             }
             Kind::DangerSolid => p.fill_rrect(rect, radius, pal.danger),
         }
@@ -294,7 +283,7 @@ impl<'a> Frame<'a> {
 /// Style of a button label.
 pub fn button_style(kind: Kind) -> TextStyle {
     match kind {
-        Kind::Primary | Kind::Danger | Kind::DangerSolid | Kind::Selected => text::BTN_PRIMARY,
+        Kind::Primary | Kind::Danger | Kind::DangerSolid => text::BTN_PRIMARY,
         _ => text::BTN,
     }
 }

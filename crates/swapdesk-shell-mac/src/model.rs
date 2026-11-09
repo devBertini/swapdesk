@@ -9,8 +9,8 @@
 use swapdesk_ui::format;
 use swapdesk_ui::state::PairingView;
 use swapdesk_ui::{
-    ConnectPhase, ControlId, ControlSpec, DataKind, EditId, Language, Msg, MsgKey, Nav, Quality, Ready, Region,
-    SelectId, SessionState, SpecialKeys, UiRole, UiState, WindowKind,
+    ConnectPhase, ControlId, ControlSpec, DataKind, EditId, Language, Msg, MsgKey, Nav, Quality, Region, SelectId,
+    SessionState, SpecialKeys, UiRole, UiState, WindowKind,
 };
 
 // ---------- blocks ----------
@@ -50,6 +50,8 @@ pub struct FieldModel {
     pub label: String,
     pub value: String,
     pub placeholder: String,
+    /// A line of help under the label (the address field's).
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,11 +90,34 @@ pub enum Block {
     Tabs(Vec<TabModel>),
     /// A row of the activity log.
     Row(String),
-    /// A device's name with its "Renomear" action beside it.
+    /// An entry of the home's recent activity: time, device name over the event.
+    Entry {
+        when: String,
+        who: String,
+        what: String,
+        alert: bool,
+        /// What a screen reader says (the Atividade row's label).
+        label: String,
+    },
+    /// A heading with an action beside it: a device's name with "Renomear" (level 1), a card's title with "Ver tudo"
+    /// (level 2).
     HeadingAction {
         text: String,
+        level: u8,
         action: ButtonModel,
     },
+    /// A text input with its button beside it (the address field and "Adicionar").
+    FieldAction {
+        field: FieldModel,
+        action: ButtonModel,
+    },
+    /// The network line of the home as a pill; `warn` is the warning look.
+    Pill {
+        text: String,
+        warn: bool,
+    },
+    /// The home's cards, in order: side by side when the width allows, one under the other otherwise.
+    Cards(Vec<Vec<Block>>),
     /// Buttons side by side ("Salvar", "Cancelar").
     ButtonRow(Vec<ButtonModel>),
     /// Placeholder lines while data loads (R-UI-1).
@@ -105,6 +130,10 @@ impl Block {
         match self {
             Block::Button(b) => vec![(b.id, b.label.clone())],
             Block::HeadingAction { action, .. } => vec![(action.id, action.label.clone())],
+            Block::FieldAction { field, action } => {
+                vec![(field.id, field.label.clone()), (action.id, action.label.clone())]
+            }
+            Block::Cards(cards) => cards.iter().flatten().flat_map(Block::labels).collect(),
             Block::ButtonRow(v) => v.iter().map(|b| (b.id, b.label.clone())).collect(),
             Block::Toggle(t) => vec![(t.id, t.label.clone())],
             Block::Field(f) => vec![(f.id, f.label.clone())],
@@ -119,6 +148,8 @@ impl Block {
         match self {
             Block::Button(b) => vec![b.id],
             Block::HeadingAction { action, .. } => vec![action.id],
+            Block::FieldAction { field, action } => vec![field.id, action.id],
+            Block::Cards(cards) => cards.iter().flatten().flat_map(Block::control_ids).collect(),
             Block::ButtonRow(v) => v.iter().map(|b| b.id).collect(),
             Block::Toggle(t) => vec![t.id],
             Block::Field(f) => vec![f.id],
@@ -138,10 +169,12 @@ fn style_of(id: ControlId, role: UiRole) -> ButtonStyle {
         | ControlId::PairDone
         | ControlId::PairRetry
         | ControlId::DialogPrimary
-        | ControlId::PairWithDevice => ButtonStyle::Primary,
+        | ControlId::PairWithDevice
+        | ControlId::PairThisComputer => ButtonStyle::Primary,
         ControlId::Decline | ControlId::PairDifferent | ControlId::Forget | ControlId::BlockAlert => {
             ButtonStyle::Danger
         }
+        ControlId::HomeActivityAll => ButtonStyle::Link,
         _ if role == UiRole::Link => ButtonStyle::Link,
         _ => ButtonStyle::Plain,
     }
@@ -196,6 +229,7 @@ pub fn blocks_from(state: &UiState, specs: &[ControlSpec]) -> Vec<Block> {
                         label: c.label.clone(),
                         value: c.value.clone().unwrap_or_default(),
                         placeholder,
+                        hint: c.description.clone(),
                     }));
                 }
             }
@@ -225,7 +259,17 @@ fn join_rows(blocks: Vec<Block>) -> Vec<Block> {
         match block {
             Block::Heading { text, level: 1 } if next_is(&mut it, ControlId::RenameDevice) => {
                 if let Some(Block::Button(action)) = it.next() {
-                    out.push(Block::HeadingAction { text, action });
+                    out.push(Block::HeadingAction { text, level: 1, action });
+                }
+            }
+            Block::Heading { text, level: 2 } if next_is(&mut it, ControlId::HomeActivityAll) => {
+                if let Some(Block::Button(action)) = it.next() {
+                    out.push(Block::HeadingAction { text, level: 2, action });
+                }
+            }
+            Block::Field(field) if next_is(&mut it, ControlId::AddAddress) => {
+                if let Some(Block::Button(action)) = it.next() {
+                    out.push(Block::FieldAction { field, action });
                 }
             }
             Block::Button(save) if save.id == ControlId::RenameSave && next_is(&mut it, ControlId::RenameCancel) => {
@@ -283,14 +327,14 @@ pub struct NavItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sidebar {
-    pub this_name: String,
-    pub this_status: String,
-    pub network_line: String,
+    /// The app's name over the list (the window has no logo row of its own).
+    pub app_name: String,
+    /// "Início", the first item.
+    pub home: NavItem,
     pub groups: Vec<DeviceGroup>,
     /// Placeholder rows instead of the list (R-UI-1).
     pub loading: bool,
-    pub address: FieldModel,
-    pub pair: ButtonModel,
+    /// "Ajustes" at the bottom.
     pub nav: Vec<NavItem>,
 }
 
@@ -353,8 +397,7 @@ impl MainModel {
                 for g in &sidebar.groups {
                     out.extend(g.rows.iter().map(|r| (r.id, r.label.clone())));
                 }
-                out.push((sidebar.address.id, sidebar.address.label.clone()));
-                out.push((sidebar.pair.id, sidebar.pair.label.clone()));
+                out.push((sidebar.home.id, sidebar.home.label.clone()));
                 out.extend(sidebar.nav.iter().map(|n| (n.id, n.label.clone())));
                 out.extend(content.iter().flat_map(Block::labels));
             }
@@ -371,8 +414,7 @@ impl MainModel {
                 for g in &sidebar.groups {
                     ids.extend(g.rows.iter().map(|r| r.id));
                 }
-                ids.push(sidebar.address.id);
-                ids.push(sidebar.pair.id);
+                ids.push(sidebar.home.id);
                 ids.extend(sidebar.nav.iter().map(|n| n.id));
                 for b in content {
                     ids.extend(b.control_ids());
@@ -414,15 +456,6 @@ fn strip_of(state: &UiState) -> Option<Strip> {
     })
 }
 
-fn ready_text(state: &UiState, ready: Ready) -> String {
-    state.t(match ready {
-        Ready::ReadyToReceive => MsgKey::ReadyToReceive,
-        Ready::ServiceOff => MsgKey::ReadyServiceOff,
-        Ready::ServiceNeedsApproval => MsgKey::ReadyServiceNeedsApproval,
-        Ready::NoNetwork => MsgKey::ReadyNoNetwork,
-    })
-}
-
 fn sidebar_of(state: &UiState, specs: &[ControlSpec]) -> Sidebar {
     let (paired, network) = state.device_groups();
     let group = |title: MsgKey, indices: &[usize]| DeviceGroup {
@@ -450,49 +483,71 @@ fn sidebar_of(state: &UiState, specs: &[ControlSpec]) -> Sidebar {
     if !network.is_empty() {
         groups.push(group(MsgKey::SidebarOnNetwork, &network));
     }
-    let (this_name, this_status) =
-        state.this_device().map(|t| (t.name.clone(), ready_text(state, t.ready))).unwrap_or_default();
-    let network_line = match state.network() {
-        Some(n) => match &n.address {
-            Some(a) => state.tm(&Msg::new(MsgKey::NetworkLine).with(n.label.clone()).with(a.clone())),
-            None => state.tm(&Msg::new(MsgKey::NetworkLineNoAddress).with(n.label.clone())),
-        },
-        None => String::new(),
-    };
-    let spec_of = |id: ControlId| specs.iter().find(|c| c.id == id);
-    let address = FieldModel {
-        id: ControlId::Edit(EditId::Address),
-        edit: EditId::Address,
-        label: state.t(MsgKey::AddressLabel),
-        value: String::new(),
-        placeholder: state.t(MsgKey::AddressPlaceholder),
-    };
-    let pair = ButtonModel {
-        id: ControlId::PairThisComputer,
-        label: spec_of(ControlId::PairThisComputer)
-            .map(|c| c.label.clone())
-            .unwrap_or_else(|| state.t(MsgKey::PairThisComputer)),
-        description: None,
-        style: ButtonStyle::Plain,
-        disabled: false,
-    };
-    let nav = [
-        (ControlId::NavActivity, MsgKey::NavActivity, Nav::Activity),
-        (ControlId::NavSettings, MsgKey::NavSettings, Nav::Settings),
-    ]
-    .into_iter()
-    .map(|(id, key, nav)| NavItem { id, label: state.t(key), selected: state.nav() == nav })
-    .collect();
+    let item = |id: ControlId, key: MsgKey, nav: Nav| NavItem { id, label: state.t(key), selected: state.nav() == nav };
     Sidebar {
-        this_name,
-        this_status,
-        network_line,
+        app_name: state.t(MsgKey::AppName),
+        home: item(ControlId::NavHome, MsgKey::NavHome, Nav::Home),
         groups,
         loading: state.placeholder(DataKind::Devices),
-        address,
-        pair,
-        nav,
+        nav: vec![item(ControlId::NavSettings, MsgKey::NavSettings, Nav::Settings)],
     }
+}
+
+/// The home's blocks: the header (name, state, network pill), whatever notices the page has, then the cards. The
+/// specs list them flat, in the order of the accessibility tree; the cards are cut at their titles.
+fn home_content(state: &UiState, blocks: Vec<Block>) -> Vec<Block> {
+    use swapdesk_ui::home::HomeCard;
+    let home = state.home();
+    let title_of = |card: &HomeCard| match card {
+        HomeCard::Pair { title, .. } | HomeCard::Recent { title, .. } => title.clone(),
+    };
+    let starts: Vec<Option<usize>> = home
+        .cards
+        .iter()
+        .map(|c| {
+            let t = title_of(c);
+            blocks.iter().position(
+                |b| matches!(b, Block::Heading { text, .. } | Block::HeadingAction { text, .. } if *text == t),
+            )
+        })
+        .collect();
+    let Some(first) = starts.first().copied().flatten() else { return blocks };
+    let mut out: Vec<Block> = blocks[..first].to_vec();
+    if let Some(chip) = &home.network {
+        for b in &mut out {
+            if matches!(b, Block::Text(t) if *t == chip.text) {
+                *b = Block::Pill { text: chip.text.clone(), warn: chip.warn };
+            }
+        }
+    }
+    let mut cards = Vec::new();
+    for (n, start) in starts.iter().enumerate() {
+        let Some(start) = *start else { continue };
+        let end = starts[n + 1..].iter().flatten().next().copied().unwrap_or(blocks.len());
+        let mut rows = match &home.cards[n] {
+            swapdesk_ui::home::HomeCard::Recent { lines, .. } => lines.iter(),
+            _ => Default::default(),
+        };
+        let card = blocks[start..end]
+            .iter()
+            .map(|b| match b {
+                Block::Row(_) => match rows.next() {
+                    Some(l) => Block::Entry {
+                        when: l.when.clone(),
+                        who: l.who.clone(),
+                        what: l.what.clone(),
+                        alert: l.alert,
+                        label: l.label.clone(),
+                    },
+                    None => b.clone(),
+                },
+                _ => b.clone(),
+            })
+            .collect();
+        cards.push(card);
+    }
+    out.push(Block::Cards(cards));
+    out
 }
 
 /// The main window's model.
@@ -506,6 +561,7 @@ pub fn main_model(state: &UiState) -> MainModel {
         let content_specs: Vec<ControlSpec> = specs.iter().filter(|c| c.region != Region::Sidebar).cloned().collect();
         let mut content = join_rows(blocks_from(state, &content_specs));
         match state.nav() {
+            Nav::Home => content = home_content(state, content),
             Nav::Devices => {
                 if state.selected_device().is_none() && state.placeholder(DataKind::Devices) {
                     content.push(Block::Skeleton(3));

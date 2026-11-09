@@ -170,6 +170,9 @@ pub enum Step {
 /// One named state of the interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
+    /// "Início" (D35): the home screen.
+    Inicio,
+    InicioEscuro,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -206,7 +209,9 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 30] = [
+    pub const ALL: [Scenario; 32] = [
+        Scenario::Inicio,
+        Scenario::InicioEscuro,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -242,6 +247,8 @@ impl Scenario {
     /// The name `--mock` takes.
     pub const fn name(self) -> &'static str {
         match self {
+            Scenario::Inicio => "inicio",
+            Scenario::InicioEscuro => "inicio-escuro",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -282,6 +289,8 @@ impl Scenario {
     /// The design board this state comes from, or what the design lacks.
     pub const fn board(self) -> &'static str {
         match self {
+            Scenario::Inicio => "new: Início, the home screen (D35)",
+            Scenario::InicioEscuro => "new: Início escuro (D35)",
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
             Scenario::Permissoes => "3. Permissões por direção",
@@ -378,6 +387,8 @@ impl Scenario {
         use Step::*;
         let mac = || Select(MAC);
         match self {
+            Scenario::Inicio => vec![],
+            Scenario::InicioEscuro => vec![Event(UiEvent::ThemeChanged { dark: true })],
             Scenario::Dispositivos => vec![mac()],
             Scenario::DispositivosEscuro => vec![mac(), Event(UiEvent::ThemeChanged { dark: true })],
             Scenario::Permissoes => vec![mac(), Tab(DeviceTab::Permissions)],
@@ -989,6 +1000,8 @@ mod tests {
     fn every_scenario_drives_the_state_to_its_screen() {
         use WindowKind::*;
         let expect: &[(Scenario, Screen, &[WindowKind])] = &[
+            (Scenario::Inicio, Screen::Home, &[Main]),
+            (Scenario::InicioEscuro, Screen::Home, &[Main]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),
@@ -1011,12 +1024,12 @@ mod tests {
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
             (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
-            (Scenario::Banner, Screen::Devices, &[Main, Banner]),
+            (Scenario::Banner, Screen::Home, &[Main, Banner]),
             (Scenario::Inverter, Screen::Devices, &[Main, Viewer]),
-            (Scenario::InverterPedido, Screen::Devices, &[Main, Banner]),
+            (Scenario::InverterPedido, Screen::Home, &[Main, Banner]),
             (Scenario::EstadoFechouInesperado, Screen::Devices, &[Main]),
-            (Scenario::EstadoNenhumComputador, Screen::Devices, &[Main]),
-            (Scenario::Carregando, Screen::Devices, &[Main]),
+            (Scenario::EstadoNenhumComputador, Screen::Home, &[Main]),
+            (Scenario::Carregando, Screen::Home, &[Main]),
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
         ];
@@ -1166,16 +1179,16 @@ mod tests {
 
         // The cache: Atividade and Ajustes are asked once, then kept fresh by events.
         let mut s = Scenario::Dispositivos.prepared_state();
-        let a = s.activate(ControlId::NavActivity);
+        let a = s.activate(ControlId::HomeActivityAll);
         assert!(a.commands.is_empty(), "the activity log is already cached");
         let a = s.activate(ControlId::NavSettings);
         assert!(a.commands.is_empty(), "the settings are already cached");
         let mut fresh = UiState::default();
-        let a = fresh.activate(ControlId::NavActivity);
+        let a = fresh.activate(ControlId::HomeActivityAll);
         assert_eq!(a.commands.len(), 1, "first open asks once");
         let a = fresh.activate(ControlId::NavSettings);
         assert_eq!(a.commands, vec![Command::GetSettings]);
-        let again = fresh.activate(ControlId::NavActivity);
+        let again = fresh.activate(ControlId::HomeActivityAll);
         assert!(again.commands.is_empty(), "a second visit does not ask again while the first is in flight");
         // An event refreshes the cache without a request.
         let mut devices = devices();

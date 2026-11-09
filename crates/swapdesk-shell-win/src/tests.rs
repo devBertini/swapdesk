@@ -65,10 +65,10 @@ fn every_scenario_renders_to_a_png_and_every_control_has_a_place() {
 }
 
 #[test]
-fn the_address_field_sits_under_the_device_list_inside_the_sidebar_and_clear_of_the_buttons() {
+fn the_address_field_sits_in_the_pair_card_on_the_home_and_the_sidebar_holds_only_navigation() {
     use swapdesk_ui::EditId;
     use swapdesk_ui::tokens::layout;
-    let state = Scenario::Dispositivos.prepared_state();
+    let state = Scenario::Inicio.prepared_state();
     for (w, h) in [(layout::DESIGN_W, layout::DESIGN_H), (layout::MIN_W, layout::MIN_H)] {
         let r = render(&state, WindowKind::Main, (w, h), 1.0, &Interaction::default()).unwrap();
         let slot = r
@@ -78,17 +78,46 @@ fn the_address_field_sits_under_the_device_list_inside_the_sidebar_and_clear_of_
             .find(|e| e.id == EditId::Address)
             .unwrap_or_else(|| panic!("{w}x{h}: no address field"));
         assert_eq!(slot.placeholder, "192.168.0.21");
-        assert!(slot.rect.right() <= layout::SIDEBAR_W, "{w}x{h}: inside the sidebar");
+        assert!(slot.rect.x >= layout::SIDEBAR_W, "{w}x{h}: the field left the sidebar");
+        assert!(slot.rect.right() <= w && slot.rect.bottom() <= h, "{w}x{h}: inside the window");
         let pair = r.output.widgets.iter().find(|x| x.id == ControlId::PairThisComputer).expect("pair button");
-        assert!(slot.rect.y + slot.rect.h < pair.rect.y, "{w}x{h}: clear of the bottom buttons");
-        let last_device = r
-            .output
-            .widgets
-            .iter()
-            .filter(|x| matches!(x.id, ControlId::Device(_)))
-            .map(|x| x.rect.bottom())
-            .fold(0.0, f32::max);
-        assert!(slot.rect.y >= last_device, "{w}x{h}: after the last device");
+        assert!(slot.rect.y > pair.rect.bottom(), "{w}x{h}: the field is under the pair button");
+        let all = r.output.widgets.iter().find(|x| x.id == ControlId::HomeActivityAll).expect("Ver tudo");
+        assert!(all.rect.bottom() <= h, "{w}x{h}: Ver tudo is on screen");
+        // Sidebar: Início, the devices and Ajustes only, all inside its width.
+        for x in r.output.widgets.iter().filter(|x| x.rect.x < layout::SIDEBAR_W) {
+            assert!(
+                matches!(x.id, ControlId::NavHome | ControlId::NavSettings | ControlId::Device(_)),
+                "{w}x{h}: {:?} in the sidebar",
+                x.id
+            );
+            assert!(x.rect.right() <= layout::SIDEBAR_W, "{w}x{h}: {:?} overflows the sidebar", x.id);
+        }
+        // Cards: two columns when wide, one when narrow, never overlapping.
+        let n = r.output.widgets.iter().find(|x| x.id == ControlId::HomeActivityAll).unwrap().rect;
+        let add = r.output.widgets.iter().find(|x| x.id == ControlId::AddAddress).expect("Adicionar").rect;
+        assert!(add.x >= slot.rect.right() && add.right() <= w, "{w}: Adicionar is beside the field");
+        if w > 1000.0 {
+            assert!(n.x > add.right(), "{w}: two columns");
+        } else {
+            assert!(n.y > add.bottom(), "{w}: one column");
+        }
+        // No device page on the home.
+        assert!(!r.output.widgets.iter().any(|x| x.id == ControlId::Control));
+    }
+}
+
+#[test]
+fn the_home_drops_its_cards_into_one_column_and_keeps_the_header_clear_at_every_width() {
+    use swapdesk_ui::tokens::layout;
+    let state = Scenario::Inicio.prepared_state();
+    for w in [layout::MIN_W, 1000.0, layout::DESIGN_W, 1600.0] {
+        let r = render(&state, WindowKind::Main, (w, 700.0), 1.0, &Interaction::default()).unwrap();
+        let get = |id| r.output.widgets.iter().find(|x| x.id == id).map(|x| x.rect).unwrap();
+        let (pair, all) = (get(ControlId::PairThisComputer), get(ControlId::HomeActivityAll));
+        let content_right = w - 40.0;
+        assert!(pair.right() <= content_right && all.right() <= content_right, "{w}: inside the content");
+        assert!(all.bottom() <= 700.0 - 32.0 + 0.5, "{w}: Ver tudo above the bottom margin");
     }
 }
 
@@ -112,16 +141,16 @@ fn the_design_geometry_is_where_the_css_puts_it() {
     let state = Scenario::Dispositivos.prepared_state();
     let r = render(&state, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default()).unwrap();
     let w = |id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect).unwrap();
-    // The sidebar is 272 px; the footer buttons are 40 px high.
+    // The sidebar is 232 px; the footer buttons are 40 px high.
     assert!((w(ControlId::NavSettings).h - 40.0).abs() < 0.01);
-    assert!((w(ControlId::NavSettings).w - (272.0 - 24.0 - 1.0)).abs() < 0.01);
+    assert!((w(ControlId::NavSettings).w - (232.0 - 24.0 - 1.0)).abs() < 0.01);
     // "Controlar" ends at the main area's right padding (1200 - 40).
     assert!((w(ControlId::Control).right() - 1160.0).abs() < 0.01);
     assert!((w(ControlId::Control).y - 32.0).abs() < 0.01);
     // Header 32 + title block, gap 28, then the tabs row: 40 px high.
     assert!((w(ControlId::Tab(swapdesk_ui::DeviceTab::Overview)).h - 40.0).abs() < 0.01);
     // The selected device row is the first of "Pareados".
-    assert!(w(ControlId::Device(0)).w > 240.0);
+    assert!(w(ControlId::Device(0)).w > 200.0);
     // Hit targets of the switches in Permissões are 38 x 22.
     let perm = Scenario::Permissoes.prepared_state();
     let r = render(&perm, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default()).unwrap();
@@ -186,7 +215,7 @@ fn placeholder_screens_have_the_footprint_of_the_real_ones() {
     assert!(loading.distinct_colors() > 3);
     // The footer buttons (hung from the bottom) are drawn in both.
     let loaded = render(
-        &Scenario::Dispositivos.prepared_state(),
+        &Scenario::Inicio.prepared_state(),
         WindowKind::Main,
         design_size(WindowKind::Main),
         1.0,
@@ -195,13 +224,15 @@ fn placeholder_screens_have_the_footprint_of_the_real_ones() {
     .unwrap();
     let y = |r: &crate::offscreen::Rendered, id| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect.y);
     assert_eq!(y(&loading, ControlId::NavSettings), y(&loaded, ControlId::NavSettings));
-    assert_eq!(y(&loading, ControlId::NavActivity), y(&loaded, ControlId::NavActivity));
+    assert_eq!(y(&loading, ControlId::NavHome), y(&loaded, ControlId::NavHome));
+    assert_eq!(y(&loading, ControlId::PairThisComputer), y(&loaded, ControlId::PairThisComputer));
     // Pending (the first 100 ms) draws no placeholder blocks: the main area stays the plain canvas.
     let mut pending = swapdesk_ui::UiState::default();
     pending.startup_commands();
     let r = render(&pending, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default()).unwrap();
-    assert_eq!(r.rgb_at(700, 100), LIGHT.canvas.hex());
-    assert_eq!(r.rgb_at(700, 300), LIGHT.canvas.hex());
+    assert_eq!(r.rgb_at(700, 50), LIGHT.canvas.hex());
+    assert_eq!(r.rgb_at(330, 45), LIGHT.canvas.hex(), "no skeleton block where the name will be");
+    assert_eq!(r.rgb_at(1100, 45), LIGHT.canvas.hex(), "no skeleton chip");
 }
 
 #[test]
@@ -437,4 +468,35 @@ fn the_viewer_toolbar_has_no_swap_toward_another_os() {
         widget(&r, ControlId::TbDisconnect).unwrap(),
     );
     assert!(chat.right() < swap.x && swap.right() < disc.x);
+}
+
+/// Writes the home and the device page, light and dark, at 100 % and 150 %, plus the narrowest window, into the folder
+/// named by `SWAPDESK_RENDERS` (a review aid; without the variable it does nothing).
+#[test]
+fn home_renders_for_review() {
+    use swapdesk_ui::tokens::layout;
+    let Some(dir) = std::env::var_os("SWAPDESK_RENDERS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&dir).expect("renders dir");
+    for (sc, name) in [
+        (Scenario::Inicio, "inicio-claro"),
+        (Scenario::InicioEscuro, "inicio-escuro"),
+        (Scenario::Dispositivos, "dispositivo-claro"),
+        (Scenario::DispositivosEscuro, "dispositivo-escuro"),
+        (Scenario::EstadoRedePublica, "dispositivo-rede-publica"),
+        (Scenario::Carregando, "inicio-carregando"),
+    ] {
+        let state = sc.prepared_state();
+        for scale in [1.0f32, 1.5] {
+            let r = render(&state, WindowKind::Main, design_size(WindowKind::Main), scale, &Interaction::default())
+                .unwrap();
+            r.save_png(&dir.join(format!("{name}@{}x.png", scale))).unwrap();
+        }
+    }
+    let mut warn = Scenario::EstadoRedePublica.prepared_state();
+    warn.navigate(swapdesk_ui::Nav::Home);
+    let r = render(&warn, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default()).unwrap();
+    r.save_png(&dir.join("inicio-rede-publica@1x.png")).unwrap();
+    let state = Scenario::Inicio.prepared_state();
+    let r = render(&state, WindowKind::Main, (layout::MIN_W, layout::MIN_H), 1.0, &Interaction::default()).unwrap();
+    r.save_png(&dir.join("inicio-janela-minima@1x.png")).unwrap();
 }
