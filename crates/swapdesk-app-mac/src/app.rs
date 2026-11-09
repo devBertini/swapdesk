@@ -160,7 +160,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             )
         }
     };
-    let level = if options.use_scratch() { Level::Debug } else { Level::Info };
+    // Development: `SWAPDESK_DEBUG=1` (e.g. `open --env SWAPDESK_DEBUG=1 Swapdesk.app`) logs at debug level too.
+    let debug = options.use_scratch() || std::env::var_os("SWAPDESK_DEBUG").is_some();
+    let level = if debug { Level::Debug } else { Level::Info };
     let trace: Arc<dyn TraceSink> =
         Arc::new(FileTrace::open(store.dir(), "trace.log", level, DEFAULT_CAP).map_err(|e| format!("trace log: {e}"))?);
     let clock: Arc<dyn Clock> = Arc::new(Monotonic(Instant::now()));
