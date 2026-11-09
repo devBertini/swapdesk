@@ -18,6 +18,7 @@ mod extras;
 mod files;
 mod helper_link;
 mod host_relay;
+mod listen;
 mod media_path;
 mod pty_proxy;
 mod routing;
@@ -115,7 +116,8 @@ struct Dialer {
     wall: Arc<dyn swapdesk_trust::WallClock>,
     interfaces: Arc<dyn NetInterfaces>,
     allow_loopback: bool,
-    local_addrs: Vec<SocketAddr>,
+    /// The session endpoint's sockets (the own-endpoint check of the development path reads them).
+    listeners: Arc<listen::Listeners>,
 }
 
 /// Opens viewer sessions. Shared by the core and by the swap environment, which opens the new connection of a swap
@@ -146,7 +148,7 @@ impl Connector {
         let SocketAddr::V4(v4) = addr else { return Err(ConnectError::NotIpv4) };
         let local = if d.allow_loopback && v4.ip().is_loopback() {
             // Development only. A session with this machine's own endpoint is still refused (PROTOCOL.md 1).
-            if d.local_addrs.contains(&addr) {
+            if d.listeners.addrs().contains(&addr) {
                 return Err(ConnectError::Refused(Refusal::OwnAddress));
             }
             Ipv4Addr::LOCALHOST
@@ -405,7 +407,7 @@ pub struct ServiceCore {
     term_env: Arc<EnvCell>,
     swap: SwapHandler,
     runtime: Option<Runtime>,
-    endpoints: Vec<Endpoint>,
+    listeners: Arc<listen::Listeners>,
     events: Mutex<Option<std::sync::mpsc::Receiver<CoreEvent>>>,
     win_session: u32,
 }
@@ -482,12 +484,13 @@ impl ServiceCore {
         let _ = host_cell.set(host.clone());
 
         // One endpoint per approved interface address (PROTOCOL.md 1), and the development addresses.
+        // (socket, is a development address)
         let mut sockets = Vec::new();
         match cfg.interfaces.list() {
             Ok(list) => {
                 for (addr, socket) in bind_quic_all_approved(&list, cfg.session_port) {
                     match socket {
-                        Ok(s) => sockets.push(s),
+                        Ok(s) => sockets.push((s, false)),
                         Err(e) => shared
                             .log(Level::Warn, format_args!("cannot listen on {} ({}): {e}", addr.addr, addr.if_name)),
                     }
@@ -496,12 +499,13 @@ impl ServiceCore {
             Err(e) => shared.log(Level::Warn, format_args!("the interface list is unavailable: {e}")),
         }
         for addr in &cfg.listen_extra {
-            sockets
-                .push(bind_quic_socket(*addr).map_err(|e| ServiceError::Bind { addr: *addr, error: e.to_string() })?);
+            sockets.push((
+                bind_quic_socket(*addr).map_err(|e| ServiceError::Bind { addr: *addr, error: e.to_string() })?,
+                true,
+            ));
         }
         let mut endpoints = Vec::new();
-        let mut local_addrs = Vec::new();
-        for socket in sockets {
+        for (socket, extra) in sockets {
             let local = socket.local_addr().map_err(ServiceError::Runtime)?;
             let endpoint =
                 open_session_endpoint(socket, &cfg.identity, cfg.trust.clone()).map_err(|e| ServiceError::Bind {
@@ -512,8 +516,7 @@ impl ServiceCore {
                     error: e.to_string(),
                 })?;
             shared.log(Level::Info, format_args!("session endpoint on {local}"));
-            local_addrs.push(local);
-            endpoints.push(endpoint);
+            endpoints.push((endpoint, extra));
         }
 
         let gate = Arc::new(Gate {
@@ -525,8 +528,15 @@ impl ServiceCore {
             handshakes: AtomicUsize::new(0),
             limits: SessionLimits::new(),
         });
-        for endpoint in &endpoints {
-            runtime.spawn(accept_loop(Arc::clone(&gate), endpoint.clone()));
+        let listeners = Arc::new(listen::Listeners::new(
+            cfg.session_port,
+            Arc::clone(&cfg.identity),
+            Arc::clone(&cfg.trust),
+            Arc::clone(&gate),
+            Arc::clone(&shared),
+        ));
+        for (endpoint, extra) in endpoints {
+            listeners.adopt(endpoint, extra).map_err(ServiceError::Runtime)?;
         }
         let dialer = Arc::new(Dialer {
             cfg_name: cfg.name.clone(),
@@ -540,7 +550,7 @@ impl ServiceCore {
             wall: Arc::clone(&cfg.wall),
             interfaces: Arc::clone(&cfg.interfaces),
             allow_loopback: cfg.allow_loopback_peers,
-            local_addrs,
+            listeners: Arc::clone(&listeners),
         });
         drop(enter);
         let connector = Arc::new(Connector {
@@ -565,7 +575,7 @@ impl ServiceCore {
             term_env,
             swap,
             runtime: Some(runtime),
-            endpoints,
+            listeners,
             events: Mutex::new(Some(events_rx)),
             win_session: cfg.win_session,
         })
@@ -580,9 +590,22 @@ impl ServiceCore {
         &self.shared.rt
     }
 
-    /// The addresses the session endpoint listens on.
-    pub fn local_addrs(&self) -> &[SocketAddr] {
-        &self.dialer.local_addrs
+    /// The addresses the session endpoint listens on now.
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        self.listeners.addrs()
+    }
+
+    /// The network changed: the session endpoint follows the approved addresses (a new one is listened on, one that
+    /// went stops taking connections; one that stayed, and its sessions, are not touched). Returns whether the
+    /// listening addresses changed. The owner calls it on every network notice (the UI hub's `network_changed`).
+    pub fn network_changed(&self) -> bool {
+        match self.dialer.interfaces.list() {
+            Ok(list) => self.listeners.follow(&list),
+            Err(e) => {
+                self.shared.log(Level::Warn, format_args!("the interface list is unavailable: {e}"));
+                false
+            }
+        }
     }
 
     /// The host service: the banner's and Permissões' calls (`set_session_grants`, `disconnect`, `sessions`, ...).
@@ -892,9 +915,7 @@ impl ServiceCore {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
-        for e in &self.endpoints {
-            e.close(quinn::VarInt::from_u32(0), b"service stopped");
-        }
+        self.listeners.close_all();
         runtime.shutdown_timeout(Duration::from_secs(2));
     }
 }

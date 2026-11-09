@@ -22,5 +22,5 @@ swapdesk-platform = { path = "../swapdesk-platform" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
-objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString"] }
-objc2-system-configuration = { workspace = true, features = ["std", "SCNetworkConfiguration"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFRunLoop", "CFString"] }
+objc2-system-configuration = { workspace = true, features = ["std", "SCDynamicStore", "SCNetworkConfiguration"] }

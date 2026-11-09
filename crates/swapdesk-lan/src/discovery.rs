@@ -5,6 +5,11 @@
 //!   is registered for those interfaces and those addresses only.
 //! - `mdns-sd`'s own interface re-check is off (`set_ip_check_interval(0)`, research dependencies.md 1.4): the caller
 //!   learns of a network change from its `NetInterfaces` watcher and calls [`Discovery::refresh`].
+//! - When the approved addresses change, the daemon is replaced by a fresh one. With the re-check off, `mdns-sd` never
+//!   forgets an address the machine lost (disabling an interface acts only on the addresses the OS lists now), and while
+//!   it still holds an IPv4 address for an interface it does not join the mDNS group through that interface's new one:
+//!   after a DHCP change it went on answering nothing and hearing nothing (seen on a Mac, 09/11). A fresh daemon has no
+//!   such memory. The peers the old one knew are reported lost, and the new one finds them again with its first query.
 //! - A resolved service is turned into a [`Peer`] only if its TXT record decodes, it is not this machine, and every
 //!   address the guard keeps is on-link in the subnet of the approved interface the answer arrived on.
 //! - The mDNS sockets are `mdns-sd`'s: TTL 255, never changed here.
@@ -12,7 +17,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -94,7 +99,17 @@ struct State {
     own: Txt,
     /// The approved addresses the daemon is bound to now (empty: nothing is announced or browsed).
     applied: Vec<ApprovedAddr>,
+    /// The daemon of the addresses in `applied`; `None` only when starting a new one failed (the next refresh retries).
+    engine: Option<Engine>,
+}
+
+/// One `mdns-sd` daemon and the worker that reads its browse channel.
+struct Engine {
+    daemon: ServiceDaemon,
     registered: Option<String>,
+    worker: Option<JoinHandle<()>>,
+    /// Set before the last daemon stops: its worker then closes the event queue instead of reporting its peers lost.
+    last: Arc<AtomicBool>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -167,14 +182,14 @@ impl Events {
 }
 
 pub struct Discovery {
-    daemon: ServiceDaemon,
     nets: Arc<dyn NetInterfaces>,
     config: Config,
     state: Mutex<State>,
     events: Arc<Events>,
     /// Bumped by every `refresh`, so the worker drops the interface list it kept.
     generation: Arc<AtomicU64>,
-    worker: Option<JoinHandle<()>>,
+    /// How many daemons were started: one at the start, one more per change of the approved addresses.
+    daemons: AtomicU64,
 }
 
 fn instance_name(fp: &[u8; FINGERPRINT_BYTES]) -> String {
@@ -189,45 +204,31 @@ impl Discovery {
     /// Starts the daemon on the approved interfaces, announces `own` and starts browsing.
     pub fn start(nets: Arc<dyn NetInterfaces>, own: Txt, config: Config) -> Result<Self, DiscoveryError> {
         own.encode().map_err(DiscoveryError::Txt)?;
-        let daemon = ServiceDaemon::new_with_port(config.mdns_port).map_err(mdns)?;
-        daemon.set_ip_check_interval(0).map_err(mdns)?;
-        // Nothing is used until the guard approves it.
-        daemon.disable_interface(MdnsIfKind::All).map_err(mdns)?;
-
-        let browse = daemon.browse(SERVICE_TYPE).map_err(mdns)?;
-        let events = Arc::new(Events::default());
-        let generation = Arc::new(AtomicU64::new(0));
-        let worker_nets = Arc::clone(&nets);
-        let own_fp = own.fingerprint;
-        let worker = {
-            let (events, generation) = (Arc::clone(&events), Arc::clone(&generation));
-            std::thread::Builder::new()
-                .name("swapdesk-discovery".into())
-                .spawn(move || run_worker(browse, worker_nets, own_fp, &events, &generation))
-                .map_err(|e| DiscoveryError::Mdns(format!("thread: {e}")))?
-        };
-
         let d = Self {
-            daemon,
             nets,
             config,
-            state: Mutex::new(State { own, applied: Vec::new(), registered: None }),
-            events,
-            generation,
-            worker: Some(worker),
+            state: Mutex::new(State { own, applied: Vec::new(), engine: None }),
+            events: Arc::new(Events::default()),
+            generation: Arc::new(AtomicU64::new(0)),
+            daemons: AtomicU64::new(0),
         };
-        d.refresh()?;
+        let list = d.nets.list().map_err(DiscoveryError::Platform)?;
+        {
+            let mut st = lock(&d.state);
+            d.apply(&mut st, approved_addrs(&list))?;
+        }
         Ok(d)
     }
 
-    /// Re-reads the interfaces and, if the approved addresses changed, rebinds the daemon and re-announces. Returns
-    /// whether anything changed. Call it when the network changes (and never on a timer).
+    /// Re-reads the interfaces and, if the approved addresses changed, replaces the daemon by one bound to the new
+    /// ones, which announces again. Returns whether anything changed. Call it when the network changes (and never on
+    /// a timer).
     pub fn refresh(&self) -> Result<bool, DiscoveryError> {
         self.generation.fetch_add(1, Ordering::SeqCst);
         let list = self.nets.list().map_err(DiscoveryError::Platform)?;
         let approved = approved_addrs(&list);
         let mut st = lock(&self.state);
-        if approved == st.applied {
+        if approved == st.applied && st.engine.is_some() {
             return Ok(false);
         }
         self.apply(&mut st, approved)?;
@@ -241,8 +242,11 @@ impl Discovery {
             return Ok(());
         }
         st.own.pairing = on;
-        let approved = st.applied.clone();
-        self.register(&mut st, &approved)
+        let (own, approved) = (st.own.clone(), st.applied.clone());
+        match st.engine.as_mut() {
+            Some(engine) => engine.register(&own, &approved, self.config.service_port),
+            None => Ok(()),
+        }
     }
 
     /// The next event, or `None` after `timeout`.
@@ -255,46 +259,24 @@ impl Discovery {
         lock(&self.state).applied.clone()
     }
 
-    fn apply(&self, st: &mut State, approved: Vec<ApprovedAddr>) -> Result<(), DiscoveryError> {
-        self.daemon.disable_interface(MdnsIfKind::All).map_err(mdns)?;
-        let mut indexes: Vec<u32> = approved.iter().map(|a| a.if_index).collect();
-        indexes.sort_unstable();
-        indexes.dedup();
-        if !indexes.is_empty() {
-            self.daemon
-                .enable_interface(indexes.iter().map(|i| MdnsIfKind::IndexV4(*i)).collect::<Vec<_>>())
-                .map_err(mdns)?;
-        }
-        self.register(st, &approved)?;
-        st.applied = approved;
-        Ok(())
+    /// How many `mdns-sd` daemons this discovery started: one at the start, one more per change of the approved
+    /// addresses (diagnostics and tests).
+    pub fn daemons_started(&self) -> u64 {
+        self.daemons.load(Ordering::SeqCst)
     }
 
-    fn register(&self, st: &mut State, approved: &[ApprovedAddr]) -> Result<(), DiscoveryError> {
-        if approved.is_empty() {
-            if let Some(full) = st.registered.take() {
-                self.daemon.unregister(&full).map_err(mdns)?;
-            }
-            return Ok(());
+    /// Replaces the daemon by one bound to `approved` (with none approved it announces and browses nothing).
+    fn apply(&self, st: &mut State, approved: Vec<ApprovedAddr>) -> Result<(), DiscoveryError> {
+        if let Some(old) = st.engine.take() {
+            // No goodbye: the record keeps its name, and the new daemon's announcement replaces the old addresses in the
+            // peers' caches (cache-flush), so they see an update, not a departure.
+            old.stop(false, Duration::from_secs(1));
         }
-        let props = st.own.encode().map_err(DiscoveryError::Txt)?;
-        let addrs: Vec<IpAddr> = approved.iter().map(|a| IpAddr::V4(a.addr)).collect();
-        let mut info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance_name(&st.own.fingerprint),
-            &host_name(&st.own.fingerprint),
-            addrs.as_slice(),
-            self.config.service_port,
-            props.as_slice(),
-        )
-        .map_err(mdns)?;
-        let mut indexes: Vec<u32> = approved.iter().map(|a| a.if_index).collect();
-        indexes.sort_unstable();
-        indexes.dedup();
-        info.set_interfaces(indexes.into_iter().map(MdnsIfKind::IndexV4).collect());
-        let full = info.get_fullname().to_string();
-        self.daemon.register(info).map_err(mdns)?;
-        st.registered = Some(full);
+        let engine =
+            Engine::start(&self.config, &st.own, &approved, Arc::clone(&self.nets), &self.events, &self.generation)?;
+        self.daemons.fetch_add(1, Ordering::SeqCst);
+        st.engine = Some(engine);
+        st.applied = approved;
         Ok(())
     }
 
@@ -304,13 +286,111 @@ impl Discovery {
     }
 
     fn stop(&mut self) {
-        if let Some(full) = lock(&self.state).registered.take()
+        let engine = lock(&self.state).engine.take();
+        match engine {
+            Some(e) => e.stop(true, Duration::from_secs(2)),
+            None => self.events.close(),
+        }
+    }
+}
+
+fn indexes_of(approved: &[ApprovedAddr]) -> Vec<u32> {
+    let mut indexes: Vec<u32> = approved.iter().map(|a| a.if_index).collect();
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+}
+
+impl Engine {
+    fn start(
+        config: &Config,
+        own: &Txt,
+        approved: &[ApprovedAddr],
+        nets: Arc<dyn NetInterfaces>,
+        events: &Arc<Events>,
+        generation: &Arc<AtomicU64>,
+    ) -> Result<Self, DiscoveryError> {
+        let daemon = ServiceDaemon::new_with_port(config.mdns_port).map_err(mdns)?;
+        let browse = match Self::configure(&daemon, approved).and_then(|()| daemon.browse(SERVICE_TYPE).map_err(mdns)) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = daemon.shutdown();
+                return Err(e);
+            }
+        };
+        let last = Arc::new(AtomicBool::new(false));
+        let own_fp = own.fingerprint;
+        let spawned = {
+            let (events, generation, last) = (Arc::clone(events), Arc::clone(generation), Arc::clone(&last));
+            std::thread::Builder::new()
+                .name("swapdesk-discovery".into())
+                .spawn(move || run_worker(browse, nets, own_fp, &events, &generation, &last))
+        };
+        let worker = match spawned {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = daemon.shutdown();
+                return Err(DiscoveryError::Mdns(format!("thread: {e}")));
+            }
+        };
+        let mut engine = Self { daemon, registered: None, worker: Some(worker), last };
+        if let Err(e) = engine.register(own, approved, config.service_port) {
+            engine.stop(false, Duration::from_secs(1));
+            return Err(e);
+        }
+        Ok(engine)
+    }
+
+    /// Nothing is used until the guard approves it, then only the approved interfaces (IPv4, by index).
+    fn configure(daemon: &ServiceDaemon, approved: &[ApprovedAddr]) -> Result<(), DiscoveryError> {
+        daemon.set_ip_check_interval(0).map_err(mdns)?;
+        daemon.disable_interface(MdnsIfKind::All).map_err(mdns)?;
+        let indexes = indexes_of(approved);
+        if !indexes.is_empty() {
+            daemon
+                .enable_interface(indexes.iter().map(|i| MdnsIfKind::IndexV4(*i)).collect::<Vec<_>>())
+                .map_err(mdns)?;
+        }
+        Ok(())
+    }
+
+    fn register(&mut self, own: &Txt, approved: &[ApprovedAddr], port: u16) -> Result<(), DiscoveryError> {
+        if approved.is_empty() {
+            if let Some(full) = self.registered.take() {
+                self.daemon.unregister(&full).map_err(mdns)?;
+            }
+            return Ok(());
+        }
+        let props = own.encode().map_err(DiscoveryError::Txt)?;
+        let addrs: Vec<IpAddr> = approved.iter().map(|a| IpAddr::V4(a.addr)).collect();
+        let mut info = ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance_name(&own.fingerprint),
+            &host_name(&own.fingerprint),
+            addrs.as_slice(),
+            port,
+            props.as_slice(),
+        )
+        .map_err(mdns)?;
+        info.set_interfaces(indexes_of(approved).into_iter().map(MdnsIfKind::IndexV4).collect());
+        let full = info.get_fullname().to_string();
+        self.daemon.register(info).map_err(mdns)?;
+        self.registered = Some(full);
+        Ok(())
+    }
+
+    /// Stops the daemon and waits for its worker. `last`: the discovery is ending, so the record says goodbye and the
+    /// event queue closes; otherwise a new daemon takes over and the worker reports the peers it knew as lost.
+    fn stop(mut self, last: bool, wait: Duration) {
+        self.last.store(last, Ordering::SeqCst);
+        if last
+            && let Some(full) = self.registered.take()
             && let Ok(done) = self.daemon.unregister(&full)
         {
-            let _ = done.recv_timeout(Duration::from_secs(2));
+            let _ = done.recv_timeout(wait);
         }
         if let Ok(done) = self.daemon.shutdown() {
-            let _ = done.recv_timeout(Duration::from_secs(2));
+            let _ = done.recv_timeout(wait);
         }
         if let Some(w) = self.worker.take() {
             let _ = w.join();
@@ -349,6 +429,7 @@ fn run_worker(
     own_fp: [u8; FINGERPRINT_BYTES],
     events: &Events,
     generation: &Arc<AtomicU64>,
+    last: &AtomicBool,
 ) {
     // fullname -> fingerprint of the peers reported as found, so a removal can name them.
     let mut known: HashMap<String, [u8; FINGERPRINT_BYTES]> = HashMap::new();
@@ -394,7 +475,14 @@ fn run_worker(
             _ => {}
         }
     }
-    events.close();
+    if last.load(Ordering::SeqCst) {
+        events.close();
+    } else {
+        // This daemon was replaced: what it knew is unknown until the new one finds it again.
+        for (_, fingerprint) in known.drain() {
+            events.push(DiscoveryEvent::Lost { fingerprint });
+        }
+    }
 }
 
 fn drop_known(known: &mut HashMap<String, [u8; FINGERPRINT_BYTES]>, fullname: &str, events: &Events) {

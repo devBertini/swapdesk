@@ -12,6 +12,12 @@
 //! ([`crate::pipe::bounded_duplex`]), restarting it when it ends. This is the in-process stand-in for the Aqua agent of
 //! `docs/CONTRACTS.md` C2.2 until the daemon and the agent exist.
 //!
+//! Network changes: [`ServiceParams::network_notices`] starts the source that says when the network changed
+//! ([`crate::app`] gives SystemConfiguration's dynamic store, `swapdesk_net_mac::NetworkWatcher`; tests inject one), and
+//! each notice calls `UiHub::network_changed`: the session endpoint and DNS-SD move to the new address and the shell
+//! hears of it. No timer looks. Without it a Mac whose Wi-Fi address changed under the running app kept listening and
+//! announcing on the old one and vanished from every other machine's list.
+//!
 //! Everything here is generic over the C3 traits: the macOS pieces (login keychain, physical interfaces) are chosen by
 //! [`crate::app`], so this module builds and is tested on any host with the C7 fakes.
 
@@ -45,6 +51,9 @@ const HELPER_PIPE_BOUND: usize = 32;
 /// Pause before the host helper is started again after it ended; doubled after each quick end, up to the maximum.
 const HELPER_RESTART: Duration = Duration::from_millis(500);
 const HELPER_RESTART_MAX: Duration = Duration::from_secs(10);
+/// Starts a source of network change notices: it calls the given function once per burst of changes until the
+/// returned guard is dropped.
+pub type NetworkNotices = Box<dyn FnOnce(Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Send>, String> + Send>;
 /// A helper that ran at least this long ended normally: the next restart starts from [`HELPER_RESTART`] again.
 const HELPER_HEALTHY: Duration = Duration::from_secs(30);
 
@@ -72,6 +81,8 @@ pub struct ServiceParams {
     pub hooks: Arc<dyn SystemHooks>,
     /// This Mac hosts sessions: the helper loop the supervisor runs and attaches (`None`: viewer only).
     pub host_helper: Option<HostHelper>,
+    /// Where network change notices come from (`None`: none, the network is taken as it was at the start).
+    pub network_notices: Option<NetworkNotices>,
 }
 
 impl ServiceParams {
@@ -97,6 +108,7 @@ impl ServiceParams {
             ports: None,
             hooks: Arc::new(NoHooks),
             host_helper: None,
+            network_notices: None,
         }
     }
 }
@@ -126,6 +138,8 @@ pub struct InProcessService {
     /// The host helper's supervisor, when this Mac hosts.
     supervisor: Option<JoinHandle<()>>,
     backend: Arc<ServiceBackend>,
+    /// The network notices' guard; dropped first at shutdown.
+    net_watch: Option<Box<dyn Send>>,
 }
 
 impl InProcessService {
@@ -144,6 +158,7 @@ impl InProcessService {
             ports,
             hooks,
             host_helper,
+            network_notices,
         } = p;
         let MacServiceSetup { mut config, identity, trust, settings } = mac_service_config(MacServiceParams {
             default_name,
@@ -198,6 +213,16 @@ impl InProcessService {
         hub.bind_core(&core);
         hub.set_console_session(Some(UI_SESSION));
         trace.log(Level::Info, "app", format_args!("service core up on {:?}", core.local_addrs()));
+        let net_watch = match network_notices {
+            Some(start) => {
+                let (hub, trace) = (hub.clone(), Arc::clone(&trace));
+                Some(start(Box::new(move || {
+                    trace.log(Level::Info, "app", format_args!("the network changed"));
+                    hub.network_changed();
+                }))?)
+            }
+            None => None,
+        };
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let supervisor = match host_helper {
@@ -229,7 +254,15 @@ impl InProcessService {
         let backend =
             ServiceBackend::start_with_sink(client_end.reader, client_end.writer, waker, std::process::id(), sink)
                 .map_err(|e| format!("hub handshake: {e}"))?;
-        Ok(Self { hub, cancel, core: Some(core), serve: Some(serve), supervisor, backend: Arc::new(backend) })
+        Ok(Self {
+            hub,
+            cancel,
+            core: Some(core),
+            serve: Some(serve),
+            supervisor,
+            backend: Arc::new(backend),
+            net_watch,
+        })
     }
 
     /// The C6 backend the shell talks to (also the pipeline's output side).
@@ -253,6 +286,8 @@ impl InProcessService {
 
     /// Stops the hub and the core, waiting a few seconds for the last handles. Safe to call twice.
     pub fn shutdown(&mut self) {
+        // No network news for a hub that is going away.
+        drop(self.net_watch.take());
         self.hub.shutdown();
         self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(t) = self.serve.take() {
@@ -484,6 +519,56 @@ mod tests {
         let after = runs.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(700));
         assert_eq!(runs.load(Ordering::SeqCst), after, "nothing restarts after shutdown");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_address_change_under_the_running_app_reaches_the_hub_and_the_shell() {
+        // The field case (09/11): the app started on 192.168.1.2, DHCP moved the Wi-Fi to 192.168.1.3, and nothing told
+        // the hub, so DNS-SD stayed on the old address and the PC listed this Mac as offline.
+        let (mut p, dir) = params("netnotice");
+        let wifi = |last: u8| swapdesk_platform::NetInterface {
+            index: 11,
+            name: "en0".into(),
+            kind: swapdesk_platform::IfKind::WiFi,
+            up: true,
+            mac: None,
+            ipv4: vec![(std::net::Ipv4Addr::new(192, 168, 1, last), 24)],
+            category: None,
+            inbound_blocked: None,
+        };
+        let nets = Arc::new(FakeNetInterfaces::new(vec![wifi(2)]));
+        p.interfaces = nets.clone();
+        // The notice source the app gives is SystemConfiguration's; this one hands its callback to the test.
+        type Notify = Box<dyn Fn() + Send + Sync>;
+        let notify: Arc<std::sync::Mutex<Option<Notify>>> = Arc::default();
+        let slot = Arc::clone(&notify);
+        p.network_notices = Some(Box::new(move |changed| {
+            *slot.lock().unwrap() = Some(changed);
+            Ok(Box::new(()) as Box<dyn Send>)
+        }));
+        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let mut svc = InProcessService::start(p, waker, None).expect("the service starts");
+        let backend = svc.backend();
+        nets.set(vec![wifi(3)]);
+        // No notice, no news: nothing looks at the list on its own.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!backend.drain().iter().any(|e| matches!(e, UiEvent::NetworkChanged(_))), "nothing polls");
+        (notify.lock().unwrap().as_ref().expect("the source was started"))();
+        let end = Instant::now() + Duration::from_secs(10);
+        let status = 'found: loop {
+            for e in backend.drain() {
+                if let UiEvent::NetworkChanged(s) = e {
+                    break 'found s;
+                }
+            }
+            assert!(Instant::now() < end, "the shell never heard of the network change");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.address.as_deref(), Some("192.168.1.3"));
+        let stopping = Instant::now();
+        svc.shutdown();
+        assert!(stopping.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
