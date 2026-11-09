@@ -564,8 +564,9 @@ fn devices_main(f: &mut Frame) {
             "",
         );
         let sx = a.x + field_w + 12.0;
-        f.button(ControlId::RenameSave, Rect::new(sx, y, sw, 40.0), Kind::Primary, &save, false);
-        f.button(ControlId::RenameCancel, Rect::new(sx + sw + 8.0, y, cw, 40.0), Kind::Default, &cancel, false);
+        // Negative first, positive last (owner, 09/11).
+        f.button(ControlId::RenameCancel, Rect::new(sx, y, cw, 40.0), Kind::Default, &cancel, false);
+        f.button(ControlId::RenameSave, Rect::new(sx + cw + 8.0, y, sw, 40.0), Kind::Primary, &save, false);
         // The refusal sits where the detail line is, in the danger colour.
         let (text, color) = match &r.error {
             Some(e) => (f.st.rename_error_text(e), pal.danger),
@@ -630,7 +631,7 @@ fn devices_main(f: &mut Frame) {
         return;
     }
     if !d.paired {
-        let body = f.t(MsgKey::PairOpenBody);
+        let body = f.t(MsgKey::PairNotPairedBody);
         let bw = p.hairline();
         let th = f.para_height(&body, text::BODY, a.cw - 44.0 - 2.0 * bw);
         let r = Rect::new(a.x, y, a.cw, 2.0 * bw + 40.0 + th);
@@ -1348,104 +1349,109 @@ fn row_parts<'r>(p: &crate::gfx::Painter, row: &'r SettingRow) -> (&'r str, Opti
 // ---------------------------------------------------------------------------------------------------------------
 // Pareamento
 
+/// One block of the pairing card, in the order the Mac app stacks them (`swapdesk-shell-mac` `blocks_from`).
+enum PairItem {
+    Title(String),
+    Body(String),
+    Code(String),
+    Countdown(u16),
+    Buttons(Vec<(ControlId, String, Kind)>),
+}
+
+/// The pairing screen: one centred card, the same on Windows and macOS (owner, 09/11: one interface on both
+/// systems). Card 520 wide, margins 32 and 28, 14 between blocks, as the Mac app's card.
 fn pairing(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
     let Some(view) = f.st.pairing().cloned() else { return };
-    let bw = p.hairline();
-    p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), pal.surface);
-    // The bar: 40 px, padding 0 16, "Swapdesk no" soft (500) then the name (600), on the sunken colour.
-    p.fill_rect(Rect::new(0.0, 0.0, f.w, 40.0), pal.sunken);
-    p.fill_rect(Rect::new(0.0, 40.0 - bw, f.w, bw), pal.line);
-    let prefix = p.label(&f.t(MsgKey::PairingBarPrefix), swapdesk_ui::tokens::TextStyle::new(13.0, 500));
-    p.draw(&prefix, 16.0, (40.0 - prefix.h) / 2.0, pal.soft);
-    let name = p.label(&this_name(f), text::BAR);
-    p.draw(&name, 16.0 + prefix.w + 8.0, (40.0 - name.h) / 2.0, pal.ink);
-
-    // The body: padding 36 40, gap 20.
-    let x = 40.0;
-    let mut y = 40.0 + 36.0;
-    let maxw = 400.0f32.min(f.w - 80.0);
-    let buttons_y = f.h - 36.0 - 40.0;
-    let small = text::CAPTION;
-    match &view.state {
-        PairingState::ShowCode { code, peer_name } => {
-            y += f.text(&f.t(MsgKey::PairingModeFixed), small, x, y, pal.soft) + 20.0;
-            y += f.text(&f.st.tm(&Msg::new(MsgKey::PairTitleWith).with(peer_name.clone())), text::H1, x, y, pal.ink)
-                + 20.0;
-            y += f.para(
-                &f.st.tm(&Msg::new(MsgKey::PairCompare).with(peer_name.clone())),
-                text::BODY,
-                x,
-                y,
-                maxw,
-                pal.soft,
-                Align::Start,
-            ) + 20.0;
-            y += 12.0;
-            y += f.text(code, text::PAIR_CODE, x, y, pal.link) + 12.0 + 20.0;
-            f.para(
-                &f.st.tm(&Msg::new(MsgKey::PairWarn).with(peer_name.clone())),
-                small,
-                x,
-                y,
-                maxw,
-                pal.soft,
-                Align::Start,
-            );
-            let same = f.t(MsgKey::PairSame);
-            let diff = f.t(MsgKey::PairDifferent);
-            let sw = f.button_width(&same, Kind::Primary);
-            f.button(ControlId::PairSame, Rect::new(x, buttons_y, sw, 40.0), Kind::Primary, &same, false);
-            let dw = f.button_width(&diff, Kind::Default);
-            f.button(
-                ControlId::PairDifferent,
-                Rect::new(x + sw + 10.0, buttons_y, dw, 40.0),
-                Kind::Default,
-                &diff,
-                false,
-            );
-        }
-        PairingState::Open { remaining_s } => {
-            let caption = f.st.tm(&Msg::new(MsgKey::PairingModeCountdown).with(format::countdown(*remaining_s)));
-            y += f.text(&caption, small, x, y, pal.soft) + 20.0;
-            y += f.text(&f.t(MsgKey::PairThisComputer), text::H1, x, y, pal.ink) + 20.0;
-            y += f.para(&f.t(MsgKey::PairOpenBody), text::BODY, x, y, maxw, pal.soft, Align::Start) + 20.0;
-            // The 2-minute bar: what is left of the window.
-            let frac = (f32::from(*remaining_s) / f32::from(layout::PAIR_COUNTDOWN_S)).clamp(0.0, 1.0);
-            p.fill_rrect(Rect::new(x, y, maxw, 6.0), 3.0, pal.line);
-            p.fill_rrect(Rect::new(x, y, maxw * frac, 6.0), 3.0, pal.link);
-            y += 6.0 + 20.0;
-            p.arc_stroke((x + 10.0, y + 10.0), 8.0, -90.0, 270.0, 2.5, pal.link);
-            f.text(&f.t(MsgKey::PairSearching), text::BODY, x + 28.0, y, pal.soft);
-            pair_cancel(f, x, buttons_y);
-        }
-        PairingState::Waiting => {
-            y += f.text(&f.t(MsgKey::PairingModeFixed), small, x, y, pal.soft) + 20.0;
-            y += f.text(&f.t(MsgKey::PairWaitingTitle), text::H1, x, y, pal.ink) + 20.0;
-            y += f.para(&f.t(MsgKey::PairWaitingBody), text::BODY, x, y, maxw, pal.soft, Align::Start) + 20.0;
-            p.arc_stroke((x + 10.0, y + 10.0), 8.0, -90.0, 270.0, 2.5, pal.link);
-            pair_cancel(f, x, buttons_y);
-        }
+    p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), pal.canvas);
+    let msg = |f: &Frame, key: MsgKey, arg: &str| f.st.tm(&Msg::new(key).with(arg.to_string()));
+    let items: Vec<PairItem> = match &view.state {
+        PairingState::ShowCode { code, peer_name } => vec![
+            PairItem::Title(msg(f, MsgKey::PairTitleWith, peer_name)),
+            PairItem::Body(msg(f, MsgKey::PairCompare, peer_name)),
+            PairItem::Code(code.clone()),
+            PairItem::Body(msg(f, MsgKey::PairWarn, peer_name)),
+            PairItem::Buttons(vec![
+                (ControlId::PairSame, f.t(MsgKey::PairSame), Kind::Primary),
+                (ControlId::PairDifferent, f.t(MsgKey::PairDifferent), Kind::Default),
+            ]),
+        ],
+        PairingState::Open { remaining_s } => vec![
+            PairItem::Title(f.t(MsgKey::PairThisComputer)),
+            PairItem::Body(f.t(MsgKey::PairOpenBody)),
+            PairItem::Countdown(*remaining_s),
+            PairItem::Body(f.t(MsgKey::PairSearching)),
+            PairItem::Buttons(vec![(ControlId::PairCancel, f.t(MsgKey::PairCancel), Kind::Default)]),
+        ],
+        PairingState::Waiting => vec![
+            PairItem::Title(f.t(MsgKey::PairWaitingTitle)),
+            PairItem::Body(f.t(MsgKey::PairWaitingBody)),
+            PairItem::Buttons(vec![(ControlId::PairCancel, f.t(MsgKey::PairCancel), Kind::Default)]),
+        ],
         PairingState::Done { device_id } => {
             let who = f.st.device_by_id(device_id).map(|d| d.name.clone()).unwrap_or_default();
-            y += f.text(&f.st.tm(&Msg::new(MsgKey::PairDoneTitle).with(who)), text::H1, x, y, pal.ink) + 20.0;
-            f.para(&f.t(MsgKey::PairDoneBody), text::BODY, x, y, maxw, pal.soft, Align::Start);
-            let done = f.t(MsgKey::PairDoneButton);
-            let w = f.button_width(&done, Kind::Primary);
-            f.button(ControlId::PairDone, Rect::new(x, buttons_y, w, 40.0), Kind::Primary, &done, false);
+            vec![
+                PairItem::Title(msg(f, MsgKey::PairDoneTitle, &who)),
+                PairItem::Body(f.t(MsgKey::PairDoneBody)),
+                PairItem::Buttons(vec![(ControlId::PairDone, f.t(MsgKey::PairDoneButton), Kind::Primary)]),
+            ]
         }
-        PairingState::Failed { reason } => {
-            y += f.text(&f.t(MsgKey::PairFailedTitle), text::H1, x, y, pal.ink) + 20.0;
-            let msg =
-                format!("{} {}", f.st.error_text(&swapdesk_ui::ApiError::new(*reason)), f.t(MsgKey::PairFailedBody));
-            f.para(&msg, text::BODY, x, y, maxw, pal.soft, Align::Start);
-            let retry = f.t(MsgKey::PairRetry);
-            let close = f.t(MsgKey::PairClose);
-            let rw = f.button_width(&retry, Kind::Primary);
-            f.button(ControlId::PairRetry, Rect::new(x, buttons_y, rw, 40.0), Kind::Primary, &retry, false);
-            let cw = f.button_width(&close, Kind::Default);
-            f.button(ControlId::PairClose, Rect::new(x + rw + 10.0, buttons_y, cw, 40.0), Kind::Default, &close, false);
+        PairingState::Failed { reason } => vec![
+            PairItem::Title(f.t(MsgKey::PairFailedTitle)),
+            PairItem::Body(format!(
+                "{} {}",
+                f.st.error_text(&swapdesk_ui::ApiError::new(*reason)),
+                f.t(MsgKey::PairFailedBody)
+            )),
+            PairItem::Buttons(vec![
+                (ControlId::PairRetry, f.t(MsgKey::PairRetry), Kind::Primary),
+                (ControlId::PairClose, f.t(MsgKey::PairClose), Kind::Default),
+            ]),
+        ],
+    };
+
+    const GAP: f32 = 14.0;
+    let card_w = layout::DIALOG_W.min(f.w - 32.0);
+    let inner = card_w - 64.0;
+    let height = |f: &Frame, it: &PairItem| -> f32 {
+        match it {
+            PairItem::Title(t) => f.para_height(t, text::H1, inner),
+            PairItem::Body(t) => f.para_height(t, text::BODY, inner),
+            PairItem::Code(c) => p.label(c, text::PAIR_CODE).h,
+            PairItem::Countdown(r) => p.label(&format::countdown(*r), text::COUNTDOWN).h,
+            PairItem::Buttons(_) => layout::BUTTON_H,
         }
+    };
+    let content: f32 = items.iter().map(|it| height(f, it)).sum::<f32>() + GAP * (items.len().saturating_sub(1)) as f32;
+    let card_h = content + 56.0;
+    let card = Rect::new((f.w - card_w) / 2.0, ((f.h - card_h) / 2.0).max(24.0), card_w, card_h);
+    p.bordered(card, layout::DIALOG_RADIUS, pal.line, pal.surface);
+    let x = card.x + 32.0;
+    let mut y = card.y + 28.0;
+    for it in &items {
+        let h = height(f, it);
+        match it {
+            PairItem::Title(t) => {
+                f.para(t, text::H1, x, y, inner, pal.ink, Align::Start);
+            }
+            PairItem::Body(t) => {
+                f.para(t, text::BODY, x, y, inner, pal.soft, Align::Start);
+            }
+            PairItem::Code(c) => {
+                f.text(c, text::PAIR_CODE, x, y, pal.link);
+            }
+            PairItem::Countdown(r) => {
+                let num = p.label(&format::countdown(*r), text::COUNTDOWN);
+                p.draw(&num, x, y, pal.ink);
+                let frac = (f32::from(*r) / f32::from(layout::PAIR_COUNTDOWN_S)).clamp(0.0, 1.0);
+                let (bx, by) = (x + num.w + 14.0, y + num.h / 2.0 - 3.0);
+                let bw = (inner - num.w - 14.0).max(40.0);
+                p.fill_rrect(Rect::new(bx, by, bw, 6.0), 3.0, pal.line);
+                p.fill_rrect(Rect::new(bx, by, bw * frac, 6.0), 3.0, pal.link);
+            }
+            PairItem::Buttons(list) => actions_row(f, x, y, inner, list),
+        }
+        y += h + GAP;
     }
     // Disabled look while "Os códigos são iguais" waits for the service.
     if f.st
@@ -1461,10 +1467,22 @@ fn pairing(f: &mut Frame) {
     }
 }
 
-fn pair_cancel(f: &mut Frame, x: f32, y: f32) {
-    let cancel = f.t(MsgKey::PairCancel);
-    let w = f.button_width(&cancel, Kind::Default);
-    f.button(ControlId::PairCancel, Rect::new(x, y, w, 40.0), Kind::Default, &cancel, false);
+/// A row of actions across `w`: negative ones from the start, positive ones (`Kind::Primary`) packed at the end
+/// (owner, 09/11: the same order on both systems).
+pub(crate) fn actions_row(f: &mut Frame, x: f32, y: f32, w: f32, list: &[(ControlId, String, Kind)]) {
+    let mut left = x;
+    for (id, label, kind) in list.iter().filter(|b| b.2 != Kind::Primary) {
+        let bw = f.button_width(label, *kind);
+        f.button(*id, Rect::new(left, y, bw, layout::BUTTON_H), *kind, label, false);
+        left += bw + 8.0;
+    }
+    let mut right = x + w;
+    for (id, label, kind) in list.iter().rev().filter(|b| b.2 == Kind::Primary) {
+        let bw = f.button_width(label, *kind);
+        right -= bw;
+        f.button(*id, Rect::new(right, y, bw, layout::BUTTON_H), *kind, label, false);
+        right -= 8.0;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

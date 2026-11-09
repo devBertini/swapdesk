@@ -378,13 +378,14 @@ fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
         y += b.h;
     }
     y += 28.0;
+    // The secondary (negative) action at the start, the primary at the end (owner, 09/11).
     if let Some(pm) = &t.primary {
-        let pw = f.button_width(pm, Kind::Primary);
-        f.button(ControlId::DialogPrimary, Rect::new(x, y, pw, 40.0), Kind::Primary, pm, false);
+        let mut list = Vec::new();
         if let Some(s) = &t.secondary {
-            let sw = f.button_width(s, Kind::Default);
-            f.button(ControlId::DialogSecondary, Rect::new(x + pw + 10.0, y, sw, 40.0), Kind::Default, s, false);
+            list.push((ControlId::DialogSecondary, s.clone(), Kind::Default));
         }
+        list.push((ControlId::DialogPrimary, pm.clone(), Kind::Primary));
+        crate::screens_main::actions_row(f, x, y, r.w - 64.0, &list);
     }
 }
 

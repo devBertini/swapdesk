@@ -144,6 +144,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Scenario::from_name(name).ok_or_else(|| format!("Unknown scenario \"{name}\".\n\n{}", usage()))?;
         let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(waker.clone()));
         scenario.apply_to(&mut state);
+        if let Some(path) = &options.shot {
+            swapdesk_shell_mac::set_shot(path.clone());
+        }
         let startup = if scenario == Scenario::Carregando { state.startup_commands() } else { Vec::new() };
         run_with_host(state, backend, waker, startup, ViewerHooks::default());
         return Ok(());

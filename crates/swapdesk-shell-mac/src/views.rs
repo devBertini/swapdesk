@@ -15,13 +15,20 @@ use std::cell::Cell;
 use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSBezelStyle, NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSFont, NSLayoutAttribute, NSPopUpButton, NSRectFill, NSStackView, NSSwitch, NSTextField,
     NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSEdgeInsets, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_app_kit::{
+    NSFontAttributeName, NSForegroundColorAttributeName, NSKernAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
+};
+use objc2_foundation::{
+    MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSEdgeInsets, NSNumber, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString,
+};
 use swapdesk_ui::tokens::{Color, Palette, TextStyle, layout, text as tx};
 use swapdesk_ui::{ControlId, EditId, SelectId};
 
@@ -181,7 +188,29 @@ fn label_view(ctx: &Ctx, text: &str, style: TextStyle, ink: Color, wrap: Option<
     if let Some(w) = wrap {
         field.setPreferredMaxLayoutWidth(w);
     }
+    field.setAttributedStringValue(&styled(text, style, ink, wrap.is_some()));
     field
+}
+
+/// `text` with the token's whole look: font, colour, the line height (`size * line`, 1.45 for body text: without it
+/// AppKit sets wrapped lines about 1.2 apart and paragraphs read as one block) and the tracking.
+pub fn styled(text: &str, style: TextStyle, ink: Color, wraps: bool) -> Retained<NSAttributedString> {
+    let para = NSMutableParagraphStyle::new();
+    let line = f64::from(style.size * style.line);
+    para.setMinimumLineHeight(line);
+    para.setMaximumLineHeight(line);
+    para.setLineBreakMode(if wraps { NSLineBreakMode::ByWordWrapping } else { NSLineBreakMode::ByClipping });
+    let kern = NSNumber::new_f64(f64::from(style.tracking * style.size));
+    let (f, c) = (font(style), color(ink));
+    // SAFETY: AppKit's attribute name constants are immutable strings; each value has the type its key documents
+    // (NSFont, NSColor, NSParagraphStyle, NSNumber).
+    unsafe {
+        let keys =
+            [NSFontAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName, NSKernAttributeName];
+        let values: [&AnyObject; 4] = [f.as_ref(), c.as_ref(), para.as_ref(), kern.as_ref()];
+        let attrs = NSDictionary::from_slices(&keys, &values);
+        NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &ns(text), Some(&attrs))
+    }
 }
 
 pub fn vstack(ctx: &Ctx, views: &[Retained<NSView>], spacing: f64) -> Retained<NSStackView> {
@@ -443,6 +472,27 @@ pub fn block(ctx: &mut Ctx, b: &Block, width: f64, values: &[(EditId, String)]) 
             let views: Vec<Retained<NSView>> = buttons.iter().map(|b| view_of(&button(ctx, b))).collect();
             view_of(&hstack(ctx, &views, 8.0))
         }
+        Block::Actions(buttons) => {
+            // Negative actions at the start, positive ones at the end, across the whole width.
+            let mut views: Vec<Retained<NSView>> = Vec::new();
+            let mut gap_added = false;
+            for b in buttons {
+                if is_positive(b) && !gap_added {
+                    let spacer = NSView::new(ctx.mtm);
+                    spacer.setContentHuggingPriority_forOrientation(
+                        1.0,
+                        objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
+                    );
+                    views.push(view_of(&spacer));
+                    gap_added = true;
+                }
+                views.push(view_of(&button(ctx, b)));
+            }
+            let row = hstack(ctx, &views, 8.0);
+            row.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+            row.widthAnchor().constraintEqualToConstant(width).setActive(true);
+            view_of(&row)
+        }
         Block::Text(text) => view_of(&label_view(ctx, text, tx::BODY, ctx.pal.soft, Some(width))),
         Block::Entry { when, who, what, alert, label } => {
             let time = label_view(ctx, when, tx::SMALL, ctx.pal.soft, None);
@@ -468,8 +518,33 @@ pub fn block(ctx: &mut Ctx, b: &Block, width: f64, values: &[(EditId, String)]) 
             view_of(&row)
         }
         Block::Row(text) => view_of(&label_view(ctx, text, tx::SMALL, ctx.pal.ink, Some(width))),
+        Block::Countdown { time, left_milli, label } => {
+            // Board "Esperando o outro computador": the time large, then the bar of what is left of the 2 minutes.
+            let num = label_view(ctx, time, tx::COUNTDOWN, ctx.pal.ink, None);
+            num.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(f64::from(tx::COUNTDOWN.size), 0.3)));
+            let bar_w = (width - num.fittingSize().width - 14.0).max(40.0);
+            let track = PaintedView::create(ctx.mtm, frame(0.0, 0.0, bar_w, 6.0), Some(ctx.pal.line));
+            let fill = PaintedView::create(
+                ctx.mtm,
+                frame(0.0, 0.0, bar_w * f64::from(*left_milli) / 1000.0, 6.0),
+                Some(ctx.pal.link),
+            );
+            for v in [&track, &fill] {
+                v.setWantsLayer(true);
+                if let Some(l) = v.layer() {
+                    l.setCornerRadius(3.0);
+                }
+            }
+            track.addSubview(&fill);
+            track.widthAnchor().constraintEqualToConstant(bar_w).setActive(true);
+            track.heightAnchor().constraintEqualToConstant(6.0).setActive(true);
+            let row = hstack(ctx, &[view_of(&num), view_of(&track)], 14.0);
+            row.setAccessibilityElement(true);
+            describe(&*row, label, None, Some("AXProgressIndicator"));
+            view_of(&row)
+        }
         Block::Code { digits, label } => {
-            let l = label_view(ctx, digits, tx::PAIR_CODE, ctx.pal.ink, None);
+            let l = label_view(ctx, digits, tx::PAIR_CODE, ctx.pal.link, None);
             l.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(f64::from(tx::PAIR_CODE.size), 0.3)));
             // The screen reader says "Código 482 913", not the bare digits.
             describe(&*l, label, None, Some("AXStaticText"));
