@@ -59,7 +59,7 @@ app="$bundle_dir/Swapdesk.app"
 binary="$root/target/release/swapdesk-app-mac"
 
 if [ "$build" = 1 ]; then
-  cargo build --release -p swapdesk-app-mac "${features[@]}"
+  cargo build --release -p swapdesk-app-mac ${features[@]+"${features[@]}"}
 fi
 [ -x "$binary" ] || { echo "missing $binary (run without --no-build)" >&2; exit 1; }
 mkdir -p "$bundle_dir"

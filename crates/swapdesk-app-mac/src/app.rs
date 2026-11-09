@@ -201,10 +201,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let addrs = service.local_addrs().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
     trace.log(Level::Info, "app", format_args!("Swapdesk.app started (scratch: {})", options.use_scratch()));
 
+    // D32: the app hosts from inside its own process, so it must come back after a login. A normal run only.
+    if options.registers_login_item() {
+        let (level, line) = crate::login_item::register();
+        trace.log(level, "app", format_args!("{line}"));
+    }
+    let note_trace = Arc::clone(&trace);
     let hooks = ViewerHooks {
         video: Some(Arc::new(MacVideoSlot::new(&viewer))),
         input: Some(Arc::new(viewer.input())),
         show_swap: true,
+        note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
     };
     // The host drive owns the backend's events: the window gets a backend that says nothing.
     let observing: Arc<dyn UiBackend> = match &options.drive_host {

@@ -425,6 +425,10 @@ strings! {
     MenuPaste => "Colar", "Paste";
     MenuSelectAll => "Selecionar tudo", "Select All";
 
+    // The macOS menu bar status item (D32: the app keeps hosting with its window closed)
+    StatusOpen => "Abrir o Swapdesk", "Open Swapdesk";
+    StatusQuit => "Sair do Swapdesk", "Quit Swapdesk";
+
     // The "send keys" chords, written the same in both languages
     KeysCtrlAltDel => "Ctrl+Alt+Del", "Ctrl+Alt+Del";
     KeysAltTab => "Alt+Tab", "Alt+Tab";
@@ -532,5 +536,13 @@ mod tests {
             plain(Language::PtBr, MsgKey::SwapNote),
             "Durante a sessão, qualquer um dos dois pode pedir para inverter."
         );
+    }
+
+    #[test]
+    fn the_status_item_menu_is_named_in_both_languages() {
+        assert_eq!(plain(Language::PtBr, MsgKey::StatusOpen), "Abrir o Swapdesk");
+        assert_eq!(plain(Language::En, MsgKey::StatusOpen), "Open Swapdesk");
+        assert_eq!(plain(Language::PtBr, MsgKey::StatusQuit), "Sair do Swapdesk");
+        assert_eq!(plain(Language::En, MsgKey::StatusQuit), "Quit Swapdesk");
     }
 }

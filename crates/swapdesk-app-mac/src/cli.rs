@@ -27,6 +27,12 @@ impl Options {
     pub fn use_scratch(&self) -> bool {
         self.scratch || self.selftest.is_some() || self.drive_host.is_some()
     }
+
+    /// Only a normal run registers the app as a login item (D32): never the mock, a scratch run, the self-test or the
+    /// host drive, which would add a login item for a development copy.
+    pub fn registers_login_item(&self) -> bool {
+        self.mock.is_none() && !self.use_scratch()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +115,16 @@ mod tests {
         assert_eq!(o.drive_host, Some(PathBuf::from("/tmp/drive")));
         assert!(o.use_scratch() && !o.scratch);
         assert_eq!(parse(&args(&["--drive-host"])), Err(CliError::MissingValue("--drive-host")));
+    }
+
+    #[test]
+    fn only_a_normal_run_registers_the_login_item() {
+        assert!(parse(&[]).unwrap().registers_login_item());
+        assert!(parse(&args(&["-psn_0_1"])).unwrap().registers_login_item());
+        for flags in [&["--scratch"][..], &["--selftest", "/tmp/x"], &["--drive-host", "/tmp/d"], &["--mock", "pronto"]]
+        {
+            assert!(!parse(&args(flags)).unwrap().registers_login_item(), "{flags:?}");
+        }
     }
 
     #[test]

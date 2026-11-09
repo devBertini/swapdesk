@@ -36,7 +36,7 @@ features = [
     "NSAppearance", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
     "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
     "NSPanel", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
-    "NSStackView", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
+    "NSStackView", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
     "NSView", "NSVisualEffectView", "NSWindow", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
 ]
 

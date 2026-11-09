@@ -13,6 +13,7 @@
 //! header of each macOS module.
 
 pub mod input;
+pub mod launch;
 pub mod locale;
 pub mod model;
 
@@ -33,6 +34,8 @@ mod views;
 
 #[cfg(target_os = "macos")]
 pub use shell::{ViewerHooks, run, run_with_host, selftest};
+#[cfg(target_os = "macos")]
+pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};
 #[cfg(target_os = "macos")]
 pub use system::{Waker, system_dark, system_language};
 #[cfg(target_os = "macos")]

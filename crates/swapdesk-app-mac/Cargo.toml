@@ -65,7 +65,7 @@ objc2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread"]
+features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true
