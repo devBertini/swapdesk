@@ -70,7 +70,7 @@ Unattended access on macOS needs macOS 14.4 or later. FileVault pre-boot is out 
 - **What the service trusts.** Any process of the logged-in user can act as the interface (it can inject into it or open the pipe itself). So the service treats every UI connection as "this user" and grants only what the user could do by hand. Granting `UNATTENDED` or `ADMIN_TERMINAL`, and using them from this machine on another, needs an elevated connection (a UAC-started `Swapdesk.exe --elevated` instance on Windows, an Authorization Services right on macOS). The service enforces it.
 - **Framing and messages.** One message is a varint type, a varint length and a body, reusing the protocol's primitives. Every length is checked against its limit before any allocation, and an unknown type closes the pipe. The message set (service to helper, helper to service, UI requests and notifications, viewer media) is C2.4 in [CONTRACTS.md](CONTRACTS.md), implemented in `swapdesk-ipc`.
 
-Development mode, `swapdesk-service --console`, runs the same code as the current user without the Service Control Manager. See the [README](../README.md#development-mode).
+Development mode, `swapdesk-service --console`, runs the same code as the current user without the Service Control Manager. See [CONTRIBUTING.md](../CONTRIBUTING.md#development-mode).
 
 ## Wire protocol summary
 
@@ -125,7 +125,7 @@ Performance budgets (B1 to B8, such as median capture-to-present latency of at m
 
 ## Crate map
 
-The crates table with the stage that creates each crate is in [CONTRACTS.md](CONTRACTS.md). One line per crate is in the [README](../README.md#repository-layout). The dependency rules:
+The crates table with the stage that creates each crate is in [CONTRACTS.md](CONTRACTS.md). One line per crate is in [CONTRIBUTING.md](../CONTRIBUTING.md#repository-layout). The dependency rules:
 
 - `swapdesk-proto` depends on no OS and does no I/O.
 - Platform crates (`*-win`, later `*-mac`) implement the traits of `swapdesk-platform` and are the only crates allowed `unsafe`.

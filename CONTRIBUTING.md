@@ -1,19 +1,59 @@
 # Contributing to Swapdesk
 
-Swapdesk is pre-alpha and its design is still settling. Before a large change, open an issue to discuss it. The design documents ([docs/SPEC.md](docs/SPEC.md), [docs/CONTRACTS.md](docs/CONTRACTS.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/DECISIONS.md](docs/DECISIONS.md)) are the source of truth, and a code change that contradicts them needs a document change in the same pull request. By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go through [SECURITY.md](SECURITY.md), not public issues.
+Swapdesk 1.0 is out, and what is planned next is listed in the [README](README.md#not-in-10-yet). Before a large change, open an issue to discuss it. The design documents ([docs/SPEC.md](docs/SPEC.md), [docs/CONTRACTS.md](docs/CONTRACTS.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/DECISIONS.md](docs/DECISIONS.md)) are the source of truth, and a code change that contradicts them needs a document change in the same pull request. By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
-## Build
+## Build on Windows
 
-Windows is built and tested here. The macOS crates are not written yet, and when they are they can only be built and tested on a Mac.
+Requirements:
 
-Requirements: Rust stable (pinned by `rust-toolchain.toml`, with `rustfmt` and `clippy`), Visual Studio 2022 Build Tools with the Windows SDK, and `cargo-nextest`. The `opus` crate builds libopus, which needs CMake; a long build directory path can break that, so use a short `CARGO_TARGET_DIR` if it does.
+- Rust stable, as pinned by [rust-toolchain.toml](rust-toolchain.toml) (channel `stable`, with `rustfmt` and `clippy`). The workspace sets `rust-version = "1.99"` and edition 2024 in [Cargo.toml](Cargo.toml).
+- Visual Studio 2022 Build Tools and the Windows SDK.
+- [cargo-nextest](https://nexte.st/): `cargo install cargo-nextest`.
+- The `opus` crate builds libopus with CMake, and a long build path can break that build on Windows: if a build fails on path length, use a short `CARGO_TARGET_DIR`.
 
 ```sh
-cargo build --release
-cargo build -p swapdesk-service --profile release-service
+cargo nextest run --workspace          # the unit tests
+cargo build --release                  # UI, helpers (panic = abort)
+cargo build -p swapdesk-service --profile release-service   # service (panic = unwind)
 ```
 
-The development mode of the service and the interface is described in the [README](README.md#development-mode).
+The service is built with its own profile because it must isolate a panic to one session, while the interface and helpers abort (decision D15 in [docs/DECISIONS.md](docs/DECISIONS.md)).
+
+### Development mode
+
+The real service runs as LocalSystem under the Service Control Manager and needs the elevated install in [packaging/windows](packaging/windows/README.md). For development, run the same code as your own user.
+
+```sh
+# terminal 1: a development service (stop it by typing "stop", or creating a file named "stop" in its dev folder)
+swapdesk-service --console [--instance N] [--dev-loopback]
+
+# terminal 2: the interface (a development build), told which process to trust as the service
+Swapdesk.exe --instance N --service-pid <pid of that swapdesk-service>
+```
+
+- `--console` runs without the SCM, with its stores and trace log under `%LOCALAPPDATA%\Swapdesk-dev\<instance>`, and starts helpers from its own folder.
+- `--instance N` (0 to 99) lets several development copies share one PC. Pipe names get the suffix `-N` and both UDP ports move up by `10 * N`.
+- `--dev-loopback` listens on 127.0.0.1 only and accepts loopback peers, so two instances on one PC can talk. Never use it on a machine that should be reachable.
+- `Swapdesk.exe --service-pid` and `--instance` exist only in development builds: a plain `cargo build` (debug) has them, and a release build has them only with `cargo build --release -p swapdesk-app --features dev`. In a normal release they are unknown arguments (the program prints the accepted ones and exits with code 2), so a shipped interface always trusts the service the SCM reports.
+- `Swapdesk.exe --service-pid <pid>` makes the interface accept that process as the pipe server instead of the service the SCM reports. `Swapdesk.exe --mock <scenario>` (development builds) runs the interface against a scripted backend.
+
+In this mode the system helper does not have secure-desktop reach, because it runs as your user. Source: [crates/swapdesk-service/src/main.rs](crates/swapdesk-service/src/main.rs) and [crates/swapdesk-app/src/cli.rs](crates/swapdesk-app/src/cli.rs).
+
+### Unsigned builds and Windows Smart App Control
+
+Windows Smart App Control (and App Control for Business) can block unsigned executables, including freshly built test binaries (os error 4551). Release binaries stay unsigned until a signing path is chosen. Decision D22: no paid certificate or signing service. The free options under study are free code signing for open-source projects, a Microsoft Store package signed by Microsoft, and building from source. None is settled. For a blocked test binary, see [Test](#test) below.
+
+## Build on macOS
+
+The macOS crates (`*-mac`) are built and tested on a Mac with Xcode and Rust:
+
+```sh
+cargo nextest run -p swapdesk-shell-mac -p swapdesk-app-mac -p swapdesk-capture-mac -p swapdesk-codec-mac
+bash scripts/mac/build-app.sh            # target/bundle/Swapdesk.app, signed with a local development certificate
+bash packaging/macos/build-release.sh    # the release zip, signed ad hoc
+```
+
+`build-app.sh` creates a self-signed code-signing certificate in its own keychain file on the first run, so the macOS permissions survive rebuilds (decision D25).
 
 ## Test
 
@@ -41,6 +81,49 @@ or per crate.
 
 **Measurements** use the synthetic sources of the test fakes (contract C7), never a capture that films its own viewer.
 
+## Repository layout
+
+Crates live in `crates/`. Only the platform crates (`*-win`, `*-mac`) contain `unsafe`; the workspace forbids it everywhere else. Crate names and traits are fixed in [docs/CONTRACTS.md](docs/CONTRACTS.md).
+
+| Crate | What it holds |
+|---|---|
+| `swapdesk-proto` | The wire protocol types and codec. No OS, no I/O, no `unsafe`. |
+| `swapdesk-platform` | The traits platform crates implement (capture, codec, input, audio, and so on). |
+| `swapdesk-lan` | LAN guard, DNS-SD discovery, socket setup (TTL 1), Wake-on-LAN packet. |
+| `swapdesk-trust` | Device identity, pairing, TLS setup, trust store, lockout, audit log format. |
+| `swapdesk-session` | Control stream state machine, permission enforcement, presence, resume. |
+| `swapdesk-video` | Video sender and receiver over QUIC, staleness, rate control, keyframe requests. |
+| `swapdesk-audio` | Opus encode and decode, jitter buffer, audio packets. |
+| `swapdesk-keys` | Key tables between HID, Windows and macOS keys. |
+| `swapdesk-swap` | The swap state machine (request, accept, reverse session). |
+| `swapdesk-term` | Terminal and quick-action relay, terminal open policy and consent. |
+| `swapdesk-termview` | Terminal model: VT parser, cell grid, scrollback, selection, key encoding. |
+| `swapdesk-files` | File transfer with resume, SHA-256 check, safe receiving, remote folder listing. |
+| `swapdesk-extras` | Clipboard sync, chat, Wake-on-LAN sender, reconnect policy. |
+| `swapdesk-ipc` | The local message set and framing between service, helpers and interface. |
+| `swapdesk-host` | OS-free process logic of the helper loop and the service relays. |
+| `swapdesk-ui` | Interface state, command API, strings (pt-BR, en), design tokens, accessibility tree. |
+| `swapdesk-fakes` | Test fakes: synthetic screen, recording input sink, sine source, log capture, and others. |
+| `swapdesk-netsim` | A UDP socket wrapper that injects loss, delay and reordering for tests. |
+| `swapdesk-crossdrive` | Test harness for runs between two machines. |
+| `swapdesk-net-win`, `swapdesk-net-mac` | Network interface listing (physical only), network category and firewall checks. |
+| `swapdesk-secret-win`, `swapdesk-secret-mac` | Secret store: DPAPI plus folder permissions on Windows, files readable only by the user on macOS (D31). |
+| `swapdesk-sys-win` | Windows service control, helper launch, named pipes and their ACLs, session watcher, trace log. |
+| `swapdesk-capture-win` | Screen capture with Desktop Duplication. |
+| `swapdesk-codec-win`, `swapdesk-codec-mac` | H.264 with Media Foundation and NVENC on Windows, VideoToolbox on macOS. |
+| `swapdesk-render-win`, `swapdesk-render-mac` | Video renderer: DirectComposition swap chain on Windows, sample buffer layer on macOS. |
+| `swapdesk-input-win`, `swapdesk-input-mac` | Input injection and the keyboard grab (`SendInput` and a low-level hook; a CGEventTap). |
+| `swapdesk-audio-win`, `swapdesk-audio-mac` | System audio: WASAPI loopback and playback; Core Audio playback. |
+| `swapdesk-shell-win`, `swapdesk-shell-mac` | The native shells: Win32 with Direct2D, AppKit. |
+| `swapdesk-core-mac` | The in-process service core of the macOS app (D27, D32). |
+| `swapdesk-capture-mac` | Screen and system audio capture with ScreenCaptureKit. |
+| `swapdesk-app-mac` | Binary: `Swapdesk.app`, interface, viewer and host. |
+| `swapdesk-service` | Binary: the Windows service (and the `--console` development mode). |
+| `swapdesk-helper` | Binary: the session helper started by the service. |
+| `swapdesk-app` | Binary: `Swapdesk.exe`, the interface and viewer. |
+
+Other folders: `packaging/windows/` (the install scripts), `packaging/macos/` (the release zip), `probes/mac/` (the MacBook probe).
+
 ## Code rules
 
 - **`unsafe` only in platform crates.** Crates named `*-win` or `*-mac` may use `unsafe`. Every other crate forbids it through the workspace lints. `swapdesk-proto` has no OS, no I/O and no `unsafe`.
@@ -50,7 +133,7 @@ or per crate.
 - **Never log secrets:** the private key, pairing nonces and codes, the TLS exporter output, tokens, terminal bytes, text input, clipboard, chat or file contents.
 - **User-facing strings live only in `swapdesk-ui`** (languages pt-BR and en), together with the design tokens. Shells and other crates do not hold their own strings.
 - Every screen follows the responsiveness rules R-UI-1 to R-UI-12 in the spec.
-- Code, comments and documents are written in English.
+- Code, comments and documents are written in English. The one exception is [README.pt-BR.md](README.pt-BR.md), the Portuguese copy of the README: a change to the README changes it in the same pull request.
 - Run `cargo clippy` and `cargo fmt` before you push.
 
 ## Commits and pull requests
