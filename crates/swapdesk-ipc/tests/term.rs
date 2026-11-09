@@ -31,7 +31,7 @@ fn all_messages() -> Vec<(u64, Message)> {
     vec![
         (0x70, Message::PtyOpen { id: 7, cols: 120, rows: 30, session_user: Text("S-1-5-21-1-2-3-1001".into()) }),
         (0x70, Message::PtyOpen { id: 8, cols: 80, rows: 24, session_user: Text(String::new()) }),
-        (0x71, Message::PtyOpenReply { id: 7, code: ErrorCode::NoError, account: Text("claudio".into()) }),
+        (0x71, Message::PtyOpenReply { id: 7, code: ErrorCode::NoError, account: Text("alex".into()) }),
         (0x71, Message::PtyOpenReply { id: 7, code: ErrorCode::NotPermitted, account: Text(String::new()) }),
         (0x72, Message::PtyInput { id: 7, bytes: bytes(b"dir\r") }),
         (0x72, Message::PtyInput { id: 7, bytes: bytes(b"") }),
@@ -70,7 +70,7 @@ fn the_ui_ops_the_reply_and_the_notification_carry_their_numbers() {
         let msg = Message::UiRequest { req: 1, op };
         assert_eq!(decode_message(&encode_message(&msg).unwrap()).unwrap(), msg);
     }
-    let opened = ReplyBody::TermOpened { term_id: 5, outcome: TermOutcome::Opened, account: Text("claudio".into()) };
+    let opened = ReplyBody::TermOpened { term_id: 5, outcome: TermOutcome::Opened, account: Text("alex".into()) };
     assert_eq!(ReplyBody::decode(32, &opened.encode().unwrap()).unwrap(), opened);
     for outcome in TermOutcome::ALL {
         let refused = ReplyBody::TermOpened { term_id: 0, outcome: *outcome, account: Text(String::new()) };
@@ -108,19 +108,19 @@ fn debug_prints_lengths_and_never_a_terminal_byte_or_the_session_user() {
         Message::TermInput { term_id: 1, bytes: Bytes(secret.as_bytes().to_vec()) },
         Message::TermOutput { term_id: 1, bytes: Bytes(secret.as_bytes().to_vec()) },
         Message::PtyOpen { id: 1, cols: 80, rows: 24, session_user: Text(user.into()) },
-        Message::PtyOpenReply { id: 1, code: ErrorCode::NoError, account: Text("claudio".into()) },
+        Message::PtyOpenReply { id: 1, code: ErrorCode::NoError, account: Text("alex".into()) },
         Message::UiReply { req: 1, status: 0, body: Bytes(secret.as_bytes().to_vec()) },
     ];
     for m in shown {
         let text = format!("{m:?}");
         assert!(
-            !text.contains(secret) && !text.contains("hunter") && !text.contains(user) && !text.contains("claudio"),
+            !text.contains(secret) && !text.contains("hunter") && !text.contains(user) && !text.contains("alex"),
             "{text}"
         );
         assert!(text.contains("len"), "a length is shown: {text}");
     }
-    let reply = ReplyBody::TermOpened { term_id: 1, outcome: TermOutcome::Opened, account: Text("claudio".into()) };
-    assert!(!format!("{reply:?}").contains("claudio"));
+    let reply = ReplyBody::TermOpened { term_id: 1, outcome: TermOutcome::Opened, account: Text("alex".into()) };
+    assert!(!format!("{reply:?}").contains("alex"));
 }
 
 #[test]

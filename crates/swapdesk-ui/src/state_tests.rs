@@ -459,8 +459,8 @@ fn the_drawer_opens_per_tab_and_asks_for_its_data_once() {
     let a = s.activate(ControlId::TbTerminal);
     assert!(matches!(a.commands[0], Command::TermOpen { admin: false, .. }));
     assert_eq!(s.drawer(), Some(DrawerTab::Terminal));
-    s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "claudio".into() } });
-    assert_eq!(s.term_account(), Some("claudio"));
+    s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } });
+    assert_eq!(s.term_account(), Some("alex"));
     s.activate(ControlId::DrawerTab(DrawerTab::Files));
     assert_eq!(s.drawer(), Some(DrawerTab::Files));
     let a = s.activate(ControlId::DrawerTab(DrawerTab::Terminal));
@@ -1143,7 +1143,7 @@ fn answer_open(s: &mut UiState, cmds: &[Command], term_id: u32) {
     let t = Ticket(9000 + u64::from(term_id));
     s.track(t, &cmds[0]);
     s.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::TermId(term_id)) });
-    s.apply(UiEvent::Term { term_id, event: TermEvent::Opened { account: "claudio".into() } });
+    s.apply(UiEvent::Term { term_id, event: TermEvent::Opened { account: "alex".into() } });
 }
 
 #[test]
@@ -1156,7 +1156,7 @@ fn the_terminal_is_asked_for_when_the_panel_first_opens_and_goes_through_its_pha
     assert_eq!(s.term_id(), None, "the id comes with the reply");
     answer_open(&mut s, &cmds, 7);
     assert_eq!(*s.term_phase(), TermPhase::Open { admin: false });
-    assert_eq!((s.term_id(), s.term_account()), (Some(7), Some("claudio")));
+    assert_eq!((s.term_id(), s.term_account()), (Some(7), Some("alex")));
     // The grid is a control while a shell runs, so the keyboard can reach it.
     let ids: Vec<_> = s.controls(WindowKind::Viewer).into_iter().map(|c| c.id).collect();
     assert!(ids.contains(&ControlId::TermGrid));

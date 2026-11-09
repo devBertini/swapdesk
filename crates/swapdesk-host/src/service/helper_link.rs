@@ -334,7 +334,7 @@ mod debug_tests {
             HelperEvent::PtyOutput { id: 1, bytes: vec![233; 9] },
             HelperEvent::PtyOutput { id: 1, bytes: b"senha-no-shell".to_vec() },
             HelperEvent::Fault { code: ErrorCode::IoFailed, what: "caminho-secreto".into() },
-            HelperEvent::PtyOpenReply { id: 2, code: ErrorCode::NoError, account: "claudio-privado".into() },
+            HelperEvent::PtyOpenReply { id: 2, code: ErrorCode::NoError, account: "alex-privado".into() },
         ];
         for event in &events {
             let shown = format!("{event:?}");

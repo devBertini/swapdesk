@@ -24,11 +24,11 @@ impl FakeSessionWatcher {
         Self { inner: Arc::new((Mutex::new(WatcherInner { state, events: VecDeque::new() }), Condvar::new())) }
     }
 
-    /// A user "claudio" logged in on session 1 at the default desktop.
+    /// A user "alex" logged in on session 1 at the default desktop.
     pub fn logged_in() -> Self {
         Self::new(ConsoleState {
             session_id: Some(1),
-            user: Some("claudio".to_string()),
+            user: Some("alex".to_string()),
             user_is_admin: false,
             desktop: Desktop::Default,
         })

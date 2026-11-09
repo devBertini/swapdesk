@@ -246,7 +246,7 @@ mod tests {
         let mut s = TrustStore::default();
         let mut d = device(1);
         d.grants_here = PermissionSet::CONTROL;
-        d.unattended_granted_by = Some(UserRef { id: "S-1-5-21-1".into(), name: "claudio".into() });
+        d.unattended_granted_by = Some(UserRef { id: "S-1-5-21-1".into(), name: "alex".into() });
         d.grants_there = Some(PermissionSet::VIEW);
         s.devices.push(d);
         s.devices.push(device(2));

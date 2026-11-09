@@ -209,7 +209,7 @@ fn a_paired_device_typed_by_address_or_seen_by_dns_sd_is_one_entry_on_the_networ
     let announce = |addr: Ipv4Addr| {
         m.presence.set(vec![PresencePeer {
             device_id: mac.device_id(),
-            name: "Mac do Claudio".into(),
+            name: "Mac da Alex".into(),
             os: Os::MacOs,
             pairing_open: false,
             addrs: vec![addr],

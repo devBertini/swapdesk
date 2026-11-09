@@ -76,7 +76,7 @@ impl SystemHooks for TestHooks {
 }
 
 fn user(sid: &str) -> UserRef {
-    UserRef { id: sid.into(), name: "claudio".into() }
+    UserRef { id: sid.into(), name: "alex".into() }
 }
 
 fn info(admin: bool) -> ConnInfo {

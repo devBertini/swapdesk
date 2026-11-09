@@ -29,7 +29,7 @@ fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
     NOW_MS - (15 * HOUR + 30 * MIN) + hour * HOUR + minute * MIN - back_days * DAY
 }
 
-pub const MAC: &str = "mac-claudio";
+pub const MAC: &str = "mac-alex";
 pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
 
@@ -487,7 +487,7 @@ impl Scenario {
                 mac(),
                 Event(Self::viewer_session(15)),
                 Activate(ControlId::TbTerminal),
-                Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "claudio".into() } }),
+                Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } }),
             ],
             Scenario::Arquivos => vec![
                 mac(),
@@ -933,7 +933,7 @@ impl World {
                 Ok(Reply::RequestId(9))
             }
             Command::TermOpen { .. } => {
-                sh.later(ms(100), UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "claudio".into() } });
+                sh.later(ms(100), UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } });
                 Ok(Reply::TermId(1))
             }
             Command::FilesList { .. } => {

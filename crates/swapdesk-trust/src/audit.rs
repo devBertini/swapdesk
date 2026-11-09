@@ -367,7 +367,7 @@ mod tests {
             AuditEvent::GrantsChanged {
                 from: PermissionSet::EMPTY,
                 to: PermissionSet::UNATTENDED,
-                by: UserRef { id: "501".into(), name: "claudio".into() },
+                by: UserRef { id: "501".into(), name: "alex".into() },
             },
             AuditEvent::Forgotten,
             AuditEvent::AddressBlocked([10, 0, 0, 5]),

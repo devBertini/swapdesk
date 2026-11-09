@@ -394,7 +394,7 @@ pub struct PtyRequest {
 }
 
 pub trait Pty: Send {
-    /// The account the shell runs as ("claudio", "SYSTEM", "root").
+    /// The account the shell runs as ("alex", "SYSTEM", "root").
     fn account(&self) -> &str;
     fn reader(&mut self) -> Result<Box<dyn std::io::Read + Send>>;
     fn writer(&mut self) -> Result<Box<dyn std::io::Write + Send>>;

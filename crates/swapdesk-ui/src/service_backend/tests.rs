@@ -557,12 +557,12 @@ fn an_open_terminal_is_an_id_then_the_account_and_input_is_written_as_messages()
     let t = b.send(Command::TermOpen { session_id: 4, admin: false, cols: 100, rows: 30 });
     let (req, op) = svc.request();
     assert_eq!(op, UiOp::TermOpen { session_id: 4, cols: 100, rows: 30, admin: false });
-    svc.reply(req, term_opened(7, swapdesk_ipc::TermOutcome::Opened, "claudio"));
+    svc.reply(req, term_opened(7, swapdesk_ipc::TermOutcome::Opened, "alex"));
     assert_eq!(
         collect(&b, 2),
         vec![
             UiEvent::Reply { ticket: t, result: Ok(Reply::TermId(7)) },
-            UiEvent::Term { term_id: 7, event: TermEvent::Opened { account: "claudio".into() } }
+            UiEvent::Term { term_id: 7, event: TermEvent::Opened { account: "alex".into() } }
         ],
         "the id answers the command, the account follows as the terminal's own event"
     );
