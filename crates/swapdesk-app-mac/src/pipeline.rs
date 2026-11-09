@@ -266,6 +266,9 @@ impl MacViewer {
     fn refresh_input(&self, ui: &mut Ui) {
         let allowed = Self::can_input(ui);
         let id = ui.session.as_ref().map_or(0, |s| s.id);
+        if self.shared.local_pointer.swap(allowed, Ordering::SeqCst) != allowed {
+            self.handoff.poke();
+        }
         if allowed {
             self.input_session.store(id, Ordering::SeqCst);
             if !ui.grabbing && ui.grabber.start(self.input_tx.clone()).is_ok() {

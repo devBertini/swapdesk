@@ -1252,6 +1252,12 @@ impl UiState {
         if self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
             self.connect_end = None;
         }
+        let was_active = self.sessions.iter().any(|s| s.id == id && matches!(s.state, SessionState::Active { .. }));
+        if !was_active && matches!(state, SessionState::Active { role: Role::Viewer, .. }) {
+            // The host captures sound only once it is told to (D16): the toolbar's switch is sent as the session
+            // comes up, or the button shows on while nothing plays.
+            self.followups.push(Command::SetAudio { session_id: id, on: self.audio_on });
+        }
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
             s.state = state;
             s.device_id = device_id;

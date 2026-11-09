@@ -89,6 +89,11 @@ impl<F> Handoff<F> {
         self.notify();
     }
 
+    /// Wakes the main thread with nothing queued, so it applies a state change (the local pointer switch) at once.
+    pub fn poke(&self) {
+        self.notify();
+    }
+
     /// Takes everything queued. The wake flag is cleared first, so a push that lands after the take wakes again.
     pub fn drain(&self) -> Drained<F> {
         self.pending.store(false, Ordering::SeqCst);

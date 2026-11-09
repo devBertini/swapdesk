@@ -728,6 +728,8 @@ fn chat_counts_unread_reads_them_when_the_panel_opens_and_keeps_each_sides_numbe
     assert_eq!(s.chat().len(), 2);
     assert_eq!(s.chat_unread(), 1, "what I wrote is not unread");
 
+    // The session coming up already sent the audio switch.
+    assert_eq!(s.take_followups(), vec![Command::SetAudio { session_id: 1, on: true }]);
     // Opening the panel reads everything and tells the peer how far.
     let a = s.activate(ControlId::TbChat);
     assert_eq!(a.commands, vec![Command::ChatMarkRead { session_id: 1, up_to: 1 }]);
@@ -975,6 +977,21 @@ fn a_display_listing_belongs_to_the_session_its_command_named() {
     // The event names its session and keeps a valid current display.
     s.apply(UiEvent::Displays { session_id: 2, displays: vec![disp(4, true)] });
     assert_eq!(s.sessions()[1].display, Some(4));
+}
+
+#[test]
+fn a_viewer_session_coming_up_sends_the_audio_switch_once() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, SessionState::Connecting));
+    assert!(s.take_followups().is_empty(), "nothing before the session is up");
+    let active = SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE };
+    s.apply(session_event(3, MAC, active.clone()));
+    assert_eq!(s.take_followups(), vec![Command::SetAudio { session_id: 3, on: true }]);
+    s.apply(session_event(3, MAC, active));
+    assert!(s.take_followups().is_empty(), "an update of a live session sends nothing");
+    let host = SessionState::Active { since_ms: 0, role: Role::Host, granted: Permissions::NONE };
+    s.apply(session_event(4, MAC, host));
+    assert!(s.take_followups().is_empty(), "the host side has no audio switch");
 }
 
 #[test]

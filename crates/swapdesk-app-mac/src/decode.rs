@@ -40,6 +40,9 @@ pub struct Shared {
     pub attached: AtomicBool,
     /// The remote cursor is drawn: the local pointer may be hidden.
     pub cursor_drawn: AtomicBool,
+    /// The viewer controls the host: the local pointer is the one shown and the remote cursor layer stays hidden (the
+    /// drawn arrow would trail it by a round trip). Written by the pipeline, read on the main thread.
+    pub local_pointer: AtomicBool,
     /// The display the last picture came from.
     pub display: AtomicU16,
     pub last_error: Mutex<Option<String>>,
