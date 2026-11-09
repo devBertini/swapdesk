@@ -32,6 +32,8 @@ pub struct Shared {
     placeholder_on: Cell<bool>,
     /// The banner's minute timer is armed (one-shot in effect: re-armed after each firing).
     banner_on: Cell<bool>,
+    /// The appearance the windows (their DWM title bars) were last given: the state's effective theme.
+    dark_applied: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
     pub terminal: RefCell<TerminalPane>,
 }
@@ -93,6 +95,7 @@ pub fn run_with_host(
     {
         let _ = state.set_receive_dir(dir);
     }
+    let dark_now = state.dark();
     let shared = Rc::new(Shared {
         gfx,
         state: RefCell::new(state),
@@ -103,6 +106,7 @@ pub fn run_with_host(
         tick_on: Cell::new(false),
         placeholder_on: Cell::new(false),
         banner_on: Cell::new(false),
+        dark_applied: Cell::new(dark_now),
         terminal: RefCell::new(TerminalPane::default()),
     });
     // Terminal output arrives on the pipe's reader thread and wakes this thread to pump and repaint.
@@ -325,12 +329,21 @@ impl Shared {
     pub fn system_theme_changed(self: &Rc<Self>) {
         let dark = system_dark();
         let c = self.state.borrow_mut().set_dark(dark);
+        self.refresh(c);
+    }
+
+    /// Gives every window the state's effective appearance (title bar and canvas) when it differs from the last one
+    /// applied: the OS changed while the theme is "Sistema", or Ajustes chose another theme.
+    fn sync_theme(&self) {
+        let dark = self.state.borrow().dark();
+        if self.dark_applied.replace(dark) == dark {
+            return;
+        }
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
         let kinds: Vec<WindowKind> = windows.iter().map(|w| w.kind).collect();
         for i in crate::window::theme_targets(&kinds) {
             windows[i].theme_changed();
         }
-        self.refresh(c);
     }
 
     /// The viewer's close button: the session ends through the service, the window goes when it has.
@@ -363,6 +376,7 @@ impl Shared {
                 let _ = DestroyWindow(w.hwnd());
             }
         }
+        self.sync_theme();
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
         if let Some(viewer) = windows.iter().find(|w| w.kind == WindowKind::Viewer) {
             let (on, monitor) = {

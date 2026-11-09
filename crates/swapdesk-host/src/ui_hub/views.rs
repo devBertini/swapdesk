@@ -8,7 +8,7 @@ use std::sync::Weak;
 
 use swapdesk_ipc::{
     ApiCode, AuditView, DeviceStatus, DeviceView, Direction as ViewDirection, KeyboardMode, Language, Msg,
-    NetCategoryView, NetworkStatus, Notice, Notify, Ready, SessionSummary, Settings, Text, ThisDevice,
+    NetCategoryView, NetworkStatus, Notice, Notify, Ready, SessionSummary, Settings, Text, Theme, ThisDevice,
 };
 use swapdesk_lan::guard::approved_addrs;
 use swapdesk_platform::{NetCategory, NetInterface};
@@ -211,6 +211,7 @@ impl Hub {
             show_stats: false,
             keyboard_mode: KeyboardMode::Auto,
             swap_ctrl_cmd: false,
+            theme: Theme::System,
         }
     }
 

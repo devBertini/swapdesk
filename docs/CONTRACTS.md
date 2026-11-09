@@ -541,7 +541,7 @@ Note (stage 10): wall-clock time for C5 records and the lockout comes from a `Wa
 
 **Rate limit:** entries caused by unauthenticated peers (`UnknownDeviceRejected`, `PairRefused`, `AddressBlocked`; never `PairFailed` or `PairingLocked`) are written at most once per address per minute and 60 per hour in total; the rest are counted and written as one `Suppressed` entry per hour, written with the first entry of any kind after the hour or when the log closes (GUESS numbers).
 
-Per-user UI settings (language, keyboard mode, quality, overlay, Ctrl/Cmd swap, open at login) are a `UserSettings` record in the same codec, in `%APPDATA%\Swapdesk\ui.bin` (Windows) or `~/Library/Application Support/Swapdesk/ui.bin` (macOS), written by the UI: not secret, not read by the service.
+Per-user UI settings (language, theme, keyboard mode, quality, overlay, Ctrl/Cmd swap, open at login, release key) are a `UserSettings` record in `%APPDATA%\Swapdesk\ui.bin` (Windows) or `~/Library/Application Support/Swapdesk/ui.bin` (macOS), written by the UI: not secret, not read by the service. Implemented in `swapdesk-ui` (`prefs.rs`: `UserPrefs`, `PrefsStore`, `FilePrefs`) and loaded by the app before the first paint (`UiState::load_prefs`). Layout: `format: u16` LE (1), then one byte each, in this order: language (0 PtBr, 1 En), theme (0 System, 1 Light, 2 Dark), quality (0 Auto, 1 Text, 2 Motion), show_stats, keyboard_mode (0 Auto, 1 Physical, 2 Text), swap_ctrl_cmd, open_at_login, release_key (0 CtrlAlt, 1 RightCtrl, 2 CtrlAltShift); exactly 10 bytes. A new field means `format` 2 (tags never renumber). A missing file is a first start (defaults); a file of another format, of the wrong length, with a tag out of range or unreadable reads as the defaults and leaves one trace line (reason only); it never stops the start. Written on each change to a temporary file beside it (`ui.bin.tmp`), flushed, then renamed over `ui.bin`. The UI's copy wins over the service's answer for these fields (the service answers defaults); the viewer pipeline takes the keyboard mode, the Ctrl/Cmd swap and the release key from it at start. Development instances (`--instance`, `--service-pid`) and scratch runs on the Mac do not read or write it.
 
 ### C5.2 On disk
 | Item | Windows | macOS |
@@ -646,8 +646,10 @@ pub struct Settings {
     pub name: String, pub language: Language, pub open_at_login: bool, pub service_enabled: bool,
     pub lock_on_end: bool, pub keep_awake: bool, pub quality: Quality, pub show_stats: bool,
     pub keyboard_mode: KeyboardMode, pub swap_ctrl_cmd: bool,
+    pub theme: Theme,   // appended last: the wire struct is positional, UI and service come from one build
 }
 pub enum Language { PtBr, En }
+pub enum Theme { System, Light, Dark }   // wire tags 0, 1, 2 (never renumbered); System follows the OS, live
 pub enum SettingsTarget { NetworkCategory, Accessibility, InputMonitoring, ScreenRecording, LoginItems }
 pub struct Msg { pub key: MsgKey, pub args: Vec<String> }   // MsgKey: one variant per string of strings.rs
 

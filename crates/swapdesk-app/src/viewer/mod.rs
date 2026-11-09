@@ -199,6 +199,20 @@ impl ViewerPipeline {
         *lock(&self.out) = Some(out);
     }
 
+    /// The per-user keyboard settings read from `ui.bin` at start (C5.1), before any session.
+    pub fn set_user_prefs(
+        &self,
+        mode: swapdesk_ui::KeyboardMode,
+        swap_ctrl_cmd: bool,
+        release: swapdesk_ui::ReleaseKey,
+    ) {
+        let mut ui = lock(&self.ui);
+        ui.keys.mode = mode;
+        ui.keys.swap_ctrl_cmd = swap_ctrl_cmd;
+        ui.keys.release = release;
+        self.apply_key_config(&mut ui);
+    }
+
     /// Who to wake when a viewer shortcut was recognised on the hook thread (the shell's waker).
     pub fn set_waker(&self, waker: Arc<dyn UiWaker>) {
         *lock(&self.shortcuts.waker) = Some(waker);
@@ -386,11 +400,8 @@ impl ViewerPipeline {
                 }
             }
             UiEvent::DevicesChanged(list) => self.learn_devices(&mut ui, list),
-            UiEvent::SettingsChanged(s) | UiEvent::Reply { result: Ok(Reply::Settings(s)), .. } => {
-                ui.keys.mode = s.keyboard_mode;
-                ui.keys.swap_ctrl_cmd = s.swap_ctrl_cmd;
-                self.apply_key_config(&mut ui);
-            }
+            // The keyboard mode and the Ctrl/Cmd swap are per user (C5.1): the service's copy is a default, so they come
+            // from `set_user_prefs` at start and from the UI's own `SetSettings`, never from these events.
             UiEvent::Reply { result: Ok(Reply::Devices(list)), .. } => self.learn_devices(&mut ui, list),
             UiEvent::Reply { result: Ok(Reply::Device(d)), .. } => self.learn_devices(&mut ui, std::slice::from_ref(d)),
             _ => {}

@@ -122,6 +122,7 @@ fn settings() -> Settings {
         show_stats: false,
         keyboard_mode: KeyboardMode::Auto,
         swap_ctrl_cmd: true,
+        theme: Theme::System,
     }
 }
 

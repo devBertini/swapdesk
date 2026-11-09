@@ -493,12 +493,22 @@ pub struct Settings {
     pub show_stats: bool,
     pub keyboard_mode: KeyboardMode,
     pub swap_ctrl_cmd: bool,
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     PtBr,
     En,
+}
+
+/// The theme chosen in Ajustes; `System` follows the OS (live).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

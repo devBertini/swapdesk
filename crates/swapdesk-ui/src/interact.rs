@@ -598,6 +598,8 @@ impl UiState {
         c.value = Some(set.name.clone());
         let c = s.add(ControlId::Select(SelectId::Language), UiRole::ComboBox, self.name_of(MsgKey::FieldLanguage));
         c.value = Some(self.select_value(SelectId::Language));
+        let c = s.add(ControlId::Select(SelectId::Theme), UiRole::ComboBox, self.name_of(MsgKey::FieldTheme));
+        c.value = Some(self.select_value(SelectId::Theme));
         s.switch(ControlId::OpenAtLogin, self.name_of(MsgKey::OpenAtLogin), set.open_at_login, None);
         s.text(
             UiRole::Text,
@@ -646,6 +648,11 @@ impl UiState {
             SelectId::Language => vec![
                 (self.name_of(MsgKey::LangPt), set.language == Language::PtBr),
                 (self.name_of(MsgKey::LangEn), set.language == Language::En),
+            ],
+            SelectId::Theme => vec![
+                (self.name_of(MsgKey::ThemeSystem), set.theme == Theme::System),
+                (self.name_of(MsgKey::ThemeLight), set.theme == Theme::Light),
+                (self.name_of(MsgKey::ThemeDark), set.theme == Theme::Dark),
             ],
             SelectId::Quality => vec![
                 (self.name_of(MsgKey::QualityAuto), set.quality == Quality::Auto),
@@ -1478,9 +1485,12 @@ impl UiState {
         let mut new = old.clone();
         f(&mut new);
         self.undo_slot = Some(Undo::Settings(Box::new(old)));
+        self.lang = new.language;
+        self.theme = new.theme;
         self.settings = Some(new.clone());
         a.changed = Changed::ALL;
         a.commands.push(Command::SetSettings { settings: new });
+        self.save_prefs();
     }
 
     fn activate_dialog(&mut self, id: ControlId, a: &mut Activation) {
@@ -1606,6 +1616,7 @@ impl UiState {
         let mut a = Activation { changed: Changed::ALL, ..Activation::default() };
         self.toggle_setting(&mut a, |s| match id {
             SelectId::Language => s.language = if index == 0 { Language::PtBr } else { Language::En },
+            SelectId::Theme => s.theme = [Theme::System, Theme::Light, Theme::Dark][index.min(2)],
             SelectId::Quality => s.quality = [Quality::Auto, Quality::Text, Quality::Motion][index.min(2)],
             SelectId::Keyboard => {
                 s.keyboard_mode = [KeyboardMode::Auto, KeyboardMode::Physical, KeyboardMode::Text][index.min(2)]
@@ -1615,6 +1626,10 @@ impl UiState {
         if id == SelectId::Language {
             self.lang = self.settings.as_ref().map_or(self.lang, |s| s.language);
         }
+        if id == SelectId::Theme {
+            self.theme = self.settings.as_ref().map_or(self.theme, |s| s.theme);
+        }
+        self.save_prefs();
         a
     }
 

@@ -107,6 +107,7 @@ pub enum NoticeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelectId {
     Language,
+    Theme,
     Quality,
     Keyboard,
     /// The chord that releases the keyboard in the viewer (UI-local, D30).
@@ -360,7 +361,14 @@ pub struct UiState {
     /// Commands an event calls for (a pairing id that starts the initiator), sent by the shell after `apply`.
     pub(crate) followups: Vec<Command>,
     pub(crate) lang: Language,
+    /// What the OS says (`ThemeChanged`); used while `theme` is `System`.
     pub(crate) dark: bool,
+    /// The theme chosen in Ajustes (per user, like the language: the UI's copy wins over the service's).
+    pub(crate) theme: Theme,
+    /// The per-user record of C5.1 once a store is attached (`load_prefs`): the UI's own copy of the per-user
+    /// settings, which wins over what the service answers and is written on each change.
+    pub(crate) ui: Option<crate::prefs::UserPrefs>,
+    prefs_store: Option<Box<dyn crate::prefs::PrefsStore>>,
     pub(crate) clock: Clock,
     pub(crate) this: Option<ThisDevice>,
     pub(crate) network: Option<NetworkStatus>,
@@ -431,6 +439,9 @@ impl UiState {
             followups: Vec::new(),
             lang,
             dark,
+            theme: Theme::System,
+            ui: None,
+            prefs_store: None,
             clock: Clock::default(),
             this: None,
             network: None,
@@ -486,8 +497,16 @@ impl UiState {
     pub fn language(&self) -> Language {
         self.lang
     }
+    /// Whether the interface is drawn dark: the choice of Ajustes, or the OS's while it is `Sistema`.
     pub fn dark(&self) -> bool {
-        self.dark
+        match self.theme {
+            Theme::System => self.dark,
+            Theme::Light => false,
+            Theme::Dark => true,
+        }
+    }
+    pub fn theme(&self) -> Theme {
+        self.theme
     }
     pub fn clock(&self) -> Clock {
         self.clock
@@ -892,12 +911,65 @@ impl UiState {
         self.clock = clock;
     }
 
+    /// The OS's appearance changed (or was read): it shows only while the theme is `Sistema`.
     pub fn set_dark(&mut self, dark: bool) -> Changed {
-        if self.dark == dark {
-            return Changed::NONE;
-        }
+        let before = self.dark();
         self.dark = dark;
-        Changed::ALL
+        if self.dark() == before { Changed::NONE } else { Changed::ALL }
+    }
+
+    /// Attaches the per-user record (C5.1) and applies it: language, theme, release key and the rest of the
+    /// per-user settings. Call before the first paint. A record that cannot be used reads as the defaults (a trace
+    /// line, never a failure).
+    pub fn load_prefs(&mut self, store: Box<dyn crate::prefs::PrefsStore>) {
+        // No record yet (first start): the language the window started with, the system's, stays.
+        let p = crate::prefs::load_or(&*store, crate::prefs::UserPrefs { language: self.lang, ..Default::default() });
+        self.lang = p.language;
+        self.theme = p.theme;
+        self.release_key = p.release_key;
+        if let Some(s) = self.settings.take() {
+            self.settings = Some(p.overlay(s));
+        }
+        self.ui = Some(p);
+        self.prefs_store = Some(store);
+    }
+
+    /// The per-user settings in force (what `ui.bin` holds), for the shells that start the viewer pipeline with them.
+    pub fn user_prefs(&self) -> crate::prefs::UserPrefs {
+        let mut p = match &self.settings {
+            Some(s) => crate::prefs::UserPrefs::from_settings(s, self.release_key),
+            None => self.ui.unwrap_or_default(),
+        };
+        p.language = self.lang;
+        p.theme = self.theme;
+        p.release_key = self.release_key;
+        p
+    }
+
+    /// Writes `ui.bin` when a store is attached and a per-user field changed since the last write.
+    pub(crate) fn save_prefs(&mut self) {
+        if self.prefs_store.is_none() || self.ui == Some(self.user_prefs()) {
+            return;
+        }
+        self.write_prefs();
+    }
+
+    /// Takes the per-user settings in force as the record and writes it, changed or not.
+    fn write_prefs(&mut self) {
+        let Some(store) = &self.prefs_store else { return };
+        let p = self.user_prefs();
+        self.ui = Some(p);
+        crate::prefs::save(&**store, &p);
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) -> Changed {
+        let before = self.dark();
+        self.theme = theme;
+        if let Some(set) = &mut self.settings {
+            set.theme = theme;
+        }
+        self.save_prefs();
+        if self.dark() == before { Changed::NONE } else { Changed::ALL }
     }
 
     pub fn set_language(&mut self, lang: Language) -> Changed {
@@ -905,6 +977,7 @@ impl UiState {
             return Changed::NONE;
         }
         self.lang = lang;
+        self.save_prefs();
         Changed::ALL
     }
 
@@ -1240,7 +1313,11 @@ impl UiState {
     fn set_settings(&mut self, s: Settings) {
         // The language is per user (C5.1): the service does not keep it and always answers its default, so the UI's
         // own choice wins over the service's copy.
-        self.settings = Some(Settings { language: self.lang, ..s });
+        let s = match &self.ui {
+            Some(p) => p.overlay(s),
+            None => Settings { language: self.lang, theme: self.theme, ..s },
+        };
+        self.settings = Some(s);
         self.finish_fetch(DataKind::Settings);
     }
 
@@ -1493,7 +1570,12 @@ impl UiState {
             }
             Some(Undo::Settings(old)) => {
                 self.lang = old.language;
+                self.theme = old.theme;
+                if self.ui.is_some() {
+                    self.ui = Some(crate::prefs::UserPrefs::from_settings(&old, self.release_key));
+                }
                 self.set_settings(*old);
+                self.write_prefs();
             }
             Some(Undo::Quality(old)) => self.quality = old,
             Some(Undo::Toggle(which, old)) => match which {

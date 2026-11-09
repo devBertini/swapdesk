@@ -83,6 +83,11 @@ wire_enum! {
 }
 
 wire_enum! {
+    /// The theme chosen in Ajustes: `System` follows the OS.
+    Theme { System = 0, Light = 1, Dark = 2 }
+}
+
+wire_enum! {
     KeyboardMode { Auto = 0, Physical = 1, Text = 2 }
 }
 
@@ -452,6 +457,8 @@ wire_struct! {
         show_stats: bool,
         keyboard_mode: KeyboardMode,
         swap_ctrl_cmd: bool,
+        /// Appended after the first version of the struct (UI and service come from one build; tags never renumber).
+        theme: Theme,
     }
 }
 

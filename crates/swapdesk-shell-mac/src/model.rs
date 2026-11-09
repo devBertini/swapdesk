@@ -180,6 +180,16 @@ fn style_of(id: ControlId, role: UiRole) -> ButtonStyle {
     }
 }
 
+/// The `NSAppearanceName` the app is forced to for a theme choice; `None` (Sistema) clears the override so the app
+/// follows the OS again.
+pub fn appearance_name(theme: swapdesk_ui::Theme) -> Option<&'static str> {
+    match theme {
+        swapdesk_ui::Theme::System => None,
+        swapdesk_ui::Theme::Light => Some("NSAppearanceNameAqua"),
+        swapdesk_ui::Theme::Dark => Some("NSAppearanceNameDarkAqua"),
+    }
+}
+
 /// The blocks of a list of specs, in order. `state` supplies what a spec lacks (a select's options, a text input's
 /// placeholder). The first heading is level 1.
 pub fn blocks_from(state: &UiState, specs: &[ControlSpec]) -> Vec<Block> {
