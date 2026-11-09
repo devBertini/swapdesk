@@ -24,4 +24,4 @@ No. There is no account, no relay, no cloud, no telemetry and no update check ov
 
 ## Can I use it over the internet?
 
-No, and this is not planned, not even through a VPN: Swapdesk accepts only peers on a physical Ethernet or Wi-Fi interface in the same subnet. For access from elsewhere, use a tool built for that case.
+Not in 1.x, not even through a VPN: Swapdesk accepts only peers on a physical Ethernet or Wi-Fi interface in the same subnet. Access from outside the LAN is a possible later direction (D36 in [DECISIONS.md](DECISIONS.md)), off by default if it comes. Until then, for access from elsewhere, use a tool built for that case.

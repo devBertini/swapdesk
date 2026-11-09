@@ -17,7 +17,7 @@ AnyDesk and TeamViewer reach your machines through a cloud. Swapdesk is for the 
 
 The goal for version 1 (from [docs/SPEC.md](docs/SPEC.md)): screen, system audio, mouse, keyboard, terminal, files, clipboard, chat, Wake-on-LAN and unattended access between two machines. Either machine can host or control. "Inverter" ("Swap") inverts the roles when the other side accepts.
 
-Swapdesk has no relay, no cloud, no NAT traversal and no account. Anything beyond the LAN is explicitly out of scope, not just unbuilt.
+Swapdesk has no relay, no cloud, no NAT traversal and no account. In 1.x nothing goes beyond the LAN, and the code enforces it ([How it stays on the LAN](#how-it-stays-on-the-lan)). Access from outside the LAN is a possible later direction, not designed yet: if it comes, it comes as a mode you turn on, and LAN-only stays the default ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
 
 ## Download
 
@@ -98,6 +98,9 @@ Planned for 1.1:
 - The next interface pass: screens, texts, accessibility, a Windows tray icon and a first-run guide.
 - An installer with an entry in the installed apps list, and a signing path for both systems.
 - Screenshots, a performance report, coverage-guided fuzzing of the decoders, a Linux CI job.
+- A short demo loop at the top of this README: pairing, the other screen, the mouse and a swap.
+
+Later, not scheduled (D36): access from outside the LAN as a mode you turn on, starting with a VPN you already run between your machines, and groups of devices. Each step gets its own design and threat model before any code.
 
 ## How it stays on the LAN
 
@@ -107,7 +110,7 @@ This is enforced in code, not left to configuration ([docs/SPEC.md](docs/SPEC.md
 - A connection is refused before the TLS handshake unless the peer address is on-link in the subnet of the interface it arrived on, and is not loopback or one of this machine's own addresses.
 - QUIC packets are sent with IP TTL (hop limit) 1, so they cannot be routed off the subnet. mDNS keeps TTL 255, as link-local multicast requires.
 - A manually typed address is accepted only if it is on-link.
-- No relay, no cloud and no NAT traversal exist in the design.
+- No relay, no cloud and no NAT traversal exist in 1.x.
 
 ## Security in brief
 
