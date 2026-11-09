@@ -44,7 +44,8 @@ jobs:
         if: failure()
         shell: python
         run: |
-          import os, re
+          import os, re, sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
           import xml.etree.ElementTree as ET
           def esc(t):
               return t.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
@@ -81,7 +82,7 @@ jobs:
                           body.append(nxt.strip())
                   if body:
                       notes += 1
-                      print(f"::error title={esc(m.group(1))}::{esc(chr(10).join(body)[-3500:])}")
+                      print(f"::error title={esc(m.group(1)).replace(':', '%3A')}::{esc(chr(10).join(body)[-3500:])}")
               keep = [l for l in lines if l.strip() and re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
               print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 
