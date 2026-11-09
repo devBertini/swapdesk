@@ -8,49 +8,98 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
 <style>
 body{margin:0}
-.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
-.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
 .sd,.sd *{box-sizing:border-box}
-.sd button{font:inherit;cursor:pointer}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
 .sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
 .sd .soft{color:var(--soft)}
-.sd .btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
-.sd .btn.danger{background:var(--danger);border-color:var(--danger);color:#FFFFFF;font-weight:600}
-.sd .btn.icon{width:36px;padding:0}
-.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
+.sd .btn.icon{width:40px;padding:0}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
+.sd .row:first-child{border-top:0}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
 a{color:#3346D3}
 </style>
 </helmet>
-<div class="{{themeClass}}" style="width: 1200px; height: 760px; position: relative; overflow: hidden; border-radius: 12px; background: #3A5566">
-  <div role="status" aria-label="Sessão ativa" style="position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 18px; border-radius: 12px; background: var(--surface); box-shadow: 0 0 0 2px var(--link), 0 14px 40px rgba(0,0,0,0.35)">
-    <span style="width: 10px; height: 10px; border-radius: 50%; background: var(--link)"></span>
-    <p><span style="font-weight: 600">MacBook do escritório controla este computador</span> <span class="soft">há 12 min</span></p>
-    <button class="btn icon" aria-label="Abrir chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"></path></svg></button>
-    <button class="btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3"></path></svg>Inverter</button>
-    <button class="btn danger">Desconectar</button>
-  </div>
-
-  <div style="position: absolute; left: 150px; top: 150px; width: 620px; height: 390px; border-radius: 8px; overflow: hidden; background: #F3F4F6; box-shadow: 0 20px 50px rgba(0,0,0,0.35)">
-    <div style="height: 34px; display: flex; align-items: center; padding: 0 14px; background: #E5E7EB; font-size: 12px; color: #171A21">Explorador de Arquivos</div>
-    <div style="padding: 20px; display: flex; flex-direction: column; gap: 12px">
-      <div style="height: 20px; width: 70%; border-radius: 4px; background: #D6DAE0"></div>
-      <div style="height: 20px; width: 52%; border-radius: 4px; background: #D6DAE0"></div>
-      <div style="height: 20px; width: 61%; border-radius: 4px; background: #D6DAE0"></div>
-    </div>
-  </div>
-  <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" style="position: absolute; left: 560px; top: 330px"><path d="M5 3l14 8-6 1.5L10 19z" fill="#FFFFFF" stroke="#171A21" stroke-width="1.4" stroke-linejoin="round"></path></svg>
-  <span style="position: absolute; left: 582px; top: 350px; padding: 2px 8px; border-radius: 6px; background: var(--link); color: var(--link-ink); font-size: 12px; font-weight: 600">MacBook</span>
-
-  <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; justify-content: center; gap: 10px; background: rgba(23,26,33,0.9)">
-    <span style="width: 30px; height: 30px; border-radius: 6px; background: rgba(255,255,255,0.16)"></span>
-    <span style="width: 30px; height: 30px; border-radius: 6px; background: rgba(255,255,255,0.16)"></span>
-    <span style="width: 30px; height: 30px; border-radius: 6px; background: rgba(255,255,255,0.16)"></span>
-    <span aria-label="Swapdesk em uso" style="width: 30px; height: 30px; border-radius: 6px; background: #3346D3; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg></span>
-  </div>
-</div>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; position: relative; overflow: hidden; background: #3A5566"><div style="position: absolute; left: 150px; top: 150px; width: 620px; height: 390px; border-radius: 8px; overflow: hidden; background: #F3F4F6; box-shadow: 0 20px 50px rgba(0,0,0,0.35)"><div style="height: 34px; display: flex; align-items: center; padding: 0 14px; background: #E5E7EB; font-size: 12px; color: #171A21">Explorador de Arquivos</div><div style="padding: 20px; display: flex; flex-direction: column; gap: 12px"><div style="height: 20px; width: 70%; border-radius: 4px; background: #D6DAE0"></div><div style="height: 20px; width: 52%; border-radius: 4px; background: #D6DAE0"></div><div style="height: 20px; width: 61%; border-radius: 4px; background: #D6DAE0"></div></div></div><svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" style="position: absolute; left: 560px; top: 330px"><path d="M5 3.5l10 5.5-4.25 1.25L9 14.5z" fill="#FFFFFF" stroke="#171A21" stroke-width="1.25" stroke-linejoin="round"></path></svg><span style="position: absolute; left: 582px; top: 350px; padding: 2px 8px; border-radius: 4px; background: #3346D3; color: #FFFFFF; font-size: 12px; font-weight: 600">MacBook do escritório</span><div role="status" aria-label="Sessão ativa" style="position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 16px; border-radius: 10px; background: var(--surface); box-shadow: 0 14px 40px rgba(0,0,0,0.35); white-space: nowrap"><span class="mp" role="img" aria-label="MacBook do escritório controla este computador"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span class="mw" style="color: var(--link)"><span></span><svg width="6" height="8" viewBox="0 0 6 8" aria-hidden="true"><path d="M0 0l6 4-6 4z" fill="currentColor"></path></svg></span><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg></span><p><span style="font-weight: 600">MacBook do escritório controla este computador</span> <span class="soft num">há 12 min</span></p><span style="width: 1px; height: 24px; background: var(--line)"></span><span role="img" aria-label="Liberado nesta sessão: tela, controle, áudio e arquivos" style="display: flex; gap: 12px; color: var(--soft)"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10.5" rx="1.5"></rect><path d="M7 17h6M10 14v3"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5l10 5.5-4.25 1.25L9 14.5z"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8v4h3l4 3.5v-11L6.5 8z"></path><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5M15.75 5.25a6.75 6.75 0 0 1 0 9.5"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6A1.5 1.5 0 0 1 4 4.5h3.5l1.75 1.75H16a1.5 1.5 0 0 1 1.5 1.5v7.25A1.5 1.5 0 0 1 16 16.5H4A1.5 1.5 0 0 1 2.5 15z"></path></svg></span><span style="width: 1px; height: 24px; background: var(--line)"></span><button class="btn icon" aria-label="Abrir chat"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h14V14H8l-5 3.5z"></path></svg></button><button class="btn"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 7h11l-2.75-2.75M15.5 13h-11l2.75 2.75"></path></svg>Inverter</button><button class="btn danger">Desconectar</button></div><div style="position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 16px; background: rgba(23,26,33,0.92); color: #E9EBF0"><span style="flex: 1"></span><span style="width: 32px; height: 32px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="width: 32px; height: 32px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="width: 32px; height: 32px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="width: 32px; height: 32px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="flex: 1"></span><span aria-label="Swapdesk em uso" role="img" style="width: 32px; height: 32px; border-radius: 6px; background: #3346D3; color: #FFFFFF; display: flex; align-items: center; justify-content: center"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg></span><span class="sm num" style="display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; font-size: 12px"><span>15:20</span><span>08/11/2026</span></span></div></div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
 class Component extends DCLogic {

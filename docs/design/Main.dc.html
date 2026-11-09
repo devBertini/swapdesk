@@ -2,138 +2,104 @@
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<title>Dispositivos</title>
+<title>Computadores, Windows</title>
 <script src="./support.js"></script>
 </head>
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
 <style>
 body{margin:0}
-.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
-.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
 .sd,.sd *{box-sizing:border-box}
 .sd button,.sd input,.sd select{font:inherit;color:inherit}
 .sd button{cursor:pointer}
-.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
-.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
 .sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
 .sd .soft{color:var(--soft)}
-.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
-.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
-.sd .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger);font-weight:600}
-.sd .btn.quiet{background:transparent;border-color:transparent}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
 .sd .btn.icon{width:40px;padding:0}
-.sd .btn:focus-visible,.sd .dev:focus-visible,.sd .switch:focus-visible{outline:2px solid var(--link);outline-offset:2px}
-.sd .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px}
-.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
-.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--line);display:flex;flex-shrink:0}
-.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
-.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
-.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
-.sd .dev{width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left}
-.sd .dev.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line)}
-.sd .dev .nm{display:block;font-weight:600}
-.sd .dev .st{display:block;font-size:12px;color:var(--soft)}
-.sd .row{display:flex;align-items:center;gap:16px;min-height:52px;padding:0 20px;border-top:1px solid var(--line)}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
 .sd .row:first-child{border-top:0}
-.sd .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
-.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
 .sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
 a{color:#3346D3}
 </style>
 </helmet>
-<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
-  <nav aria-label="Dispositivos" style="width: 272px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px; background: var(--sunken); border-right: 1px solid var(--line)">
-    <div style="display: flex; align-items: center; gap: 10px; padding: 0 10px">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg>
-      <span style="font-size: 16px; font-weight: 700; letter-spacing: -0.01em">Swapdesk</span>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Este computador</h2>
-      <div class="dev" style="cursor: default">
-        <span class="dot" style="background: var(--ok)"></span>
-        <span><span class="nm">Notebook da sala</span><span class="st">Pronto para receber</span></span>
-      </div>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Pareados</h2>
-      <button class="dev sel" aria-current="true">
-        <span class="dot" style="background: var(--ok)"></span>
-        <span><span class="nm">MacBook do escritório</span><span class="st">Online, macOS 15</span></span>
-      </button>
-      <button class="dev">
-        <span class="dot" style="background: var(--line)"></span>
-        <span><span class="nm">Desktop do escritório</span><span class="st">Dormindo, Windows 11</span></span>
-      </button>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Na rede</h2>
-      <button class="dev">
-        <span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span>
-        <span><span class="nm">MacBook Air</span><span class="st">Não pareado</span></span>
-      </button>
-    </div>
-    <div style="flex: 1"></div>
-    <div style="display: flex; flex-direction: column; gap: 2px">
-      <button class="btn quiet" style="justify-content: flex-start">Atividade</button>
-      <button class="btn quiet" style="justify-content: flex-start">Ajustes</button>
-    </div>
-    <p class="soft" style="padding: 0 10px; font-size: 12px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p>
-  </nav>
-
-  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 28px; padding: 32px 40px; background: var(--canvas)">
-    <header style="display: flex; align-items: flex-start; gap: 16px">
-      <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
-        <h1>MacBook do escritório</h1>
-        <p class="soft">Online em 192.168.0.21, resposta em 3 ms</p>
-      </div>
-      <button class="btn">Só ver</button>
-      <button class="btn primary">Controlar</button>
-    </header>
-
-    <nav class="tabs" aria-label="Seções do dispositivo">
-      <button class="tab" aria-selected="true">Visão geral</button>
-      <button class="tab" aria-selected="false">Permissões</button>
-      <button class="tab" aria-selected="false">Histórico</button>
-    </nav>
-
-    <section aria-label="Quem controla quem" class="panel" style="padding: 32px 36px; display: flex; flex-direction: column; gap: 22px">
-      <div style="display: flex; align-items: center; gap: 0">
-        <div style="width: 180px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center">
-          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="var(--ink)" stroke-width="2.5" stroke-linejoin="round" aria-hidden="true"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
-          <span style="font-weight: 600">Notebook da sala</span>
-          <span class="soft" style="font-size: 12px">Este computador</span>
-        </div>
-        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: -34px">
-          <span style="font-size: 13px; font-weight: 600; color: var(--link)">Você controla</span>
-          <div style="width: 100%; display: flex; align-items: center">
-            <span style="flex: 1; height: 3px; border-radius: 2px; background: var(--link)"></span>
-            <svg width="16" height="18" viewBox="0 0 16 18" aria-hidden="true"><path d="M0 0l16 9-16 9z" fill="var(--link)"></path></svg>
-          </div>
-        </div>
-        <div style="width: 180px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center">
-          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="var(--link)" stroke-width="2.5" stroke-linejoin="round" aria-hidden="true"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
-          <span style="font-weight: 600">MacBook do escritório</span>
-          <span class="soft" style="font-size: 12px">macOS 15</span>
-        </div>
-      </div>
-      <p class="soft" style="text-align: center">Durante a sessão, qualquer um dos dois pode pedir para inverter.</p>
-    </section>
-
-    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px">
-      <section aria-label="Permissões" class="panel" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 10px">
-        <div style="display: flex; align-items: center"><h2 style="flex: 1">O MacBook pode, aqui</h2><a href="Permissoes.dc.html" style="font-weight: 600; text-decoration: none; color: var(--link)">Editar</a></div>
-        <p class="soft">Ver a tela, controlar, ouvir o áudio, terminal, arquivos, área de transferência e acesso sem usuário.</p>
-      </section>
-      <section aria-label="Última sessão" class="panel" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 10px">
-        <h2>Última sessão</h2>
-        <p class="soft">Ontem às 23:40, por 6 minutos, na tela de login deste computador.</p>
-      </section>
-    </div>
-  </main>
-</div>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; border: 1px solid var(--line); background: var(--canvas)"><div class="titlebar"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg><span>Swapdesk</span><span style="flex: 1"></span><button class="cbtn" aria-label="Minimizar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M0 5h10"></path></svg></button><button class="cbtn" aria-label="Maximizar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><rect x=".5" y=".5" width="9" height="9" rx="1"></rect></svg></button><button class="cbtn" aria-label="Fechar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"></path></svg></button></div><div style="flex: 1; min-height: 0; display: flex"><nav aria-label="Computadores" class="side"><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Este computador</h2><div class="dev" style="cursor: default"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span><span class="nm">Notebook da sala</span><span class="st"><span class="dot" style="background: var(--ok)"></span>Pronto para receber</span></span></div></div><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Pareados</h2><button class="dev sel" aria-current="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span><span class="nm">MacBook do escritório</span><span class="st"><span class="dot" style="background: var(--ok)"></span>Online, macOS 27</span></span></button><button class="dev"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span><span class="nm">Desktop do escritório</span><span class="st"><span class="dot" style="background: var(--track)"></span>Dormindo, Windows 11</span></span></button></div><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Na rede</h2><button class="dev"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span><span class="nm">MacBook Air</span><span class="st"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span>Não pareado</span></span></button></div><div style="flex: 1"></div><div style="display: flex; flex-direction: column; gap: 2px"><button class="btn quiet" style="justify-content: flex-start">Atividade</button><button class="btn quiet" style="justify-content: flex-start">Ajustes</button></div><p class="cap" style="padding: 0 10px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p></nav><main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 24px; padding: 28px 40px"><header style="display: flex; align-items: flex-start; gap: 12px"><div style="flex: 1; display: flex; flex-direction: column; gap: 6px"><h1>MacBook do escritório</h1><p class="soft">Online em 192.168.0.21, resposta em 3 ms</p></div><button class="btn"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 10s3-5.5 8-5.5 8 5.5 8 5.5-3 5.5-8 5.5S2 10 2 10z"></path><circle cx="10" cy="10" r="2.25"></circle></svg>Só ver</button><button class="btn primary">Controlar</button></header><nav class="tabs" aria-label="Seções do computador"><button class="tab" aria-selected="true">Visão geral</button><button class="tab" aria-selected="false">Permissões</button><button class="tab" aria-selected="false">Histórico</button></nav><section aria-label="Quem controla quem" class="panel" style="padding: 28px 36px; display: flex; flex-direction: column; gap: 20px"><div style="display: flex; align-items: center"><div style="width: 190px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center"><svg class="ic" width="96" height="64" viewBox="0 0 96 64" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="18" y="4" width="60" height="40" rx="2"></rect><rect x="23" y="9" width="50" height="30" rx=".5"></rect><path d="M18 44L8 58h80L78 44"></path><path d="M22 48.5h52M20 52.5h56M41 55.5h14"></path></svg><span style="font-weight: 600">Notebook da sala</span><span class="cap">Este computador, Windows 11</span></div><div style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: -44px"><span class="sm" style="font-weight: 600; color: var(--link)">Você controla</span><div class="wire" style="width: 100%"><span></span><svg width="16" height="18" viewBox="0 0 16 18" aria-hidden="true"><path d="M0 0l16 9-16 9z" fill="var(--link)"></path></svg></div></div><div style="width: 190px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center"><svg class="ic" width="96" height="64" viewBox="0 0 96 64" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="16" y="6" width="64" height="44" rx="4"></rect><rect x="19.5" y="9.5" width="57" height="37" rx="1.5"></rect><path d="M6 50h84v2a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z"></path><path d="M40 50v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1"></path></svg><span style="font-weight: 600">MacBook do escritório</span><span class="cap">macOS 27</span></div></div><p class="soft" style="text-align: center">Durante a sessão, qualquer um dos dois pode pedir para inverter.</p></section><div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px"><section aria-labelledby="lib" class="panel" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 12px"><div style="display: flex; align-items: center"><h2 id="lib" style="flex: 1">Liberado aqui</h2><a href="Permissoes.dc.html">Editar</a></div><span role="img" aria-label="Tela, controle, áudio, terminal, arquivos e área de transferência" style="display: flex; gap: 12px; color: var(--soft)"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10.5" rx="1.5"></rect><path d="M7 17h6M10 14v3"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5l10 5.5-4.25 1.25L9 14.5z"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8v4h3l4 3.5v-11L6.5 8z"></path><path d="M13.5 7.5a3.5 3.5 0 0 1 0 5M15.75 5.25a6.75 6.75 0 0 1 0 9.5"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"></rect><path d="M6 8l2.5 2.5L6 13M10.5 13H14"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6A1.5 1.5 0 0 1 4 4.5h3.5l1.75 1.75H16a1.5 1.5 0 0 1 1.5 1.5v7.25A1.5 1.5 0 0 1 16 16.5H4A1.5 1.5 0 0 1 2.5 15z"></path></svg><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="3.5" width="11" height="14" rx="1.5"></rect><path d="M7.5 2.5h5V5h-5z"></path></svg></span><p class="soft sm">Tela, controle, áudio, terminal, arquivos e área de transferência. Entra sem perguntar.</p></section><section aria-labelledby="last" class="panel" style="padding: 20px 22px; display: flex; flex-direction: column; gap: 12px"><h2 id="last">Última sessão</h2><p class="soft">Ontem às 23:40, por 6 minutos, na tela de login deste computador.</p></section></div></main></div></div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
 class Component extends DCLogic {
