@@ -290,10 +290,20 @@ impl Wire for CursorShapeHeader {
 }
 
 /// A whole cursor shape stream: the header and exactly `width × height × 4` bytes of straight RGBA.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CursorShape {
     pub header: CursorShapeHeader,
     pub rgba: Vec<u8>,
+}
+
+/// The pixels are whatever is under the pointer: `Debug` shows their size only.
+impl core::fmt::Debug for CursorShape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CursorShape")
+            .field("header", &self.header)
+            .field("rgba", &crate::codec::RedactedLen(self.rgba.len()))
+            .finish()
+    }
 }
 
 impl Wire for CursorShape {

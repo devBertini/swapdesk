@@ -440,13 +440,26 @@ pub enum TransferState {
     Failed { reason: ApiCode },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChatView {
     pub msg_id: u32,
     pub mine: bool,
     pub text: String,
     pub sent_at_ms: u64,
     pub read: bool,
+}
+
+/// Chat text is never logged (CONTRACTS.md C2.3): `Debug` shows its size only.
+impl core::fmt::Debug for ChatView {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChatView")
+            .field("msg_id", &self.msg_id)
+            .field("mine", &self.mine)
+            .field("text", &swapdesk_proto::RedactedLen(self.text.len()))
+            .field("sent_at_ms", &self.sent_at_ms)
+            .field("read", &self.read)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -523,7 +536,7 @@ impl From<MsgKey> for Msg {
 
 // ---------- commands ----------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Command {
     GetThisDevice,
     GetNetwork,
@@ -573,6 +586,80 @@ pub enum Command {
     SetSettings { settings: Settings },
     OpenSystemSettings { target: SettingsTarget },
     RequestOsPermissions,
+}
+
+/// Typed chat text and terminal input are never logged (CONTRACTS.md C2.3): `Debug` shows their size only. Written
+/// by hand because a derive would print them.
+impl core::fmt::Debug for Command {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        macro_rules! dbg_fields {
+            ($name:literal $(, $field:ident)*) => {
+                f.debug_struct($name)$(.field(stringify!($field), $field))*.finish()
+            };
+        }
+        match self {
+            Self::GetThisDevice => f.write_str("GetThisDevice"),
+            Self::GetNetwork => f.write_str("GetNetwork"),
+            Self::ListDevices => f.write_str("ListDevices"),
+            Self::AddByAddress { ipv4 } => dbg_fields!("AddByAddress", ipv4),
+            Self::PairOpen { device_id } => dbg_fields!("PairOpen", device_id),
+            Self::PairStart { pairing_id, device_id } => dbg_fields!("PairStart", pairing_id, device_id),
+            Self::PairConfirm { pairing_id, matches } => dbg_fields!("PairConfirm", pairing_id, matches),
+            Self::PairCancel { pairing_id } => dbg_fields!("PairCancel", pairing_id),
+            Self::SetGrants { device_id, grants } => dbg_fields!("SetGrants", device_id, grants),
+            Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
+            Self::Elevate { action } => dbg_fields!("Elevate", action),
+            Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
+            Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),
+            Self::AnswerIncoming { request_id, decision } => dbg_fields!("AnswerIncoming", request_id, decision),
+            Self::ListDisplays { session_id } => dbg_fields!("ListDisplays", session_id),
+            Self::SelectDisplay { session_id, display_id } => dbg_fields!("SelectDisplay", session_id, display_id),
+            Self::SetScale { session_id, scale } => dbg_fields!("SetScale", session_id, scale),
+            Self::SetQuality { session_id, quality } => dbg_fields!("SetQuality", session_id, quality),
+            Self::SetAudio { session_id, on } => dbg_fields!("SetAudio", session_id, on),
+            Self::SetKeyboardMode { session_id, mode } => dbg_fields!("SetKeyboardMode", session_id, mode),
+            Self::SetGrab { session_id, on } => dbg_fields!("SetGrab", session_id, on),
+            Self::SetViewOnly { session_id, on } => dbg_fields!("SetViewOnly", session_id, on),
+            Self::SendKeys { session_id, keys } => dbg_fields!("SendKeys", session_id, keys),
+            Self::RequestSwap { session_id } => dbg_fields!("RequestSwap", session_id),
+            Self::AnswerSwap { request_id, accept } => dbg_fields!("AnswerSwap", request_id, accept),
+            Self::CancelSwap { request_id } => dbg_fields!("CancelSwap", request_id),
+            Self::TermOpen { session_id, admin, cols, rows } => dbg_fields!("TermOpen", session_id, admin, cols, rows),
+            Self::TermResize { term_id, cols, rows } => dbg_fields!("TermResize", term_id, cols, rows),
+            Self::TermClose { term_id } => dbg_fields!("TermClose", term_id),
+            Self::RunAction { session_id, action } => dbg_fields!("RunAction", session_id, action),
+            Self::FilesList { session_id, path } => dbg_fields!("FilesList", session_id, path),
+            Self::FilesSend { session_id, local_paths, remote_dir } => {
+                dbg_fields!("FilesSend", session_id, local_paths, remote_dir)
+            }
+            Self::FilesGet { session_id, remote_path, local_dir } => {
+                dbg_fields!("FilesGet", session_id, remote_path, local_dir)
+            }
+            Self::TransferPause { transfer_id } => dbg_fields!("TransferPause", transfer_id),
+            Self::TransferResume { transfer_id } => dbg_fields!("TransferResume", transfer_id),
+            Self::TransferCancel { transfer_id } => dbg_fields!("TransferCancel", transfer_id),
+            Self::SetClipboardSync { session_id, on } => dbg_fields!("SetClipboardSync", session_id, on),
+            Self::ChatMarkRead { session_id, up_to } => dbg_fields!("ChatMarkRead", session_id, up_to),
+            Self::Wake { device_id } => dbg_fields!("Wake", device_id),
+            Self::ActivityList { before_ms, limit } => dbg_fields!("ActivityList", before_ms, limit),
+            Self::ActivityExport { path } => dbg_fields!("ActivityExport", path),
+            Self::BlockAddress { ipv4 } => dbg_fields!("BlockAddress", ipv4),
+            Self::GetSettings => f.write_str("GetSettings"),
+            Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),
+            Self::OpenSystemSettings { target } => dbg_fields!("OpenSystemSettings", target),
+            Self::RequestOsPermissions => f.write_str("RequestOsPermissions"),
+            Self::TermWrite { term_id, bytes } => f
+                .debug_struct("TermWrite")
+                .field("term_id", term_id)
+                .field("bytes", &swapdesk_proto::RedactedLen(bytes.len()))
+                .finish(),
+            Self::ChatSend { session_id, text } => f
+                .debug_struct("ChatSend")
+                .field("session_id", session_id)
+                .field("text", &swapdesk_proto::RedactedLen(text.len()))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -713,5 +800,31 @@ impl Command {
             Command::ActivityList { .. } | Command::FilesList { .. } | Command::ActivityExport { .. } => 10,
             _ => 5,
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_of_a_command_shows_the_size_of_typed_text_and_terminal_input_and_never_the_content() {
+        let chat = format!("{:?}", Command::ChatSend { session_id: 2, text: "segredo-do-chat".into() });
+        assert!(!chat.contains("segredo") && chat.contains("<redacted 15 bytes>") && chat.contains("session_id: 2"));
+        let term = format!("{:?}", Command::TermWrite { term_id: 1, bytes: b"senha-no-shell".to_vec() });
+        assert!(!term.contains("senha") && term.contains("<redacted 14 bytes>"), "{term}");
+        let bytes = format!("{:?}", Command::TermWrite { term_id: 1, bytes: vec![233; 4] });
+        assert!(!bytes.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "{bytes}");
+        // The other commands print as before.
+        assert_eq!(format!("{:?}", Command::GetThisDevice), "GetThisDevice");
+        assert!(format!("{:?}", Command::Disconnect { session_id: 9 }).contains("session_id: 9"));
+    }
+
+    #[test]
+    fn debug_of_a_chat_view_shows_its_size_and_never_the_text() {
+        let view = ChatView { msg_id: 1, mine: false, text: "segredo-do-chat".into(), sent_at_ms: 2, read: true };
+        let shown = format!("{view:?}");
+        assert!(!shown.contains("segredo"), "chat text leaked: {shown}");
+        assert!(shown.contains("<redacted 15 bytes>"), "{shown}");
     }
 }

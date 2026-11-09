@@ -64,18 +64,19 @@ fn the_new_ops_carry_their_numbers_and_the_chat_text_stays_out_of_debug() {
     let ops = [
         (UiOp::RequestSwap { session_id: 1 }, 22),
         (UiOp::AnswerSwap { request_id: 2, accept: true }, 23),
-        (UiOp::ChatSend { session_id: 3, text: "segredo".into() }, 24),
+        (UiOp::ChatSend { session_id: 3, text: Text("segredo".into()) }, 24),
         (UiOp::ChatMarkRead { session_id: 4 }, 25),
         (UiOp::Wake { device_id: "d".into(), intent: Intent::View }, 26),
         (UiOp::ListDisplays { session_id: 5 }, 27),
     ];
-    for (op, code) in ops {
-        assert_eq!(op.code(), code);
+    for (op, code) in &ops {
+        assert_eq!(op.code(), *code);
     }
+    assert!(!format!("{:?}", ops[2].0).contains("segredo"), "the chat text of a request is never printed");
     let note =
         Notify::Chat { session_id: 1, item: ChatItem { msg_id: 1, text: Text("segredo".into()), sent_at_ms: 2 } };
     assert!(!format!("{note:?}").contains("segredo"), "chat text is never printed");
     // A text over the limit is refused before it is sent.
-    let long = UiOp::ChatSend { session_id: 1, text: "x".repeat(4097) };
+    let long = UiOp::ChatSend { session_id: 1, text: Text("x".repeat(4097)) };
     assert!(encode_message(&Message::UiRequest { req: 1, op: long }).is_err());
 }

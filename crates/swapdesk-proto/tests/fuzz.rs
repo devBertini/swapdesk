@@ -449,7 +449,7 @@ targets! {
         run_target(name, cases, bytes(), |b| check_input_stream(&b))
     };
     sas(500, 2_000_000) => |name, cases| {
-        run_target(name, cases, (any::<[u8; 32]>(), vec(any::<u8>(), 0..64), vec(any::<u8>(), 0..64), any::<[u8; 32]>(), any::<[u8; 32]>()),
+        run_target(name, cases, (any::<[u8; 32]>(), spki(), spki(), any::<[u8; 32]>(), any::<[u8; 32]>()),
             |(digest, spki_i, spki_r, ni, nr)| {
                 calls(1);
                 let sas = Sas::from_digest(&digest);
@@ -465,6 +465,11 @@ targets! {
                 Ok(())
             })
     };
+}
+
+/// A public key as the pairing messages carry it: exactly `SPKI_LEN` bytes.
+fn spki() -> impl Strategy<Value = [u8; swapdesk_proto::SPKI_LEN]> {
+    vec(any::<u8>(), swapdesk_proto::SPKI_LEN).prop_map(|v| v.try_into().expect("SPKI_LEN bytes"))
 }
 
 /// For each wire type: `<name>_bytes` (arbitrary bytes and soup) and `<name>_values` (valid values with

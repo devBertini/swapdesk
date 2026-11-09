@@ -46,10 +46,20 @@ impl LlKey {
 }
 
 /// What the viewer's layout says a key press types.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Translated {
     pub text: Option<String>,
     pub dead: bool,
+}
+
+/// A typed character is as private as the text: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for Translated {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Translated")
+            .field("text", &self.text.as_ref().map(|t| swapdesk_proto::RedactedLen(t.len())))
+            .field("dead", &self.dead)
+            .finish()
+    }
 }
 
 /// What the grabber does with events that `SendInput` injected (`LLKHF_INJECTED`).
@@ -288,6 +298,14 @@ pub fn usage_of(key: &LlKey) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_of_a_translation_shows_the_size_of_the_typed_text_and_never_the_text() {
+        let shown = format!("{:?}", Translated { text: Some("senha-digitada".into()), dead: false });
+        assert!(!shown.contains("senha"), "typed text leaked: {shown}");
+        assert!(shown.contains("<redacted 14 bytes>") && shown.contains("dead: false"), "{shown}");
+        assert!(format!("{:?}", Translated::default()).contains("None"));
+    }
 
     fn k(vk: u32, scan: u32, ext: bool, up: bool) -> LlKey {
         LlKey { vk, scan, flags: (if ext { LLKHF_EXTENDED } else { 0 }) | (if up { LLKHF_UP } else { 0 }) }

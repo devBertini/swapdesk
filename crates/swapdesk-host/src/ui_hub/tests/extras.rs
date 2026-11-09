@@ -245,7 +245,8 @@ fn chat_travels_both_ways_with_its_read_state_and_vanishes_when_the_session_ends
     let mut d = Duo::new();
     let s = d.open();
 
-    let send = |ui: &mut Client, text: &str| ui.call(UiOp::ChatSend { session_id: s, text: text.into() });
+    let send =
+        |ui: &mut Client, text: &str| ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text(text.into()) });
     let ReplyBody::Chat(mine) = send(&mut d.viewer_ui, "oi").unwrap() else { panic!() };
     assert_eq!((mine.msg_id, mine.text.0.as_str()), (1, "oi"), "the reply is the message as stored");
     let theirs = d.host_ui.notify("the message at the host", |n| match n {
@@ -274,11 +275,14 @@ fn chat_travels_both_ways_with_its_read_state_and_vanishes_when_the_session_ends
     // Empty text and unknown sessions are refused; another connection's session id is not a capability.
     assert_eq!(send(&mut d.viewer_ui, "   ").unwrap_err(), ApiCode::Invalid);
     assert_eq!(
-        d.viewer_ui.call(UiOp::ChatSend { session_id: s + 1, text: "x".into() }).unwrap_err(),
+        d.viewer_ui.call(UiOp::ChatSend { session_id: s + 1, text: swapdesk_ipc::Text("x".into()) }).unwrap_err(),
         ApiCode::NotFound
     );
     let mut other = d.viewer.client(info(false));
-    assert_eq!(other.call(UiOp::ChatSend { session_id: s, text: "x".into() }).unwrap_err(), ApiCode::NotFound);
+    assert_eq!(
+        other.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("x".into()) }).unwrap_err(),
+        ApiCode::NotFound
+    );
     assert_eq!(other.call(UiOp::ChatMarkRead { session_id: s }).unwrap_err(), ApiCode::NotFound);
     let _ = CHAT_SEND_OP;
 
@@ -404,7 +408,7 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
     );
     // The handle works on the new connection: a control message, a chat message and media all cross it.
     assert!(d.viewer_ui.call(UiOp::SetAudio { session_id: s, on: true }).is_ok());
-    assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: "voltei".into() }).is_ok());
+    assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("voltei".into()) }).is_ok());
     d.host_ui.notify("chat after the resume", |n| {
         matches!(n, Notify::Chat { session_id, .. } if *session_id == s).then_some(())
     });

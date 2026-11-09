@@ -435,7 +435,7 @@ fn swap_chat_and_wake_commands_travel_as_their_ops_and_come_back_as_events() {
     // Chat: the reply is this side's own message, a notification is the peer's, and the read mark goes out.
     let t = b.send(Command::ChatSend { session_id: 7, text: "oi".into() });
     let (req, op) = svc.request();
-    assert_eq!(op, UiOp::ChatSend { session_id: 7, text: "oi".into() });
+    assert_eq!(op, UiOp::ChatSend { session_id: 7, text: swapdesk_ipc::Text("oi".into()) });
     svc.reply(req, ReplyBody::Chat(ChatItem { msg_id: 1, text: Text("oi".into()), sent_at_ms: 55 }));
     svc.write(Message::UiNotify(Notify::Chat {
         session_id: 7,

@@ -535,19 +535,20 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     let events = host.core.take_events().expect("events once");
     assert!(host.core.take_events().is_none());
 
-    // A helper that does its handshake and vanishes.
+    // A helper that does its handshake and vanishes. The caller verified its PID (1234); the helper wrote 77 in its
+    // `Hello`, and only the verified one is used.
     let (core_end, helper_end): (End, End) = duplex_blocking();
     let vanishing = std::thread::spawn(move || {
         let mut reader = FrameReader::new(helper_end.reader);
         let mut writer = FrameWriter::new(helper_end.writer);
         Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 77).expect("client handshake");
     });
-    host.core.attach_helper(IpcRole::HelperUser, core_end.reader, core_end.writer).expect("attach");
+    host.core.attach_helper_pid(IpcRole::HelperUser, 1234, core_end.reader, core_end.writer).expect("attach");
     vanishing.join().expect("helper thread");
     let attached = events.recv_timeout(WAIT).expect("attached event");
-    assert_eq!(attached, CoreEvent::HelperAttached { kind: HelperKind::User, pid: 77 });
+    assert_eq!(attached, CoreEvent::HelperAttached { kind: HelperKind::User, pid: 1234 });
     let gone = events.recv_timeout(WAIT).expect("gone event");
-    assert_eq!(gone, CoreEvent::HelperGone { kind: HelperKind::User, pid: 77, error: None });
+    assert_eq!(gone, CoreEvent::HelperGone { kind: HelperKind::User, pid: 1234, error: None });
     wait_for("the slot to empty", || host.core.helper(HelperKind::User).is_none().then_some(()));
 
     // The supervisor's relaunch: a new helper takes the slot.
@@ -555,6 +556,42 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     assert!(host.core.helper(HelperKind::User).is_some());
     host.core.shutdown();
     again.join();
+}
+
+#[test]
+fn the_pid_of_a_helper_is_the_verified_one_and_never_the_hellos() {
+    let host = Machine::new("host-pc", true, false);
+    let events = host.core.take_events().expect("events once");
+    // The supervisor verified the pipe client's PID (31337) while the helper claims 1 in its `Hello`.
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let liar = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperSystem, 1).expect("client handshake");
+        // Stay connected until the core hangs up.
+        let _ = reader.read_message();
+    });
+    let kind =
+        host.core.attach_helper_pid(IpcRole::HelperSystem, 31337, core_end.reader, core_end.writer).expect("attach");
+    assert_eq!(host.core.helper(kind).expect("attached").pid(), 31337, "the link keeps the verified PID");
+    assert_eq!(
+        events.recv_timeout(WAIT).expect("attached event"),
+        CoreEvent::HelperAttached { kind: HelperKind::System, pid: 31337 }
+    );
+
+    // An in-process helper (the Mac app's, the tests') is this process.
+    let (core_end2, helper_end2): (End, End) = duplex_blocking();
+    let inproc = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end2.reader);
+        let mut writer = FrameWriter::new(helper_end2.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 9).expect("client handshake");
+        let _ = reader.read_message();
+    });
+    let kind = host.core.attach_helper(IpcRole::HelperUser, core_end2.reader, core_end2.writer).expect("attach");
+    assert_eq!(host.core.helper(kind).expect("attached").pid(), std::process::id());
+    host.core.shutdown();
+    liar.join().expect("helper thread");
+    inproc.join().expect("helper thread");
 }
 
 #[test]

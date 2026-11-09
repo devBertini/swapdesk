@@ -27,12 +27,28 @@ const POLL: Duration = Duration::from_millis(25);
 const DRAIN_GRACE: Duration = Duration::from_millis(1500);
 
 /// What the PTY side tells the network side.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TermEvent {
     /// Bytes for the 0x10 stream of `term_id`.
     Output { term_id: u32, data: Vec<u8> },
     /// The shell ended: the owner sends `TermExited` after the output already queued.
     Exited { term_id: u32, exit_code: Option<i32> },
+}
+
+/// The shell's output is as private as typed text: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl std::fmt::Debug for TermEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Output { term_id, data } => f
+                .debug_struct("Output")
+                .field("term_id", term_id)
+                .field("data", &swapdesk_proto::RedactedLen(data.len()))
+                .finish(),
+            Self::Exited { term_id, exit_code } => {
+                f.debug_struct("Exited").field("term_id", term_id).field("exit_code", exit_code).finish()
+            }
+        }
+    }
 }
 
 /// Facts of the session at the time of a `TermOpen`.
@@ -266,5 +282,20 @@ fn end(t: &Live) {
 impl Drop for TermHost {
     fn drop(&mut self) {
         self.close_all();
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_of_terminal_output_shows_its_size_and_never_the_shell_text() {
+        let shown = format!("{:?}", TermEvent::Output { term_id: 2, data: b"hunter2-from-the-shell".to_vec() });
+        assert!(!shown.contains("hunter2") && !shown.contains("shell"), "{shown}");
+        let bytes = format!("{:?}", TermEvent::Output { term_id: 2, data: vec![233; 5] });
+        assert!(!bytes.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "{bytes}");
+        assert!(shown.contains("<redacted 22 bytes>"), "{shown}");
+        assert!(format!("{:?}", TermEvent::Exited { term_id: 2, exit_code: Some(1) }).contains("exit_code: Some(1)"));
     }
 }

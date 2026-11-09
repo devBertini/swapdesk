@@ -207,9 +207,9 @@ impl Supervisor {
             if client != child.pid() {
                 return Err(format!("the pipe client is process {client}, not the launched {}", child.pid()));
             }
-            Ok(conn)
+            Ok((conn, client))
         })();
-        let conn = match connected {
+        let (conn, verified_pid) = match connected {
             Ok(c) => c,
             Err(e) => {
                 let _ = child.kill();
@@ -239,7 +239,8 @@ impl Supervisor {
                 })
                 .map_err(|e| e.to_string())?;
         }
-        let attached = self.core.attach_helper(ipc, reader, writer);
+        // The core records the PID verified above, never the one the helper writes in its `Hello`.
+        let attached = self.core.attach_helper_pid(ipc, verified_pid, reader, writer);
         done.store(true, Ordering::Release);
         match attached {
             Ok(_) => Ok(Running { child, started: Instant::now(), cancel }),

@@ -121,7 +121,7 @@ pub struct Frame {
     pub content_changed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CursorShape {
     pub id: u32,
     pub width: u16,
@@ -129,6 +129,20 @@ pub struct CursorShape {
     pub hot_x: u16,
     pub hot_y: u16,
     pub rgba: Vec<u8>,
+}
+
+/// The pixels are whatever is under the pointer: `Debug` shows their size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for CursorShape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CursorShape")
+            .field("id", &self.id)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("hot_x", &self.hot_x)
+            .field("hot_y", &self.hot_y)
+            .field("rgba", &swapdesk_proto::RedactedLen(self.rgba.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,10 +354,20 @@ pub trait InputGrabber {
 }
 
 // ---------- clipboard ----------
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ClipContent {
     Text(String),
     Png(Vec<u8>),
+}
+
+/// Clipboard content is never logged (CONTRACTS.md C2.3): `Debug` shows the kind and the size only.
+impl core::fmt::Debug for ClipContent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Text(t) => write!(f, "Text({:?})", swapdesk_proto::RedactedLen(t.len())),
+            Self::Png(p) => write!(f, "Png({:?})", swapdesk_proto::RedactedLen(p.len())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +504,26 @@ pub trait SecretStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_of_a_cursor_shape_and_an_update_holding_it_shows_the_size_and_never_the_pixels() {
+        let shape = CursorShape { id: 1, width: 2, height: 2, hot_x: 0, hot_y: 0, rgba: vec![233; 16] };
+        let update = CursorUpdate { display: DisplayId(0), x: 5, y: 6, visible: true, shape: Some(shape.clone()) };
+        for shown in [format!("{shape:?}"), format!("{update:?}")] {
+            assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "pixels leaked: {shown}");
+            assert!(shown.contains("<redacted 16 bytes>"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn debug_of_clipboard_content_shows_the_kind_and_size_and_never_the_content() {
+        let text = format!("{:?}", ClipRead::Content(ClipContent::Text("senha123".into())));
+        assert!(!text.contains("senha"), "clipboard text leaked: {text}");
+        assert!(text.contains("Text(<redacted 8 bytes>)"), "{text}");
+        let png = format!("{:?}", ClipContent::Png(vec![233; 12]));
+        assert!(!png.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "{png}");
+        assert!(png.contains("Png(<redacted 12 bytes>)"), "{png}");
+    }
 
     /// Compiles only when every trait that C3 uses behind `dyn` is object-safe.
     #[allow(clippy::too_many_arguments)]

@@ -15,7 +15,7 @@ pub mod media;
 pub mod pairing;
 pub mod types;
 
-pub use codec::{CodecError, Reader, Wire, Writer};
+pub use codec::{CodecError, Reader, Redacted, RedactedLen, Wire, Writer};
 pub use control::*;
 pub use media::*;
 pub use pairing::*;

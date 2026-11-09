@@ -85,7 +85,6 @@ impl std::fmt::Debug for Queued {
 }
 
 /// A frame ready for the decoder.
-#[derive(Debug)]
 pub struct ReceivedFrame {
     pub header: VideoHeader,
     pub payload: Vec<u8>,
@@ -93,6 +92,17 @@ pub struct ReceivedFrame {
     pub received_at: Instant,
     /// Keeps the frame's bytes in the receiver's budget while it waits for the decoder.
     _queued: Queued,
+}
+
+/// The payload is the screen's pixels: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl std::fmt::Debug for ReceivedFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedFrame")
+            .field("header", &self.header)
+            .field("payload", &swapdesk_proto::RedactedLen(self.payload.len()))
+            .field("received_at", &self.received_at)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -491,5 +501,38 @@ impl Inner {
         }
         drop(t);
         self.count(|s| s.budget_stops += stopped);
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use swapdesk_proto::Codec;
+
+    #[test]
+    fn debug_of_a_received_frame_shows_its_size_and_never_its_bytes() {
+        let header = VideoHeader {
+            keyframe: false,
+            config: false,
+            discontinuity: false,
+            display_id: 0,
+            frame_id: 9,
+            capture_us: 0,
+            encode_us: 0,
+            width: 1280,
+            height: 720,
+            codec: Codec::H264,
+            payload_len: 48,
+        };
+        let counter = Arc::new(AtomicUsize::new(48));
+        let frame = ReceivedFrame {
+            header,
+            payload: vec![233; 48],
+            received_at: Instant::now(),
+            _queued: Queued { counter, bytes: 48 },
+        };
+        let shown = format!("{frame:?}");
+        assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "payload bytes leaked: {shown}");
+        assert!(shown.contains("<redacted 48 bytes>"), "{shown}");
     }
 }

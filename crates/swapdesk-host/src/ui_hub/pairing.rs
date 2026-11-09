@@ -17,9 +17,9 @@ use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
 use swapdesk_platform::Level;
 use swapdesk_proto::Sas;
 use swapdesk_trust::{
-    Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingService, PeerInfo,
-    ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex, endpoint_from_socket,
-    open_pairing_endpoint,
+    Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
+    PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex,
+    endpoint_from_socket, open_pairing_endpoint,
 };
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -49,6 +49,8 @@ pub(crate) struct PairState {
     inner: Mutex<Inner>,
     /// Serve tasks of the pairing endpoints still running.
     serving: Arc<AtomicUsize>,
+    /// One connection attempt per source address per 30 s (PROTOCOL.md 3), across every opening of the mode.
+    rate: Arc<PairingRate>,
 }
 
 /// The screen side of a ceremony: what the trust crate shows becomes a `Pairing` notification.
@@ -176,7 +178,11 @@ impl Hub {
         let _enter = rt.enter();
         let service = PairingService::with_options(
             Arc::clone(ctx),
-            ServeOptions { filter: Some(self.pairing_filter()), ..ServeOptions::default() },
+            ServeOptions {
+                filter: Some(self.pairing_filter()),
+                admitted: Some(self.pairing_admitted()),
+                ..ServeOptions::default()
+            },
         );
         let mut endpoints = Vec::new();
         for socket in sockets {
@@ -196,21 +202,34 @@ impl Hub {
         Ok(endpoints)
     }
 
-    /// The LAN guard on the pairing endpoint (PROTOCOL.md 1: on-link, not loopback, not this machine).
+    /// The filter of the pairing endpoint: the LAN guard (PROTOCOL.md 1: on-link, not loopback, not this machine),
+    /// then one connection attempt per source address per 30 s (PROTOCOL.md 3). A source that is not validated yet
+    /// gets `retry()` and costs its turn nothing; a second attempt inside the interval is ignored before any
+    /// handshake and without an audit entry.
     fn pairing_filter(&self) -> swapdesk_trust::IncomingFilter {
         let (nets, allow_loopback) = (Arc::clone(&self.p.interfaces), self.allow_loopback());
+        let rate = Arc::clone(&self.pairing.rate);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
             let local = incoming.local_ip();
-            if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
-                return Decision::Accept;
+            let on_link = if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
+                true
+            } else if let (Ok(list), Some(local)) = (nets.list(), local) {
+                check_incoming(&list, local, remote).is_ok()
+            } else {
+                false
+            };
+            if !on_link {
+                return Decision::Refuse;
             }
-            let (Ok(list), Some(local)) = (nets.list(), local) else { return Decision::Refuse };
-            match check_incoming(&list, local, remote) {
-                Ok(_) => Decision::Accept,
-                Err(_) => Decision::Refuse,
-            }
+            rate.judge(incoming)
         })
+    }
+
+    /// Where a source address's 30 s turn is spent: only for an attempt the pairing service admitted past its cap.
+    fn pairing_admitted(&self) -> swapdesk_trust::AdmittedHook {
+        let rate = Arc::clone(&self.pairing.rate);
+        Arc::new(move |incoming| rate.note(incoming))
     }
 
     /// `PairOpen`: pairing mode for 2 minutes (D12), the endpoints, the `pair=1` announcement, the screen's id.

@@ -116,7 +116,7 @@ impl Hub {
         // The ops that answer when their work is done (or at once, with the work going on) reply themselves.
         match op {
             UiOp::RequestSwap { session_id } => self.request_swap(conn, req, session_id),
-            UiOp::ChatSend { session_id, text } => self.chat_send(conn, req, session_id, text),
+            UiOp::ChatSend { session_id, text } => self.chat_send(conn, req, session_id, text.0),
             UiOp::ChatMarkRead { session_id } => self.chat_read(conn, req, session_id),
             UiOp::Wake { device_id, intent } => self.wake(conn, req, &device_id, intent),
             UiOp::RunAction { session_id, action } => self.run_action(conn, req, session_id, action),

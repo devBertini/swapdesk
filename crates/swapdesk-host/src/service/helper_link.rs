@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use swapdesk_files::{FsCaller, Pending, PipeCaller};
 use swapdesk_ipc::{AudioModeKind, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, Message};
-use swapdesk_proto::{CursorPosition, CursorShape, Desktop, Display, DisplayList, ErrorCode};
+use swapdesk_proto::{CursorPosition, CursorShape, Desktop, Display, DisplayList, ErrorCode, RedactedLen};
 use tokio::sync::mpsc;
 
 use super::routing::HelperKind;
@@ -26,8 +26,7 @@ const EVENT_QUEUE: usize = 64;
 /// How long an async sender sleeps between two looks at a full queue.
 const FULL_RETRY: Duration = Duration::from_millis(2);
 
-/// What a helper told the service.
-#[derive(Debug)]
+/// What a helper told the service. `Debug` shows sizes, never the pixels, audio, shell output or fault details.
 pub enum HelperEvent {
     Displays(DisplayList),
     Video {
@@ -64,6 +63,37 @@ pub enum HelperEvent {
     Gone {
         error: Option<String>,
     },
+}
+
+impl core::fmt::Debug for HelperEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Displays(d) => f.debug_tuple("Displays").field(d).finish(),
+            Self::Video { header, payload } => {
+                f.debug_struct("Video").field("header", header).field("payload", &RedactedLen(payload.len())).finish()
+            }
+            Self::CursorPos(p) => f.debug_tuple("CursorPos").field(p).finish(),
+            Self::CursorShape(s) => f.debug_tuple("CursorShape").field(s).finish(),
+            Self::Audio(a) => f.debug_tuple("Audio").field(&RedactedLen(a.len())).finish(),
+            Self::AudioMode(m) => f.debug_tuple("AudioMode").field(m).finish(),
+            Self::Desktop(d) => f.debug_tuple("Desktop").field(d).finish(),
+            Self::SasRequest => f.write_str("SasRequest"),
+            Self::Fault { code, what } => {
+                f.debug_struct("Fault").field("code", code).field("what", &RedactedLen(what.len())).finish()
+            }
+            Self::PtyOpenReply { id, code, account } => f
+                .debug_struct("PtyOpenReply")
+                .field("id", id)
+                .field("code", code)
+                .field("account", &RedactedLen(account.len()))
+                .finish(),
+            Self::PtyOutput { id, bytes } => {
+                f.debug_struct("PtyOutput").field("id", id).field("bytes", &RedactedLen(bytes.len())).finish()
+            }
+            Self::PtyExited { id, code } => f.debug_struct("PtyExited").field("id", id).field("code", code).finish(),
+            Self::Gone { error } => f.debug_struct("Gone").field("error", error).finish(),
+        }
+    }
 }
 
 /// Why a helper could not be attached.
@@ -114,7 +144,8 @@ impl HelperLink {
         self.kind
     }
 
-    /// The process id the helper announced in its `Hello`.
+    /// The helper's process id as the caller verified it (the pipe client's PID, or the service's own for an
+    /// in-process helper): never the one in the helper's `Hello`, which the helper itself writes.
     pub fn pid(&self) -> u32 {
         self.pid
     }
@@ -177,8 +208,15 @@ pub(crate) struct Attached {
 
 /// Does the service side of the handshake on `reader` / `writer`, then starts the reader thread and the writer
 /// thread. Blocks until the helper's `Hello` arrives: call it from the supervisor's thread, never from a runtime
-/// task.
-pub(crate) fn attach<R, W>(role: IpcRole, win_session: u32, reader: R, writer: W) -> Result<Attached, AttachError>
+/// task. `pid` is the helper's process id as the caller verified it; the `Hello`'s own `pid` is ignored (a helper
+/// that wrote another one would leave a slot the supervisor can never match to its child, so it would never restart).
+pub(crate) fn attach<R, W>(
+    role: IpcRole,
+    win_session: u32,
+    pid: u32,
+    reader: R,
+    writer: W,
+) -> Result<Attached, AttachError>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -207,7 +245,7 @@ where
         .name(format!("service-helper-{kind:?}"))
         .spawn(move || read_loop(reader, &tx, &closer, &reading, &pending))
         .map_err(AttachError::Spawn)?;
-    let link = HelperLink { id, kind, pid: hello.pid, outbox, displays: Mutex::new(Vec::new()), rpc, fs };
+    let link = HelperLink { id, kind, pid, outbox, displays: Mutex::new(Vec::new()), rpc, fs };
     Ok(Attached { link, events })
 }
 
@@ -261,4 +299,67 @@ fn read_loop<R: Read>(
     rpc.close();
     fs.close();
     let _ = tx.blocking_send(HelperEvent::Gone { error });
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use swapdesk_proto::{Codec, CursorShapeHeader, VideoHeader};
+
+    fn video_header() -> VideoHeader {
+        VideoHeader {
+            keyframe: false,
+            config: false,
+            discontinuity: false,
+            display_id: 0,
+            frame_id: 5,
+            capture_us: 0,
+            encode_us: 0,
+            width: 640,
+            height: 480,
+            codec: Codec::H264,
+            payload_len: 32,
+        }
+    }
+
+    fn leaks_byte(shown: &str) -> bool {
+        shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233")
+    }
+
+    #[test]
+    fn debug_of_helper_events_shows_sizes_and_never_pixels_audio_shell_output_or_details() {
+        let shape = CursorShape {
+            header: CursorShapeHeader { shape_id: 1, width: 2, height: 2, hot_x: 0, hot_y: 0 },
+            rgba: vec![233; 16],
+        };
+        let events = [
+            HelperEvent::Video { header: video_header(), payload: vec![233; 32] },
+            HelperEvent::Audio(vec![233; 20]),
+            HelperEvent::CursorShape(shape.clone()),
+            HelperEvent::PtyOutput { id: 1, bytes: vec![233; 9] },
+            HelperEvent::PtyOutput { id: 1, bytes: b"senha-no-shell".to_vec() },
+            HelperEvent::Fault { code: ErrorCode::IoFailed, what: "caminho-secreto".into() },
+            HelperEvent::PtyOpenReply { id: 2, code: ErrorCode::NoError, account: "claudio-privado".into() },
+        ];
+        for event in &events {
+            let shown = format!("{event:?}");
+            assert!(!leaks_byte(&shown), "bytes leaked: {shown}");
+            for text in ["senha", "secreto", "privado"] {
+                assert!(!shown.contains(text), "{text} leaked: {shown}");
+            }
+        }
+        assert!(format!("{:?}", events[0]).contains("<redacted 32 bytes>"));
+        assert!(format!("{:?}", events[3]).contains("<redacted 9 bytes>"));
+        // The shared media relay's copy of the same events.
+        let media = [
+            super::super::shared::MediaEv::Video { header: video_header(), payload: vec![233; 32] },
+            super::super::shared::MediaEv::Audio(vec![233; 20]),
+            super::super::shared::MediaEv::CursorShape(shape),
+        ];
+        for ev in &media {
+            let shown = format!("{ev:?}");
+            assert!(!leaks_byte(&shown), "bytes leaked: {shown}");
+            assert!(shown.contains("redacted"), "{shown}");
+        }
+    }
 }

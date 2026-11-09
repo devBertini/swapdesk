@@ -546,7 +546,7 @@ pub fn route(c: &a::Command) -> Route {
         C::ActivityList { before_ms, limit } => O::ActivityList { before_ms: *before_ms, limit: *limit },
         C::RequestSwap { session_id } => O::RequestSwap { session_id: *session_id },
         C::AnswerSwap { request_id, accept } => O::AnswerSwap { request_id: *request_id, accept: *accept },
-        C::ChatSend { session_id, text } => O::ChatSend { session_id: *session_id, text: text.clone() },
+        C::ChatSend { session_id, text } => O::ChatSend { session_id: *session_id, text: w::Text(text.clone()) },
         // The service marks everything the peer sent as read: `up_to` is only for the UI's own state.
         C::ChatMarkRead { session_id, .. } => O::ChatMarkRead { session_id: *session_id },
         // The UI has no choice of intent for "Acordar": it wakes the device to control it, like "Controlar".
@@ -763,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             route(&C::ChatSend { session_id: 4, text: "oi".into() }),
-            Route::Op(w::UiOp::ChatSend { session_id: 4, text: "oi".into() })
+            Route::Op(w::UiOp::ChatSend { session_id: 4, text: w::Text("oi".into()) })
         );
         assert_eq!(
             route(&C::ChatMarkRead { session_id: 4, up_to: 9 }),

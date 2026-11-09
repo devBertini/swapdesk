@@ -92,7 +92,8 @@ pub enum UiOp {
     /// Send a chat message; the reply carries it as stored (id, time).
     ChatSend {
         session_id: u64,
-        text: String,
+        /// Chat text is never logged: `Text` prints its length only.
+        text: Text,
     },
     /// The chat panel shows everything the peer sent: the peer is told (`ChatRead`).
     ChatMarkRead {
@@ -244,7 +245,7 @@ impl UiOp {
             }
             Self::ChatSend { session_id, text } => {
                 w.put_u64(*session_id);
-                w.put_str(text, MAX_CHAT_TEXT)?;
+                w.put_str(&text.0, MAX_CHAT_TEXT)?;
             }
             Self::Wake { device_id, intent } => {
                 w.put_str(device_id, MAX_NAME)?;
@@ -300,7 +301,7 @@ impl UiOp {
             21 => Self::ActivityList { before_ms: <Option<u64>>::get(r, 0)?, limit: r.u32()? },
             22 => Self::RequestSwap { session_id: r.u64()? },
             23 => Self::AnswerSwap { request_id: r.u32()?, accept: r.bool()? },
-            24 => Self::ChatSend { session_id: r.u64()?, text: r.str(MAX_CHAT_TEXT)? },
+            24 => Self::ChatSend { session_id: r.u64()?, text: Text(r.str(MAX_CHAT_TEXT)?) },
             25 => Self::ChatMarkRead { session_id: r.u64()? },
             26 => Self::Wake { device_id: r.str(MAX_NAME)?, intent: Intent::get(r, 0)? },
             27 => Self::ListDisplays { session_id: r.u64()? },

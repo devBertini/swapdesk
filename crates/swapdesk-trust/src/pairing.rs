@@ -116,15 +116,15 @@ pub struct InitiateOptions {
 // ---------- pure parts: commitment and code ----------
 
 /// `commit = H("swapdesk commit v1" || spki_I || nonce_I)` (step 1).
-pub fn commitment(spki_i: &[u8], nonce_i: &[u8; NONCE_LEN]) -> [u8; 32] {
+pub fn commitment(spki_i: &Spki, nonce_i: &[u8; NONCE_LEN]) -> [u8; 32] {
     sha256(&CommitmentInput { spki_i, nonce_i }.preimage())
 }
 
 /// The six digits both users compare (step 4).
 pub fn compute_sas(
     ek: &[u8; EXPORTER_LEN],
-    spki_i: &[u8],
-    spki_r: &[u8],
+    spki_i: &Spki,
+    spki_r: &Spki,
     nonce_i: &[u8; NONCE_LEN],
     nonce_r: &[u8; NONCE_LEN],
 ) -> Sas {
@@ -397,10 +397,14 @@ where
                 // still on disk, which counts too.
                 let _ = ctx.trust.update(|s| s.lockout.fail(now));
             }
+            // A failure that reached step 2 counted against the lockout (`PairFailed`); one that did not is what an
+            // unauthenticated peer can repeat at will (`PairRefused`), and the audit rate limit covers only that.
             let event = if matches!(e, TrustError::Locked { .. }) {
                 AuditEvent::PairingLocked
-            } else {
+            } else if attempt.began.load(Ordering::SeqCst) {
                 AuditEvent::PairFailed(e.code())
+            } else {
+                AuditEvent::PairRefused(e.code())
             };
             ctx.audit.append(AuditEntry { time_ms: now, device, event, duration_s: None });
             ctx.trace.log(Level::Warn, "pair", format_args!("pairing failed: {:?}", e.code()));

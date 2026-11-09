@@ -6,11 +6,22 @@ pub const SHAPE_COLOR: u32 = 2;
 pub const SHAPE_MASKED_COLOR: u32 = 4;
 
 /// A converted pointer image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Converted {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+/// The pixels are whatever is under the pointer: `Debug` shows their size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for Converted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Converted")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("rgba", &format_args!("<redacted {} bytes>", self.rgba.len()))
+            .finish()
+    }
 }
 
 /// Converts one shape buffer. `width`, `height` and `pitch` are those of `DXGI_OUTDUPL_POINTER_SHAPE_INFO` (for a
@@ -87,6 +98,13 @@ pub fn convert_shape(shape_type: u32, width: u32, height: u32, pitch: u32, buf: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_of_a_converted_pointer_shows_the_size_and_never_the_pixels() {
+        let shown = format!("{:?}", Converted { width: 2, height: 2, rgba: vec![233; 16] });
+        assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "pixels leaked: {shown}");
+        assert!(shown.contains("<redacted 16 bytes>"), "{shown}");
+    }
 
     #[test]
     fn color_shape_swaps_to_rgba_and_honours_the_pitch() {

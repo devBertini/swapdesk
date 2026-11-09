@@ -573,13 +573,7 @@ fn headers_refuse_wrong_kinds_versions_flags_and_reserved_bytes() {
 #[test]
 fn pairing_inputs_are_plain_concatenations() {
     let mut runner = TestRunner::new(Config { cases: 128, failure_persistence: None, ..Config::default() });
-    let strategy = (
-        proptest::collection::vec(any::<u8>(), 0..64),
-        proptest::collection::vec(any::<u8>(), 0..64),
-        any::<[u8; 32]>(),
-        any::<[u8; 32]>(),
-        any::<[u8; 32]>(),
-    );
+    let strategy = (any::<[u8; 44]>(), any::<[u8; 44]>(), any::<[u8; 32]>(), any::<[u8; 32]>(), any::<[u8; 32]>());
     runner
         .run(&strategy, |(spki_i, spki_r, ek, ni, nr)| {
             let c = CommitmentInput { spki_i: &spki_i, nonce_i: &ni }.preimage();

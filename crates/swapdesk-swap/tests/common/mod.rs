@@ -509,8 +509,8 @@ impl Quic {
         };
         let addr = endpoint.local_addr().unwrap();
         let task = tokio::spawn({
-            let (host, endpoint) = (host.clone(), endpoint.clone());
-            async move { host.run_endpoint(endpoint).await }
+            let (host, trust, endpoint) = (host.clone(), trust.clone(), endpoint.clone());
+            serve_endpoint(host, trust, endpoint)
         });
         Self { host, ui, trust, host_identity, addr, host_link, endpoint, task }
     }
@@ -584,4 +584,17 @@ pub fn assert_refused(r: Result<swapdesk_session::ViewerSession, swapdesk_sessio
 
 pub fn elapsed_since(t: Instant) -> Duration {
     t.elapsed()
+}
+
+/// What the service's accept loop does with the connections of a test endpoint: the handshake and the gate, then one
+/// task per session. It has no LAN guard and no limit (the service's own loop has both), so it stays in the tests.
+pub async fn serve_endpoint(host: HostService, trust: Arc<TrustHandle>, endpoint: Endpoint) {
+    while let Some(incoming) = endpoint.accept().await {
+        let (host, trust) = (host.clone(), Arc::clone(&trust));
+        tokio::spawn(async move {
+            if let Ok((conn, device)) = swapdesk_trust::accept_session(incoming, &*trust).await {
+                host.serve(conn, device).await;
+            }
+        });
+    }
 }

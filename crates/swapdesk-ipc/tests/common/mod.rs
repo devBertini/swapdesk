@@ -265,7 +265,9 @@ pub fn op() -> BoxedStrategy<UiOp> {
             .boxed(),
         any::<u64>().prop_map(|session_id| UiOp::RequestSwap { session_id }).boxed(),
         (any::<u32>(), any::<bool>()).prop_map(|(request_id, accept)| UiOp::AnswerSwap { request_id, accept }).boxed(),
-        (any::<u64>(), txt(4096)).prop_map(|(session_id, text)| UiOp::ChatSend { session_id, text }).boxed(),
+        (any::<u64>(), txt(4096))
+            .prop_map(|(session_id, text)| UiOp::ChatSend { session_id, text: Text(text) })
+            .boxed(),
         any::<u64>().prop_map(|session_id| UiOp::ChatMarkRead { session_id }).boxed(),
         (txt(64), pick(Intent::ALL)).prop_map(|(device_id, intent)| UiOp::Wake { device_id, intent }).boxed(),
         any::<u64>().prop_map(|session_id| UiOp::ListDisplays { session_id }).boxed(),

@@ -114,6 +114,10 @@ pub enum Decision {
 /// and nothing else has happened yet.
 pub type IncomingFilter = Arc<dyn Fn(&Incoming) -> Decision + Send + Sync>;
 
+/// Called with an `Incoming` the service has admitted past every check, its in-flight cap included, before the
+/// handshake runs: where a per-address turn is recorded (a turn dropped by the cap is not spent).
+pub type AdmittedHook = Arc<dyn Fn(&Incoming) + Send + Sync>;
+
 /// The load limit of PROTOCOL.md 1: at most 16 handshakes in flight per machine.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 
@@ -124,11 +128,13 @@ pub struct ServeOptions {
     pub max_in_flight: usize,
     /// Runs on every `Incoming` before anything else of this service looks at it. `None` accepts all.
     pub filter: Option<IncomingFilter>,
+    /// Runs on every `Incoming` that passed the filter and got a place under `max_in_flight`.
+    pub admitted: Option<AdmittedHook>,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None }
+        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None, admitted: None }
     }
 }
 
@@ -205,6 +211,9 @@ impl PairingService {
             }
         }
         let Some(place) = self.reserve() else { return incoming.ignore() };
+        if let Some(admitted) = &self.options.admitted {
+            admitted(&incoming);
+        }
         let me = Arc::clone(self);
         tokio::spawn(async move {
             me.handle(incoming).await;

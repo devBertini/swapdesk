@@ -437,6 +437,16 @@ impl core::fmt::Debug for Redacted {
     }
 }
 
+/// Stands in for a never-logged byte or text body in `Debug` output: only its size shows (CONTRACTS.md C2.3).
+/// Shared by every crate that holds payloads, so a `{:?}` can never print them.
+pub struct RedactedLen(pub usize);
+
+impl core::fmt::Debug for RedactedLen {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "<redacted {} bytes>", self.0)
+    }
+}
+
 macro_rules! wire_debug_field {
     ($v:expr) => {
         &$v as &dyn core::fmt::Debug

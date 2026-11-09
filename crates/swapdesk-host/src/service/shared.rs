@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use swapdesk_platform::{Level, TraceSink};
-use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, VideoHeader};
+use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, RedactedLen, VideoHeader};
 use swapdesk_session::{Forwarded, HostService};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -41,7 +41,7 @@ pub enum CoreEvent {
 }
 
 /// What the media helper sent, as the relays of live sessions see it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum MediaEv {
     Displays(Vec<Display>),
     Video {
@@ -53,6 +53,22 @@ pub(crate) enum MediaEv {
     Audio(Vec<u8>),
     /// A helper's pipe ended (its link id).
     HelperGone(u64),
+}
+
+/// Screen pixels and system audio never show in `Debug` (CONTRACTS.md C2.3): sizes only.
+impl core::fmt::Debug for MediaEv {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Displays(d) => f.debug_tuple("Displays").field(d).finish(),
+            Self::Video { header, payload } => {
+                f.debug_struct("Video").field("header", header).field("payload", &RedactedLen(payload.len())).finish()
+            }
+            Self::CursorPos(p) => f.debug_tuple("CursorPos").field(p).finish(),
+            Self::CursorShape(s) => f.debug_tuple("CursorShape").field(s).finish(),
+            Self::Audio(a) => f.debug_tuple("Audio").field(&RedactedLen(a.len())).finish(),
+            Self::HelperGone(id) => f.debug_tuple("HelperGone").field(id).finish(),
+        }
+    }
 }
 
 /// Everything a host relay's task can be woken by.

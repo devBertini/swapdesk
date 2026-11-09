@@ -3,7 +3,7 @@
 use ring::digest;
 
 /// `SubjectPublicKeyInfo` of an Ed25519 key, RFC 8410 form: 12 bytes of header and the 32-byte key.
-pub const SPKI_LEN: usize = 44;
+pub const SPKI_LEN: usize = swapdesk_proto::SPKI_LEN;
 const SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
 
 pub type Spki = [u8; SPKI_LEN];

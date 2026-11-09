@@ -47,7 +47,10 @@ use swapdesk_session::{
     StartInfo, ViewerConfig,
 };
 use swapdesk_swap::{SwapHandler, SwapOutcome};
-use swapdesk_trust::{DeviceId, TrustHandle, accept_session, endpoint_from_socket, open_session_endpoint};
+use swapdesk_trust::{
+    Admission, DeviceId, SessionLimits, TrustHandle, accept_session, endpoint_from_socket, open_session_endpoint,
+    turn_away,
+};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot;
 
@@ -267,6 +270,8 @@ struct Gate {
     host: HostService,
     shared: Arc<Shared>,
     handshakes: AtomicUsize,
+    /// Connections per remote address (PROTOCOL.md 1: 4 at once, `retry()` over the limit).
+    limits: SessionLimits,
 }
 
 /// A place among the handshakes in flight, given back when dropped.
@@ -309,6 +314,20 @@ async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
             incoming.refuse();
             continue;
         }
+        // Before any place is taken: an address that has not proved itself gets `retry()` (a forged source cannot
+        // answer it, so it holds no per-address place and no handshake place). A validated address is then held to
+        // its 4 connections.
+        let address = match gate.limits.judge(&incoming) {
+            Admission::Admit(address) => address,
+            Admission::Retry => {
+                turn_away(incoming, true);
+                continue;
+            }
+            Admission::Ignore => {
+                turn_away(incoming, false);
+                continue;
+            }
+        };
         let Some(slot) = gate.reserve() else {
             incoming.ignore();
             continue;
@@ -323,6 +342,8 @@ async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
                 }
                 Err(e) => gate.shared.log(Level::Debug, format_args!("a session handshake failed: {e}")),
             }
+            // The address's place is held until the connection is over, not only through the handshake.
+            drop(address);
         });
     }
 }
@@ -481,6 +502,7 @@ impl ServiceCore {
             host: host.clone(),
             shared: Arc::clone(&shared),
             handshakes: AtomicUsize::new(0),
+            limits: SessionLimits::new(),
         });
         for endpoint in &endpoints {
             runtime.spawn(accept_loop(Arc::clone(&gate), endpoint.clone()));
@@ -554,17 +576,35 @@ impl ServiceCore {
 
     // ---------- helpers ----------
 
-    /// Attaches a helper: the service side of the C2.4 handshake on `reader` / `writer`, then a reader thread and a
-    /// writer path. `role` is what the caller expects (the pipe it created for that helper); a `Hello` with another
-    /// role is refused. A second helper of the same kind replaces the first, which is told to shut down. Blocks until
-    /// the helper's `Hello` arrives: call it from the supervisor's thread. The end of the pipe is reported as
-    /// `CoreEvent::HelperGone`.
+    /// Attaches a helper that runs inside this process (the Mac app's in-process helper, the tests'): the helper's
+    /// process id is this process's own. A helper in another process goes through [`ServiceCore::attach_helper_pid`]
+    /// with the PID the caller verified.
     pub fn attach_helper<R, W>(&self, role: IpcRole, reader: R, writer: W) -> Result<HelperKind, AttachError>
     where
         R: Read + Send + 'static,
         W: Write + Send + 'static,
     {
-        let helper_link::Attached { link, events } = helper_link::attach(role, self.win_session, reader, writer)?;
+        self.attach_helper_pid(role, std::process::id(), reader, writer)
+    }
+
+    /// Attaches a helper: the service side of the C2.4 handshake on `reader` / `writer`, then a reader thread and a
+    /// writer path. `role` is what the caller expects (the pipe it created for that helper); a `Hello` with another
+    /// role is refused. `pid` is the helper's process id as the caller verified it (the supervisor's check of the pipe
+    /// client's PID): the `Hello`'s own `pid` is ignored, and `HelperGone` reports this one. A second helper of the
+    /// same kind replaces the first, which is told to shut down. Blocks until the helper's `Hello` arrives: call it
+    /// from the supervisor's thread. The end of the pipe is reported as `CoreEvent::HelperGone`.
+    pub fn attach_helper_pid<R, W>(
+        &self,
+        role: IpcRole,
+        pid: u32,
+        reader: R,
+        writer: W,
+    ) -> Result<HelperKind, AttachError>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        let helper_link::Attached { link, events } = helper_link::attach(role, self.win_session, pid, reader, writer)?;
         let link = Arc::new(link);
         let kind = link.kind();
         if let Some(old) = self.shared.install(Arc::clone(&link)) {

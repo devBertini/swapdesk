@@ -91,6 +91,7 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         AuditEvent::Paired => (msg(MsgKey::AuditPaired, &[]), false),
         AuditEvent::UnknownDeviceRejected => (msg(MsgKey::AuditUnknownPair, &[]), true),
         AuditEvent::PairFailed(ErrorCode::SasRejected | ErrorCode::Timeout | ErrorCode::CommitMismatch)
+        | AuditEvent::PairRefused(ErrorCode::Timeout)
         | AuditEvent::PairingLocked => (msg(MsgKey::AuditUnknownPair, &[]), unknown),
         AuditEvent::SessionStarted { desktop: Desktop::LoginWindow, mode: GrantMode::Unattended, .. } => {
             (msg(MsgKey::AuditUnattendedLogin, &[]), false)
