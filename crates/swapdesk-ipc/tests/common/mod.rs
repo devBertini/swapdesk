@@ -236,6 +236,7 @@ pub fn op() -> BoxedStrategy<UiOp> {
         any::<u32>().prop_map(|pairing_id| UiOp::PairCancel { pairing_id }).boxed(),
         (txt(64), any::<u16>()).prop_map(|(device_id, grants)| UiOp::SetGrants { device_id, grants }).boxed(),
         txt(64).prop_map(|device_id| UiOp::ForgetDevice { device_id }).boxed(),
+        (txt(64), txt(64)).prop_map(|(device_id, name)| UiOp::RenameDevice { device_id, name }).boxed(),
         (txt(64), pick(Intent::ALL), any::<bool>())
             .prop_map(|(device_id, intent, unattended)| UiOp::Connect { device_id, intent, unattended })
             .boxed(),

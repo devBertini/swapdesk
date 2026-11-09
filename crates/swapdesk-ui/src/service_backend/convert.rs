@@ -519,6 +519,7 @@ pub fn route(c: &a::Command) -> Route {
         C::PairCancel { pairing_id } => O::PairCancel { pairing_id: *pairing_id },
         C::SetGrants { device_id, grants } => O::SetGrants { device_id: device_id.clone(), grants: grants.0 },
         C::ForgetDevice { device_id } => O::ForgetDevice { device_id: device_id.clone() },
+        C::RenameDevice { device_id, name } => O::RenameDevice { device_id: device_id.clone(), name: name.clone() },
         C::Connect { device_id, intent, unattended } => {
             O::Connect { device_id: device_id.clone(), intent: intent_to_wire(*intent), unattended: *unattended }
         }

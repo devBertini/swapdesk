@@ -565,6 +565,11 @@ pub enum Command {
     ForgetDevice {
         device_id: String,
     },
+    /// A local name for a paired device (the alias this machine shows; the peer is not told).
+    RenameDevice {
+        device_id: String,
+        name: String,
+    },
     Elevate {
         action: ElevatedAction,
     },
@@ -729,6 +734,7 @@ impl core::fmt::Debug for Command {
             Self::PairCancel { pairing_id } => dbg_fields!("PairCancel", pairing_id),
             Self::SetGrants { device_id, grants } => dbg_fields!("SetGrants", device_id, grants),
             Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
+            Self::RenameDevice { device_id, name } => dbg_fields!("RenameDevice", device_id, name),
             Self::Elevate { action } => dbg_fields!("Elevate", action),
             Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
             Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),

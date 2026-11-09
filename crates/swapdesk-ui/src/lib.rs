@@ -38,6 +38,6 @@ pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRo
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
     Activation, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId, Effect, Fetch,
-    Nav, NoticeKind, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
+    Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
 };
 pub use strings::MsgKey;

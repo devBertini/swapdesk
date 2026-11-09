@@ -142,16 +142,21 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
     let mut chat = tool(ControlId::TbChat, icons::CHAT);
     chat.pressed = f.st.drawer() == Some(DrawerTab::Chat);
     tools.extend([term, files, chat]);
-    tools.push(Tool {
-        id: ControlId::TbSwap,
-        icon: Some(icons::SWAP.to_owned()),
-        label: Some(f.t(MsgKey::TbSwap)),
-        pressed: false,
-        color: white,
-        weight_bold: false,
-        chevron: false,
-        sep_before: true,
-    });
+    // Swap between Windows and macOS is not in 1.0: "Inverter" is laid out only toward a machine of this OS, and
+    // "Desconectar" then takes its separator, so the bar has no gap.
+    let swap_offered = f.st.viewer_session().is_none_or(|v| f.st.swap_offered(v));
+    if swap_offered {
+        tools.push(Tool {
+            id: ControlId::TbSwap,
+            icon: Some(icons::SWAP.to_owned()),
+            label: Some(f.t(MsgKey::TbSwap)),
+            pressed: false,
+            color: white,
+            weight_bold: false,
+            chevron: false,
+            sep_before: true,
+        });
+    }
     tools.push(Tool {
         id: ControlId::TbDisconnect,
         icon: None,
@@ -160,7 +165,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
         color: fixed::TOOLBAR_DANGER,
         weight_bold: true,
         chevron: false,
-        sep_before: false,
+        sep_before: !swap_offered,
     });
 
     // Measure: button = padding 10 + content + 10, min 40; content = icon 18 / label / chevron 14, gap 8.
@@ -613,16 +618,20 @@ pub fn paint_banner(f: &mut Frame) {
     let dw = p.label(&disc, text::BTN_PRIMARY).w + 28.0 + 2.0 * p.hairline();
     x -= dw;
     f.button(ControlId::BannerDisconnect, Rect::new(x, cy - btn_h / 2.0, dw, btn_h), Kind::DangerSolid, &disc, false);
-    let swap = f.t(MsgKey::TbSwap);
-    let sw = p.label(&swap, text::BTN).w + 28.0 + 2.0 * p.hairline() + 16.0 + 8.0;
-    x -= 14.0 + sw;
-    let sr = Rect::new(x, cy - btn_h / 2.0, sw, btn_h);
-    p.bordered(sr, 8.0, pal.line, pal.surface);
-    f.tint(ControlId::BannerSwap, sr, 8.0, pal.ink, 0.06, 0.11);
-    p.svg(icons::SWAP, sr.x + 14.0 + p.hairline(), sr.y + 10.0, 16.0, 2.0, pal.link);
-    let sl = p.label(&swap, text::BTN);
-    p.draw(&sl, sr.x + 14.0 + p.hairline() + 16.0 + 8.0, sr.y + (btn_h - sl.h) / 2.0, pal.ink);
-    f.register(ControlId::BannerSwap, sr, 8.0);
+    // Swap between Windows and macOS is not in 1.0: the button exists only toward a machine of this OS, and the
+    // chat button then sits next to "Desconectar" with the usual gap.
+    if f.st.swap_offered(&h) {
+        let swap = f.t(MsgKey::TbSwap);
+        let sw = p.label(&swap, text::BTN).w + 28.0 + 2.0 * p.hairline() + 16.0 + 8.0;
+        x -= 14.0 + sw;
+        let sr = Rect::new(x, cy - btn_h / 2.0, sw, btn_h);
+        p.bordered(sr, 8.0, pal.line, pal.surface);
+        f.tint(ControlId::BannerSwap, sr, 8.0, pal.ink, 0.06, 0.11);
+        p.svg(icons::SWAP, sr.x + 14.0 + p.hairline(), sr.y + 10.0, 16.0, 2.0, pal.link);
+        let sl = p.label(&swap, text::BTN);
+        p.draw(&sl, sr.x + 14.0 + p.hairline() + 16.0 + 8.0, sr.y + (btn_h - sl.h) / 2.0, pal.ink);
+        f.register(ControlId::BannerSwap, sr, 8.0);
+    }
     x -= 14.0 + 36.0;
     let cr = Rect::new(x, cy - btn_h / 2.0, 36.0, btn_h);
     p.bordered(cr, 8.0, pal.line, pal.surface);

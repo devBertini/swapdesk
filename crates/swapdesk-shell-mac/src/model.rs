@@ -88,6 +88,13 @@ pub enum Block {
     Tabs(Vec<TabModel>),
     /// A row of the activity log.
     Row(String),
+    /// A device's name with its "Renomear" action beside it.
+    HeadingAction {
+        text: String,
+        action: ButtonModel,
+    },
+    /// Buttons side by side ("Salvar", "Cancelar").
+    ButtonRow(Vec<ButtonModel>),
     /// Placeholder lines while data loads (R-UI-1).
     Skeleton(u8),
 }
@@ -97,6 +104,8 @@ impl Block {
     pub fn labels(&self) -> Vec<(ControlId, String)> {
         match self {
             Block::Button(b) => vec![(b.id, b.label.clone())],
+            Block::HeadingAction { action, .. } => vec![(action.id, action.label.clone())],
+            Block::ButtonRow(v) => v.iter().map(|b| (b.id, b.label.clone())).collect(),
             Block::Toggle(t) => vec![(t.id, t.label.clone())],
             Block::Field(f) => vec![(f.id, f.label.clone())],
             Block::Select(s) => vec![(s.id, s.label.clone())],
@@ -109,6 +118,8 @@ impl Block {
     pub fn control_ids(&self) -> Vec<ControlId> {
         match self {
             Block::Button(b) => vec![b.id],
+            Block::HeadingAction { action, .. } => vec![action.id],
+            Block::ButtonRow(v) => v.iter().map(|b| b.id).collect(),
             Block::Toggle(t) => vec![t.id],
             Block::Field(f) => vec![f.id],
             Block::Select(s) => vec![s.id],
@@ -121,6 +132,7 @@ impl Block {
 fn style_of(id: ControlId, role: UiRole) -> ButtonStyle {
     match id {
         ControlId::Control
+        | ControlId::RenameSave
         | ControlId::Accept
         | ControlId::PairSame
         | ControlId::PairDone
@@ -198,6 +210,30 @@ pub fn blocks_from(state: &UiState, specs: &[ControlSpec]) -> Vec<Block> {
                     }));
                 }
             }
+        }
+    }
+    out
+}
+
+/// Puts what belongs side by side on one row: a device's name with its "Renomear" action, and the rename field's
+/// "Salvar" with "Cancelar". Everything else keeps its place.
+fn join_rows(blocks: Vec<Block>) -> Vec<Block> {
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut it = blocks.into_iter().peekable();
+    let next_is = |it: &mut std::iter::Peekable<std::vec::IntoIter<Block>>, id: ControlId| matches!(it.peek(), Some(Block::Button(b)) if b.id == id);
+    while let Some(block) = it.next() {
+        match block {
+            Block::Heading { text, level: 1 } if next_is(&mut it, ControlId::RenameDevice) => {
+                if let Some(Block::Button(action)) = it.next() {
+                    out.push(Block::HeadingAction { text, action });
+                }
+            }
+            Block::Button(save) if save.id == ControlId::RenameSave && next_is(&mut it, ControlId::RenameCancel) => {
+                if let Some(Block::Button(cancel)) = it.next() {
+                    out.push(Block::ButtonRow(vec![save, cancel]));
+                }
+            }
+            other => out.push(other),
         }
     }
     out
@@ -300,6 +336,15 @@ pub struct MainModel {
 }
 
 impl MainModel {
+    /// Whether the content has the text field `edit` (the rename field appears and goes with the device's page).
+    pub fn has_field(&self, edit: EditId) -> bool {
+        let blocks = match &self.layout {
+            MainLayout::Browse { content, .. } => content,
+            MainLayout::Card { blocks } => blocks,
+        };
+        blocks.iter().any(|b| matches!(b, Block::Field(f) if f.edit == edit))
+    }
+
     /// Every control the window offers with its accessible name, for the "every control has a place" test.
     pub fn control_labels(&self) -> Vec<(ControlId, String)> {
         let mut out = Vec::new();
@@ -459,7 +504,7 @@ pub fn main_model(state: &UiState) -> MainModel {
     } else {
         let sidebar_specs: Vec<ControlSpec> = specs.iter().filter(|c| c.region == Region::Sidebar).cloned().collect();
         let content_specs: Vec<ControlSpec> = specs.iter().filter(|c| c.region != Region::Sidebar).cloned().collect();
-        let mut content = blocks_from(state, &content_specs);
+        let mut content = join_rows(blocks_from(state, &content_specs));
         match state.nav() {
             Nav::Devices => {
                 if state.selected_device().is_none() && state.placeholder(DataKind::Devices) {
@@ -530,7 +575,7 @@ pub enum Tool {
         label: String,
         options: Vec<(SpecialKeys, String)>,
     },
-    /// The slot for "Inverter": always laid out, drawn only when the shell is told to show it.
+    /// "Inverter": in the model only toward a machine of this OS; drawn when the shell is told to show it.
     Swap {
         label: String,
     },
@@ -591,7 +636,7 @@ pub fn viewer_model(state: &UiState) -> Option<ViewerModel> {
     let current =
         state.viewer_display().and_then(|c| displays.iter().position(|d| d.id == c)).map(|i| i + 1).unwrap_or(1);
     let screen_label = state.t(MsgKey::TbScreen);
-    let tools = vec![
+    let mut tools = vec![
         Tool::Screen {
             label: screen_label,
             current: state.tm(&Msg::new(MsgKey::TbScreenN).with(current.to_string())),
@@ -629,9 +674,13 @@ pub fn viewer_model(state: &UiState) -> Option<ViewerModel> {
             disabled: !controllable,
         },
         Tool::Keys { label: state.t(MsgKey::TbKeys), options: state.special_keys() },
-        Tool::Swap { label: state.t(MsgKey::TbSwap) },
-        Tool::Disconnect { label: state.t(MsgKey::Disconnect) },
     ];
+    // Swap between Windows and macOS is not in 1.0: "Inverter" is in the bar only toward a machine of this OS, and
+    // "Desconectar" then sits next to the keys menu with no gap.
+    if state.swap_offered(session) {
+        tools.push(Tool::Swap { label: state.t(MsgKey::TbSwap) });
+    }
+    tools.push(Tool::Disconnect { label: state.t(MsgKey::Disconnect) });
 
     let specs = state.controls(WindowKind::Viewer);
     let mut overlay_specs: Vec<ControlSpec> =

@@ -340,9 +340,13 @@ impl Scenario {
     }
 
     fn viewer_session(since_ago_min: u64) -> UiEvent {
+        Self::viewer_session_to(MAC, since_ago_min)
+    }
+
+    fn viewer_session_to(device: &str, since_ago_min: u64) -> UiEvent {
         UiEvent::Session {
             session_id: 1,
-            device_id: MAC.into(),
+            device_id: device.into(),
             state: SessionState::Active {
                 since_ms: NOW_MS - since_ago_min * MIN,
                 role: Role::Viewer,
@@ -357,10 +361,10 @@ impl Scenario {
         }
     }
 
-    fn host_session() -> UiEvent {
+    fn host_session_to(device: &str) -> UiEvent {
         UiEvent::Session {
             session_id: 2,
-            device_id: MAC.into(),
+            device_id: device.into(),
             state: SessionState::Active {
                 since_ms: NOW_MS - 12 * MIN,
                 role: Role::Host,
@@ -552,13 +556,17 @@ impl Scenario {
                     },
                 }),
             ],
-            Scenario::Banner => vec![Event(Self::host_session())],
-            Scenario::Inverter => vec![mac(), Event(Self::viewer_session(12)), Activate(ControlId::TbSwap)],
+            // The banner offers "Inverter" only toward a machine of this OS (Windows here): the Desktop.
+            Scenario::Banner => vec![Event(Self::host_session_to(DESKTOP))],
+            // Swap is offered only toward a machine of this OS (this mock machine is Windows): the Desktop.
+            Scenario::Inverter => {
+                vec![Select(DESKTOP), Event(Self::viewer_session_to(DESKTOP, 12)), Activate(ControlId::TbSwap)]
+            }
             Scenario::InverterPedido => vec![
-                Event(Self::host_session()),
+                Event(Self::host_session_to(DESKTOP)),
                 Event(UiEvent::Swap {
                     session_id: 2,
-                    event: SwapEvent::Asked { request_id: 11, by: "MacBook do escritório".into(), remaining_s: 14 },
+                    event: SwapEvent::Asked { request_id: 11, by: "Desktop do escritório".into(), remaining_s: 14 },
                 }),
             ],
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
@@ -833,6 +841,20 @@ impl World {
             Command::ForgetDevice { device_id } => {
                 self.device(&device_id)?;
                 self.devices.retain(|d| d.id != device_id);
+                Ok(Reply::Done)
+            }
+            Command::RenameDevice { device_id, name } => {
+                let name = name.trim();
+                if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+                    return Err(ApiError::new(ApiCode::Invalid));
+                }
+                let d = self.device(&device_id)?;
+                if !d.paired {
+                    return Err(ApiError::new(ApiCode::NotFound));
+                }
+                d.name = name.to_owned();
+                let devices = self.devices.clone();
+                sh.later(ms(50), UiEvent::DevicesChanged(devices));
                 Ok(Reply::Done)
             }
             Command::Elevate { action } => {

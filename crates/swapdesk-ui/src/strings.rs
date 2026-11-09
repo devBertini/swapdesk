@@ -121,6 +121,12 @@ strings! {
     PermUnknown => "–", "–";
     ThereNote => "Quem decide é o {0}. Para inverter, o lado que passa a ser controlado precisa ter liberado “Controlar” para o outro.", "{0} decides. To swap, the side that becomes controlled must have allowed “Control” for the other.";
     ForgetDevice => "Esquecer este dispositivo", "Forget this device";
+    RenameAction => "Renomear", "Rename";
+    RenameSave => "Salvar", "Save";
+    RenameLabel => "Nome do dispositivo", "Device name";
+    RenameEmpty => "Digite um nome.", "Type a name.";
+    RenameTooLong => "Esse nome é longo demais.", "That name is too long.";
+    RenameControlChars => "O nome não pode ter caracteres de controle.", "The name cannot contain control characters.";
     HistoryTitle => "Histórico de {0}", "History of {0}";
     HistoryPlaceholder => "O histórico por dispositivo chega numa próxima versão. Por enquanto, veja tudo em Atividade.", "History per device arrives in a later version. For now, see everything under Activity.";
 

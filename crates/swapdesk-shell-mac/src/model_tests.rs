@@ -169,17 +169,18 @@ fn the_connect_flow_states_show_on_the_main_window() {
 }
 
 #[test]
-fn the_viewer_toolbar_has_every_tool_and_the_swap_slot() {
+fn the_viewer_toolbar_has_every_tool_and_no_swap_toward_another_os() {
     let state = shell_state(Scenario::Visualizador);
     let m = viewer_model(&state).expect("viewer");
     let ids = m.control_ids();
+    // The mock machine is Windows and the scenario's peer a Mac: swap is not in the bar (not in 1.0).
+    assert!(!ids.contains(&ControlId::TbSwap));
     for id in [
         ControlId::TbScreen,
         ControlId::TbFit,
         ControlId::TbAudio,
         ControlId::TbGrab,
         ControlId::TbKeys,
-        ControlId::TbSwap,
         ControlId::TbDisconnect,
         ControlId::TbQuality,
         ControlId::TbViewOnly,
@@ -342,4 +343,63 @@ fn the_address_edit_is_a_field_with_no_value() {
     let MainLayout::Browse { sidebar, .. } = main_of(&state).layout else { panic!() };
     assert_eq!(sidebar.address.edit, EditId::Address);
     assert!(sidebar.address.value.is_empty());
+}
+
+#[test]
+fn the_swap_tool_is_in_the_bar_only_toward_a_machine_of_this_os() {
+    use swapdesk_ui::Permission;
+    let mut state = shell_state(Scenario::Visualizador);
+    state.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: swapdesk_ui::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    let m = viewer_model(&state).expect("viewer");
+    let ids = m.control_ids();
+    let (swap, disconnect) = (
+        ids.iter().position(|i| *i == ControlId::TbSwap).expect("swap toward the same OS"),
+        ids.iter().position(|i| *i == ControlId::TbDisconnect).expect("disconnect"),
+    );
+    assert_eq!(swap + 1, disconnect, "swap sits right before disconnect");
+}
+
+#[test]
+fn renaming_puts_the_action_beside_the_name_and_save_beside_cancel() {
+    let mut state = Scenario::Dispositivos.prepared_state();
+    let content = |state: &UiState| match main_model(state).layout {
+        MainLayout::Browse { content, .. } => content,
+        MainLayout::Card { blocks } => blocks,
+    };
+    let blocks = content(&state);
+    assert!(
+        matches!(&blocks[0], Block::HeadingAction { text, action } if text == "MacBook do escritório" && action.id == ControlId::RenameDevice),
+        "{:?}",
+        blocks[0]
+    );
+    assert!(!main_model(&state).has_field(EditId::Rename));
+
+    state.activate(ControlId::RenameDevice);
+    let model = main_model(&state);
+    assert!(model.has_field(EditId::Rename));
+    let blocks = content(&state);
+    let field = blocks.iter().find_map(|b| match b {
+        Block::Field(f) if f.edit == EditId::Rename => Some(f.clone()),
+        _ => None,
+    });
+    assert_eq!(field.expect("the rename field").value, "MacBook do escritório", "prefilled");
+    let row = blocks.iter().find_map(|b| match b {
+        Block::ButtonRow(v) => Some(v.iter().map(|x| x.id).collect::<Vec<_>>()),
+        _ => None,
+    });
+    assert_eq!(row, Some(vec![ControlId::RenameSave, ControlId::RenameCancel]));
+    assert!(blocks.iter().all(|b| !matches!(b, Block::HeadingAction { .. })), "the action gave way to the field");
+
+    state.submit_edit(EditId::Rename, "  ".into());
+    let texts: Vec<String> =
+        content(&state).iter().filter_map(|b| if let Block::Text(t) = b { Some(t.clone()) } else { None }).collect();
+    assert!(texts.contains(&state.t(MsgKey::RenameEmpty)), "{texts:?}");
 }

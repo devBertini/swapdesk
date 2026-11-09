@@ -26,6 +26,8 @@ fn pairing_grants_forget_connect_and_wake_belong_to_the_console() {
         denied
     );
     assert_eq!(away.call(UiOp::ForgetDevice { device_id: id.clone() }).unwrap_err(), denied);
+    assert_eq!(away.call(UiOp::RenameDevice { device_id: id.clone(), name: "novo".into() }).unwrap_err(), denied);
+    assert_eq!(m.trust.read(|s| s.devices[0].name.clone()), "other-pc", "nothing renamed");
     assert_eq!(away.call(UiOp::PairOpen { device_id: None }).unwrap_err(), denied);
     assert_eq!(away.call(UiOp::PairStart { pairing_id: 1, device_id: id.clone() }).unwrap_err(), denied);
     assert_eq!(away.call(UiOp::PairConfirm { pairing_id: 1, matches: true }).unwrap_err(), denied);

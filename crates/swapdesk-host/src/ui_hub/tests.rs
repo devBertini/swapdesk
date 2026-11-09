@@ -619,6 +619,25 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
     assert_eq!(m.trust.read(|s| s.devices[0].unattended_granted_by.clone()), None);
     assert!(m.audit.entries().iter().filter(|e| matches!(e.event, AuditEvent::GrantsChanged { .. })).count() >= 3);
 
+    // Rename: only the local name of the record changes, the list is pushed, and bad names are refused.
+    let rename = |device_id: &str, name: &str| UiOp::RenameDevice { device_id: device_id.into(), name: name.into() };
+    assert!(plain.call(rename(&id, "  Sala de estar  ")).is_ok());
+    assert_eq!(m.trust.read(|s| s.devices[0].name.clone()), "Sala de estar", "trimmed and stored");
+    assert_eq!(m.trust.read(|s| s.devices[0].grants_here.bits()), PermissionSet::FILES.bits(), "grants untouched");
+    let pushed = plain.notify("the renamed list", |n| match n {
+        Notify::DevicesChanged(l) if l[0].name == "Sala de estar" => Some(l.clone()),
+        _ => None,
+    });
+    assert_eq!(pushed[0].name, "Sala de estar");
+    // (A name over 64 bytes never gets here: the wire codec refuses it, see swapdesk-ipc `tests/rename.rs`.)
+    for bad in ["", "   ", "a\nb", "tab\there"] {
+        assert_eq!(plain.call(rename(&id, bad)).unwrap_err(), ApiCode::Invalid, "{bad:?}");
+    }
+    assert!(plain.call(rename(&id, &"x".repeat(64))).is_ok());
+    assert_eq!(m.trust.read(|s| s.devices[0].name.len()), 64);
+    assert_eq!(plain.call(rename("zz", "Nome")).unwrap_err(), ApiCode::Invalid);
+    assert_eq!(plain.call(rename(&"0".repeat(32), "Nome")).unwrap_err(), ApiCode::NotFound);
+
     // Forget: the key and grants go.
     assert!(plain.call(UiOp::ForgetDevice { device_id: id.clone() }).is_ok());
     assert!(m.trust.read(|s| s.devices.is_empty()));

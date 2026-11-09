@@ -43,10 +43,13 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS_NAME: PCWSTR = w!("SwapdeskWindow");
 pub const TIMER_TICK: usize = 1;
 pub const TIMER_PLACEHOLDER: usize = 2;
+/// The host banner's minute boundary (re-armed after each firing, stopped when the banner closes).
+pub const TIMER_BANNER: usize = 4;
 /// One-shot: 150 ms after the last key typed in the address field (R-UI-4).
 const TIMER_ADDRESS: usize = 3;
 const EN_CHANGE: u16 = 0x0300;
 const EM_SETCUEBANNER: u32 = 0x1501;
+const EM_SETSEL: u32 = 0x00B1;
 const ES_AUTOHSCROLL_STYLE: u32 = 0x0080;
 
 /// The EDIT window procedure the inputs had before they were subclassed.
@@ -699,9 +702,11 @@ impl Window {
                 ((slot.rect.x * s).round() as i32, (slot.rect.y * s).round() as i32, (slot.rect.w * s).round() as i32);
             let y = y + ((slot.rect.h * s).round() as i32 - line) / 2;
             let existing = handles.iter().find(|h| h.id == slot.id).map(|h| h.hwnd);
+            let mut created_now = false;
             let hwnd = match existing {
                 Some(h) => h,
                 None => {
+                    created_now = true;
                     // SAFETY: a child EDIT of our window; it is destroyed with it.
                     let created = unsafe {
                         let instance = GetModuleHandleW(None).ok();
@@ -742,6 +747,8 @@ impl Window {
                 }
             };
             let handle = handles.iter_mut().find(|h| h.id == slot.id).expect("the handle was just found or pushed");
+            // The rename field opens prefilled, with its text selected and the keyboard in it.
+            let opening = slot.id == EditId::Rename && (created_now || !handle.visible);
             // SAFETY: our child windows.
             unsafe {
                 if handle.font != font.0 as isize {
@@ -753,7 +760,17 @@ impl Window {
                     handle.rect = (x, y, w, line);
                     handle.visible = true;
                 }
-                if GetFocus() != hwnd && !slot.value.is_empty() && edit_text(hwnd) != slot.value {
+                if opening {
+                    let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
+                    let _ = SetFocus(Some(hwnd));
+                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                }
+                // The rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
+                if slot.id != EditId::Rename
+                    && GetFocus() != hwnd
+                    && !slot.value.is_empty()
+                    && edit_text(hwnd) != slot.value
+                {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                 }
             }
@@ -811,13 +828,19 @@ impl Window {
                 if id == EditId::Chat {
                     self.clear_edit(id);
                 }
-                // SAFETY: our own window takes the focus back.
-                unsafe {
-                    let _ = SetFocus(Some(self.hwnd()));
+                // The rename field keeps the focus: a refused name is corrected in place.
+                if id != EditId::Rename {
+                    // SAFETY: our own window takes the focus back.
+                    unsafe {
+                        let _ = SetFocus(Some(self.hwnd()));
+                    }
                 }
             }
             2 => self.move_focus(unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0),
             3 => {
+                if id == EditId::Rename {
+                    self.shared.activate(ControlId::RenameCancel, self);
+                }
                 if id == EditId::Name
                     && let Some(n) = self.shared.state.borrow().settings().map(|s| s.name.clone())
                 {
@@ -1292,6 +1315,7 @@ impl Window {
                 match wparam.0 {
                     TIMER_TICK => self.shared.tick(),
                     TIMER_PLACEHOLDER => self.shared.arm_placeholders(),
+                    TIMER_BANNER => self.shared.banner_tick(),
                     TIMER_ADDRESS => {
                         // SAFETY: our own window's timer.
                         unsafe {
@@ -1372,6 +1396,7 @@ fn edit_code(id: EditId) -> usize {
         EditId::Name => 1,
         EditId::Chat => 2,
         EditId::Address => 3,
+        EditId::Rename => 4,
     }
 }
 
@@ -1380,6 +1405,7 @@ fn edit_from_code(code: usize) -> Option<EditId> {
         1 => Some(EditId::Name),
         2 => Some(EditId::Chat),
         3 => Some(EditId::Address),
+        4 => Some(EditId::Rename),
         _ => None,
     }
 }
