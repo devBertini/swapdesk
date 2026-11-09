@@ -120,8 +120,13 @@ impl HostUi for HubHostUi {
             kind: RequestKind::Session { intent: request.intent },
             // The stored grants, or, for a device that has none yet (just paired), what its user asked for:
             // ticking every box by hand before "Aceitar" is a dead end. Never UNATTENDED or ADMIN_TERMINAL (D8).
+            // Only the two bits go: the sets UNATTENDED and ADMIN_TERMINAL also hold VIEW and TERMINAL, and masking
+            // with them left CONTROL without VIEW, a set the answer's own check refuses as invalid.
             preset: if request.stored.is_empty() {
-                request.requested.bits() & !PermissionSet::UNATTENDED.union(PermissionSet::ADMIN_TERMINAL).bits()
+                PermissionSet::closure(
+                    request.requested.bits() & !(PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL),
+                )
+                .bits()
             } else {
                 request.stored.bits()
             },

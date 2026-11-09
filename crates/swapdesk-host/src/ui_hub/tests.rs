@@ -1110,3 +1110,45 @@ fn a_device_paired_through_a_typed_address_is_dialled_at_that_address() {
     a.finish();
     b.finish();
 }
+
+#[test]
+fn a_just_paired_device_gets_a_valid_preset_that_the_accept_takes() {
+    // Nothing stored yet (just paired): the preset is what the viewer asked for, without UNATTENDED and
+    // ADMIN_TERMINAL. Masking with those sets once dropped VIEW too, and "Aceitar" then answered Invalid.
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::EMPTY);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees(&host, false);
+    host.hub.set_console_session(Some(1));
+    let mut host_ui = host.client(info(false));
+    let mut viewer_ui = viewer.client(info(false));
+
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let incoming = host_ui.notify("IncomingRequest", |n| match n {
+        Notify::IncomingRequest(r) => Some(r.clone()),
+        _ => None,
+    });
+    let preset = PermissionSet::from_bits(incoming.preset).expect("the preset is a valid set");
+    assert!(preset.contains(PermissionSet::CONTROL), "control asked for: {:#06x}", incoming.preset);
+    assert!(!preset.contains(PermissionSet::UNATTENDED) && !preset.contains(PermissionSet::ADMIN_TERMINAL));
+    assert!(
+        host_ui
+            .call(UiOp::AnswerIncoming {
+                request_id: incoming.request_id,
+                decision: Decision::Accept,
+                grants: incoming.preset
+            })
+            .is_ok(),
+        "the preset as it came is accepted"
+    );
+    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
+        panic!()
+    };
+    assert!(viewer_ui.call(UiOp::Disconnect { session_id }).is_ok());
+    drop((host_ui, viewer_ui));
+    host.finish();
+    viewer.finish();
+}
