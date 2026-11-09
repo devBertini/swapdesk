@@ -16,6 +16,13 @@
 //! - A frame of another size than the configured one rebuilds the session (new SPS/PPS); the first output of every
 //!   session is a keyframe with `config_change: true`.
 //!
+//! A lost session (`kVTInvalidSessionErr` and the other statuses of [`session_gone`]: the system invalidates hardware
+//! sessions on sleep, display or GPU changes) does not end the video thread: `encode` rebuilds the session from the
+//! stored configuration and submits the same frame as a key frame with `config_change`, once per frame (a second failure
+//! is returned), and `set_rate` on a lost session keeps the numbers for the rebuild. A sample that cannot be turned into
+//! Annex B costs that one frame (counted in [`VtH264Encoder::dropped_frames`]) and the next frame is forced to be a key
+//! frame. The length field of the AVCC samples comes from the sample's format description (`NALUnitHeaderLengthOut`).
+//!
 //! Input is `Pixels::Gpu` holding a `CFRetained<CVPixelBuffer>` (NV12 `420f` from the screen lane, or BGRA; VideoToolbox
 //! converts what the encoder does not take) or `Pixels::Cpu` BGRA, copied into a buffer of the session's pool.
 //!
@@ -125,9 +132,34 @@ pub fn skip_frame(interval_us: u64, last_encoded: Option<u64>, captured: MonoMic
         && last_encoded.is_some_and(|last| captured.0.saturating_sub(last) < interval_us * 9 / 10)
 }
 
+/// `OSStatus` values after which the compression session cannot be used any more but a new one may work
+/// (`VTErrors.h`; values as shipped in `objc2-video-toolbox` 0.3.2):
+/// * `kVTInvalidSessionErr` (-12903): the session was invalidated, which the system does to a hardware session when the
+///   machine sleeps, the display or GPU changes, or the encoder daemon restarts;
+/// * `kVTVideoEncoderMalfunctionErr` (-12912) and `kVTSessionMalfunctionErr` (-17691): the encoder or the session broke;
+/// * `kVTVideoEncoderNotAvailableNowErr` (-12915): the hardware encoder was taken away (a new session may get another
+///   encoder, or fail with `Unavailable` and be retried).
+///
+/// The encoder rebuilds the session from the stored configuration and forces a key frame, once per frame.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn session_gone(status: i32) -> bool {
+    matches!(status, -12903 | -12912 | -17691 | -12915)
+}
+
 #[cfg(test)]
 mod plan_tests {
     use super::*;
+
+    #[test]
+    fn session_gone_statuses() {
+        for status in [-12903, -12912, -17691, -12915] {
+            assert!(session_gone(status), "{status}");
+        }
+        // A bad parameter, a refused property, success and an unknown code are not a lost session.
+        for status in [0, -12902, -12900, -12908, -12911, -1, 1] {
+            assert!(!session_gone(status), "{status}");
+        }
+    }
 
     #[test]
     fn text_halves_the_frame_rate_and_doubles_the_bits() {
@@ -189,7 +221,7 @@ pub use vt::{DEFAULT_WAIT, OutputWait, VtH264Encoder};
 #[cfg(target_os = "macos")]
 mod vt {
     use std::collections::VecDeque;
-    use std::ffi::c_void;
+    use std::ffi::{c_int, c_void};
     use std::ptr::{self, NonNull};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -219,12 +251,15 @@ mod vt {
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
     };
     use swapdesk_platform::{
-        Clock, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, Result, VideoEncoder,
+        Clock, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, PlatformError, Result,
+        VideoEncoder,
     };
     use swapdesk_proto::H264Profile;
 
-    use super::{Effective, data_rate_limit_bytes, effective, level_idc, next_pts, skip_frame, skip_interval_us};
-    use crate::annexb::{self, AVCC_LENGTH_SIZE};
+    use super::{
+        Effective, data_rate_limit_bytes, effective, level_idc, next_pts, session_gone, skip_frame, skip_interval_us,
+    };
+    use crate::annexb;
     use crate::sys::{err, status_err};
 
     /// How long `encode` waits for the frame's output when waiting on the condvar.
@@ -245,9 +280,22 @@ mod vt {
     pub const DEFAULT_WAIT: OutputWait = OutputWait::CompleteFrames;
 
     enum Landed {
-        Frame { keyframe: bool, annex_b: Vec<u8> },
+        Frame {
+            keyframe: bool,
+            annex_b: Vec<u8>,
+        },
         Dropped,
-        Failed { status: i32, what: &'static str },
+        /// The encoder reported an error for the frame.
+        Failed {
+            status: i32,
+            what: &'static str,
+        },
+        /// The encoder produced a sample that could not be turned into Annex B (corrupt AVCC, no parameter sets): that
+        /// one frame is dropped and the next one is forced to be a key frame.
+        Unreadable {
+            status: i32,
+            what: &'static str,
+        },
     }
 
     /// One callback result: the frame's timestamp (the source frame refcon) and when it landed.
@@ -281,16 +329,13 @@ mod vt {
                 return Err((status, "CMBlockBufferCopyDataBytes"));
             }
         }
-        let sets = if keyframe {
-            // SAFETY: as above.
-            let format = unsafe { sample.format_description() }.ok_or((-1, "keyframe without format description"))?;
-            let sets = parameter_sets(&format)?;
-            Some(sets)
-        } else {
-            None
-        };
+        // The length field size is a property of the format description, which every sample carries.
+        // SAFETY: as above.
+        let format = unsafe { sample.format_description() }.ok_or((-1, "sample without format description"))?;
+        let (count, length_size) = parameter_set_info(&format)?;
+        let sets = if keyframe { Some(parameter_sets(&format, count)?) } else { None };
         let prefix: Vec<&[u8]> = sets.iter().flatten().map(Vec::as_slice).collect();
-        let annex_b = annexb::avcc_to_annexb(&prefix, &avcc, AVCC_LENGTH_SIZE).ok_or((-1, "corrupt AVCC sample"))?;
+        let annex_b = annexb::avcc_to_annexb(&prefix, &avcc, length_size).ok_or((-1, "corrupt AVCC sample"))?;
         Ok((keyframe, annex_b))
     }
 
@@ -314,12 +359,14 @@ mod vt {
         }
     }
 
-    /// SPS then PPS of the sample's format description, each without start code.
-    fn parameter_sets(
+    /// The number of parameter sets of the sample's format description and the size of the length field of its AVCC
+    /// samples (`NALUnitHeaderLengthOut`, 1 to 4 bytes).
+    fn parameter_set_info(
         format: &objc2_core_media::CMFormatDescription,
-    ) -> std::result::Result<Vec<Vec<u8>>, (i32, &'static str)> {
+    ) -> std::result::Result<(usize, usize), (i32, &'static str)> {
         let mut count = 0usize;
-        // SAFETY: only the count is asked for; the other out pointers may be null.
+        let mut header_length: c_int = 0;
+        // SAFETY: only the count and the header length are asked for; the other out pointers may be null.
         let status = unsafe {
             CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                 format,
@@ -327,12 +374,21 @@ mod vt {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 &raw mut count,
-                ptr::null_mut(),
+                &raw mut header_length,
             )
         };
         if status != 0 {
             return Err((status, "CMVideoFormatDescriptionGetH264ParameterSetAtIndex"));
         }
+        let length_size = usize::try_from(header_length).ok().filter(|n| (1..=4).contains(n));
+        Ok((count, length_size.ok_or((-1, "unsupported NAL unit header length"))?))
+    }
+
+    /// SPS then PPS of the sample's format description (`count` of them), each without start code.
+    fn parameter_sets(
+        format: &objc2_core_media::CMFormatDescription,
+        count: usize,
+    ) -> std::result::Result<Vec<Vec<u8>>, (i32, &'static str)> {
         let mut sets = Vec::with_capacity(count);
         for i in 0..count {
             let mut p: *const u8 = ptr::null();
@@ -360,8 +416,9 @@ mod vt {
     /// `VTCompressionOutputCallback`: stores the sample's result for `encode`.
     ///
     /// # Safety
-    /// `refcon` is the address of the `Shared` of the session that owns this callback (the session is invalidated before
-    /// it is freed); `sample` is null or a live sample buffer for the duration of the call; `frame_refcon` is the
+    /// `refcon` is the address of the `Shared` allocation owned by the `SharedCell` of the session that owns this
+    /// callback (the allocation never moves and is freed only after the session was invalidated, so no callback runs
+    /// once it is gone); `sample` is null or a live sample buffer for the duration of the call; `frame_refcon` is the
     /// timestamp `encode` passed.
     unsafe extern "C-unwind" fn on_output(
         refcon: *mut c_void,
@@ -383,7 +440,7 @@ mod vt {
                 None => Landed::Dropped,
                 Some(s) => match extract(s) {
                     Ok((keyframe, annex_b)) => Landed::Frame { keyframe, annex_b },
-                    Err((status, what)) => Landed::Failed { status, what },
+                    Err((status, what)) => Landed::Unreadable { status, what },
                 },
             }
         };
@@ -398,10 +455,43 @@ mod vt {
         CMTime { value, timescale: TIMESCALE, flags: CMTimeFlags::Valid, epoch: 0 }
     }
 
+    /// The heap cell the output callback reports into. VideoToolbox keeps its address (the callback refcon) for as long
+    /// as the session lives, on another thread, so it is a raw allocation that no move of the owner can invalidate (a
+    /// `Box` that is moved is retagged as unique, which would conflict with the callback's shared reads), freed in `Drop`.
+    struct SharedCell(NonNull<Shared>);
+
+    impl SharedCell {
+        fn new(shared: Shared) -> Self {
+            Self(NonNull::from(Box::leak(Box::new(shared))))
+        }
+
+        fn get(&self) -> &Shared {
+            // SAFETY: the allocation lives until this cell drops; it is only ever accessed through shared references
+            // (the callback's and this one), and `Shared` is made of a mutex, a condvar and an `Arc<dyn Clock>`.
+            unsafe { self.0.as_ref() }
+        }
+
+        /// The refcon to give `VTCompressionSessionCreate`.
+        fn refcon(&self) -> *mut c_void {
+            self.0.as_ptr().cast::<c_void>()
+        }
+    }
+
+    impl Drop for SharedCell {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from `Box::leak` in `new` and is freed exactly once, here. A `Session` declares
+            // its `shared` field after `session` and invalidates the session in its own `Drop`, which runs first, so the
+            // callback can no longer run when this frees the allocation; a cell that never reached a session (the create
+            // call failed) was never given to VideoToolbox.
+            drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+        }
+    }
+
     /// A running session with the callback cell it reports into.
     struct Session {
+        /// Dropped (released) before `shared` is freed; `Session::drop` has invalidated it by then.
         session: CFRetained<VTCompressionSession>,
-        shared: Box<Shared>,
+        shared: SharedCell,
         width: u32,
         height: u32,
         hardware: bool,
@@ -411,8 +501,9 @@ mod vt {
 
     impl Drop for Session {
         fn drop(&mut self) {
-            // SAFETY: finishes pending frames, then tears the session down before its callback cell (`shared`, dropped
-            // after this) goes away; no callback runs after `invalidate` returns.
+            // SAFETY: finishes pending frames, then tears the session down before its callback cell (the `shared` field,
+            // freed after this `drop` returns) goes away; no callback runs after `invalidate` returns. Both calls accept
+            // a session that was already invalidated (they return an error status, ignored here).
             unsafe {
                 self.session.complete_frames(kCMTimeIndefinite);
                 self.session.invalidate();
@@ -439,6 +530,10 @@ mod vt {
         last_encoded_at: Option<u64>,
         skip_interval: u64,
         config_pending: bool,
+        /// The next frame must be a key frame: a sample could not be read, so the picture chain is broken.
+        force_key: bool,
+        /// Why the last unreadable sample was dropped.
+        last_unreadable: Option<PlatformError>,
         dropped: u64,
     }
 
@@ -455,6 +550,8 @@ mod vt {
                 last_encoded_at: None,
                 skip_interval: 0,
                 config_pending: true,
+                force_key: false,
+                last_unreadable: None,
                 dropped: 0,
             }
         }
@@ -462,6 +559,11 @@ mod vt {
         /// Frames the encoder dropped itself (its rate control, or no output for them) since this object was made.
         pub fn dropped_frames(&self) -> u64 {
             self.dropped
+        }
+
+        /// Why the last sample that could not be read was dropped (`None` if none was).
+        pub fn last_unreadable_sample(&self) -> Option<&PlatformError> {
+            self.last_unreadable.as_ref()
         }
 
         /// Chooses how `encode` waits for its output (measurements; the default is [`DEFAULT_WAIT`]).
@@ -500,13 +602,15 @@ mod vt {
             self.skip_interval = skip_interval_us(&eff);
             self.last_encoded_at = None;
             self.config_pending = true;
+            // A new session starts with a key frame whatever happens.
+            self.force_key = false;
             Ok(info)
         }
 
         /// Collects what the callback left, matching it to the frames that were handed in.
         fn drain(&mut self) -> Result<Vec<EncodedFrame>> {
             let Some(session) = self.session.as_ref() else { return Ok(Vec::new()) };
-            let mut outs = match session.shared.outs.lock() {
+            let mut outs = match session.shared.get().outs.lock() {
                 Ok(mut g) => std::mem::take(&mut *g),
                 Err(_) => return Err(err(ErrorKind::Os, "encode", "output cell poisoned")),
             };
@@ -521,6 +625,13 @@ mod vt {
                 match out.landed {
                     Landed::Failed { status, what } => return Err(status_err(what, status)),
                     Landed::Dropped => self.dropped += 1,
+                    Landed::Unreadable { status, what } => {
+                        self.last_unreadable = Some(status_err(what, status));
+                        // One sample that cannot be read costs one frame: the chain is broken, so the next frame is a
+                        // key frame (the helper's own force-until-keyframe loop does the same from its side).
+                        self.dropped += 1;
+                        self.force_key = true;
+                    }
                     Landed::Frame { keyframe, annex_b } => {
                         let (captured_at, started) = pending
                             .map_or((MonoMicros(out.pts.max(0) as u64), out.done_at), |p| (p.captured_at, p.started));
@@ -556,10 +667,10 @@ mod vt {
                         }
                     }
                     OutputWait::Condvar => {
-                        if let Ok(guard) = session.shared.outs.lock() {
+                        let shared = session.shared.get();
+                        if let Ok(guard) = shared.outs.lock() {
                             // A timeout is not an error: the output is collected by a later call.
-                            let _ = session
-                                .shared
+                            let _ = shared
                                 .signal
                                 .wait_timeout_while(guard, OUTPUT_WAIT, |outs| !outs.iter().any(|o| o.pts >= pts));
                         }
@@ -615,16 +726,84 @@ mod vt {
                 return Err(err(ErrorKind::InvalidInput, "encode", "empty frame"));
             }
             let mut out = Vec::new();
-            let mut force = force_keyframe;
+            let mut force = force_keyframe || self.force_key;
             if (frame.width, frame.height) != (cfg.width, cfg.height) {
                 // A display size change: a new session, new SPS/PPS, the first frame a keyframe with `config_change`.
-                out = self.flush()?;
+                // A session that is already gone has nothing left to flush.
+                out = match self.flush() {
+                    Ok(frames) => frames,
+                    Err(e) if is_session_gone(&e) => Vec::new(),
+                    Err(e) => return Err(e),
+                };
                 self.build(&EncoderConfig { width: frame.width, height: frame.height, ..cfg })?;
+                force = true;
+            } else if self.session.is_none() {
+                // An earlier rebuild failed (or `set_rate` found the session gone): try again with the stored
+                // configuration; the new session starts with a key frame.
+                self.build(&cfg)?;
                 force = true;
             }
             if skip_frame(self.skip_interval, self.last_encoded_at, frame.captured_at, force) {
                 return Ok(out);
             }
+            match self.submit(frame, force) {
+                Ok(frames) => out.extend(frames),
+                Err(e) if is_session_gone(&e) => {
+                    // The session was invalidated under us (sleep, display or GPU change, encoder restart): build a new
+                    // one from the stored configuration and submit this same frame as a key frame. Once per frame: a
+                    // second failure is returned.
+                    let cfg = self.cfg.unwrap_or(cfg);
+                    self.build(&cfg)?;
+                    out.extend(self.submit(frame, true)?);
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(out)
+        }
+
+        fn set_rate(&mut self, kbps: u32, fps: u16) -> Result<()> {
+            let cfg = self.cfg.ok_or_else(|| err(ErrorKind::Closed, "set_rate", "not configured"))?;
+            let eff = effective(cfg.preset, kbps, fps);
+            let result = match self.session.as_ref() {
+                Some(session) => apply_rate(&session.session, &eff, true),
+                None => Ok(()),
+            };
+            match result {
+                Ok(()) => {}
+                Err(e) if is_session_gone(&e) => {
+                    // The session is gone: the new numbers go into the stored configuration and the next `encode`
+                    // builds the session with them.
+                    self.session = None;
+                    self.pending.clear();
+                }
+                Err(e) => return Err(e),
+            }
+            self.cfg = Some(EncoderConfig { kbps, fps, ..cfg });
+            self.eff = eff;
+            self.skip_interval = skip_interval_us(&eff);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<Vec<EncodedFrame>> {
+            if let Some(session) = self.session.as_ref() {
+                // SAFETY: a live session; an indefinite time completes every pending frame.
+                let status = unsafe { session.session.complete_frames(kCMTimeIndefinite) };
+                if status != 0 {
+                    return Err(status_err("VTCompressionSessionCompleteFrames", status));
+                }
+            }
+            self.drain()
+        }
+    }
+
+    /// True when the error carries an `OSStatus` after which the session must be rebuilt (see [`session_gone`]).
+    fn is_session_gone(e: &PlatformError) -> bool {
+        e.os_code.and_then(|c| i32::try_from(c).ok()).is_some_and(session_gone)
+    }
+
+    impl VtH264Encoder {
+        /// Hands one frame to the session and returns what comes out in this call.
+        fn submit(&mut self, frame: &Frame, force: bool) -> Result<Vec<EncodedFrame>> {
             let started = self.clock.now().0;
             let buffer = self.source_buffer(frame)?;
             let pts = next_pts(self.last_pts, frame.captured_at);
@@ -648,33 +827,14 @@ mod vt {
             if status != 0 {
                 return Err(status_err("VTCompressionSessionEncodeFrame", status));
             }
+            if force {
+                // The key frame this call asked for is in the session; `drain` sets the flag again if its output is lost.
+                self.force_key = false;
+            }
             self.last_pts = Some(pts);
             self.last_encoded_at = Some(frame.captured_at.0);
             self.pending.push_back(Pending { pts, captured_at: frame.captured_at, started });
-            out.extend(self.collect(pts)?);
-            Ok(out)
-        }
-
-        fn set_rate(&mut self, kbps: u32, fps: u16) -> Result<()> {
-            let cfg = self.cfg.ok_or_else(|| err(ErrorKind::Closed, "set_rate", "not configured"))?;
-            let eff = effective(cfg.preset, kbps, fps);
-            let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "set_rate", "not configured"))?;
-            apply_rate(&session.session, &eff, true)?;
-            self.cfg = Some(EncoderConfig { kbps, fps, ..cfg });
-            self.eff = eff;
-            self.skip_interval = skip_interval_us(&eff);
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<Vec<EncodedFrame>> {
-            if let Some(session) = self.session.as_ref() {
-                // SAFETY: a live session; an indefinite time completes every pending frame.
-                let status = unsafe { session.session.complete_frames(kCMTimeIndefinite) };
-                if status != 0 {
-                    return Err(status_err("VTCompressionSessionCompleteFrames", status));
-                }
-            }
-            self.drain()
+            self.collect(pts)
         }
     }
 
@@ -773,10 +933,12 @@ mod vt {
         for (require, hardware, low_latency) in attempts {
             let spec = encoder_specification(require, hardware, low_latency);
             let shared =
-                Box::new(Shared { clock: clock.clone(), outs: Mutex::new(Vec::new()), signal: Condvar::new() });
+                SharedCell::new(Shared { clock: clock.clone(), outs: Mutex::new(Vec::new()), signal: Condvar::new() });
             let mut out: *mut VTCompressionSession = ptr::null_mut();
-            // SAFETY: the dictionaries are live; the refcon points into the box that the returned `Session` keeps until
-            // after `invalidate`; `out` is a valid out pointer and receives a +1 session.
+            // SAFETY: the dictionaries are live; the refcon is the address of the cell's own heap allocation, which
+            // never moves and which the returned `Session` frees only after `invalidate` (a failed create never calls
+            // the callback, and the cell is freed here at the end of the iteration); `out` is a valid out pointer and
+            // receives a +1 session.
             let status = unsafe {
                 VTCompressionSession::create(
                     None,
@@ -787,7 +949,7 @@ mod vt {
                     Some(&attrs),
                     None,
                     Some(on_output),
-                    ptr::from_ref::<Shared>(&shared).cast_mut().cast::<c_void>(),
+                    shared.refcon(),
                     NonNull::from(&mut out),
                 )
             };
@@ -938,5 +1100,186 @@ mod vt {
         // SAFETY: balances the lock above.
         unsafe { CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags(0)) };
         result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Instant;
+
+        use objc2_core_media::{CMFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets};
+        use swapdesk_platform::{AdapterId, DisplayId};
+        use swapdesk_proto::Preset;
+
+        use super::*;
+
+        const START_US: u64 = 1_000_000;
+        const FRAME_US: u64 = 33_333;
+
+        struct TestClock(Instant);
+
+        impl Clock for TestClock {
+            fn now(&self) -> MonoMicros {
+                MonoMicros(self.0.elapsed().as_micros() as u64)
+            }
+        }
+
+        fn encoder() -> VtH264Encoder {
+            let mut enc = VtH264Encoder::new(Arc::new(TestClock(Instant::now())));
+            let cfg = EncoderConfig {
+                width: 320,
+                height: 180,
+                fps: 30,
+                kbps: 2000,
+                preset: Preset::Auto,
+                adapter: AdapterId(0),
+            };
+            enc.configure(&cfg).expect("configure");
+            enc
+        }
+
+        fn frame(n: usize) -> Frame {
+            let (w, h) = (320usize, 180usize);
+            let mut data = vec![255u8; w * h * 4];
+            for (i, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let v = (((i % w) + n * 3) % 256) as u8;
+                px[..3].fill(v);
+            }
+            Frame {
+                display: DisplayId(0),
+                captured_at: MonoMicros(START_US + n as u64 * FRAME_US),
+                width: w as u32,
+                height: h as u32,
+                pixels: Pixels::Cpu { stride: (w * 4) as u32, data },
+                dirty: Vec::new(),
+                content_changed: true,
+            }
+        }
+
+        /// Invalidates the session the way the system does; the next call into it answers `kVTInvalidSessionErr`.
+        fn invalidate(enc: &VtH264Encoder) {
+            let session = enc.session.as_ref().expect("a session");
+            // SAFETY: a live session; `Session::drop` invalidates again and accepts an invalidated one.
+            unsafe { session.session.invalidate() };
+        }
+
+        #[test]
+        fn the_session_gone_statuses_are_the_framework_constants() {
+            use objc2_video_toolbox::{
+                kVTInvalidSessionErr, kVTSessionMalfunctionErr, kVTVideoEncoderMalfunctionErr,
+                kVTVideoEncoderNotAvailableNowErr,
+            };
+            for status in [
+                kVTInvalidSessionErr,
+                kVTVideoEncoderMalfunctionErr,
+                kVTSessionMalfunctionErr,
+                kVTVideoEncoderNotAvailableNowErr,
+            ] {
+                assert!(session_gone(status), "{status}");
+            }
+            assert_eq!(kVTInvalidSessionErr, crate::sys::VT_INVALID_SESSION);
+        }
+
+        #[test]
+        fn an_invalidated_session_is_rebuilt_and_the_frame_comes_out_as_a_keyframe() {
+            let mut enc = encoder();
+            let first = enc.encode(&frame(0), false).expect("frame 0");
+            assert!(first[0].keyframe && first[0].config_change);
+            let second = enc.encode(&frame(1), false).expect("frame 1");
+            assert!(!second[0].keyframe);
+
+            invalidate(&enc);
+            let rebuilt = enc.encode(&frame(2), false).expect("the invalidated session is rebuilt, not an error");
+            assert_eq!(rebuilt.len(), 1);
+            assert!(rebuilt[0].keyframe, "the first frame of the new session is a key frame");
+            assert!(rebuilt[0].config_change, "the new session has its own parameter sets");
+            assert_eq!(rebuilt[0].captured_at, MonoMicros(START_US + 2 * FRAME_US));
+            assert!(annexb::parameter_sets(&rebuilt[0].annex_b).is_some() && annexb::is_idr(&rebuilt[0].annex_b));
+
+            let next = enc.encode(&frame(3), false).expect("frame 3");
+            assert!(!next[0].keyframe && !next[0].config_change);
+            assert!(enc.is_configured());
+        }
+
+        #[test]
+        fn set_rate_on_a_gone_session_keeps_the_numbers_for_the_rebuild() {
+            let mut enc = encoder();
+            enc.encode(&frame(0), false).expect("frame 0");
+            invalidate(&enc);
+            enc.set_rate(1000, 30).expect("a lost session does not make set_rate fail");
+            assert_eq!(enc.cfg.map(|c| c.kbps), Some(1000));
+            let out = enc.encode(&frame(1), false).expect("encode after the rebuild");
+            assert!(out[0].keyframe && out[0].config_change);
+        }
+
+        #[test]
+        fn an_unreadable_sample_drops_one_frame_and_forces_the_next_keyframe() {
+            let mut enc = encoder();
+            enc.encode(&frame(0), false).expect("frame 0");
+            // What the output callback leaves when `extract` fails for a sample.
+            enc.session.as_ref().expect("a session").shared.get().outs.lock().expect("outs").push(Out {
+                pts: 0,
+                done_at: 0,
+                landed: Landed::Unreadable { status: -1, what: "corrupt AVCC sample" },
+            });
+            assert!(enc.drain().expect("an unreadable sample is not an error").is_empty());
+            assert_eq!(enc.dropped_frames(), 1);
+            assert_eq!(enc.last_unreadable_sample().map(|e| e.op), Some("corrupt AVCC sample"));
+            assert!(enc.force_key);
+
+            let out = enc.encode(&frame(1), false).expect("frame 1");
+            assert!(out[0].keyframe, "the frame after a lost sample is a key frame");
+            assert!(!out[0].config_change, "it is not a new configuration");
+            assert!(!enc.force_key);
+            let next = enc.encode(&frame(2), false).expect("frame 2");
+            assert!(!next[0].keyframe);
+        }
+
+        #[test]
+        fn the_nal_length_size_is_read_from_the_format_description() {
+            let mut enc = encoder();
+            let key = enc.encode(&frame(0), false).expect("frame 0").remove(0);
+            let sets = annexb::parameter_sets(&key.annex_b).expect("parameter sets");
+            // CoreMedia refuses a 3 byte field for H.264 (the AVC configuration record allows 1, 2 or 4).
+            for length in [1, 2, 4] {
+                let pointers: Vec<NonNull<u8>> =
+                    sets.all().map(|s| NonNull::new(s.as_ptr().cast_mut()).expect("a non-null slice")).collect();
+                let sizes: Vec<usize> = sets.all().map(<[u8]>::len).collect();
+                let mut out: *const CMFormatDescription = ptr::null();
+                // SAFETY: the arrays hold one pointer and one size per set and outlive the call; `out` is a valid out
+                // pointer and receives a +1 description.
+                let status = unsafe {
+                    CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                        None,
+                        pointers.len(),
+                        NonNull::new(pointers.as_ptr().cast_mut()).expect("pointers"),
+                        NonNull::new(sizes.as_ptr().cast_mut()).expect("sizes"),
+                        length,
+                        NonNull::from(&mut out),
+                    )
+                };
+                assert_eq!(status, 0, "format description with a {length} byte length field");
+                // SAFETY: Create rule.
+                let format = unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).expect("a description")) };
+                let (count, size) = parameter_set_info(&format).expect("parameter set info");
+                assert_eq!((count, size), (sets.sps.len() + sets.pps.len(), length as usize));
+                let read = parameter_sets(&format, count).expect("parameter sets");
+                assert_eq!(read.concat(), sets.all().collect::<Vec<_>>().concat());
+            }
+        }
+
+        #[test]
+        fn a_failed_rebuild_leaves_the_encoder_able_to_build_again() {
+            let mut enc = encoder();
+            enc.encode(&frame(0), false).expect("frame 0");
+            // A size the encoder cannot build: the rebuild for the new size fails, the error comes back and no session
+            // is left.
+            let mut huge = frame(1);
+            huge.width = 20_000;
+            huge.height = 20_000;
+            assert!(enc.encode(&huge, false).is_err());
+            // The stored configuration is untouched, and the next normal frame builds a session again.
+            let out = enc.encode(&frame(2), false).expect("the encoder builds a session again");
+            assert!(out[0].keyframe && out[0].config_change);
+        }
     }
 }

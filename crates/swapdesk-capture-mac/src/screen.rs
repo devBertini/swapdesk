@@ -35,20 +35,36 @@
 //!   returns another process's cursor image. `NSCursor.currentSystemCursor` is the only AppKit way; its header marks it
 //!   deprecated ("will always be nil in a future version of macOS", and recommends `NSCursor.currentCursor`, which is the
 //!   calling application's cursor only). It is not documented as main-thread-free; this module calls it from the
-//!   capture thread, at most every 50 ms, and falls back to the arrow cursor when it returns nil. See the report.
+//!   capture thread, at most every 50 ms. When it returns nil (no window server session, or a future macOS) there is no
+//!   shape and no shape change is reported: the process-wide `+[NSCursor arrowCursor]` is never touched here, because
+//!   AppKit does not document it as usable off the main thread and it would hand out the shared image object.
+//!
+//! # Behaviour of the stream
+//!
+//! * Stream stops: `stream:didStopWithError:` keeps the `NSError` code and `next_frame` maps it with the table of
+//!   `sck_error` (stopped on purpose is `Closed`, so the helper stops instead of re-acquiring; the system stopping the
+//!   stream is `AccessLost`).
+//! * Every AppKit and ScreenCaptureKit call on the caller's thread runs inside an autorelease pool, so a long-lived
+//!   capture thread that has none of its own does not accumulate autoreleased objects.
+//! * Waits on completion handlers are bounded (`REPLY_TIMEOUT` for the content query and the start, 2 s for a stop).
+//!   A start that times out is stopped (bounded) before the stream is dropped. They are not longer on purpose: the
+//!   helper's `stop_video` joins the capture thread, so a long wait in `open` would freeze the helper's message loop
+//!   (the macOS "allow this month" prompt is what can hold the first reply; a timeout then is retried by the user).
 
 use core::time::Duration;
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-use swapdesk_platform::{ErrorKind, MonoMicros, OsGrant, Rect};
+use swapdesk_platform::{ErrorKind, MonoMicros, Rect};
+
+use crate::sck_error;
 
 /// Largest cursor bitmap edge sent to the viewer.
 pub const MAX_CURSOR_EDGE: u32 = 256;
 /// Refresh rate reported when the mode says 0 (built-in panels): 60 Hz in millihertz.
 pub const DEFAULT_REFRESH_MHZ: u32 = 60_000;
 /// `SCStreamErrorUserDeclined`.
-pub const SC_ERROR_USER_DECLINED: i64 = -3801;
+pub const SC_ERROR_USER_DECLINED: i64 = sck_error::USER_DECLINED;
 
 // ---------- pure parts ----------
 
@@ -175,9 +191,9 @@ pub fn classify_status(status: Option<i64>) -> FrameKind {
     }
 }
 
-/// Error kind for an `SCStreamError` code.
+/// Error kind for an `SCStreamError` code (the table shared with the audio source, see `sck_error`).
 pub fn error_kind_for_code(code: i64) -> ErrorKind {
-    if code == SC_ERROR_USER_DECLINED { ErrorKind::PermissionDenied(OsGrant::ScreenRecording) } else { ErrorKind::Os }
+    sck_error::kind_for_code(code)
 }
 
 /// Id of a cursor shape: FNV-1a (32 bit) over width, height and the pixels, never 0 (0 means "no shape" on the wire).
@@ -252,16 +268,24 @@ pub enum Wake<B> {
     Frame(Pending<B>),
     /// An Idle/Blank/Suspended sample arrived: nothing new.
     Idle,
-    /// The stream stopped with this message (latched: every later wait returns it again).
-    Stopped(String),
+    /// The stream stopped for this reason (latched: every later wait returns it again).
+    Stopped(Stop),
     Timeout,
+}
+
+/// Why the stream stopped: the error kind the helper acts on, the `NSError` code when there is one, a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stop {
+    pub kind: ErrorKind,
+    pub code: Option<i64>,
+    pub message: String,
 }
 
 struct MailState<B> {
     frame: Option<Pending<B>>,
     idle: u64,
     idle_seen: u64,
-    stopped: Option<String>,
+    stopped: Option<Stop>,
     dropped: u64,
 }
 
@@ -306,8 +330,9 @@ impl<B> Mailbox<B> {
         self.cond.notify_all();
     }
 
-    pub fn stop(&self, message: String) {
-        self.lock().stopped.get_or_insert(message);
+    /// Latches the first stop; later ones are ignored.
+    pub fn stop(&self, stop: Stop) {
+        self.lock().stopped.get_or_insert(stop);
         self.cond.notify_all();
     }
 
@@ -320,8 +345,8 @@ impl<B> Mailbox<B> {
         let deadline = Instant::now() + timeout;
         let mut s = self.lock();
         loop {
-            if let Some(m) = &s.stopped {
-                return Wake::Stopped(m.clone());
+            if let Some(stop) = &s.stopped {
+                return Wake::Stopped(stop.clone());
             }
             if let Some(p) = s.frame.take() {
                 return Wake::Frame(p);
@@ -356,9 +381,9 @@ mod mac {
 
     use block2::RcBlock;
     use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
-    use objc2::rc::Retained;
+    use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::ProtocolObject;
-    use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
+    use objc2::{AnyThread, DefinedClass, define_class, msg_send};
     use objc2_app_kit::NSCursor;
     use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
@@ -378,12 +403,14 @@ mod mac {
         SCStreamFrameInfoDirtyRects, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
     };
     use swapdesk_platform::{
-        AdapterId, CaptureConfig, Clock, CursorShape, CursorUpdate, DisplayId, DisplayInfo, Frame, GpuSurface, Pixels,
-        PlatformError, Result, ScreenSource,
+        AdapterId, CaptureConfig, Clock, CursorShape, CursorUpdate, DisplayId, DisplayInfo, Frame, GpuSurface, OsGrant,
+        Pixels, PlatformError, Result, ScreenSource,
     };
 
-    /// How long a ScreenCaptureKit completion handler may take.
+    /// How long the content query and the start may take (see the module documentation for why it is not longer).
     const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+    /// How long a stop may take before the stream is dropped anyway.
+    const STOP_TIMEOUT: Duration = Duration::from_secs(2);
     /// How often `next_frame` re-reads the display mode to notice a size change.
     const GEOMETRY_CHECK: Duration = Duration::from_millis(250);
     /// Minimum time between two reads of the system cursor image.
@@ -423,7 +450,8 @@ mod mac {
                 if kind != SCStreamOutputType::Screen {
                     return;
                 }
-                self.handle_sample(sample);
+                // The queue's own pool is drained at times of the system's choosing: one per sample keeps it flat.
+                autoreleasepool(|_| self.handle_sample(sample));
             }
         }
 
@@ -431,8 +459,12 @@ mod mac {
         unsafe impl SCStreamDelegate for ScreenOutput {
             #[unsafe(method(stream:didStopWithError:))]
             fn did_stop(&self, _stream: &SCStream, error: &NSError) {
-                let msg = format!("{} (code {})", error.localizedDescription(), error.code());
-                self.ivars().mailbox.stop(msg);
+                let code = error.code() as i64;
+                self.ivars().mailbox.stop(Stop {
+                    kind: sck_error::stop_kind(code),
+                    code: Some(code),
+                    message: error.localizedDescription().to_string(),
+                });
             }
         }
     );
@@ -463,8 +495,15 @@ mod mac {
                     };
                     let (w, h) = (CVPixelBufferGetWidth(&buffer) as u32, CVPixelBufferGetHeight(&buffer) as u32);
                     if (w, h) != iv.size {
-                        iv.mailbox
-                            .stop(format!("frame size {w}x{h} differs from the stream's {}x{}", iv.size.0, iv.size.1));
+                        // The display changed mode under the stream: rebuild it (`AccessLost`).
+                        iv.mailbox.stop(Stop {
+                            kind: ErrorKind::AccessLost,
+                            code: None,
+                            message: format!(
+                                "frame size {w}x{h} differs from the stream's {}x{}",
+                                iv.size.0, iv.size.1
+                            ),
+                        });
                         return;
                     }
                     iv.mailbox.push(Pending {
@@ -636,7 +675,12 @@ mod mac {
             Ok(assign_display_ids(&mut self.known, &active, CGMainDisplayID()))
         }
 
+        /// Builds and starts the stream inside an autorelease pool (the capture thread has no pool of its own).
         fn build(&mut self, display: DisplayId, config: CaptureConfig) -> Result<()> {
+            autoreleasepool(|_| self.build_in_pool(display, config))
+        }
+
+        fn build_in_pool(&mut self, display: DisplayId, config: CaptureConfig) -> Result<()> {
             if !CGPreflightScreenCaptureAccess() {
                 return Err(denied("CGPreflightScreenCaptureAccess"));
             }
@@ -695,6 +739,7 @@ mod mac {
                 stream.addStreamOutput_type_sampleHandlerQueue_error(sink, SCStreamOutputType::Screen, Some(&queue))
             }
             .map_err(|e| sc_error("SCStream.addStreamOutput", &e))?;
+            let open = OpenStream { stream, output, _queue: queue, mailbox, geometry, checked: Instant::now() };
             let (tx, rx) = mpsc::channel::<Option<(i64, String)>>();
             let block = RcBlock::new(move |err: *mut NSError| {
                 // SAFETY: when non-null the pointer is a live NSError for the duration of the callback.
@@ -702,10 +747,11 @@ mod mac {
                 let _ = tx.send(e);
             });
             // SAFETY: the block lives until the call returns; ScreenCaptureKit copies it.
-            unsafe { stream.startCaptureWithCompletionHandler(Some(&block)) };
+            unsafe { open.stream.startCaptureWithCompletionHandler(Some(&block)) };
             match rx.recv_timeout(REPLY_TIMEOUT) {
                 Ok(None) => {}
                 Ok(Some((code, detail))) => {
+                    // The start failed: the stream never ran and is dropped as it is.
                     let kind = error_kind_for_code(code);
                     let detail = if matches!(kind, ErrorKind::PermissionDenied(_)) {
                         format!("Screen Recording is not allowed for this program: {detail}")
@@ -715,6 +761,9 @@ mod mac {
                     return Err(PlatformError { kind, op: "SCStream.startCapture", os_code: Some(code), detail });
                 }
                 Err(_) => {
+                    // No reply: the start may still complete later (a consent prompt). Stop it, so that no capture
+                    // session outlives the stream object, then drop it.
+                    halt(open);
                     return Err(PlatformError {
                         kind: ErrorKind::Timeout,
                         op: "SCStream.startCapture",
@@ -723,7 +772,7 @@ mod mac {
                     });
                 }
             }
-            self.open = Some(OpenStream { stream, output, _queue: queue, mailbox, geometry, checked: Instant::now() });
+            self.open = Some(open);
             self.target = Some(Target { display, config });
             self.cursor = CursorState::default();
             Ok(())
@@ -731,17 +780,22 @@ mod mac {
 
         fn stop_stream(&mut self) {
             let Some(open) = self.open.take() else { return };
-            let (tx, rx) = mpsc::channel::<()>();
-            let block = RcBlock::new(move |_err: *mut NSError| {
-                let _ = tx.send(());
-            });
-            // SAFETY: the block lives until the call returns; the completion only signals the channel.
-            unsafe { open.stream.stopCaptureWithCompletionHandler(Some(&block)) };
-            let _ = rx.recv_timeout(Duration::from_secs(2));
-            let sink = ProtocolObject::<dyn SCStreamOutput>::from_ref(&*open.output);
-            // SAFETY: removes the output added in `build`; failure (already stopped) is harmless.
-            let _ = unsafe { open.stream.removeStreamOutput_type_error(sink, SCStreamOutputType::Screen) };
+            autoreleasepool(|_| halt(open));
         }
+    }
+
+    /// Stops a stream (waiting at most [`STOP_TIMEOUT`] for the completion) and detaches its output.
+    fn halt(open: OpenStream) {
+        let (tx, rx) = mpsc::channel::<()>();
+        let block = RcBlock::new(move |_err: *mut NSError| {
+            let _ = tx.send(());
+        });
+        // SAFETY: the block lives until the call returns; the completion only signals the channel.
+        unsafe { open.stream.stopCaptureWithCompletionHandler(Some(&block)) };
+        let _ = rx.recv_timeout(STOP_TIMEOUT);
+        let sink = ProtocolObject::<dyn SCStreamOutput>::from_ref(&*open.output);
+        // SAFETY: removes the output added in `build`; failure (already stopped) is harmless.
+        let _ = unsafe { open.stream.removeStreamOutput_type_error(sink, SCStreamOutputType::Screen) };
     }
 
     impl Drop for MacScreen {
@@ -854,11 +908,11 @@ mod mac {
                     content_changed: true,
                 })),
                 Wake::Idle | Wake::Timeout => Ok(None),
-                Wake::Stopped(msg) => Err(PlatformError {
-                    kind: ErrorKind::AccessLost,
+                Wake::Stopped(stop) => Err(PlatformError {
+                    kind: stop.kind,
                     op: "SCStream.didStopWithError",
-                    os_code: None,
-                    detail: msg,
+                    os_code: stop.code,
+                    detail: stop.message,
                 }),
             }
         }
@@ -904,15 +958,15 @@ mod mac {
         }
     }
 
-    /// The cursor image the system shows now, as straight RGBA (see the module doc for the API caveat).
+    /// The cursor image the system shows now, as straight RGBA (see the module doc for the API caveat). `None` when
+    /// AppKit has no current system cursor (no window server session): there is no fallback image, so the caller reports
+    /// no shape change. Runs inside an autorelease pool.
     #[allow(deprecated)]
     pub fn system_cursor_shape(scale: f64) -> Option<CursorShape> {
-        let cursor = NSCursor::currentSystemCursor().or_else(|| {
-            // SAFETY: `+arrowCursor` takes no arguments; the binding's non-null return type is bypassed because
-            // without a window server session (SSH, a daemon) the class method returns nil.
-            unsafe { msg_send![NSCursor::class(), arrowCursor] }
-        })?;
-        render_cursor(&cursor, scale)
+        autoreleasepool(|_| {
+            let cursor = NSCursor::currentSystemCursor()?;
+            render_cursor(&cursor, scale)
+        })
     }
 
     /// Renders an `NSCursor` to straight RGBA at `scale` pixels per point (capped to 256 x 256).
@@ -956,6 +1010,7 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swapdesk_platform::OsGrant;
 
     #[test]
     fn scale_from_mode() {
@@ -1045,7 +1100,17 @@ mod tests {
         assert_eq!(classify_status(Some(4)), FrameKind::Ignore);
         assert_eq!(classify_status(Some(5)), FrameKind::Ignore);
         assert_eq!(error_kind_for_code(-3801), ErrorKind::PermissionDenied(OsGrant::ScreenRecording));
-        assert_eq!(error_kind_for_code(-3802), ErrorKind::Os);
+        assert_eq!(error_kind_for_code(-3811), ErrorKind::Os);
+    }
+
+    #[test]
+    fn stream_error_codes_map_to_the_helper_kinds() {
+        // The table itself is tested in `sck_error`; this is the screen's view of it.
+        assert_eq!(error_kind_for_code(-3817), ErrorKind::Closed);
+        assert_eq!(error_kind_for_code(-3816), ErrorKind::Closed);
+        assert_eq!(error_kind_for_code(-3808), ErrorKind::Closed);
+        assert_eq!(error_kind_for_code(SC_ERROR_USER_DECLINED), ErrorKind::PermissionDenied(OsGrant::ScreenRecording));
+        assert_eq!(error_kind_for_code(-3821), ErrorKind::AccessLost);
     }
 
     #[test]
@@ -1108,10 +1173,17 @@ mod tests {
         assert!(matches!(m.wait(Duration::from_millis(5)), Wake::Idle));
         assert!(matches!(m.wait(Duration::from_millis(5)), Wake::Timeout));
         m.push(Pending { buffer: 1, captured_at: MonoMicros(1), dirty: Vec::new() });
-        m.stop("boom".into());
-        // The stop wins over a waiting frame and stays latched.
-        assert!(matches!(m.wait(Duration::from_millis(5)), Wake::Stopped(s) if s == "boom"));
-        assert!(matches!(m.wait(Duration::from_millis(5)), Wake::Stopped(_)));
+        m.stop(Stop { kind: ErrorKind::Closed, code: Some(-3817), message: "boom".into() });
+        // The first stop wins over a waiting frame and over a later stop, keeps its kind and code, and stays latched.
+        m.stop(Stop { kind: ErrorKind::AccessLost, code: Some(-3821), message: "later".into() });
+        for _ in 0..2 {
+            match m.wait(Duration::from_millis(5)) {
+                Wake::Stopped(s) => {
+                    assert_eq!((s.kind, s.code, s.message.as_str()), (ErrorKind::Closed, Some(-3817), "boom"));
+                }
+                _ => panic!("expected the latched stop"),
+            }
+        }
     }
 
     #[test]
@@ -1130,7 +1202,7 @@ mod tests {
     mod mac {
         use super::super::*;
         use std::sync::Arc;
-        use swapdesk_platform::{CaptureConfig, Clock, DisplayId, Pixels, ScreenSource};
+        use swapdesk_platform::{CaptureConfig, Clock, DisplayId, OsGrant, Pixels, ScreenSource};
 
         struct StdClock(Instant);
         impl Clock for StdClock {
@@ -1235,10 +1307,23 @@ mod tests {
         }
 
         #[test]
+        fn no_system_cursor_means_no_shape_and_no_fallback() {
+            // Over SSH there is no window server session and `currentSystemCursor` is nil: `None`, never a panic and
+            // never the process-wide arrow cursor. With a session the shape must be a sane bitmap.
+            if let Some(shape) = system_cursor_shape(2.0) {
+                assert_eq!(shape.rgba.len(), usize::from(shape.width) * usize::from(shape.height) * 4);
+            }
+        }
+
+        #[test]
         #[ignore = "needs a window server session (logged-in GUI session; SSH has none): NSCursor is nil without it"]
-        fn arrow_cursor_renders_to_rgba() {
-            let arrow = objc2_app_kit::NSCursor::arrowCursor();
-            let shape = render_cursor(&arrow, 2.0).expect("arrow renders");
+        fn system_cursor_renders_to_rgba() {
+            #[allow(deprecated)]
+            let Some(cursor) = objc2_app_kit::NSCursor::currentSystemCursor() else {
+                eprintln!("no current system cursor: nothing to render");
+                return;
+            };
+            let shape = render_cursor(&cursor, 2.0).expect("system cursor renders");
             assert_eq!(shape.rgba.len(), usize::from(shape.width) * usize::from(shape.height) * 4);
             assert!(shape.rgba.as_chunks::<4>().0.iter().any(|p| p[3] == 255), "no opaque pixel");
             assert!(shape.hot_x < shape.width && shape.hot_y < shape.height);

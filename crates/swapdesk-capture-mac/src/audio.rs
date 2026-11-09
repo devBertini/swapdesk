@@ -17,14 +17,22 @@
 //!   non-interleaved. Interleaved and 16-bit integer layouts are handled too.
 //! * `CGPreflightScreenCaptureAccess` tells whether the Screen Recording grant exists without prompting
 //!   (developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()); the request API is never called.
-//! * `SCStreamError` codes (developer.apple.com/documentation/screencapturekit/scstreamerror/code).
+//! * `SCStreamError` codes (developer.apple.com/documentation/screencapturekit/scstreamerror/code), mapped by the table
+//!   the screen source shares (`sck_error`).
+//!
+//! Every ScreenCaptureKit call on the caller's thread (start, stop) runs inside an autorelease pool, and every wait on a
+//! completion handler is bounded: 5 s for the content query and the start, 2 s for a stop. A start that times out is
+//! stopped (bounded) before the stream is dropped. The waits are short on purpose: the helper's `stop_audio` joins the
+//! audio thread, so a long wait in `start` would freeze the helper's message loop.
 //!
 //! The pure parts (sample conversion, channel layout, the ring) build and are tested on every host; the stream itself is
 //! macOS only.
 
 use std::collections::VecDeque;
 
-use swapdesk_platform::{ErrorKind, OsGrant};
+use swapdesk_platform::ErrorKind;
+
+use crate::sck_error;
 
 /// Frames (per channel) in one block: 10 ms at 48 kHz.
 pub const BLOCK_FRAMES: usize = 480;
@@ -171,17 +179,11 @@ impl BlockRing {
     }
 }
 
-/// The `ErrorKind` for an `SCStreamError` code that stopped the stream. The system stopping the stream (display sleep,
-/// configuration change) is what a device invalidation is on Windows (`AccessLost`, as `WasapiLoopbackSource` reports
-/// it); the user stopping it or a stop in progress is `Closed`.
+/// The `ErrorKind` for an `SCStreamError` code. The system stopping the stream (display sleep, configuration change) is
+/// what a device invalidation is on Windows (`AccessLost`, as `WasapiLoopbackSource` reports it); the user stopping it or
+/// a stop in progress is `Closed`. One table with the screen source: `sck_error`.
 pub fn kind_for_stream_code(code: i64) -> ErrorKind {
-    match code {
-        -3821 => ErrorKind::AccessLost,                                  // systemStoppedStream
-        -3817 | -3816 | -3808 => ErrorKind::Closed, // userStopped, removingStream, attemptToStopStreamState
-        -3801 => ErrorKind::PermissionDenied(OsGrant::ScreenRecording), // userDeclined
-        -3814 | -3815 | -3813 | -3802 | -3818 => ErrorKind::Unavailable, // no display / source, failed to start (audio)
-        _ => ErrorKind::Os,
-    }
+    sck_error::kind_for_code(code)
 }
 
 #[cfg(target_os = "macos")]
@@ -196,10 +198,10 @@ mod mac {
 
     use block2::RcBlock;
     use dispatch2::{DispatchQueue, DispatchQueueAttr};
-    use objc2::rc::Retained;
+    use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-    use objc2_core_audio_types::AudioBufferList;
+    use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
     use objc2_core_foundation::CFRetained;
     use objc2_core_graphics::CGPreflightScreenCaptureAccess;
     use objc2_core_media::{CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMSampleBuffer, CMTime};
@@ -213,15 +215,18 @@ mod mac {
     use super::{
         BlockRing, PcmBuffer, RING_VALUES, SampleKind, f32_from_i16, kind_for_stream_code, sample_kind, to_stereo,
     };
+    use crate::sck_error;
 
-    /// How long the asynchronous SCK calls (content query, start, stop) may take.
-    const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long the content query and the start may take (see the module documentation for why it is not longer).
+    const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+    /// How long a stop may take before the stream is dropped anyway.
+    const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
     fn failure(kind: ErrorKind, op: &'static str, detail: impl Into<String>) -> PlatformError {
         PlatformError { kind, op, os_code: None, detail: detail.into() }
     }
 
-    fn sck_error(op: &'static str, code: i64, detail: String) -> PlatformError {
+    fn sck_failure(op: &'static str, code: i64, detail: String) -> PlatformError {
         PlatformError { kind: kind_for_stream_code(code), op, os_code: Some(code), detail }
     }
 
@@ -264,9 +269,12 @@ mod mac {
                 if kind != SCStreamOutputType::Audio {
                     return;
                 }
-                if let Some(stereo) = convert_sample_buffer(sample_buffer) {
-                    self.ivars().shared.push(&stereo);
-                }
+                // The queue's own pool is drained at times of the system's choosing: one per buffer keeps it flat.
+                autoreleasepool(|_| {
+                    if let Some(stereo) = convert_sample_buffer(sample_buffer) {
+                        self.ivars().shared.push(&stereo);
+                    }
+                });
             }
         }
 
@@ -276,7 +284,13 @@ mod mac {
             fn did_stop(&self, _stream: &SCStream, error: &NSError) {
                 let code = error.code() as i64;
                 let detail = error.localizedDescription().to_string();
-                self.ivars().shared.fail(sck_error("SCStream.didStopWithError", code, detail));
+                // A running stream that stopped: the same rule as the screen source (`sck_error::stop_kind`).
+                self.ivars().shared.fail(PlatformError {
+                    kind: sck_error::stop_kind(code),
+                    op: "SCStream.didStopWithError",
+                    os_code: Some(code),
+                    detail,
+                });
             }
         }
     );
@@ -359,8 +373,12 @@ mod mac {
                 return None;
             }
 
-            let count = (*list).mNumberBuffers as usize;
-            let buffers = std::slice::from_raw_parts((*list).mBuffers.as_ptr(), count);
+            // `mBuffers` is declared with one element but the list holds `mNumberBuffers` of them in the storage
+            // above: the slice starts at the field's address taken from the list pointer (provenance of the whole
+            // allocation, not of the one-element array), and its length is capped to what `needed` bytes can hold.
+            let room = (needed - std::mem::offset_of!(AudioBufferList, mBuffers)) / std::mem::size_of::<AudioBuffer>();
+            let count = ((*list).mNumberBuffers as usize).min(room);
+            let buffers = std::slice::from_raw_parts(ptr::addr_of!((*list).mBuffers).cast::<AudioBuffer>(), count);
             let mut converted: Vec<(Vec<f32>, usize)> = Vec::with_capacity(count);
             for b in buffers {
                 if b.mData.is_null() {
@@ -427,7 +445,7 @@ mod mac {
         match rx.recv_timeout(CALL_TIMEOUT) {
             Ok(Ok(Handoff(Some(d)))) => Ok(d),
             Ok(Ok(Handoff(None))) => Err(failure(ErrorKind::Unavailable, "SCShareableContent.displays", "no display")),
-            Ok(Err((code, detail))) => Err(sck_error("SCShareableContent.getShareableContent", code, detail)),
+            Ok(Err((code, detail))) => Err(sck_failure("SCShareableContent.getShareableContent", code, detail)),
             Err(RecvTimeoutError::Timeout) => {
                 Err(failure(ErrorKind::Timeout, "SCShareableContent.getShareableContent", "no answer"))
             }
@@ -437,15 +455,19 @@ mod mac {
         }
     }
 
-    fn run_completion(op: &'static str, call: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>)) -> Result<()> {
+    fn run_completion(
+        op: &'static str,
+        timeout: Duration,
+        call: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>),
+    ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<Option<(i64, String)>>();
         let block = RcBlock::new(move |err: *mut NSError| {
             let _ = tx.send(error_parts(err));
         });
         call(&block);
-        match rx.recv_timeout(CALL_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(None) => Ok(()),
-            Ok(Some((code, detail))) => Err(sck_error(op, code, detail)),
+            Ok(Some((code, detail))) => Err(sck_failure(op, code, detail)),
             Err(RecvTimeoutError::Timeout) => Err(failure(ErrorKind::Timeout, op, "no answer")),
             Err(RecvTimeoutError::Disconnected) => Err(failure(ErrorKind::Os, op, "completion dropped")),
         }
@@ -479,15 +501,41 @@ mod mac {
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(sink, SCStreamOutputType::Audio, Some(&queue))
                 .map_err(|e| {
-                    sck_error("SCStream.addStreamOutput", e.code() as i64, e.localizedDescription().to_string())
+                    sck_failure("SCStream.addStreamOutput", e.code() as i64, e.localizedDescription().to_string())
                 })?;
             Running { stream, output, _queue: queue }
         };
         // SAFETY: the block passed lives for the call; SCK copies it.
-        run_completion("SCStream.startCapture", |b| unsafe {
+        let started = run_completion("SCStream.startCapture", CALL_TIMEOUT, |b| unsafe {
             running.stream.startCaptureWithCompletionHandler(Some(b))
-        })?;
-        Ok(running)
+        });
+        match started {
+            Ok(()) => Ok(running),
+            Err(e) => {
+                // No reply: the start may still complete later, so stop it before the stream is dropped. A start that
+                // answered with an error never ran and is dropped as it is.
+                if e.kind == ErrorKind::Timeout {
+                    halt(running);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Stops a stream (waiting at most [`STOP_TIMEOUT`] for the completion) and detaches its output.
+    fn halt(r: Running) {
+        // A failed stop (the stream already ended) leaves nothing to undo.
+        // SAFETY: the block passed lives for the call; SCK copies it.
+        let _ = run_completion("SCStream.stopCapture", STOP_TIMEOUT, |b| unsafe {
+            r.stream.stopCaptureWithCompletionHandler(Some(b))
+        });
+        // SAFETY: the output was added by `open_stream` for this type.
+        let _ = unsafe {
+            r.stream.removeStreamOutput_type_error(
+                ProtocolObject::<dyn SCStreamOutput>::from_ref(&*r.output),
+                SCStreamOutputType::Audio,
+            )
+        };
     }
 
     /// `AudioSource` for the Mac host: system audio over ScreenCaptureKit. Needs the Screen Recording grant.
@@ -536,7 +584,8 @@ mod mac {
                 st.error = None;
                 st.running = true;
             }
-            match open_stream(&self.shared) {
+            // The audio thread has no autorelease pool of its own.
+            match autoreleasepool(|_| open_stream(&self.shared)) {
                 Ok(r) => {
                     self.running = Some(r);
                     Ok(())
@@ -575,18 +624,7 @@ mod mac {
             lock(&self.shared.state).running = false;
             self.shared.wake.notify_all();
             if let Some(r) = self.running.take() {
-                // A failed stop (the stream already ended) leaves nothing to undo.
-                // SAFETY: the block passed lives for the call; SCK copies it.
-                let _ = run_completion("SCStream.stopCapture", |b| unsafe {
-                    r.stream.stopCaptureWithCompletionHandler(Some(b))
-                });
-                // SAFETY: the output was added by `open_stream` for this type.
-                let _ = unsafe {
-                    r.stream.removeStreamOutput_type_error(
-                        ProtocolObject::<dyn SCStreamOutput>::from_ref(&*r.output),
-                        SCStreamOutputType::Audio,
-                    )
-                };
+                autoreleasepool(|_| halt(r));
             }
             lock(&self.shared.state).ring.clear();
         }
@@ -661,6 +699,7 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swapdesk_platform::OsGrant;
 
     fn ramp(from: usize, n: usize) -> Vec<f32> {
         (from..from + n).map(|v| v as f32).collect()
@@ -801,6 +840,8 @@ mod tests {
     fn stream_stop_codes_map_to_kinds() {
         assert_eq!(kind_for_stream_code(-3821), ErrorKind::AccessLost);
         assert_eq!(kind_for_stream_code(-3817), ErrorKind::Closed);
+        assert_eq!(kind_for_stream_code(-3816), ErrorKind::Closed);
+        assert_eq!(kind_for_stream_code(-3808), ErrorKind::Closed);
         assert_eq!(kind_for_stream_code(-3801), ErrorKind::PermissionDenied(OsGrant::ScreenRecording));
         assert_eq!(kind_for_stream_code(-3814), ErrorKind::Unavailable);
         assert_eq!(kind_for_stream_code(-3811), ErrorKind::Os);

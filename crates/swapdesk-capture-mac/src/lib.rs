@@ -10,6 +10,8 @@
 pub mod audio;
 pub mod screen;
 
+mod sck_error;
+
 /// The Screen Recording grant, without prompting (`CGPreflightScreenCaptureAccess`).
 #[cfg(target_os = "macos")]
 pub fn screen_access() -> bool {

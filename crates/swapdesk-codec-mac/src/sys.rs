@@ -9,6 +9,8 @@ pub(crate) const VT_DECODER_NOT_AVAILABLE_NOW: i32 = -12913;
 pub(crate) const VT_DECODER_UNSUPPORTED_DATA_FORMAT: i32 = -12910;
 pub(crate) const VT_PROPERTY_NOT_SUPPORTED: i32 = -12900;
 pub(crate) const VT_PARAMETER: i32 = -12902;
+pub(crate) const VT_ENCODER_MALFUNCTION: i32 = -12912;
+pub(crate) const VT_SESSION_MALFUNCTION: i32 = -17691;
 pub(crate) const VT_COULD_NOT_FIND_ENCODER: i32 = -12908;
 pub(crate) const VT_ENCODER_NOT_AVAILABLE_NOW: i32 = -12915;
 /// `kCVReturnInvalidArgument`.
@@ -26,10 +28,29 @@ pub(crate) fn status_err(op: &'static str, status: i32) -> PlatformError {
         VT_INVALID_SESSION
         | VT_DECODER_NOT_AVAILABLE_NOW
         | VT_ENCODER_NOT_AVAILABLE_NOW
+        | VT_ENCODER_MALFUNCTION
+        | VT_SESSION_MALFUNCTION
         | VT_COULD_NOT_FIND_ENCODER => ErrorKind::Unavailable,
         VT_DECODER_UNSUPPORTED_DATA_FORMAT | VT_PROPERTY_NOT_SUPPORTED => ErrorKind::Unsupported,
         VT_PARAMETER | CV_INVALID_ARGUMENT => ErrorKind::InvalidInput,
         _ => ErrorKind::Os,
     };
     PlatformError { kind, op, os_code: Some(i64::from(status)), detail: String::new() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_sessions_and_encoders_are_unavailable_with_their_code() {
+        for status in [VT_INVALID_SESSION, VT_ENCODER_MALFUNCTION, VT_SESSION_MALFUNCTION, VT_ENCODER_NOT_AVAILABLE_NOW]
+        {
+            let e = status_err("op", status);
+            assert_eq!(e.kind, ErrorKind::Unavailable, "{status}");
+            assert_eq!(e.os_code, Some(i64::from(status)));
+        }
+        assert_eq!(status_err("op", VT_PARAMETER).kind, ErrorKind::InvalidInput);
+        assert_eq!(status_err("op", -1).kind, ErrorKind::Os);
+    }
 }
