@@ -152,3 +152,23 @@ fn pair(pump: &mut Pump<'_>, cfg: &HostConfig, log: &dyn Fn(&str), pairing_id: u
         _ => None,
     })?
 }
+
+/// The host's user for hand testing between machines: answers every session request of an already paired device with
+/// `grants`, for as long as it runs. It pairs nothing and forgets nothing, so a pairing outlives the tool.
+pub fn host_stay(backend: &dyn UiBackend, grants: Permissions, log: &dyn Fn(&str)) -> Result<(), String> {
+    let mut pump = Pump::new(backend);
+    log("HOST_STAY");
+    loop {
+        let (request_id, device, kind) =
+            pump.wait("a session request", Duration::from_secs(u64::from(u32::MAX)), |e| match e {
+                UiEvent::IncomingRequest(r) => Some((r.request_id, r.device.id.clone(), r.kind.clone())),
+                _ => None,
+            })?;
+        if !matches!(kind, RequestKind::Session { .. }) {
+            log(&format!("HOST_IGNORED request={request_id} kind={kind:?}"));
+            continue;
+        }
+        pump.ask(Command::AnswerIncoming { request_id, decision: Decision::Accept { grants } }, REPLY)?;
+        log(&format!("HOST_ACCEPTED request={request_id} device={device}"));
+    }
+}

@@ -18,6 +18,6 @@ pub mod host;
 pub mod pump;
 pub mod viewer;
 
-pub use host::{HostConfig, host_drive};
+pub use host::{HostConfig, host_drive, host_stay};
 pub use pump::{Pump, wait_file};
 pub use viewer::{DecoderFactory, Media, ViewerConfig, ViewerReport, viewer_drive};

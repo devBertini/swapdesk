@@ -6,6 +6,10 @@
 //! CONTROL and AUDIO, answers the incoming request with Accept, waits for the session to end and forgets the device.
 //!
 //!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>]
+//!     cross_host_driver --stay
+//!
+//! `--stay` (hand testing) pairs nothing and forgets nothing: it accepts every session request of a paired device
+//! until it is stopped (`swapdesk_crossdrive::host_stay`).
 //!
 //! The viewer's code arrives in `<file>` (written by the orchestrator). Markers go to stdout; the exit code is 0 only
 //! when the whole script ran and the device was forgotten. It injects no input itself: the viewer's pointer moves are
@@ -18,7 +22,7 @@ use std::time::Duration;
 
 use swapdesk_app::cli::Options;
 use swapdesk_app::connect::open_pipe;
-use swapdesk_crossdrive::{HostConfig, host_drive};
+use swapdesk_crossdrive::{HostConfig, host_drive, host_stay};
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Permission, Permissions, UiWaker};
 
@@ -38,10 +42,12 @@ fn seconds(args: &[String], flag: &str, default: u64) -> Duration {
 
 pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(peer_code) = value(&args, "--peer-code") else {
-        eprintln!("usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>]");
+    let stay = args.iter().any(|a| a == "--stay");
+    let peer_code = value(&args, "--peer-code");
+    if !stay && peer_code.is_none() {
+        eprintln!("usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] | --stay");
         return ExitCode::from(2);
-    };
+    }
     let log = |line: &str| println!("{line}");
     let fail = |why: &str| {
         println!("HOST_RESULT FAIL {why}");
@@ -63,11 +69,18 @@ pub fn main() -> ExitCode {
     };
     log(&format!("HOST_CONNECTED win_session={}", backend.win_session()));
 
+    let grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+    if stay {
+        return match host_stay(&backend, grants, &log) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        };
+    }
     let cfg = HostConfig {
-        peer_code: PathBuf::from(peer_code),
+        peer_code: PathBuf::from(peer_code.unwrap_or_default()),
         pair_timeout: seconds(&args, "--pair-timeout", 100),
         session_timeout: seconds(&args, "--session-timeout", 120),
-        grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
+        grants,
     };
     let (outcome, result) = host_drive(&backend, &cfg, &log);
     match result {
