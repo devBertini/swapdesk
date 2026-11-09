@@ -157,7 +157,7 @@ impl Worker {
                 self.request_keyframe(true);
             }
             // The main thread applies the window's size and the scale mode to the renderer itself.
-            Cmd::Resize(_) | Cmd::Scale(_) => {}
+            Cmd::Resize(_) | Cmd::Scale(_) | Cmd::CursorMode => {}
             Cmd::Detach(ack) => {
                 self.detach();
                 let _ = ack.send(());

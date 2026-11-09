@@ -222,6 +222,9 @@ impl ViewerPipeline {
     fn refresh_input(&self, ui: &mut Ui) {
         let allowed = Self::can_input(ui);
         let id = ui.session.as_ref().map_or(0, |s| s.id);
+        if self.shared.local_pointer.swap(allowed, Ordering::SeqCst) != allowed {
+            self.mailbox.push_cmd(Cmd::CursorMode);
+        }
         if !allowed {
             // Whatever the host still holds is let go while the session id is still the right one.
             let mut released = ui.pointer.release_all();
@@ -472,8 +475,11 @@ impl ViewerHost for ViewerPipeline {
         true
     }
 
-    fn hides_pointer(&self) -> bool {
-        Self::can_input(&lock(&self.ui)) && self.shared.cursor_drawn.load(Ordering::SeqCst)
+    fn pointer_shape(&self) -> Option<Arc<swapdesk_platform::CursorShape>> {
+        if !Self::can_input(&lock(&self.ui)) {
+            return None;
+        }
+        self.shared.pointer_shape.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 

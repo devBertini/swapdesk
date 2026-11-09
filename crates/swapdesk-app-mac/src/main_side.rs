@@ -14,9 +14,10 @@ use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
-use swapdesk_platform::{CursorUpdate, DecodedFrame, ErrorKind, NativeSurface, Rect, Renderer, ScaleMode};
+use swapdesk_app::shared::cursor::shown as cursor_shown;
+use swapdesk_platform::{CursorShape, CursorUpdate, DecodedFrame, ErrorKind, NativeSurface, Rect, Renderer, ScaleMode};
 use swapdesk_render_mac::{Counters, MacRenderer, RendererOptions};
-use swapdesk_shell_mac::VideoArea;
+use swapdesk_shell_mac::{VideoArea, ViewCursor, set_view_cursor};
 
 use crate::decode::Shared;
 use crate::handoff::{Drained, Handoff};
@@ -81,6 +82,11 @@ pub struct MainSide {
     last_cursor: Option<(CursorUpdate, bool)>,
     /// The local pointer switch the renderer's cursor was last set under.
     local_applied: bool,
+    /// The host's current cursor shape, for the local pointer.
+    shape: Option<CursorShape>,
+    /// What the video view's pointer was last set to: the shape id and the backing scale it was built for, or `None`
+    /// for the system arrow.
+    view_cursor: Option<(u32, u64)>,
 }
 
 impl MainSide {
@@ -114,6 +120,8 @@ impl MainSide {
             observer,
             last_cursor: None,
             local_applied: false,
+            shape: None,
+            view_cursor: None,
         };
         let _ = side.renderer.set_scale(scale);
         // Anything the decode thread queued before the window was up is not for this renderer; the wake is re-armed.
@@ -206,11 +214,46 @@ impl MainSide {
     }
 
     fn set_cursor(&mut self, update: &CursorUpdate, drawn: bool, local: bool) {
+        if let Some(s) = &update.shape {
+            self.shape = Some(s.clone());
+        }
         let shown = cursor_shown(update, local);
         match self.renderer.set_cursor(&shown) {
             Ok(()) => self.shared.cursor_drawn.store(drawn && !local, Ordering::SeqCst),
             Err(e) => self.shared.error("cursor", format!("{e:?}")),
         }
+        self.apply_view_cursor(local);
+    }
+
+    /// While the viewer controls, the pointer over the video takes the host's shape (at its pixel size, as the drawn
+    /// arrow had it); otherwise the system arrow.
+    fn apply_view_cursor(&mut self, local: bool) {
+        let want = if local { self.shape.as_ref().map(|s| (s.id, self.backing.to_bits())) } else { None };
+        if want == self.view_cursor {
+            return;
+        }
+        let Some(view) = self.view.clone() else { return };
+        match (want, &self.shape) {
+            (Some(_), Some(shape)) => match swapdesk_render_mac::cursor_image(shape) {
+                Ok(image) => {
+                    let b = self.backing;
+                    set_view_cursor(
+                        &view,
+                        ViewCursor::Image {
+                            image: &image,
+                            size: (f64::from(shape.width) / b, f64::from(shape.height) / b),
+                            hot: (f64::from(shape.hot_x) / b, f64::from(shape.hot_y) / b),
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.shared.error("cursor", format!("{e:?}"));
+                    set_view_cursor(&view, ViewCursor::System);
+                }
+            },
+            _ => set_view_cursor(&view, ViewCursor::System),
+        }
+        self.view_cursor = want;
     }
 
     fn present(&mut self, f: MainFrame) {
@@ -252,14 +295,11 @@ impl MainSide {
     }
 }
 
-/// The update the renderer gets: while the viewer controls the host, the local pointer is the one on screen, so the
-/// remote arrow is hidden (its shape still recorded for when control ends).
-fn cursor_shown(update: &CursorUpdate, local: bool) -> CursorUpdate {
-    CursorUpdate { visible: update.visible && !local, ..update.clone() }
-}
-
 impl Drop for MainSide {
     fn drop(&mut self) {
+        if let Some(view) = &self.view {
+            set_view_cursor(view, ViewCursor::System);
+        }
         self.layout.set(None);
         self.shared.cursor_drawn.store(false, Ordering::SeqCst);
         self.renderer.detach();
@@ -269,21 +309,6 @@ impl Drop for MainSide {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_remote_arrow_hides_while_the_viewer_controls_and_keeps_its_shape() {
-        let shape =
-            swapdesk_platform::CursorShape { id: 1, width: 1, height: 1, hot_x: 0, hot_y: 0, rgba: vec![0, 0, 0, 255] };
-        let u =
-            CursorUpdate { display: swapdesk_platform::DisplayId(0), x: 3, y: 4, visible: true, shape: Some(shape) };
-        let controlled = cursor_shown(&u, true);
-        assert!(!controlled.visible, "the local pointer is the one shown while controlling");
-        assert!(controlled.shape.is_some(), "the shape still reaches the renderer");
-        assert_eq!((controlled.x, controlled.y), (3, 4));
-        assert!(cursor_shown(&u, false).visible, "view only: the remote arrow is drawn");
-        let hidden = CursorUpdate { visible: false, ..u };
-        assert!(!cursor_shown(&hidden, false).visible);
-    }
 
     #[test]
     fn points_become_window_pixels_at_the_screens_scale() {

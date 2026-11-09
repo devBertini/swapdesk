@@ -73,6 +73,8 @@ pub struct Window {
     adapter: RefCell<Option<accesskit_windows::Adapter>>,
     actions: Arc<Mutex<Vec<ActionRequest>>>,
     tracking: Cell<bool>,
+    /// The host's cursor shape as a Win32 cursor, shown over the video while the viewer controls.
+    remote_cursor: crate::cursor::CursorCache,
     scroll_max: Cell<f32>,
     list_area: Cell<Option<Rect>>,
     video: Cell<Option<Rect>>,
@@ -148,6 +150,7 @@ impl Window {
             adapter: RefCell::new(None),
             actions: Arc::new(Mutex::new(Vec::new())),
             tracking: Cell::new(false),
+            remote_cursor: crate::cursor::CursorCache::default(),
             scroll_max: Cell::new(0.0),
             list_area: Cell::new(None),
             video: Cell::new(None),
@@ -1018,7 +1021,7 @@ impl Window {
                 let hover = self.ix.borrow().hover;
                 if hover.is_none()
                     && let Some(host) = self.host()
-                    && host.hides_pointer()
+                    && let Some(shape) = host.pointer_shape()
                     && let Some(a) = self.video_px()
                 {
                     let mut p = windows::Win32::Foundation::POINT::default();
@@ -1027,9 +1030,14 @@ impl Window {
                         let _ = GetCursorPos(&mut p);
                         let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
                     }
-                    if p.x >= a.x && p.y >= a.y && p.x < a.x + a.width as i32 && p.y < a.y + a.height as i32 {
-                        // SAFETY: hides the pointer over the video; the remote cursor is drawn there.
-                        unsafe { SetCursor(None) };
+                    if p.x >= a.x
+                        && p.y >= a.y
+                        && p.x < a.x + a.width as i32
+                        && p.y < a.y + a.height as i32
+                        && let Some(c) = self.remote_cursor.get(&shape)
+                    {
+                        // SAFETY: a cursor the window's cache owns; it lives until the cache replaces it.
+                        unsafe { SetCursor(Some(c)) };
                         return Some(LRESULT(1));
                     }
                 }

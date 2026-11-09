@@ -33,6 +33,8 @@ pub enum Cmd {
     Scale(ScaleMode),
     /// Tear the renderer down and acknowledge (the window's composition tree is about to go).
     Detach(Sender<()>),
+    /// The viewer started or stopped controlling the host: draw the remote cursor again under the new rule.
+    CursorMode,
 }
 
 pub struct Frame {

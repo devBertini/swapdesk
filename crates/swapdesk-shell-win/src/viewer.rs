@@ -82,8 +82,9 @@ pub trait ViewerHost: Send + Sync {
     fn captures_keyboard(&self) -> bool;
     /// True when the key was taken (forwarded, or left to the system-wide grabber); the shell then keeps it from the UI.
     fn key(&self, msg: &KeyMsg) -> bool;
-    /// True when the local pointer is hidden over the video (the remote cursor is drawn instead).
-    fn hides_pointer(&self) -> bool;
+    /// The host's cursor shape while the viewer controls the host: the local pointer takes it over the video, and the
+    /// remote arrow is not drawn (it would trail the pointer by a round trip). `None`: the system arrow.
+    fn pointer_shape(&self) -> Option<std::sync::Arc<swapdesk_platform::CursorShape>>;
 }
 
 /// A composition tree with a D3D11 device and a parent visual, and no window: what the renderer needs from a shell,

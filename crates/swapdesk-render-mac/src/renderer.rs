@@ -234,7 +234,7 @@ fn upload(stride: usize, data: &[u8], w: u32, h: u32) -> Result<CFRetained<CVIma
 
 /// The remote cursor as a `CGImage` (straight RGBA in, premultiplied on the image). Shapes are at most 256x256
 /// (PROTOCOL.md 7.4).
-fn cursor_image(shape: &CursorShape) -> Result<CFRetained<CGImage>> {
+pub fn cursor_image(shape: &CursorShape) -> Result<CFRetained<CGImage>> {
     let (w, h) = (usize::from(shape.width), usize::from(shape.height));
     if w == 0 || h == 0 || w > 256 || h > 256 || shape.rgba.len() != w * h * 4 {
         return Err(err(ErrorKind::InvalidInput, "set_cursor", "cursor shape size does not match its pixels"));

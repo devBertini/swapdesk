@@ -31,7 +31,7 @@ features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NS
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true
 features = [
-    "std", "objc2-quartz-core", "objc2-core-foundation", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle",
+    "std", "objc2-quartz-core", "objc2-core-foundation", "objc2-core-graphics", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle",
     "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols",
     "NSAppearance", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
     "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
@@ -39,6 +39,10 @@ features = [
     "NSStackView", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
     "NSView", "NSVisualEffectView", "NSWindow", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
 ]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
+workspace = true
+features = ["std", "CGImage"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 workspace = true

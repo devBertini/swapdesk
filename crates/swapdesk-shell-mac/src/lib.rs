@@ -36,7 +36,7 @@ pub use shell::{ViewerHooks, run, run_with_host, selftest};
 #[cfg(target_os = "macos")]
 pub use system::{Waker, system_dark, system_language};
 #[cfg(target_os = "macos")]
-pub use video::{VideoSlot, VideoSurface};
+pub use video::{VideoSlot, VideoSurface, ViewCursor, set_view_cursor};
 
 #[cfg(test)]
 mod model_tests;

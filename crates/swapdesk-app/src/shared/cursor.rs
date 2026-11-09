@@ -28,6 +28,12 @@ pub fn denormalize(v: u16, size: u32) -> i32 {
     ((u64::from(v) * u64::from(size - 1) + 32767) / 65535) as i32
 }
 
+/// The update the renderer gets: while the viewer controls the host, the local pointer is the one on screen (with the
+/// host's shape), so the remote arrow is hidden; its shape still reaches the renderer for when control ends.
+pub fn shown(update: &CursorUpdate, local: bool) -> CursorUpdate {
+    CursorUpdate { visible: update.visible && !local, ..update.clone() }
+}
+
 impl CursorTracker {
     pub fn new() -> Self {
         Self::default()
@@ -135,5 +141,15 @@ mod tests {
         assert!(next.shape.is_none(), "already applied");
         t.on_shape(shape(8));
         assert_eq!(t.on_position(&pos(3, 0, 8), Some((10, 10))).unwrap().shape.map(|s| s.id), Some(8));
+    }
+
+    #[test]
+    fn the_remote_arrow_hides_while_the_viewer_controls_and_keeps_its_shape() {
+        let u = CursorUpdate { display: DisplayId(0), x: 3, y: 4, visible: true, shape: Some(shape(1)) };
+        let controlled = shown(&u, true);
+        assert!(!controlled.visible, "the local pointer is the one shown while controlling");
+        assert!(controlled.shape.is_some(), "the shape still reaches the renderer");
+        assert!(shown(&u, false).visible, "view only: the remote arrow is drawn");
+        assert!(!shown(&CursorUpdate { visible: false, ..u }, false).visible);
     }
 }
