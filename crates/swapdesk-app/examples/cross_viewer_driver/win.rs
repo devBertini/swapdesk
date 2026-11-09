@@ -7,7 +7,7 @@
 //! nothing is forgotten: the pairing outlives the tool.
 //!
 //!     cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type]
+//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip]
 //!
 //! `--pair` is the full script against a host run by `Swapdesk --drive-host` (a scratch identity on the Mac): it adds
 //! the host by address, prints `VIEWER_CODE <code>`, reads the host's code from `<folder>/peer-code.txt`, waits for
@@ -92,7 +92,7 @@ pub fn main() -> ExitCode {
     if device.is_none() == pair.is_none() {
         eprintln!(
             "usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type]"
+       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip]"
         );
         return ExitCode::from(2);
     }
@@ -146,6 +146,14 @@ pub fn main() -> ExitCode {
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--type"), &pair) {
         cfg.type_after = Some(PathBuf::from(dir).join("type"));
     }
+    // `--clip`: the copy and paste proof through this user's clipboard; the orchestrator works the host's in `<dir>`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--clip"), &pair) {
+        backend.set_clipboard(swapdesk_input_win::clipboard::WinClipboard::new());
+        cfg.clip = Some(swapdesk_crossdrive::ClipStep {
+            dir: PathBuf::from(dir),
+            provider: std::sync::Mutex::new(Box::new(swapdesk_input_win::clipboard::WinClipboard::new())),
+        });
+    }
     // `--fresh-host`: the orchestrator starts the host after this viewer and writes `<dir>/host-up`.
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--fresh-host"), &pair) {
         cfg.host_up = Some(PathBuf::from(dir).join("host-up"));
@@ -155,7 +163,10 @@ pub fn main() -> ExitCode {
     drop(backend);
     media.finish();
     println!("{}", report.counts_line());
-    let verdict = verdict(&report);
+    let verdict = verdict(&report).and_then(|()| match &report.clip_failed {
+        Some(why) => Err(format!("copy and paste: {why}")),
+        None => Ok(()),
+    });
     match (verdict, result) {
         (Ok(()), Ok(())) => {
             println!("VIEWER_RESULT PASS");

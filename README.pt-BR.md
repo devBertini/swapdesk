@@ -75,7 +75,8 @@ Cada recurso está num de três estados, descritos de forma conservadora:
 | Adicionar por endereço e a proteção de rede local | Entre máquinas | Entre máquinas | Um PC |
 | Descoberta na rede local (DNS-SD) | Entre máquinas | Entre máquinas | Um PC |
 | Inversão, chat, Wake-on-LAN, reconexão | Fora da 1.0 | Fora da 1.0 | Um PC |
-| Terminal, arquivos, área de transferência, ações rápidas | Fora da 1.0 | Fora da 1.0 | Um PC |
+| Área de transferência (texto e imagens, nos dois sentidos) | Entre máquinas | Entre máquinas | Um PC |
+| Terminal, arquivos, ações rápidas | Fora da 1.0 | Fora da 1.0 | Um PC |
 | Tela cheia e atalhos do visualizador | Construído | Construído | Um PC |
 | Alcançável com a sessão aberta e a janela fechada | n/a | Item de início e barra de menus | Serviço do Windows |
 | Sem ninguém na frente (tela de login, tela bloqueada, UAC) | Fora da 1.0 | Fora da 1.0 (o macOS só permite com sessão aberta e desbloqueada) | Fora da 1.0 |
@@ -90,7 +91,7 @@ As execuções entre máquinas são conduzidas por um harness de testes sobre o 
 
 Planejado para a 1.1:
 
-- Inversão, terminal, arquivos e área de transferência entre Windows e Mac (já funcionam de Windows para Windows).
+- Inversão, terminal e arquivos entre Windows e Mac (já funcionam de Windows para Windows).
 - Acesso sem ninguém na frente no Windows, na tela de login, na tela bloqueada e nos avisos do UAC, provado depois de uma reinicialização real.
 - Um teste de 8 horas com quedas de Wi-Fi, com os orçamentos de CPU, GPU e memória medidos nele.
 - Troca entre as telas do host, provada em duas telas com escalas diferentes.

@@ -14,7 +14,7 @@ use crate::api::*;
 use crate::format::Clock;
 use crate::inflight::{InFlight, Joined};
 use crate::interact::ControlId;
-use crate::state::{DataKind, DeviceTab, Nav, UiState};
+use crate::state::{DataKind, DeviceTab, DrawerTab, Nav, UiState};
 use crate::strings::MsgKey;
 
 /// 2026-11-08 15:30 UTC: the fixed "now" of every scenario, so captures do not change from day to day.
@@ -196,6 +196,8 @@ pub enum Scenario {
     Terminal,
     Arquivos,
     Chat,
+    /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
+    AreaTransferencia,
     Banner,
     Inverter,
     InverterPedido,
@@ -210,7 +212,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 32] = [
+    pub const ALL: [Scenario; 33] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -235,6 +237,7 @@ impl Scenario {
         Scenario::Terminal,
         Scenario::Arquivos,
         Scenario::Chat,
+        Scenario::AreaTransferencia,
         Scenario::Banner,
         Scenario::Inverter,
         Scenario::InverterPedido,
@@ -272,6 +275,7 @@ impl Scenario {
             Scenario::Terminal => "terminal",
             Scenario::Arquivos => "arquivos",
             Scenario::Chat => "chat",
+            Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
             Scenario::Inverter => "inverter",
             Scenario::InverterPedido => "inverter-pedido",
@@ -314,6 +318,7 @@ impl Scenario {
             Scenario::Terminal => "8. Terminal e ações rápidas (shell only)",
             Scenario::Arquivos => "9. Arquivos",
             Scenario::Chat => "10. Chat e copiar e colar",
+            Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
             Scenario::Inverter => "7. Inverter controle, step 1",
             Scenario::InverterPedido => "7. Inverter controle, step 2",
@@ -531,6 +536,12 @@ impl Scenario {
                     ],
                     truncated: false,
                 })))),
+            ],
+            Scenario::AreaTransferencia => vec![
+                mac(),
+                Event(Self::viewer_session(21)),
+                Activate(ControlId::TbChat),
+                Activate(ControlId::DrawerTab(DrawerTab::Clipboard)),
             ],
             Scenario::Chat => vec![
                 mac(),
@@ -1025,6 +1036,7 @@ mod tests {
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
             (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
+            (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),
             (Scenario::Inverter, Screen::Devices, &[Main, Viewer]),
             (Scenario::InverterPedido, Screen::Home, &[Main, Banner]),

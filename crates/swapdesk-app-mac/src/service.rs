@@ -254,6 +254,10 @@ impl InProcessService {
         let backend =
             ServiceBackend::start_with_sink(client_end.reader, client_end.writer, waker, std::process::id(), sink)
                 .map_err(|e| format!("hub handshake: {e}"))?;
+        // The clipboard sync of the viewer role reads and writes this user's pasteboard (C2.4 0x60 to 0x62), as the
+        // Windows UI does with its own clipboard.
+        #[cfg(target_os = "macos")]
+        backend.set_clipboard(swapdesk_input_mac::MacClipboard::new());
         Ok(Self {
             hub,
             cancel,

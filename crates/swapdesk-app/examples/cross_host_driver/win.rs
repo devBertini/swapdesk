@@ -5,7 +5,7 @@
 //! `swapdesk_crossdrive::host_drive`: opens pairing, confirms the code the viewer reports, grants the viewer VIEW,
 //! CONTROL and AUDIO, answers the incoming request with Accept, waits for the session to end and forgets the device.
 //!
-//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>]
+//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] [--clip]
 //!     cross_host_driver --stay
 //!
 //! `--stay` (hand testing) pairs nothing and forgets nothing: it accepts every session request of a paired device
@@ -69,7 +69,11 @@ pub fn main() -> ExitCode {
     };
     log(&format!("HOST_CONNECTED win_session={}", backend.win_session()));
 
-    let grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+    let mut grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+    // `--clip`: the copy and paste proof also needs the clipboard granted.
+    if args.iter().any(|a| a == "--clip") {
+        grants = grants.with(Permission::Clipboard);
+    }
     if stay {
         return match host_stay(&backend, grants, &log) {
             Ok(()) => ExitCode::SUCCESS,

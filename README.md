@@ -75,7 +75,8 @@ Each feature is in one of three states, written conservatively:
 | Add by address and the LAN guard | Between machines | Between machines | One PC |
 | Discovery on the LAN (DNS-SD) | Between machines | Between machines | One PC |
 | Swap, chat, Wake-on-LAN, reconnect | Not in 1.0 | Not in 1.0 | One PC |
-| Terminal, files, clipboard, quick actions | Not in 1.0 | Not in 1.0 | One PC |
+| Clipboard (text and images, both ways) | Between machines | Between machines | One PC |
+| Terminal, files, quick actions | Not in 1.0 | Not in 1.0 | One PC |
 | Full screen and viewer shortcuts | Built | Built | One PC |
 | Reachable while logged in, window closed | n/a | Login item and menu bar | Windows service |
 | Unattended (login screen, lock screen, UAC) | Not in 1.0 | Not in 1.0 (macOS allows only logged-in and unlocked) | Not in 1.0 |
@@ -90,7 +91,7 @@ The runs between machines are driven by a test harness over the shipped host and
 
 Planned for 1.1:
 
-- Swap, terminal, files and clipboard between Windows and Mac (they work Windows to Windows).
+- Swap, terminal and files between Windows and Mac (they work Windows to Windows).
 - Unattended Windows access at the login screen, the lock screen and UAC prompts, proven across a real reboot.
 - An 8-hour soak with Wi-Fi drops, with the CPU, GPU and memory budgets measured on it.
 - Switching between the host's displays, proven on two displays with different scaling.

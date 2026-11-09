@@ -80,7 +80,7 @@ pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), 
         peer_code: dir.join("peer-code.txt"),
         pair_timeout: Duration::from_secs(150),
         session_timeout: Duration::from_secs(180),
-        grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
+        grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio).with(Permission::Clipboard),
     };
     std::thread::Builder::new()
         .name("swapdesk-drive-host".into())

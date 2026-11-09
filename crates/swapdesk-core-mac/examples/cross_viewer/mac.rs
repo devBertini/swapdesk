@@ -184,14 +184,14 @@ pub fn main() -> ExitCode {
     let (Some(host_addr), Some(peer_code), Some(go)) =
         (value(&args, "--host-addr"), value(&args, "--peer-code"), value(&args, "--go"))
     else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file>");
+        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]");
         return ExitCode::from(2);
     };
     let Some(anchor) = value(&args, "--anchor-file") else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file>");
+        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]");
         return ExitCode::from(2);
     };
-    match run(&host_addr, PathBuf::from(peer_code), PathBuf::from(go), PathBuf::from(anchor)) {
+    match run(&host_addr, PathBuf::from(peer_code), PathBuf::from(go), PathBuf::from(anchor), value(&args, "--clip")) {
         Ok(()) => {
             println!("VIEWER_RESULT PASS");
             ExitCode::SUCCESS
@@ -203,7 +203,13 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Result<(), String> {
+fn run(
+    host_addr: &str,
+    peer_code: PathBuf,
+    go: PathBuf,
+    anchor: PathBuf,
+    clip_dir: Option<String>,
+) -> Result<(), String> {
     let scratch = Scratch::new()?;
     let trace: Arc<dyn TraceSink> = Arc::new(StderrTrace);
     let clock: Arc<dyn Clock> = Arc::new(Monotonic(Instant::now()));
@@ -272,7 +278,16 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     )
     .map_err(|e| format!("hub handshake: {e}"))?;
 
-    let cfg = ViewerConfig::new(host_addr, peer_code, go, anchor);
+    let mut cfg = ViewerConfig::new(host_addr, peer_code, go, anchor);
+    // `--clip <dir>`: the copy and paste proof through this user's pasteboard; the orchestrator works the host's
+    // clipboard and meets this side through the files in `<dir>`.
+    if let Some(dir) = clip_dir {
+        backend.set_clipboard(swapdesk_input_mac::MacClipboard::new());
+        cfg.clip = Some(swapdesk_crossdrive::ClipStep {
+            dir: std::path::PathBuf::from(dir),
+            provider: std::sync::Mutex::new(Box::new(swapdesk_input_mac::MacClipboard::new())),
+        });
+    }
     let log = |line: &str| println!("{line}");
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
     println!("{}", report.counts_line());
@@ -298,6 +313,9 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     println!("VIEWER_CLEANED keychain file, items and folder removed");
 
     result?;
+    if let Some(why) = report.clip_failed {
+        return Err(format!("copy and paste: {why}"));
+    }
     if report.frames_decoded == 0 {
         return Err("no frame decoded".into());
     }

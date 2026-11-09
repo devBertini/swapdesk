@@ -198,6 +198,12 @@ fn nonblack_percent(data: &[u8], stride: usize, width: usize, height: usize) -> 
     (lit * 100).checked_div(total).unwrap_or(0)
 }
 
+/// The clipboard this side uses for the copy and paste proof, and the folder shared with the orchestrator.
+pub struct ClipStep {
+    pub dir: PathBuf,
+    pub provider: Mutex<Box<dyn swapdesk_platform::ClipboardProvider + Send>>,
+}
+
 pub struct ViewerConfig {
     /// The host's IPv4 address, as typed in "add by address".
     pub host_addr: String,
@@ -229,6 +235,9 @@ pub struct ViewerConfig {
     /// the focus on the host), then type [`TYPED_WORD`] with physical keys and save with Cmd+S (Ctrl+S toward Windows
     /// is the host's own matter: this proof is toward the Mac). `None`: no keys.
     pub type_after: Option<PathBuf>,
+    /// Copy and paste proof ([`crate::clip`]): after the keys, text and an image each way through this clipboard and
+    /// the files in this folder. `None`: no clipboard steps.
+    pub clip: Option<ClipStep>,
     /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
     /// `pair_with_fresh_host`). `None`: the host is found by its address.
     pub host_up: Option<PathBuf>,
@@ -253,6 +262,7 @@ impl ViewerConfig {
             send_input: true,
             hold: Duration::ZERO,
             type_after: None,
+            clip: None,
             host_up: None,
         }
     }
@@ -281,6 +291,8 @@ pub struct ViewerReport {
     pub session_active: bool,
     pub ended_clean: bool,
     pub forgotten: bool,
+    /// The copy and paste proof failed (only when it ran): why.
+    pub clip_failed: Option<String>,
 }
 
 impl ViewerReport {
@@ -549,6 +561,14 @@ fn script_media(
         Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, log),
         None => Ok(()),
     });
+    if let Some(step) = &cfg.clip {
+        log("VIEWER_NEED_CLIP");
+        let mut provider = lock(&step.provider);
+        if let Err(e) = crate::clip::clip_round(provider.as_mut(), &step.dir, Duration::from_secs(20), log) {
+            log(&format!("CLIP_FAIL {e}"));
+            report.clip_failed = Some(e);
+        }
+    }
     // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.
     let hold_end = active_at + cfg.hold;
     let audio_end = Instant::now() + Duration::from_millis(1500);

@@ -963,6 +963,7 @@ dependencies = [
  "swapdesk-crossdrive",
  "swapdesk-fakes",
  "swapdesk-host",
+ "swapdesk-input-mac",
  "swapdesk-ipc",
  "swapdesk-net-mac",
  "swapdesk-platform",

@@ -847,7 +847,37 @@ impl Shell {
         if SHOT_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let (path, window) = (path.clone(), self.main.window.windowNumber());
+        // A scenario with a session films the viewer window, any other the main window.
+        let window = self.viewer.borrow().as_ref().map_or(self.main.window.windowNumber(), |v| v.window.windowNumber());
+        let path = path.clone();
+        // The view tree beside the picture (class, frame, hidden, layer), for a capture that looks wrong.
+        if let Some(v) = self.viewer.borrow().as_ref()
+            && let Some(root) = v.window.contentView()
+        {
+            fn walk(v: &NSView, depth: usize, out: &mut String) {
+                let f = v.frame();
+                out.push_str(&format!(
+                    "{:indent$}{} {:.0},{:.0} {:.0}x{:.0}{}{}
+",
+                    "",
+                    v.class().name().to_string_lossy(),
+                    f.origin.x,
+                    f.origin.y,
+                    f.size.width,
+                    f.size.height,
+                    if v.isHidden() { " hidden" } else { "" },
+                    if v.wantsLayer() { " layer" } else { "" },
+                    indent = depth * 2
+                ));
+                let subs = v.subviews();
+                for i in 0..subs.count() {
+                    walk(&subs.objectAtIndex(i), depth + 1, out);
+                }
+            }
+            let mut out = String::new();
+            walk(&root, 0, &mut out);
+            let _ = std::fs::write(path.with_extension("views.txt"), out);
+        }
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             let status = std::process::Command::new("/usr/sbin/screencapture")
