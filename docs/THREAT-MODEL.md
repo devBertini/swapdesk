@@ -1,6 +1,6 @@
 # Threat model
 
-Status: version 1.0.0. This describes the mitigations as designed and says which are tested. It is not a statement that Swapdesk is secure. Discovery, the LAN guard, pairing, the trust store, TLS and the local IPC are implemented and tested in code, and a focused security review of pairing, the LAN guard, grants, the IPC ACLs and the wire decoder ran before 1.0. Protocol fuzzing and a long soak have not happened. There has been no independent audit.
+Status: version 1.0.0. This describes the mitigations as designed and says which are tested. It is not a statement that Swapdesk is secure. Discovery, the LAN guard, pairing, the trust store, TLS and the local IPC are implemented and tested in code, and a focused security review of pairing, the LAN guard, grants, the IPC ACLs and the wire decoder ran before 1.0. It found and 1.0 fixes: a UI of another Windows session (fast user switching) could pair, grant, connect or answer a swap that made this machine the host, now reserved to the console session's interface; a standard user could widen what an unattended device may do, now an administrator's change; and blocked addresses are now dropped before the handshake. The wire and IPC decoders are property-tested with random input (`proptest`); coverage-guided fuzzing and a long soak have not happened. There has been no independent audit.
 
 **macOS in version 1** runs as one app of the logged-in user (README, Architecture): there is no root daemon, so the statements below about a daemon, root-owned sockets and the System keychain describe the later design. On the Mac the device key and trust store are files readable only by that user (mode 0600 in a 0700 folder), the same reach as DPAPI user scope: any process of that user can read them.
 
@@ -37,7 +37,7 @@ Capabilities assumed: it can send any packet to the machine's ports, spoof addre
 | An unknown key tries a session | Refused in the handshake, logged (rate-limited), alert shown in Activity with a block action. | SPEC F-PAIR-03 |
 | Altered or replayed packets | QUIC and TLS 1.3 integrity. Swap and resume tokens are single-use, bound to the device, with 10 s and 60 s lifetimes. | SPEC STRIDE row T; PROTOCOL 6.3, 6.4 |
 | Handshake, pairing, stream, transfer or audit-log floods | Caps on handshakes and connections per address, QUIC retry and ignore under load, one stream on the pairing endpoint, explicit receive windows and a buffered-bytes budget per connection, no allocation from a peer-declared length, caps on terminals, transfers and chat, rate-limited unauthenticated audit entries. Most numbers are marked GUESS. | SPEC STRIDE row D; PROTOCOL 1, 9 |
-| Malformed messages reaching a privileged parser | `swapdesk-proto` has no `unsafe`, strict length limits, rejects trailing bytes and unknown types. Fuzzing is planned, not done. | SPEC STRIDE row E; PROTOCOL 5.1 |
+| Malformed messages reaching a privileged parser | `swapdesk-proto` has no `unsafe`, strict length limits, rejects trailing bytes and unknown types. Property tests feed random bytes to every network and IPC decoder (`crates/swapdesk-proto/tests/fuzz.rs`, `crates/swapdesk-ipc/tests/fuzz.rs`); coverage-guided fuzzing is not done. | SPEC STRIDE row E; PROTOCOL 5.1 |
 | Tricking the machine into connecting to itself | Own and loopback addresses are refused. | SPEC F-FIND-02 |
 | A peer from outside the subnet or on a virtual interface | Physical interfaces only, peers must be on-link in the arrival interface's subnet, checked before the TLS handshake. TTL 1 on QUIC. | SPEC F-FIND-02; PROTOCOL 1 |
 | Reading what mDNS announces | Accepted: name, OS and key fingerprint are visible on the LAN, and no secret is in the announcement. | SPEC STRIDE row I |
@@ -109,4 +109,4 @@ These are marked UNPROVEN or GUESS in the design documents. They are risks, not 
 | What macOS allows at the login window and lock screen | Probes P4 to P6 not yet run; not in 1.0 | SPEC R4, F-UNAT-02 |
 | Whether macOS daemon-owned networking is exempt from Local Network privacy | Assumed from an Apple technical note, risk R10 (probe P8) | SPEC R10 |
 | Rate limits, lockout durations, handshake caps and timeouts | GUESS numbers | PROTOCOL 1, 3; CONTRACTS C5.1 |
-| The whole implementation against these threats | A focused review ran before 1.0; fuzzing and an independent audit have not | |
+| The whole implementation against these threats | A focused review ran before 1.0; coverage-guided fuzzing and an independent audit have not | |

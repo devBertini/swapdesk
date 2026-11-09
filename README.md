@@ -78,7 +78,7 @@ Planned for 1.1:
 - Fewer copies on the frame path and a cached text layout in the interface.
 - The next interface pass: screens, texts, accessibility, a Windows tray icon and a first-run guide.
 - An installer with an entry in the installed apps list, and a signing path for both systems.
-- Screenshots, a performance report, fuzzing of the wire decoder, a Linux CI job.
+- Screenshots, a performance report, coverage-guided fuzzing of the decoders, a Linux CI job.
 
 ## How it stays on the LAN
 
