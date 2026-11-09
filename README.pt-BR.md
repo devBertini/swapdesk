@@ -17,7 +17,7 @@ AnyDesk e TeamViewer chegam às suas máquinas por uma nuvem. O Swapdesk é para
 
 O objetivo da versão 1 (de [docs/SPEC.md](docs/SPEC.md)): tela, áudio do sistema, mouse, teclado, terminal, arquivos, área de transferência, chat, Wake-on-LAN e acesso sem ninguém na frente da máquina, entre dois computadores. Qualquer um dos dois pode hospedar ou controlar. "Inverter" troca os papéis quando o outro lado aceita.
 
-O Swapdesk não tem relay, nuvem, travessia de NAT nem conta. Qualquer coisa além da rede local está fora do escopo de propósito, não só por falta de tempo.
+O Swapdesk não tem relay, nuvem, travessia de NAT nem conta. Na 1.x nada sai da rede local, e o código garante isso ([Como ele fica na rede local](#como-ele-fica-na-rede-local)). Acesso de fora da rede local é uma direção possível para depois, ainda não projetada: se vier, vem como um modo que você liga, e só rede local continua sendo o padrão ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
 
 ## Download
 
@@ -98,6 +98,9 @@ Planejado para a 1.1:
 - A próxima rodada da interface: telas, textos, acessibilidade, um ícone na bandeja do Windows e um guia de primeiro uso.
 - Um instalador com entrada na lista de aplicativos instalados, e um caminho de assinatura para os dois sistemas.
 - Capturas de tela, um relatório de desempenho, fuzzing guiado por cobertura dos decodificadores, um job de CI no Linux.
+- Uma demonstração curta em loop no topo deste README: parear, ver a outra tela, mover o mouse e inverter os papéis.
+
+Depois, sem data (D36): acesso de fora da rede local como um modo que você liga, começando por uma VPN que você já usa entre as suas máquinas, e grupos de dispositivos. Cada passo ganha seu próprio projeto e modelo de ameaças antes de qualquer código.
 
 ## Como ele fica na rede local
 
@@ -107,7 +110,7 @@ Isso é imposto no código, não deixado para configuração ([docs/SPEC.md](doc
 - Uma conexão é recusada antes do handshake TLS, a não ser que o endereço do outro lado esteja na mesma sub-rede da interface por onde chegou, e não seja loopback nem um dos endereços desta máquina.
 - Os pacotes QUIC saem com TTL (hop limit) 1, então não podem ser roteados para fora da sub-rede. O mDNS mantém TTL 255, como o multicast local exige.
 - Um endereço digitado à mão só é aceito se estiver na mesma sub-rede.
-- Relay, nuvem e travessia de NAT não existem no projeto.
+- Relay, nuvem e travessia de NAT não existem na 1.x.
 
 ## Segurança em resumo
 

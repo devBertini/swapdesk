@@ -80,7 +80,7 @@ From the owner's performance study (`~/Documents/Projetos/DESEMPENHO-WEB.md`, D2
 
 ## Later
 
-Privacy screen (host blanked), session recording, H.264 4:4:4 and a "text" preset beyond 4:2:0, several viewers on one host, IPv6 for QUIC, Win-Win and Mac-Mac across two machines (unverified in v1: one machine of each), a direct NVENC path, HEVC/AV1, file sync of whole folders, printing, remote microphone, a relay or anything beyond the LAN (never), a Windows code-signing certificate, multi-monitor "all displays" view, touch and pen input, sound for chat, elevated-window control in prompted sessions.
+Privacy screen (host blanked), session recording, H.264 4:4:4 and a "text" preset beyond 4:2:0, several viewers on one host, IPv6 for QUIC, Win-Win and Mac-Mac across two machines (unverified in v1: one machine of each), a direct NVENC path, HEVC/AV1, file sync of whole folders, printing, remote microphone, access beyond the LAN as a mode the user turns on (D36: not designed; LAN-only stays the default and 1.x enforces it), a Windows code-signing certificate, multi-monitor "all displays" view, touch and pen input, sound for chat, elevated-window control in prompted sessions.
 
 ## Look
 

@@ -81,7 +81,7 @@ What it can still do: anything the user can do, such as start sessions to alread
 
 ## Out of scope
 
-- Anything beyond the LAN. There is no relay, cloud or NAT traversal, by design and permanently.
+- Anything beyond the LAN. 1.x has no relay, cloud or NAT traversal. A later mode beyond the LAN (D36) gets its own threat model before it is built, and this one stays true for the LAN-only default.
 - An attacker with administrator, SYSTEM or root on a machine, or with kernel code execution there.
 - Physical access to an unlocked machine.
 - Hiding that Swapdesk is present from the LAN: names, OS and key fingerprints are visible through discovery.
