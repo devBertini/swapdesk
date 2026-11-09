@@ -44,7 +44,9 @@ use crate::mf::{
     set_u32, video_type,
 };
 use crate::mft::{self, Category, Mft};
-use crate::preset::{MAX_KBPS, RATE_CBR, effective, level_idc, preset_plan, rate_limits};
+use crate::preset::{
+    LiveRate, MAX_KBPS, RATE_CBR, effective, level_idc, live_rate, preset_plan, rate_limits, rate_modes_for,
+};
 use crate::sys::{Ctx, err, os_err};
 use crate::{annexb, sys};
 
@@ -244,8 +246,12 @@ struct Active {
     rate_modes: Vec<(u32, bool)>,
     /// The MFT takes a new mean bitrate while streaming (`IsModifiable`); otherwise `set_rate` rebuilds it.
     bitrate_live: bool,
-    /// The peak bitrate the MFT was given at `configure`, bits per second (`u32::MAX`: none).
+    /// The peak bitrate the MFT was given (`u32::MAX`: none), bits per second.
     peak_bps: u32,
+    /// How this MFT follows a new rate while streaming ([`LiveRate`]).
+    live: LiveRate,
+    /// Whether the rate control in force is CBR.
+    cbr: bool,
     // Effective numbers.
     coded_fps: u32,
     input_fps: u32,
@@ -543,6 +549,8 @@ impl Active {
     ) -> Result<Self> {
         let eff = effective(cfg.preset, cfg.kbps, cfg.fps);
         let plan = preset_plan(cfg.preset);
+        let live = live_rate(gpu.adapter.vendor_id, candidate.hardware);
+        let modes = rate_modes_for(cfg.preset, live);
         let coded_fps = eff.output_fps;
         let transform = candidate.activate()?;
         // Any `?` below shuts the transform down; `Active`'s own `Drop` takes over once it is built.
@@ -606,7 +614,7 @@ impl Active {
             let chosen = if quality {
                 Some(RATE_QUALITY)
             } else {
-                plan.rate_modes.iter().copied().find(|m| rate_modes.iter().any(|(rm, ok)| rm == m && *ok))
+                modes.iter().copied().find(|m| rate_modes.iter().any(|(rm, ok)| rm == m && *ok))
             };
             outcomes.push(match chosen {
                 Some(m) => {
@@ -616,7 +624,7 @@ impl Active {
                 }
                 None => SettingOutcome {
                     name: "AVEncCommonRateControlMode",
-                    value: format!("none of {:?}", plan.rate_modes),
+                    value: format!("none of {modes:?}"),
                     supported: is_supported(c, &CODECAPI_AVEncCommonRateControlMode),
                     applied: false,
                     hresult: None,
@@ -665,7 +673,7 @@ impl Active {
         }
 
         // Types: output first, then input.
-        let level = level_idc(cfg.width, cfg.height, coded_fps);
+        let level = level_idc(cfg.width, cfg.height, coded_fps, eff.kbps);
         let (profile, level) = set_types(&transform, &cfg, coded_fps, eff.kbps, level)?;
 
         // Properties some MFTs only take once the types are set.
@@ -735,7 +743,8 @@ impl Active {
         // `IsModifiable` is read once streaming runs and is believed: Quick Sync under CBR reports the mean bitrate as
         // fixed and ignores a new value (measured), under peak-constrained VBR it follows it; the software MFT accepts
         // the call and ignores it. A fixed bitrate makes `set_rate` rebuild the MFT (new SPS/PPS, a keyframe).
-        let bitrate_live = support.iter().any(|p| p.name == "AVEncCommonMeanBitRate" && p.modifiable);
+        let bitrate_live = support.iter().any(|p| p.name == "AVEncCommonMeanBitRate" && p.modifiable)
+            || (live == LiveRate::CbrWithPeak && cbr);
 
         // The converter and its textures.
         let proc = VideoProc::new(
@@ -799,6 +808,8 @@ impl Active {
             rate_modes,
             bitrate_live,
             peak_bps,
+            live,
+            cbr,
             coded_fps,
             input_fps,
             kbps_target: eff.kbps,
@@ -1090,12 +1101,31 @@ impl Active {
         // The MFT keeps the frame rate it was configured with; scale the target so the real bitrate matches.
         let scaled = (u64::from(eff.kbps) * u64::from(self.coded_fps) / u64::from(eff.output_fps))
             .min(u64::from(u32::MAX / 1000));
-        if scaled as u32 * 1000 > self.peak_bps {
+        let mean = scaled as u32 * 1000;
+        let set_mean = || {
+            set_u32(&codec, &CODECAPI_AVEncCommonMeanBitRate, mean).ctx("ICodecAPI::SetValue(AVEncCommonMeanBitRate)")
+        };
+        if self.live == LiveRate::CbrWithPeak && self.peak_bps != u32::MAX {
+            // The peak moves with the mean (CBR: the peak is the mean); this MFT takes both live (`LiveRate`). Raised
+            // peak first, lowered mean first, so the pair never has the mean above the peak.
+            let (peak, _) = rate_limits(mean, self.cbr, self.coded_fps);
+            let set_peak = || {
+                set_u32(&codec, &CODECAPI_AVEncCommonMaxBitRate, peak).ctx("ICodecAPI::SetValue(AVEncCommonMaxBitRate)")
+            };
+            if peak >= self.peak_bps {
+                set_peak()?;
+                set_mean()?;
+            } else {
+                set_mean()?;
+                set_peak()?;
+            }
+            self.peak_bps = peak;
+        } else if mean > self.peak_bps {
             // A mean above the configured peak is not a valid pair: the caller rebuilds the encoder (new limits).
             return Err(err(ErrorKind::Unsupported, "set_rate", "the new bitrate is above the configured peak"));
+        } else {
+            set_mean()?;
         }
-        set_u32(&codec, &CODECAPI_AVEncCommonMeanBitRate, scaled as u32 * 1000)
-            .ctx("ICodecAPI::SetValue(AVEncCommonMeanBitRate)")?;
         self.cfg.kbps = kbps;
         self.cfg.fps = fps;
         self.kbps_target = eff.kbps;
@@ -1153,6 +1183,12 @@ fn set_types(
             if let Some(l) = lvl {
                 t.SetUINT32(&MF_MT_MPEG2_LEVEL, l).ctx("MF_MT_MPEG2_LEVEL")?;
             }
+            // The colour the stream is in, for the VUI: BT.709 limited range, as NVENC signals it (an MFT that does
+            // not write a colour description leaves the decoder to guess, and VideoToolbox guesses BT.601 below HD).
+            let _ = t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+            let _ = t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+            let _ = t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
             transform.SetOutputType(0, &t, 0)
         };
         match result {

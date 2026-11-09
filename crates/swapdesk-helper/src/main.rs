@@ -47,8 +47,13 @@ mod win {
     }
 
     impl VideoEncoder for CaptureEncoder {
+        /// The encoder's name carries why NVENC did not serve an NVIDIA display, for the helper's log note.
         fn configure(&mut self, config: &EncoderConfig) -> swapdesk_platform::Result<EncoderInfo> {
-            self.0.configure(config)
+            let mut info = self.0.configure(config)?;
+            if let Some(reason) = self.0.fallback_reason() {
+                info.name = format!("{} (NVENC did not open: {reason})", info.name);
+            }
+            Ok(info)
         }
         fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> swapdesk_platform::Result<Vec<EncodedFrame>> {
             match unwrap_gpu(frame) {

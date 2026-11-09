@@ -346,6 +346,7 @@ pub(crate) async fn pump(
             HelperEvent::PtyOpenReply { .. } | HelperEvent::PtyOutput { .. } | HelperEvent::PtyExited { .. } => {
                 shared.log(Level::Warn, format_args!("{kind:?} helper sent a terminal message: ignored"));
             }
+            HelperEvent::Note { what } => shared.log(Level::Info, format_args!("{kind:?} helper: {what}")),
             HelperEvent::Fault { code, what } => {
                 shared.log(Level::Warn, format_args!("{kind:?} helper fault {code:?}: {what}"));
                 shared.emit(CoreEvent::HelperFault { kind, code, what });

@@ -196,6 +196,39 @@ fn a_bitrate_change_takes_effect() {
     }
 }
 
+/// The host's rate control raises the target 5 % a second from 20 Mbps (swapdesk-video `RateConfig`): a hardware
+/// encoder follows each step live, with no new SPS/PPS and no keyframe (the NVIDIA MFT used to rebuild at every step).
+#[test]
+fn the_rising_rate_of_a_session_is_followed_live_on_hardware() {
+    for c in candidates().iter().filter(|c| c.hardware) {
+        let who = &c.name;
+        let mut enc = encoder(c);
+        enc.configure(&config(c, Preset::Auto, 60, 20_000)).expect("configure");
+        let mut first = Vec::new();
+        for i in 0..32 {
+            first.extend(enc.encode(&frame(i % 64), false).expect("encode"));
+        }
+        let start = mean_bytes(&first[8..]);
+        let mut kbps = 20_000u32;
+        let mut later = Vec::new();
+        for step in 0..8 {
+            kbps = kbps * 105 / 100;
+            enc.set_rate(kbps, 60).expect("set_rate");
+            for i in 0..16 {
+                later.extend(enc.encode(&frame((step * 16 + i) % 64), false).expect("encode"));
+            }
+        }
+        assert!(
+            !later.iter().any(|e| e.config_change || e.keyframe),
+            "{who}: a rate step rebuilt the encoder ({} keyframes)",
+            later.iter().filter(|e| e.keyframe).count()
+        );
+        let end = mean_bytes(&later[later.len() - 12..]);
+        println!("{who}: 20000 -> {kbps} kbps in 8 steps, {start:.0} -> {end:.0} bytes per frame, no rebuild");
+        assert!(end > start * 1.15, "{who}: {start:.0} bytes per frame at 20 Mbps, {end:.0} at {kbps} kbps");
+    }
+}
+
 #[test]
 fn the_software_mft_works_when_hardware_is_excluded() {
     let c = software_candidate();

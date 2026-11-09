@@ -398,6 +398,7 @@ pub fn message() -> BoxedStrategy<Message> {
         pick(Desktop::ALL).prop_map(Message::DesktopChanged).boxed(),
         Just(Message::SasRequest).boxed(),
         (pick(ErrorCode::ALL), txt(256)).prop_map(|(code, w)| Message::HelperFault { code, what: Text(w) }).boxed(),
+        txt(256).prop_map(|w| Message::HelperNote { what: Text(w) }).boxed(),
         (any::<u32>(), op()).prop_map(|(req, op)| Message::UiRequest { req, op }).boxed(),
         (any::<u32>(), 0u16..=10, bytes(100))
             .prop_map(|(req, status, body)| Message::UiReply { req, status, body })

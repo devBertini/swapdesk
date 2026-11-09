@@ -43,6 +43,10 @@ pub enum HelperEvent {
         code: ErrorCode,
         what: String,
     },
+    /// `HelperNote`: logged at INFO.
+    Note {
+        what: String,
+    },
     /// The terminal proxy (C2.4 "Terminal"): the helper's answers and output for the shells it runs. The bytes are
     /// as private as typed text: nothing prints them.
     PtyOpenReply {
@@ -80,6 +84,7 @@ impl core::fmt::Debug for HelperEvent {
             Self::Fault { code, what } => {
                 f.debug_struct("Fault").field("code", code).field("what", &RedactedLen(what.len())).finish()
             }
+            Self::Note { what } => f.debug_struct("Note").field("what", &RedactedLen(what.len())).finish(),
             Self::PtyOpenReply { id, code, account } => f
                 .debug_struct("PtyOpenReply")
                 .field("id", id)
@@ -261,6 +266,7 @@ fn read_loop<R: Read>(
             Message::DesktopChanged(d) => HelperEvent::Desktop(d),
             Message::SasRequest => HelperEvent::SasRequest,
             Message::HelperFault { code, what } => HelperEvent::Fault { code, what: what.0 },
+            Message::HelperNote { what } => HelperEvent::Note { what: what.0 },
             // The answer to a blocking request of the service: its waiter takes it, no event.
             m @ (Message::ClipReply { .. } | Message::ActionReply { .. }) => {
                 rpc.resolve(m);

@@ -244,6 +244,25 @@ fn platform_fault(outbox: &Outbox, what: &str, e: &PlatformError) {
     fault(outbox, code_of(e.kind), format!("{what}: {e}"));
 }
 
+/// Something the service logs at INFO (`HelperNote`).
+fn note(outbox: &Outbox, what: String) {
+    outbox.send_control(Message::HelperNote { what: Text(truncate(what, MAX_FAULT_TEXT)) });
+}
+
+/// The encoder serving a display, as the service's log shows it.
+fn encoder_note(display: u16, cfg: &EncoderConfig, info: &swapdesk_platform::EncoderInfo, why: &str) -> String {
+    format!(
+        "video {display}: {why} {} ({}), {}x{} at {} fps, {} kbps, preset {:?}",
+        info.name,
+        if info.hardware { "hardware" } else { "software" },
+        cfg.width,
+        cfg.height,
+        cfg.fps,
+        cfg.kbps,
+        cfg.preset
+    )
+}
+
 /// A pixel position of a display of `size` pixels as the 0..=65535 of the wire (the inverse of C3's
 /// `round(v * (size - 1) / 65535)`).
 fn to_wire(px: i32, size: u32) -> u16 {
@@ -349,8 +368,17 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     while !ctl.stop.load(Ordering::Acquire) && !env.outbox.is_closed() {
         if let Some((k, f)) = lock(&ctl.rate).take() {
             (kbps, fps) = (k, f);
-            if let Some(enc) = encoder.as_mut() {
-                enc.set_rate(k, f)?;
+            if let (Some(enc), Some(cfg)) = (encoder.as_mut(), config.as_mut())
+                && let Err(e) = enc.set_rate(k, f)
+            {
+                // A rate the encoder cannot follow live (or a session it lost) does not end the video: the encoder is
+                // configured again at the new rate, and the stream restarts with a keyframe. Only a failed
+                // configure ends the loop, as at the start.
+                (cfg.kbps, cfg.fps) = (k, f);
+                let info = enc.configure(cfg)?;
+                note(&env.outbox, encoder_note(p.display, cfg, &info, &format!("set_rate failed ({e}), rebuilt:")));
+                discontinuity = true;
+                force = true;
             }
         }
         match source.next_frame(CAPTURE_POLL) {
@@ -380,7 +408,8 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                         Some(e) => e,
                         None => encoder.insert((env.encoder)(&frame, &cfg, p.backend)?),
                     };
-                    enc.configure(&cfg)?;
+                    let info = enc.configure(&cfg)?;
+                    note(&env.outbox, encoder_note(p.display, &cfg, &info, "encoding with"));
                     config = Some(cfg);
                     discontinuity = true;
                     force = true;
@@ -1116,3 +1145,7 @@ mod refine_tests;
 #[cfg(test)]
 #[path = "helper_stall_tests.rs"]
 mod stall_tests;
+
+#[cfg(test)]
+#[path = "helper_rate_tests.rs"]
+mod rate_tests;
