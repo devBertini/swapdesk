@@ -242,6 +242,35 @@ fn a_declined_or_refused_swap_leaves_the_session_alone_and_says_why() {
     d.finish();
 }
 
+// ---------- swap is for two machines of the same OS ----------
+
+#[test]
+fn a_swap_toward_another_os_is_refused_asking_and_asked() {
+    use swapdesk_proto::Os;
+    let mut d = Duo::new();
+    let s = d.open();
+
+    // Outgoing: the viewer's trust record says the host is a Mac (this test machine is Windows): refused at once.
+    d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
+    assert_eq!(d.viewer_ui.call(UiOp::RequestSwap { session_id: s }).unwrap_err(), ApiCode::NotPermitted);
+    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "nothing was sent to the other side");
+    d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
+
+    // Incoming: the host's record says the viewer is a Mac: the question never reaches the user and the asker is
+    // refused.
+    d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
+    request_swap(&mut d.viewer_ui, s);
+    assert!(matches!(swap_note(&mut d.viewer_ui, s), SwapNote::Declined { .. }));
+    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "no card at the asked user");
+
+    // Same OS again: the swap card comes as before.
+    d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
+    request_swap(&mut d.viewer_ui, s);
+    let (card, _, _) = asked(&mut d.host_ui, s);
+    assert!(d.host_ui.call(UiOp::AnswerSwap { request_id: card, accept: false }).is_ok());
+    d.finish();
+}
+
 // ---------- F-CHAT-01 ----------
 
 #[test]

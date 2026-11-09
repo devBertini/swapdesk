@@ -18,7 +18,7 @@ use crate::surface::Gfx;
 use crate::system::{Waker, register_gdi_font, system_dark};
 use crate::terminal::{PUMP_BUDGET, TerminalPane, set_terminal_waker};
 use crate::viewer::ViewerHost;
-use crate::window::{TIMER_PLACEHOLDER, TIMER_TICK, Window};
+use crate::window::{TIMER_BANNER, TIMER_PLACEHOLDER, TIMER_TICK, Window};
 
 pub struct Shared {
     pub gfx: Gfx,
@@ -30,6 +30,8 @@ pub struct Shared {
     windows: RefCell<Vec<Rc<Window>>>,
     tick_on: Cell<bool>,
     placeholder_on: Cell<bool>,
+    /// The banner's minute timer is armed (one-shot in effect: re-armed after each firing).
+    banner_on: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
     pub terminal: RefCell<TerminalPane>,
 }
@@ -100,6 +102,7 @@ pub fn run_with_host(
         windows: RefCell::new(Vec::new()),
         tick_on: Cell::new(false),
         placeholder_on: Cell::new(false),
+        banner_on: Cell::new(false),
         terminal: RefCell::new(TerminalPane::default()),
     });
     // Terminal output arrives on the pipe's reader thread and wakes this thread to pump and repaint.
@@ -294,6 +297,19 @@ impl Shared {
         self.refresh(c);
     }
 
+    /// The banner's minute came: the clock moves, the banner repaints, and `refresh` arms the next minute.
+    pub fn banner_tick(self: &Rc<Self>) {
+        if let Some(h) = self.main_hwnd() {
+            // SAFETY: our window; the timer is re-armed by `sync_timers` through `refresh`.
+            unsafe {
+                let _ = KillTimer(Some(h), TIMER_BANNER);
+            }
+        }
+        self.banner_on.set(false);
+        self.state.borrow_mut().set_clock(crate::system::local_clock());
+        self.refresh(Changed::BANNER);
+    }
+
     pub fn arm_placeholders(self: &Rc<Self>) {
         if let Some(h) = self.main_hwnd() {
             // SAFETY: our window; the placeholder timer is one-shot.
@@ -394,9 +410,11 @@ impl Shared {
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
         let Some(h) = self.main_hwnd() else { return };
-        let (tick, placeholder) = {
+        let (tick, placeholder, banner) = {
             let st = self.state.borrow();
-            (st.needs_tick(), st.has_pending_fetch())
+            let now = crate::system::local_clock().now_ms;
+            // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
+            (st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
         // SAFETY: our window.
         unsafe {
@@ -406,6 +424,15 @@ impl Shared {
             } else if !tick && self.tick_on.get() {
                 let _ = KillTimer(Some(h), TIMER_TICK);
                 self.tick_on.set(false);
+            }
+            if let Some(ms) = banner {
+                if !self.banner_on.get() {
+                    SetTimer(Some(h), TIMER_BANNER, u32::try_from(ms).unwrap_or(60_000), None);
+                    self.banner_on.set(true);
+                }
+            } else if self.banner_on.get() {
+                let _ = KillTimer(Some(h), TIMER_BANNER);
+                self.banner_on.set(false);
             }
             if placeholder && !self.placeholder_on.get() {
                 SetTimer(Some(h), TIMER_PLACEHOLDER, 100, None);

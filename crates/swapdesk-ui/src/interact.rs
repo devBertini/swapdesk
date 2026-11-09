@@ -10,6 +10,9 @@ use crate::state::*;
 use crate::strings::MsgKey;
 use crate::tokens::layout::PAIR_COUNTDOWN_S;
 
+/// Longest local name of a paired device, in bytes: what the trust record stores.
+const MAX_DEVICE_NAME: usize = 64;
+
 mod files_panel;
 pub use files_panel::FILES_PAGE;
 pub(crate) use files_panel::FilesPanel;
@@ -23,6 +26,10 @@ pub enum ControlId {
     NavActivity,
     NavSettings,
     // device header, tabs, overview
+    /// "Renomear": turns the header's name into the inline field.
+    RenameDevice,
+    RenameSave,
+    RenameCancel,
     ViewOnly,
     Control,
     /// "Acordar": wake an asleep paired device (F-WAKE-01).
@@ -296,7 +303,23 @@ impl UiState {
             }
             return;
         };
-        s.text(UiRole::Heading, d.name.clone());
+        match self.renaming().filter(|_| self.rename_available(d)) {
+            Some(r) => {
+                let c = s.add(ControlId::Edit(EditId::Rename), UiRole::TextInput, self.name_of(MsgKey::RenameLabel));
+                c.value = Some(d.name.clone());
+                s.button(ControlId::RenameSave, self.name_of(MsgKey::RenameSave));
+                s.button(ControlId::RenameCancel, self.name_of(MsgKey::Cancel));
+                if let Some(e) = &r.error {
+                    s.text(UiRole::Text, self.rename_error_text(e));
+                }
+            }
+            None => {
+                s.text(UiRole::Heading, d.name.clone());
+                if self.rename_available(d) {
+                    s.button(ControlId::RenameDevice, self.name_of(MsgKey::RenameAction));
+                }
+            }
+        }
         s.text(UiRole::Text, format::detail_line(lang, d));
         if let Some(w) = self.waking_session().filter(|w| w.device_id == d.id) {
             let _ = w;
@@ -899,12 +922,15 @@ impl UiState {
             let c = s.add(id, UiRole::Button, label);
             c.toggled = Some(open);
         }
-        s.button(ControlId::TbSwap, self.name_of(MsgKey::TbSwap));
-        // A request is waiting for the other side: one at a time, so the button waits too.
-        if self.swap_requested()
-            && let Some(c) = s.v.last_mut()
-        {
-            c.disabled = true;
+        // Swap between Windows and macOS is not in 1.0: the button exists only toward a machine of this OS.
+        if self.viewer_session().is_none_or(|v| self.swap_offered(v)) {
+            s.button(ControlId::TbSwap, self.name_of(MsgKey::TbSwap));
+            // A request is waiting for the other side: one at a time, so the button waits too.
+            if self.swap_requested()
+                && let Some(c) = s.v.last_mut()
+            {
+                c.disabled = true;
+            }
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
         if !self.session_bar_visible() {
@@ -981,14 +1007,26 @@ impl UiState {
             self.name_of(MsgKey::BannerOpenChat)
         };
         s.button(ControlId::BannerChat, chat_label);
-        s.button(ControlId::BannerSwap, self.name_of(MsgKey::TbSwap));
-        if self.swap_requested()
-            && let Some(c) = s.v.last_mut()
-        {
-            c.disabled = true;
+        if self.swap_offered(h) {
+            s.button(ControlId::BannerSwap, self.name_of(MsgKey::TbSwap));
+            if self.swap_requested()
+                && let Some(c) = s.v.last_mut()
+            {
+                c.disabled = true;
+            }
         }
         s.button(ControlId::BannerDisconnect, self.name_of(MsgKey::Disconnect));
         s.v
+    }
+
+    /// Whether "Inverter" is offered in session `s`: swap between Windows and macOS is not in 1.0, so only when the
+    /// peer runs this machine's OS. When either OS is not known yet the control stays (the service refuses a swap
+    /// toward another OS on its own).
+    pub fn swap_offered(&self, s: &SessionView) -> bool {
+        match (self.this.as_ref(), self.device_by_id(&s.device_id)) {
+            (Some(this), Some(peer)) => this.os == peer.os,
+            _ => true,
+        }
     }
 
     /// "MacBook do escritório controla este computador há 12 min".
@@ -1096,6 +1134,17 @@ impl UiState {
                     }
                     a.commands.push(Command::SetGrants { device_id: d.id, grants });
                 }
+            }
+            ControlId::RenameDevice => {
+                if let Some(d) = self.selected_device().filter(|d| d.paired) {
+                    self.rename = Some(RenameDraft { device_id: d.id.clone(), error: None });
+                    a.changed = Changed::MAIN;
+                }
+            }
+            ControlId::RenameSave => a.effect = Some(Effect::SubmitEdit(EditId::Rename)),
+            ControlId::RenameCancel => {
+                self.rename = None;
+                a.changed = Changed::MAIN;
             }
             ControlId::Forget => {
                 if let Some(d) = self.selected_device() {
@@ -1285,6 +1334,9 @@ impl UiState {
             ControlId::TbTerminal => self.toggle_drawer(DrawerTab::Terminal, &mut a),
             ControlId::TbFiles => self.toggle_drawer(DrawerTab::Files, &mut a),
             ControlId::TbChat => self.toggle_drawer(DrawerTab::Chat, &mut a),
+            // Not offered toward another OS (never drawn): an activation that still arrives does nothing.
+            ControlId::TbSwap if self.viewer_session().is_some_and(|v| !self.swap_offered(v)) => {}
+            ControlId::BannerSwap if self.host_session().is_some_and(|h| !self.swap_offered(h)) => {}
             ControlId::TbSwap | ControlId::BannerSwap if self.swap_requested() => a.changed = Changed::NONE,
             ControlId::TbSwap | ControlId::BannerSwap => {
                 if id == ControlId::TbSwap {
@@ -1551,6 +1603,19 @@ impl UiState {
         a
     }
 
+    /// "Renomear" is offered on the page of a paired device, except while it is being woken (that card replaces the page).
+    pub fn rename_available(&self, d: &DeviceView) -> bool {
+        d.paired && self.waking_session().is_none_or(|w| w.device_id != d.id)
+    }
+
+    /// The line under the rename field: what was wrong with the name, or the service's refusal.
+    pub fn rename_error_text(&self, error: &ApiError) -> String {
+        match &error.detail {
+            Some(m) => self.tm(m),
+            None => self.error_text(error),
+        }
+    }
+
     /// The text of a native input was committed (Enter, the send button, focus lost).
     pub fn submit_edit(&mut self, id: EditId, text: String) -> Activation {
         let mut a = Activation::default();
@@ -1559,6 +1624,30 @@ impl UiState {
                 let text = text.trim().to_owned();
                 if !text.is_empty() && self.settings.as_ref().is_some_and(|s| s.name != text) {
                     self.toggle_setting(&mut a, |s| s.name = text);
+                }
+            }
+            EditId::Rename => {
+                let Some(device_id) = self.renaming().map(|r| r.device_id.clone()) else { return a };
+                let name = text.trim().to_owned();
+                let refused = if name.is_empty() {
+                    Some(MsgKey::RenameEmpty)
+                } else if name.len() > MAX_DEVICE_NAME {
+                    Some(MsgKey::RenameTooLong)
+                } else if name.chars().any(char::is_control) {
+                    Some(MsgKey::RenameControlChars)
+                } else {
+                    None
+                };
+                a.changed = Changed::MAIN;
+                if let Some(key) = refused {
+                    let error = ApiError { code: ApiCode::Invalid, detail: Some(Msg::new(key)) };
+                    self.rename = Some(RenameDraft { device_id, error: Some(error) });
+                } else if self.device_by_id(&device_id).is_some_and(|d| d.name == name) {
+                    // Nothing to change: the field just closes.
+                    self.rename = None;
+                } else {
+                    self.rename = Some(RenameDraft { device_id: device_id.clone(), error: None });
+                    a.commands.push(Command::RenameDevice { device_id, name });
                 }
             }
             EditId::Address => {

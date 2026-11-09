@@ -357,6 +357,16 @@ pub fn block(ctx: &mut Ctx, b: &Block, width: f64, values: &[(EditId, String)]) 
             describe(&*l, text, None, Some("AXHeading"));
             view_of(&l)
         }
+        Block::HeadingAction { text, action } => {
+            let l = label_view(ctx, text, tx::H1, ctx.pal.ink, Some(width));
+            describe(&*l, text, None, Some("AXHeading"));
+            let b = button(ctx, action);
+            view_of(&hstack(ctx, &[view_of(&l), view_of(&b)], 12.0))
+        }
+        Block::ButtonRow(buttons) => {
+            let views: Vec<Retained<NSView>> = buttons.iter().map(|b| view_of(&button(ctx, b))).collect();
+            view_of(&hstack(ctx, &views, 8.0))
+        }
         Block::Text(text) => view_of(&label_view(ctx, text, tx::BODY, ctx.pal.soft, Some(width))),
         Block::Row(text) => view_of(&label_view(ctx, text, tx::SMALL, ctx.pal.ink, Some(width))),
         Block::Code { digits, label } => {

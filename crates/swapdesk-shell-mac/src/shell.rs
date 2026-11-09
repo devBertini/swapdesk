@@ -16,8 +16,9 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSBox, NSBoxType, NSControl, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSScrollView,
-    NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel,
+    NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
@@ -140,6 +141,13 @@ define_class!(
         #[unsafe(method(textChanged:))]
         fn text_changed(&self, n: &NSNotification) {
             with_shell(|s| s.text_changed(n));
+        }
+
+        // Esc while the rename field is open: AppKit sends `cancelOperation:` up the responder chain (the window
+        // forwards it to its delegate, this controller).
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, _sender: Option<&AnyObject>) {
+            with_shell(|s| s.cancel_rename());
         }
 
         #[unsafe(method(themeChanged:))]
@@ -441,7 +449,17 @@ impl Shell {
             // The Mac shell has no crash marker yet (D12 is Windows first): OpenLogs is never produced there.
             // The file panel's pickers (stage 44) are a Windows shell feature for now: the Mac panel is a later stage.
             Some(Effect::PickFiles) | Some(Effect::PickReceiveFolder) => {}
-            Some(Effect::SubmitEdit(_)) | Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
+            // "Salvar" of the rename field: the field's text goes through `submit_edit` like Enter does.
+            Some(Effect::SubmitEdit(e)) => {
+                let text =
+                    self.main.fields.borrow().iter().find(|(id, _)| *id == e).map(|(_, f)| f.stringValue().to_string());
+                if let Some(text) = text {
+                    let again = self.state.borrow_mut().submit_edit(e, text);
+                    self.send_commands(again.commands);
+                    self.refresh(again.changed);
+                }
+            }
+            Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
         }
         self.send_commands(act.commands);
         self.refresh(act.changed);
@@ -485,6 +503,8 @@ impl Shell {
             sender.downcast_ref::<objc2_app_kit::NSPopUpButton>().map(|p| p.indexOfSelectedItem().max(0) as usize);
         match action {
             Action::Control(id) => self.activate(id),
+            // The rename field acts on Return only: ending the editing by a click (on "Cancelar") must not save.
+            Action::Edit(EditId::Rename) if !self.return_pressed() => {}
             Action::Edit(e) => {
                 let text =
                     sender.downcast_ref::<NSTextField>().map(|f| f.stringValue().to_string()).unwrap_or_default();
@@ -530,6 +550,20 @@ impl Shell {
                 let changed = self.state.borrow_mut().dismiss_connect();
                 self.refresh(changed);
             }
+        }
+    }
+
+    /// The event being handled is the Return or Enter key.
+    fn return_pressed(&self) -> bool {
+        NSApplication::sharedApplication(self.mtm)
+            .currentEvent()
+            .is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 36 | 76))
+    }
+
+    /// Esc: closes the rename field without saving.
+    fn cancel_rename(&self) {
+        if self.state.borrow().renaming().is_some() {
+            self.activate(ControlId::RenameCancel);
         }
     }
 
@@ -826,7 +860,16 @@ impl Shell {
         *self.main.actions.borrow_mut() = actions;
         *self.main.fields.borrow_mut() = fields;
 
-        if let Some(e) = focused
+        // The rename field opens with the keyboard in it and its text selected.
+        let rename_opened = model.has_field(EditId::Rename)
+            && !self.main.last.borrow().as_ref().is_some_and(|m| m.has_field(EditId::Rename));
+        if rename_opened && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == EditId::Rename) {
+            win.makeFirstResponder(Some(f));
+            if let Some(ed) = f.currentEditor() {
+                let len = f.stringValue().length();
+                ed.setSelectedRange(NSRange::new(0, len));
+            }
+        } else if let Some(e) = focused
             && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e)
         {
             win.makeFirstResponder(Some(f));

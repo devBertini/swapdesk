@@ -859,7 +859,7 @@ fn a_lost_session_shows_the_attempt_and_says_so_when_the_minute_ends() {
             granted: Permissions::NONE.with(Permission::Control),
         },
     });
-    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbSwap));
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbDisconnect));
     assert!(s.error().is_none());
     // Not back within the minute: the session ends and the strip says it could not reconnect.
     s.apply(UiEvent::Session {
@@ -1216,4 +1216,156 @@ fn an_open_waits_up_to_25_seconds_for_the_hosts_user() {
     // D13: the host's user has 20 s to answer, and the shell then starts.
     assert_eq!(Command::TermOpen { session_id: 1, admin: false, cols: 80, rows: 24 }.timeout_s(), 25);
     assert_eq!(Command::TermWrite { term_id: 1, bytes: vec![] }.timeout_s(), 5);
+}
+
+// ---------- rename a paired device ----------
+
+fn rename_ticket(s: &mut UiState, command: &Command) -> Ticket {
+    let t = Ticket(4100);
+    s.track(t, command);
+    t
+}
+
+#[test]
+fn rename_turns_the_name_into_a_field_and_saves_through_one_command() {
+    let mut s = base();
+    let ids = |s: &UiState| s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect::<Vec<_>>();
+    assert!(ids(&s).contains(&ControlId::RenameDevice) && !ids(&s).contains(&ControlId::Edit(EditId::Rename)));
+
+    let a = s.activate(ControlId::RenameDevice);
+    assert!(a.commands.is_empty() && s.renaming().is_some());
+    let spec = s.controls(WindowKind::Main).into_iter().find(|c| c.id == ControlId::Edit(EditId::Rename)).unwrap();
+    assert_eq!(spec.value.as_deref(), Some("MacBook do escritório"), "prefilled with the current name");
+    let ids = ids(&s);
+    assert!(ids.contains(&ControlId::RenameSave) && ids.contains(&ControlId::RenameCancel));
+    assert!(!ids.contains(&ControlId::RenameDevice));
+
+    // "Salvar" asks the shell to read the field; the text is trimmed and sent once.
+    assert_eq!(s.activate(ControlId::RenameSave).effect, Some(Effect::SubmitEdit(EditId::Rename)));
+    let a = s.submit_edit(EditId::Rename, "  Mac da sala  ".into());
+    let command = Command::RenameDevice { device_id: MAC.into(), name: "Mac da sala".into() };
+    assert_eq!(a.commands, vec![command.clone()]);
+    let t = rename_ticket(&mut s, &command);
+    s.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::Done) });
+    assert_eq!(s.device_by_id(MAC).unwrap().name, "Mac da sala");
+    assert!(s.renaming().is_none(), "the field closes when the service says done");
+    assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::RenameDevice));
+}
+
+#[test]
+fn rename_refuses_bad_names_inline_and_cancel_or_leaving_closes_it() {
+    let mut s = base();
+    s.activate(ControlId::RenameDevice);
+    let long = "n".repeat(65);
+    for (text, key) in [
+        ("   ", MsgKey::RenameEmpty),
+        ("", MsgKey::RenameEmpty),
+        (long.as_str(), MsgKey::RenameTooLong),
+        ("a\u{7}b", MsgKey::RenameControlChars),
+    ] {
+        let a = s.submit_edit(EditId::Rename, text.into());
+        assert!(a.commands.is_empty(), "{text:?}");
+        let shown = s.renaming().unwrap().error.clone().expect("an inline error");
+        assert_eq!(s.rename_error_text(&shown), s.t(key), "{text:?}");
+        let texts: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+        assert!(texts.contains(&s.t(key)), "the error is on the page");
+    }
+    // The same name closes the field without a command.
+    assert!(s.submit_edit(EditId::Rename, "MacBook do escritório".into()).commands.is_empty());
+    assert!(s.renaming().is_none());
+
+    // The service refuses: the field stays and says so inline, with no error strip.
+    s.activate(ControlId::RenameDevice);
+    let a = s.submit_edit(EditId::Rename, "Outro".into());
+    let t = rename_ticket(&mut s, &a.commands[0]);
+    s.apply(UiEvent::Reply { ticket: t, result: Err(ApiError::new(ApiCode::Internal)) });
+    assert!(s.error().is_none() && s.renaming().is_some_and(|r| r.error.is_some()));
+    assert_eq!(s.device_by_id(MAC).unwrap().name, "MacBook do escritório");
+
+    // Cancel, and leaving the device, close it.
+    s.activate(ControlId::RenameCancel);
+    assert!(s.renaming().is_none());
+    s.activate(ControlId::RenameDevice);
+    s.select_device(AIR);
+    s.select_device(MAC);
+    assert!(s.renaming().is_none());
+    // A device that is not paired has no rename action.
+    let unpaired = s.devices().iter().find(|d| !d.paired).map(|d| d.id.clone());
+    if let Some(unpaired) = unpaired {
+        s.select_device(&unpaired);
+        assert!(!s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::RenameDevice));
+    }
+}
+
+// ---------- swap only toward the same OS ----------
+
+#[test]
+fn swap_is_offered_only_toward_a_machine_of_this_os() {
+    // This mock machine is Windows. The banner scenario hosts for the Windows Desktop: offered.
+    let mut s = Scenario::Banner.prepared_state();
+    let has = |s: &UiState, w, id| s.controls(w).iter().any(|c| c.id == id);
+    assert!(has(&s, WindowKind::Banner, ControlId::BannerSwap));
+    // The same session with a Mac: no button, and an activation that still arrives does nothing.
+    s.apply(UiEvent::Session {
+        session_id: 2,
+        device_id: MAC.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Host,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    assert!(!has(&s, WindowKind::Banner, ControlId::BannerSwap));
+    assert!(
+        has(&s, WindowKind::Banner, ControlId::BannerDisconnect) && has(&s, WindowKind::Banner, ControlId::BannerChat)
+    );
+    let a = s.activate(ControlId::BannerSwap);
+    assert!(a.commands.is_empty() && s.swap().is_none());
+
+    // The viewer toolbar: Mac peer none, Windows peer present.
+    let v = viewer();
+    assert!(!has(&v, WindowKind::Viewer, ControlId::TbSwap) && has(&v, WindowKind::Viewer, ControlId::TbDisconnect));
+    let mut v = viewer();
+    v.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    assert!(has(&v, WindowKind::Viewer, ControlId::TbSwap));
+}
+
+// ---------- the banner's minute ----------
+
+#[test]
+fn the_banner_timer_is_due_at_the_next_minute_boundary_and_only_while_hosting() {
+    let mut s = Scenario::Banner.prepared_state();
+    let since = 5 * 60_000 + 1_000;
+    s.apply(UiEvent::Session {
+        session_id: 2,
+        device_id: DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: since,
+            role: Role::Host,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    assert_eq!(s.banner_minute_delay_ms(since), Some(60_000), "on the boundary the next one is a minute away");
+    assert_eq!(s.banner_minute_delay_ms(since + 59_990), Some(10));
+    assert_eq!(s.banner_minute_delay_ms(since + 61_000), Some(59_000));
+    // The text moves with the clock: "1 min" until two minutes, then "2 min".
+    let h = s.host_session().cloned().unwrap();
+    let at = |s: &mut UiState, ms: u64| {
+        s.set_clock(crate::format::Clock { now_ms: ms, utc_offset_min: 0 });
+        s.banner_parts("PC", &h).1
+    };
+    assert!(at(&mut s, since + 30_000).ends_with("1 min"));
+    assert!(at(&mut s, since + 125_000).ends_with("2 min"));
+    // No hosted session, no timer.
+    s.apply(UiEvent::Session { session_id: 2, device_id: DESKTOP.into(), state: SessionState::Ended { reason: None } });
+    assert_eq!(s.banner_minute_delay_ms(since), None);
+    assert_eq!(viewer().banner_minute_delay_ms(0), None, "a viewer session has no banner");
 }

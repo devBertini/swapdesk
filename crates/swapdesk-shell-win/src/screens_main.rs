@@ -284,10 +284,51 @@ fn devices_main(f: &mut Frame) {
     let waking = f.st.waking_session().filter(|s| s.device_id == d.id).cloned();
 
     // Header: title block grows, the buttons sit at the end (gap 16, top-aligned).
-    let title = p.label_ellipsis(&d.name, text::H1, a.cw - 260.0);
-    let status = p.label_ellipsis(&format::detail_line(f.st.language(), &d), text::BODY, a.cw - 260.0);
-    p.draw(&title, a.x, y, pal.ink);
-    p.draw(&status, a.x, y + title.h + 6.0, pal.soft);
+    let head_w = a.cw - 260.0;
+    let renaming = f.st.renaming().filter(|_| f.st.rename_available(&d)).cloned();
+    let detail = format::detail_line(f.st.language(), &d);
+    // Not renaming: the name, then "Renomear" beside it. Renaming: the field with "Salvar" and "Cancelar".
+    let (title_h, status) = if let Some(r) = &renaming {
+        let (save, cancel) = (f.t(MsgKey::RenameSave), f.t(MsgKey::Cancel));
+        let (sw, cw) = (f.button_width(&save, Kind::Primary), f.button_width(&cancel, Kind::Default));
+        let field_w = (head_w - sw - cw - 2.0 * 8.0 - 12.0).clamp(120.0, 360.0);
+        f.edit_field(
+            EditId::Rename,
+            Rect::new(a.x, y + (40.0 - layout::FIELD_H) / 2.0, field_w, layout::FIELD_H),
+            &d.name,
+            "",
+        );
+        let sx = a.x + field_w + 12.0;
+        f.button(ControlId::RenameSave, Rect::new(sx, y, sw, 40.0), Kind::Primary, &save, false);
+        f.button(ControlId::RenameCancel, Rect::new(sx + sw + 8.0, y, cw, 40.0), Kind::Default, &cancel, false);
+        // The refusal sits where the detail line is, in the danger colour.
+        let (text, color) = match &r.error {
+            Some(e) => (f.st.rename_error_text(e), pal.danger),
+            None => (detail.clone(), pal.soft),
+        };
+        let status = p.label_ellipsis(&text, text::BODY, head_w);
+        p.draw(&status, a.x, y + 40.0 + 6.0, color);
+        (40.0, status)
+    } else {
+        let rename = f.t(MsgKey::RenameAction);
+        let can_rename = f.st.rename_available(&d);
+        let rw = if can_rename { f.button_width(&rename, Kind::Quiet) + 12.0 } else { 0.0 };
+        let title = p.label_ellipsis(&d.name, text::H1, (head_w - rw).max(80.0));
+        let status = p.label_ellipsis(&detail, text::BODY, head_w);
+        p.draw(&title, a.x, y, pal.ink);
+        p.draw(&status, a.x, y + title.h + 6.0, pal.soft);
+        if can_rename {
+            let bw = rw - 12.0;
+            f.button(
+                ControlId::RenameDevice,
+                Rect::new(a.x + title.w + 12.0, y + (title.h - 40.0) / 2.0, bw, 40.0),
+                Kind::Quiet,
+                &rename,
+                false,
+            );
+        }
+        (title.h, status)
+    };
     if waking.is_none() {
         if d.paired && swapdesk_ui::UiState::can_wake(&d) {
             // Asleep: "Acordar" replaces the connect buttons (F-WAKE-01).
@@ -309,7 +350,7 @@ fn devices_main(f: &mut Frame) {
             f.button(ControlId::PairWithDevice, Rect::new(a.x + a.cw - bw, y, bw, 40.0), Kind::Primary, &label, false);
         }
     }
-    y += (title.h + 6.0 + status.h).max(40.0) + 28.0;
+    y += (title_h + 6.0 + status.h).max(40.0) + 28.0;
 
     if let Some(w) = waking {
         waking_card(f, &a, y, &d, &w.state);

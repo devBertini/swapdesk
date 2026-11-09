@@ -117,6 +117,8 @@ pub enum SelectId {
 pub enum EditId {
     Name,
     Chat,
+    /// The inline field that renames a paired device (acts on Enter or "Salvar", never on a timer).
+    Rename,
     /// The manual address field (F-FIND-03); acts 150 ms after the last key (R-UI-4).
     Address,
 }
@@ -264,6 +266,13 @@ pub enum SwapPhase {
     Declined(SwapWhy),
 }
 
+/// A paired device's name being edited on its page: which device, and why the last save did not go through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameDraft {
+    pub device_id: String,
+    pub error: Option<ApiError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapView {
     pub session_id: u64,
@@ -361,6 +370,7 @@ pub struct UiState {
     pub(crate) elevation: Option<Elevation>,
     pub(crate) sessions: Vec<SessionView>,
     pub(crate) swap: Option<SwapView>,
+    pub(crate) rename: Option<RenameDraft>,
     pub(crate) activity: Vec<AuditView>,
     pub(crate) alert: Option<AuditView>,
     pub(crate) settings: Option<Settings>,
@@ -464,6 +474,7 @@ impl UiState {
             pair_confirming: false,
             crash_notice: false,
             empty_s: 0,
+            rename: None,
         }
     }
 
@@ -657,6 +668,12 @@ impl UiState {
     }
 
     /// The selected device (the first paired one when nothing is selected).
+    /// The rename in progress for the device on screen (the field replaces its name in the header).
+    pub fn renaming(&self) -> Option<&RenameDraft> {
+        let d = self.selected_device()?;
+        self.rename.as_ref().filter(|r| r.device_id == d.id)
+    }
+
     pub fn selected_device(&self) -> Option<&DeviceView> {
         self.selected
             .as_ref()
@@ -837,6 +854,16 @@ impl UiState {
             && matches!(self.incoming.as_ref().map(|i| &i.request.kind), Some(RequestKind::Session { .. }))
     }
 
+    /// Milliseconds from `now_ms` to the next whole minute of the host banner's duration ("há 12 min"), or `None`
+    /// while no session is being hosted. The shell arms one timer for it, re-arms it after each firing and stops it
+    /// when the banner closes: the banner's text changes only on these minutes, so it needs no steadier tick.
+    pub fn banner_minute_delay_ms(&self, now_ms: u64) -> Option<u64> {
+        let SessionState::Active { since_ms, .. } = self.host_session()?.state else { return None };
+        const MINUTE_MS: u64 = 60_000;
+        let elapsed = now_ms.saturating_sub(since_ms);
+        Some(MINUTE_MS - elapsed % MINUTE_MS)
+    }
+
     /// True while something counts seconds down (the shell then runs a one-second timer, otherwise none).
     pub fn needs_tick(&self) -> bool {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
@@ -878,6 +905,7 @@ impl UiState {
 
     pub fn navigate(&mut self, nav: Nav) -> Changed {
         self.nav = nav;
+        self.rename = None;
         self.crash_notice = false;
         Changed::MAIN
     }
@@ -885,6 +913,7 @@ impl UiState {
     pub fn select_device(&mut self, id: &str) -> Changed {
         if self.devices.iter().any(|d| d.id == id) {
             self.selected = Some(id.to_owned());
+            self.rename = None;
             self.crash_notice = false;
             self.nav = Nav::Devices;
             self.tab = DeviceTab::Overview;
@@ -894,6 +923,7 @@ impl UiState {
 
     pub fn select_tab(&mut self, tab: DeviceTab) -> Changed {
         self.tab = tab;
+        self.rename = None;
         Changed::MAIN
     }
 
@@ -1324,6 +1354,16 @@ impl UiState {
                     self.sessions.retain(|s| s.id != session_id);
                     Changed::ALL
                 }
+                // The service stored the trimmed name; the pushed device list says so too, this just does not wait.
+                Some(Command::RenameDevice { device_id, name }) => {
+                    if let Some(d) = self.devices.iter_mut().find(|d| d.id == device_id) {
+                        d.name = name;
+                    }
+                    if self.rename.as_ref().is_some_and(|r| r.device_id == device_id) {
+                        self.rename = None;
+                    }
+                    Changed::ALL
+                }
                 _ => Changed::NONE,
             },
             Reply::ThisDevice(t) => {
@@ -1498,6 +1538,13 @@ impl UiState {
                 self.elevation = Some(Elevation { action, phase: ElevPhase::Ask });
                 return Changed::ALL;
             }
+        }
+        // A refused rename is told inline, under the field that is still open.
+        if let Command::RenameDevice { device_id, .. } = &pending.command
+            && let Some(r) = self.rename.as_mut().filter(|r| &r.device_id == device_id)
+        {
+            r.error = Some(error);
+            return Changed::MAIN;
         }
         if let Command::PairOpen { .. } | Command::PairStart { .. } = pending.command {
             self.pairing =

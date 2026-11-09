@@ -176,8 +176,12 @@ impl Hub {
                 | UiOp::PairCancel { .. }
                 | UiOp::SetGrants { .. }
                 | UiOp::ForgetDevice { .. }
+                | UiOp::RenameDevice { .. }
         ) {
-            self.require_console(conn, "a pairing, grants or forget request from a UI that is not the console's")?;
+            self.require_console(
+                conn,
+                "a pairing, grants, rename or forget request from a UI that is not the console's",
+            )?;
         }
         match op {
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
@@ -190,6 +194,7 @@ impl Hub {
             UiOp::PairCancel { pairing_id } => done(self.pair_cancel(conn, pairing_id)),
             UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
             UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
+            UiOp::RenameDevice { device_id, name } => done(self.rename_device(&device_id, &name)),
             UiOp::Connect { .. } => Err(ApiCode::Internal),
             UiOp::Disconnect { session_id } => done(self.disconnect(conn, session_id)),
             UiOp::AnswerIncoming { request_id, decision, grants } => {
@@ -364,6 +369,36 @@ impl Hub {
             }
         }
         lock(&self.learned).remove(&id);
+        self.devices_changed();
+        Ok(())
+    }
+
+    /// The local alias of a paired device: only `PairedDevice.name` of the trust record changes (the peer is not told
+    /// and nothing else of the record moves). The name is trimmed; it must not be empty, longer than the 64 bytes the
+    /// record stores (which also bounds it at 64 characters), or hold a control character.
+    fn rename_device(&self, device_id: &str, name: &str) -> Result<(), ApiCode> {
+        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        let name = name.trim();
+        if name.is_empty() || name.len() > swapdesk_ipc::MAX_NAME || name.chars().any(char::is_control) {
+            return Err(ApiCode::Invalid);
+        }
+        let renamed = self
+            .p
+            .trust
+            .update(|s| match s.devices.iter_mut().find(|d| d.device_id == id) {
+                Some(d) => {
+                    d.name = name.to_owned();
+                    true
+                }
+                None => false,
+            })
+            .map_err(|e| {
+                self.log(Level::Warn, format_args!("the trust store was not written: {e}"));
+                ApiCode::Internal
+            })?;
+        if !renamed {
+            return Err(ApiCode::NotFound);
+        }
         self.devices_changed();
         Ok(())
     }

@@ -323,3 +323,118 @@ fn settings_list_the_shortcuts_inside_the_window() {
     assert!(find(swapdesk_ui::SelectId::FullscreenMonitor).is_some(), "the monitor select is drawn");
     assert!(release.bottom() < h, "inside the window at the design size: {release:?}");
 }
+
+// ----- rename a paired device, swap only toward the same OS -----
+
+#[test]
+fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
+    use swapdesk_ui::tokens::layout;
+    use swapdesk_ui::{EditId, UiState};
+    let overlap = |a: &crate::gfx::Rect, b: &crate::gfx::Rect| {
+        a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+    };
+    let at = |state: &UiState, size: (f32, f32)| {
+        render(state, WindowKind::Main, size, 1.0, &Interaction::default()).unwrap()
+    };
+    for size in [(layout::DESIGN_W, layout::DESIGN_H), (layout::MIN_W, layout::MIN_H)] {
+        // Not renaming: "Renomear" sits beside the name and clear of the connect buttons.
+        let mut state = Scenario::Dispositivos.prepared_state();
+        let r = at(&state, size);
+        let widget = |r: &crate::offscreen::Rendered, id: ControlId| {
+            r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect).unwrap_or_else(|| panic!("{id:?} not drawn"))
+        };
+        let (rename, control, view) =
+            (widget(&r, ControlId::RenameDevice), widget(&r, ControlId::Control), widget(&r, ControlId::ViewOnly));
+        assert!(!overlap(&rename, &control) && !overlap(&rename, &view), "{size:?}: rename clear of the buttons");
+        assert!(rename.right() <= control.x, "{size:?}: inside the title block");
+
+        // Renaming: the field is prefilled, "Salvar" and "Cancelar" follow it, nothing overlaps the connect buttons.
+        state.activate(ControlId::RenameDevice);
+        let r = at(&state, size);
+        let slot = r.output.edits.iter().find(|e| e.id == EditId::Rename).expect("the rename field");
+        assert_eq!(slot.value, "MacBook do escritório");
+        let (save, cancel) = (widget(&r, ControlId::RenameSave), widget(&r, ControlId::RenameCancel));
+        let (control, view) = (widget(&r, ControlId::Control), widget(&r, ControlId::ViewOnly));
+        assert!(slot.rect.right() <= save.x && save.right() <= cancel.x, "{size:?}: field, Salvar, Cancelar in order");
+        for part in [&save, &cancel, &widget(&r, ControlId::Edit(EditId::Rename))] {
+            assert!(!overlap(part, &control) && !overlap(part, &view), "{size:?}: clear of the connect buttons");
+        }
+        assert!(r.output.widgets.iter().all(|w| w.id != ControlId::RenameDevice), "the action gives way to the field");
+
+        // A refused name says why, under the field.
+        state.submit_edit(EditId::Rename, "   ".into());
+        let r = at(&state, size);
+        assert!(r.distinct_colors() > 3);
+        assert!(r.output.widgets.iter().any(|w| w.id == ControlId::RenameSave));
+    }
+}
+
+#[test]
+fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
+    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
+    use swapdesk_ui::mock::MAC;
+    let widget =
+        |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
+    let size = design_size(WindowKind::Banner);
+    // A Windows peer: chat, swap and disconnect, in that order, 14 apart.
+    let state = Scenario::Banner.prepared_state();
+    let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
+    let (chat, swap, disc) = (
+        widget(&r, ControlId::BannerChat).unwrap(),
+        widget(&r, ControlId::BannerSwap).expect("swap toward the same OS"),
+        widget(&r, ControlId::BannerDisconnect).unwrap(),
+    );
+    assert!(chat.right() < swap.x && swap.right() < disc.x);
+    // A Mac peer: no swap, and chat takes its place next to disconnect.
+    let mut state = Scenario::Banner.prepared_state();
+    state.apply(UiEvent::Session {
+        session_id: 2,
+        device_id: MAC.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Host,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
+    assert!(widget(&r, ControlId::BannerSwap).is_none(), "no swap toward another OS");
+    let (chat2, disc2) = (widget(&r, ControlId::BannerChat).unwrap(), widget(&r, ControlId::BannerDisconnect).unwrap());
+    assert_eq!(disc2.x, disc.x, "disconnect keeps its place");
+    assert!((disc2.x - chat2.right() - 14.0).abs() < 0.6, "no gap where swap was: {} {}", chat2.right(), disc2.x);
+}
+
+#[test]
+fn the_viewer_toolbar_has_no_swap_toward_another_os() {
+    let widget =
+        |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
+    let size = design_size(WindowKind::Viewer);
+    // The Mac peer of the Visualizador scenario: no swap, the separator moves to "Desconectar".
+    let state = Scenario::Visualizador.prepared_state();
+    let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
+    assert!(widget(&r, ControlId::TbSwap).is_none());
+    let (chat, disc) = (widget(&r, ControlId::TbChat).unwrap(), widget(&r, ControlId::TbDisconnect).unwrap());
+    assert!(
+        disc.x - chat.right() > 12.0 && disc.x - chat.right() < 24.0,
+        "one separator, no gap: {}",
+        disc.x - chat.right()
+    );
+    // A Windows peer keeps the swap button, between the chat button and "Desconectar".
+    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
+    let mut state = Scenario::Visualizador.prepared_state();
+    state.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: swapdesk_ui::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
+    let (chat, swap, disc) = (
+        widget(&r, ControlId::TbChat).unwrap(),
+        widget(&r, ControlId::TbSwap).expect("swap toward the same OS"),
+        widget(&r, ControlId::TbDisconnect).unwrap(),
+    );
+    assert!(chat.right() < swap.x && swap.right() < disc.x);
+}
