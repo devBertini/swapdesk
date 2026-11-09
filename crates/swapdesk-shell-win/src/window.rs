@@ -199,6 +199,13 @@ impl Window {
         match created {
             Ok(h) => {
                 window.hwnd.set(h);
+                if kind == WindowKind::Banner {
+                    // The banner is for the person at this machine: kept out of the screen capture, so the viewer
+                    // never sees its own "controla este computador" bar (Windows 10 2004 and later; older systems
+                    // fail the call and keep showing it, which is harmless).
+                    // SAFETY: our own window, just created.
+                    let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
+                }
                 window.place_and_show();
                 Ok(window)
             }
