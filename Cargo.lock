@@ -869,6 +869,7 @@ dependencies = [
  "swapdesk-secret-mac",
  "swapdesk-session",
  "swapdesk-shell-mac",
+ "swapdesk-sys-mac",
  "swapdesk-trust",
  "swapdesk-ui",
  "tokio",
@@ -1276,6 +1277,15 @@ dependencies = [
  "swapdesk-session",
  "swapdesk-trust",
  "tokio",
+]
+
+[[package]]
+name = "swapdesk-sys-mac"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "swapdesk-platform",
+ "swapdesk-proto",
 ]
 
 [[package]]
