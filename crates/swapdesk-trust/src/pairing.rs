@@ -274,11 +274,16 @@ impl Ceremony<'_> {
             Some(remote_v4(self.conn)),
         );
         // One change: the pin and the cleared provisional failure land together, or nothing does.
-        let pinned = ctx.trust.try_update(|s| {
-            let replaced = pin(s, device.clone(), self.replaces)?;
-            s.lockout.succeed();
-            Ok(replaced)
-        });
+        let pinned = {
+            let (device, replaces) = (device.clone(), self.replaces);
+            ctx.trust
+                .try_update_blocking(move |s| {
+                    let replaced = pin(s, device, replaces)?;
+                    s.lockout.succeed();
+                    Ok(replaced)
+                })
+                .await
+        };
         let replaced = match pinned {
             Ok(replaced) => replaced,
             Err(e) => {
@@ -395,7 +400,7 @@ where
             if attempt.began.load(Ordering::SeqCst) {
                 // The provisional failure becomes a counted one. If the write fails the provisional entry is
                 // still on disk, which counts too.
-                let _ = ctx.trust.update(|s| s.lockout.fail(now));
+                let _ = ctx.trust.update_blocking(move |s| s.lockout.fail(now)).await;
             }
             // A failure that reached step 2 counted against the lockout (`PairFailed`); one that did not is what an
             // unauthenticated peer can repeat at will (`PairRefused`), and the audit rate limit covers only that.
@@ -473,7 +478,7 @@ async fn respond_steps(ctx: &PairingContext, conn: &quinn::Connection, attempt: 
     // Step 2: the provisional failed attempt is on disk before the nonce is sent.
     let nonce_r = random_nonce()?;
     let now = ctx.wall.unix_ms();
-    match ctx.trust.update(|s| s.lockout.begin(now)) {
+    match ctx.trust.update_blocking(move |s| s.lockout.begin(now)).await {
         Ok(Ok(())) => attempt.began.store(true, std::sync::atomic::Ordering::SeqCst),
         Ok(Err(left)) => {
             attempt.release_slot();
@@ -569,7 +574,7 @@ async fn initiate_steps(
     };
     // The initiator counts its own failures the same way, from the moment the responder committed to a nonce.
     let now = ctx.wall.unix_ms();
-    match ctx.trust.update(|s| s.lockout.begin(now)) {
+    match ctx.trust.update_blocking(move |s| s.lockout.begin(now)).await {
         Ok(Ok(())) => attempt.began.store(true, std::sync::atomic::Ordering::SeqCst),
         Ok(Err(left)) => {
             refuse(&mut send, ErrorCode::PairingLocked).await;

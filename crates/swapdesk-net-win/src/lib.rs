@@ -7,7 +7,11 @@
 pub mod classify;
 
 #[cfg(windows)]
+mod watch;
+#[cfg(windows)]
 mod windows_impl;
 
+#[cfg(windows)]
+pub use watch::NetworkWatcher;
 #[cfg(windows)]
 pub use windows_impl::{AdapterReport, WindowsNetInterfaces, list_adapters, process_cpu_time};

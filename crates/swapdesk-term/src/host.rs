@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 use swapdesk_platform::{Pty, PtyRequest, PtySpawner};
 use swapdesk_proto::{ErrorCode, PermissionSet, TermOpen, TermOpened};
@@ -22,7 +22,11 @@ const MAX_DIM: u16 = 1000;
 const READ_CHUNK: usize = 8192;
 /// Input chunks queued per terminal before the sender must wait.
 const INPUT_QUEUE: usize = 64;
-const POLL: Duration = Duration::from_millis(25);
+/// How soon the exit watcher looks at a shell again, first; the pause doubles up to [`POLL_MAX`] while nothing happens.
+/// The PTY trait has no exit notification (`try_wait` only), so a shell that ends without closing its output has to be
+/// looked for; what wakes the watcher at once is everything else (the output ending, the terminal being closed).
+const POLL_MIN: Duration = Duration::from_millis(25);
+const POLL_MAX: Duration = Duration::from_millis(200);
 /// How long after the shell exited its last output may still be on its way.
 const DRAIN_GRACE: Duration = Duration::from_millis(1500);
 
@@ -79,11 +83,35 @@ impl InputTx {
     }
 }
 
+/// What the threads of one terminal tell the exit watcher: the output ended, or the terminal is being closed. A flag is
+/// set first, then [`Signal::notify`] wakes the watcher, so it never sleeps through either.
+#[derive(Clone, Default)]
+struct Signal(Arc<(Mutex<()>, Condvar)>);
+
+impl Signal {
+    fn notify(&self) {
+        let (m, cv) = &*self.0;
+        // Taking the lock makes the wake-up come after the flag for a watcher that is between its check and its wait.
+        drop(lock(m));
+        cv.notify_all();
+    }
+
+    /// Sleeps up to `timeout`, or until `stop()` is true (checked under the lock, so a `notify` after the flag is not
+    /// missed). Returns whether `stop()` held.
+    fn sleep_until(&self, timeout: Duration, stop: impl Fn() -> bool) -> bool {
+        let (m, cv) = &*self.0;
+        let guard = lock(m);
+        let (_guard, _) = cv.wait_timeout_while(guard, timeout, |()| !stop()).unwrap_or_else(|p| p.into_inner());
+        stop()
+    }
+}
+
 struct Live {
     admin: bool,
     pty: Arc<Mutex<Box<dyn Pty>>>,
     input: InputTx,
     closing: Arc<AtomicBool>,
+    signal: Signal,
 }
 
 pub struct TermHost {
@@ -142,12 +170,13 @@ impl TermHost {
         let pty = Arc::new(Mutex::new(pty));
         let closing = Arc::new(AtomicBool::new(false));
         let reader_done = Arc::new(AtomicBool::new(false));
+        let signal = Signal::default();
         let (in_tx, in_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
 
         // PTY -> events.
         {
             let (events, done, closing) = (self.events.clone(), Arc::clone(&reader_done), Arc::clone(&closing));
-            let pty = Arc::clone(&pty);
+            let (pty, signal) = (Arc::clone(&pty), signal.clone());
             std::thread::Builder::new()
                 .name(format!("swapdesk-term-{term_id}-out"))
                 .spawn(move || {
@@ -166,6 +195,7 @@ impl TermHost {
                         }
                     }
                     done.store(true, Ordering::SeqCst);
+                    signal.notify();
                 })
                 .map_err(|_| ErrorCode::Internal)?;
         }
@@ -185,11 +215,14 @@ impl TermHost {
             .map_err(|_| ErrorCode::Internal)?;
         // Exit watcher.
         {
-            let (events, pty, closing, done) =
-                (self.events.clone(), Arc::clone(&pty), Arc::clone(&closing), Arc::clone(&reader_done));
+            let (events, pty, closing, done, signal) =
+                (self.events.clone(), Arc::clone(&pty), Arc::clone(&closing), Arc::clone(&reader_done), signal.clone());
             std::thread::Builder::new()
                 .name(format!("swapdesk-term-{term_id}-wait"))
                 .spawn(move || {
+                    let mut pause = POLL_MIN;
+                    // The output ending wakes the watcher once; after that only a closing does.
+                    let mut output_ended = false;
                     let exit_code = loop {
                         if closing.load(Ordering::SeqCst) {
                             return;
@@ -199,19 +232,24 @@ impl TermHost {
                             Ok(None) => {}
                             Err(_) => break None,
                         }
-                        std::thread::sleep(POLL);
+                        // Woken at once by the output ending or the terminal closing; otherwise it looks again after
+                        // `pause`, which grows while the shell just runs.
+                        let woken = signal.sleep_until(pause, || {
+                            closing.load(Ordering::SeqCst) || (!output_ended && done.load(Ordering::SeqCst))
+                        });
+                        output_ended = done.load(Ordering::SeqCst);
+                        pause = if woken { POLL_MIN } else { (pause * 2).min(POLL_MAX) };
                     };
-                    let deadline = Instant::now() + DRAIN_GRACE;
-                    while !done.load(Ordering::SeqCst) && Instant::now() < deadline && !closing.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
+                    // The shell ended: its last output may still be on its way, so wait for the reader to finish (it
+                    // tells us), for the terminal to be closed, or for the grace to run out.
+                    signal.sleep_until(DRAIN_GRACE, || done.load(Ordering::SeqCst) || closing.load(Ordering::SeqCst));
                     if !closing.load(Ordering::SeqCst) {
                         let _ = events.send(TermEvent::Exited { term_id, exit_code });
                     }
                 })
                 .map_err(|_| ErrorCode::Internal)?;
         }
-        self.terms.insert(term_id, Live { admin: req.admin, pty, input: InputTx(in_tx), closing });
+        self.terms.insert(term_id, Live { admin: req.admin, pty, input: InputTx(in_tx), closing, signal });
         Ok(TermOpened { term_id, account })
     }
 
@@ -276,6 +314,7 @@ impl TermHost {
 
 fn end(t: &Live) {
     t.closing.store(true, Ordering::SeqCst);
+    t.signal.notify();
     let _ = lock(&t.pty).kill();
 }
 

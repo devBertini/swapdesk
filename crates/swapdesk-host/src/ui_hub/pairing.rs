@@ -14,7 +14,7 @@ use quinn::Endpoint;
 use swapdesk_ipc::{ApiCode, Notify, PairingState, Text};
 use swapdesk_lan::guard::{check_incoming, find_on_link};
 use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
-use swapdesk_platform::Level;
+use swapdesk_platform::{Level, NetInterface};
 use swapdesk_proto::Sas;
 use swapdesk_trust::{
     Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
@@ -51,6 +51,10 @@ pub(crate) struct PairState {
     serving: Arc<AtomicUsize>,
     /// One connection attempt per source address per 30 s (PROTOCOL.md 3), across every opening of the mode.
     rate: Arc<PairingRate>,
+    /// The interface list the endpoints' filter judges incoming connections by: read when the endpoints open and again
+    /// at every network change, so the filter (which runs on a runtime task for every incoming connection, however
+    /// many a peer sends) never enumerates adapters itself.
+    nets: Arc<Mutex<Vec<NetInterface>>>,
 }
 
 /// The screen side of a ceremony: what the trust crate shows becomes a `Pairing` notification.
@@ -142,6 +146,7 @@ impl Hub {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         let port = self.settings().pair_port;
         let list = self.p.interfaces.list().unwrap_or_default();
+        *lock(&self.pairing.nets) = list.clone();
         let mut sockets = Vec::new();
         for (addr, socket) in bind_quic_all_approved(&list, port) {
             match socket {
@@ -207,15 +212,15 @@ impl Hub {
     /// gets `retry()` and costs its turn nothing; a second attempt inside the interval is ignored before any
     /// handshake and without an audit entry.
     fn pairing_filter(&self) -> swapdesk_trust::IncomingFilter {
-        let (nets, allow_loopback) = (Arc::clone(&self.p.interfaces), self.allow_loopback());
+        let (nets, allow_loopback) = (Arc::clone(&self.pairing.nets), self.allow_loopback());
         let rate = Arc::clone(&self.pairing.rate);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
             let local = incoming.local_ip();
             let on_link = if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
                 true
-            } else if let (Ok(list), Some(local)) = (nets.list(), local) {
-                check_incoming(&list, local, remote).is_ok()
+            } else if let Some(local) = local {
+                check_incoming(&lock(&nets), local, remote).is_ok()
             } else {
                 false
             };
@@ -270,6 +275,15 @@ impl Hub {
         rt.spawn(async move { me.watch_pairing_mode(id).await });
         self.notify(Notify::Pairing { pairing_id: id, state: PairingState::Open { remaining_s: self.remaining_s() } });
         Ok(id)
+    }
+
+    /// The network changed: the filter of the open pairing endpoints judges by the new list from now on.
+    pub(crate) fn refresh_pair_nets(&self) {
+        if self.pairing.serving.load(Ordering::SeqCst) > 0
+            && let Ok(list) = self.p.interfaces.list()
+        {
+            *lock(&self.pairing.nets) = list;
+        }
     }
 
     fn remaining_s(&self) -> u16 {

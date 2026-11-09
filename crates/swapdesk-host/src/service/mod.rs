@@ -150,7 +150,9 @@ impl Connector {
             }
             Ipv4Addr::LOCALHOST
         } else {
-            let list = d.interfaces.list().map_err(|_| ConnectError::Refused(Refusal::UnknownLocalAddress))?;
+            let list = crate::netcache::list_async(&d.interfaces)
+                .await
+                .map_err(|_| ConnectError::Refused(Refusal::UnknownLocalAddress))?;
             find_on_link(&list, *v4.ip()).map_err(ConnectError::Refused)?.local
         };
         let spki = d
@@ -287,13 +289,16 @@ impl Gate {
     /// PROTOCOL.md 1, before any handshake: on-link in the subnet of the approved interface that owns the local
     /// address, not loopback, not one of this machine's own addresses. Loopback is let through only when the core
     /// was built with the development option, and then only between two loopback addresses.
-    fn judge(&self, incoming: &Incoming) -> Result<(), Refusal> {
+    ///
+    /// The interface list is read off the runtime's workers (and from a copy no older than a second, see
+    /// [`crate::netcache`]): an incoming connection is something a peer can make as often as it likes.
+    async fn judge(&self, incoming: &Incoming) -> Result<(), Refusal> {
         let remote = incoming.remote_address().ip();
         let local = incoming.local_ip();
         if self.allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
             return Ok(());
         }
-        let list = self.interfaces.list().map_err(|_| Refusal::UnknownLocalAddress)?;
+        let list = crate::netcache::list_async(&self.interfaces).await.map_err(|_| Refusal::UnknownLocalAddress)?;
         let local = local.ok_or(Refusal::UnknownLocalAddress)?;
         check_incoming(&list, local, remote).map(|_| ())
     }
@@ -308,7 +313,7 @@ impl Gate {
 
 async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
-        if let Err(why) = gate.judge(&incoming) {
+        if let Err(why) = gate.judge(&incoming).await {
             gate.shared
                 .log(Level::Warn, format_args!("refused a connection from {}: {why}", incoming.remote_address()));
             incoming.refuse();
@@ -400,7 +405,7 @@ impl ServiceCore {
             .build()
             .map_err(ServiceError::Runtime)?;
         let enter = runtime.enter();
-        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::sync_channel(shared::CORE_EVENTS);
         let shared =
             Arc::new(Shared::new(runtime.handle().clone(), Arc::clone(&cfg.trace), cfg.audio_exclude_pid, events_tx));
 
@@ -572,6 +577,18 @@ impl ServiceCore {
     /// The core's events, once: the owner reads them (a supervisor thread, the UI dispatcher).
     pub fn take_events(&self) -> Option<std::sync::mpsc::Receiver<CoreEvent>> {
         lock(&self.events).take()
+    }
+
+    /// Runs `wake` after every event is queued (from the thread that queued it: keep it short and never blocking), so
+    /// the owner can sleep until [`take_events`](Self::take_events)'s receiver has something. Once: a second call is
+    /// ignored. Events queued before it are not announced.
+    pub fn set_event_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.shared.set_waker(wake)
+    }
+
+    /// Advisory events (`HelperFault`, `SasRequested`) dropped because the owner was not reading its queue.
+    pub fn events_dropped(&self) -> u64 {
+        self.shared.events_dropped()
     }
 
     // ---------- helpers ----------

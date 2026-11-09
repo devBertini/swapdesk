@@ -168,6 +168,85 @@ fn an_exiting_shell_reports_its_code_after_its_last_output() {
     assert_eq!(h.open_count(), 0);
 }
 
+/// A shell that never ends and never writes: its output stays open, and `try_wait` is counted.
+struct SilentPty {
+    looks: Arc<std::sync::atomic::AtomicUsize>,
+    killed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A reader that blocks until the PTY is killed, like a shell's output pipe.
+struct UntilKilled(Arc<std::sync::atomic::AtomicBool>);
+
+impl Read for UntilKilled {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        while !self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(0)
+    }
+}
+
+impl Pty for SilentPty {
+    fn account(&self) -> &str {
+        "silent"
+    }
+    fn reader(&mut self) -> PResult<Box<dyn Read + Send>> {
+        Ok(Box::new(UntilKilled(Arc::clone(&self.killed))))
+    }
+    fn writer(&mut self) -> PResult<Box<dyn Write + Send>> {
+        Ok(Box::new(std::io::sink()))
+    }
+    fn resize(&mut self, _: u16, _: u16) -> PResult<()> {
+        Ok(())
+    }
+    fn try_wait(&mut self) -> PResult<Option<i32>> {
+        self.looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(None)
+    }
+    fn kill(&mut self) -> PResult<()> {
+        self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct SilentSpawner(Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicBool>);
+
+impl PtySpawner for SilentSpawner {
+    fn spawn(&self, _: &PtyRequest) -> PResult<Box<dyn Pty>> {
+        Ok(Box::new(SilentPty { looks: Arc::clone(&self.0), killed: Arc::clone(&self.1) }))
+    }
+}
+
+#[test]
+fn a_running_shell_is_looked_at_with_a_growing_pause_not_every_25_ms() {
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (mut h, _rx) = host(SilentSpawner(Arc::clone(&looks), Arc::clone(&killed)));
+    h.open(&open_req(1, false), &user_ctx()).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    let n = looks.load(std::sync::atomic::Ordering::SeqCst);
+    // 25, 50, 100, then 200 ms apart: about 10 looks in 1.5 s. A fixed 25 ms pause would be about 60.
+    assert!((3..=14).contains(&n), "{n} looks at the shell in 1.5 s");
+    h.close(1).unwrap();
+}
+
+#[test]
+fn closing_a_terminal_wakes_its_watcher_at_once() {
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (mut h, rx) = host(SilentSpawner(Arc::clone(&looks), Arc::clone(&killed)));
+    h.open(&open_req(1, false), &user_ctx()).unwrap();
+    // Let the pause grow to its longest, then close: the watcher ends without waiting that long, and no `Exited` follows.
+    std::thread::sleep(Duration::from_millis(600));
+    let before = looks.load(std::sync::atomic::Ordering::SeqCst);
+    h.close(1).unwrap();
+    assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the viewer asked for the close: no Exited");
+    std::thread::sleep(Duration::from_millis(500));
+    let after = looks.load(std::sync::atomic::Ordering::SeqCst);
+    // One look may have been due between reading `before` and closing; none after that.
+    assert!(after <= before + 1, "the watcher kept looking after the close: {before} then {after}");
+}
+
 struct DeniedSpawner(ErrorKind);
 
 impl PtySpawner for DeniedSpawner {

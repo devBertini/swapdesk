@@ -29,7 +29,7 @@ use swapdesk_proto::{
 };
 
 use crate::helper_pty::{PtyFactory, PtyServer};
-use crate::outbox::{Outbox, spawn_writer};
+use crate::outbox::{DEFAULT_BYTES, Limits, Outbox, TryControl, spawn_writer};
 use crate::proxy::{answer_action, answer_clipboard, no_actions, no_clipboard};
 
 /// Longest wait of the capture loop for a frame: also how fast `StopVideo` is noticed.
@@ -40,8 +40,9 @@ const AUDIO_POLL: Duration = Duration::from_millis(20);
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
 /// Queued input batches before the reader waits (input is never dropped).
 const INPUT_QUEUE: usize = 256;
-/// Default queue of the writer (messages, not bytes: a video message can be large).
-const DEFAULT_OUTBOX: usize = 16;
+/// Default queue of the writer: 16 messages and 4 MiB, whichever comes first (a count alone is no bound: one video
+/// message can be 8 MiB).
+const DEFAULT_OUTBOX: Limits = Limits::new(16, DEFAULT_BYTES);
 /// Disk calls queued toward the files thread before the reader waits.
 const FS_QUEUE: usize = 64;
 /// Most cursor updates read per loop turn.
@@ -108,7 +109,7 @@ pub struct HelperDeps<S, E, I, A> {
     audio: AudioFactory<A>,
     audio_mode: AudioModeFn<A>,
     clock: Arc<dyn Clock>,
-    outbox_capacity: usize,
+    outbox: Limits,
     clipboard: Option<ClipFactory>,
     actions: Option<ActionFactory>,
     pty: Option<PtyFactory>,
@@ -136,7 +137,7 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
             audio: Arc::new(audio),
             audio_mode: Arc::new(|_| AudioModeKind::Loopback),
             clock,
-            outbox_capacity: DEFAULT_OUTBOX,
+            outbox: DEFAULT_OUTBOX,
             clipboard: None,
             actions: None,
             pty: None,
@@ -196,7 +197,15 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
     /// Messages the writer queue holds before media is dropped (default 16).
     #[must_use]
     pub fn with_outbox_capacity(mut self, capacity: usize) -> Self {
-        self.outbox_capacity = capacity.max(1);
+        self.outbox = Limits::new(capacity, self.outbox.bytes);
+        self
+    }
+
+    /// Bytes the writer queue holds before media is dropped (default 4 MiB); an empty queue takes one message of any
+    /// size.
+    #[must_use]
+    pub fn with_outbox_bytes(mut self, bytes: usize) -> Self {
+        self.outbox = self.outbox.with_bytes(bytes);
         self
     }
 }
@@ -333,10 +342,9 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     let mut config: Option<EncoderConfig> = None;
     let mut discontinuity = true;
     let mut force = true;
-    let mut cursor_seq = 0u32;
-    let mut shape_id = 0u32;
     let mut faulted = false;
     let mut still = Still::default();
+    let mut cursor = CursorState::default();
 
     while !ctl.stop.load(Ordering::Acquire) && !env.outbox.is_closed() {
         if let Some((k, f)) = lock(&ctl.rate).take() {
@@ -351,7 +359,7 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                 if let Some(frame) = &frame {
                     dims = (frame.width, frame.height);
                 }
-                pump_cursor(env, source, p.display, dims, &mut cursor_seq, &mut shape_id);
+                pump_cursor(env, source, p.display, dims, &mut cursor);
                 let Some(frame) = frame else {
                     if let Some(enc) = encoder.as_mut() {
                         refine_still(env, p, ids, enc, &mut still, &mut discontinuity, &mut force);
@@ -511,38 +519,63 @@ fn refine_still<S: ScreenSource, E: VideoEncoder>(
     }
 }
 
+/// What the capture thread remembers about the cursor between two looks.
+#[derive(Default)]
+struct CursorState {
+    seq: u32,
+    /// The shape the viewer holds: positions name it, so it moves on only once its message is queued.
+    shape_id: u32,
+    /// A shape the queue had no room for, sent again at the next look (positions keep naming the old one meanwhile).
+    unsent: Option<(u32, Message)>,
+}
+
 fn pump_cursor<S: ScreenSource, E>(
     env: &CaptureEnv<S, E>,
     source: &mut S,
     display: u16,
     dims: (u32, u32),
-    seq: &mut u32,
-    shape_id: &mut u32,
+    cursor: &mut CursorState,
 ) {
+    // A shape is up to 256 KiB: it goes through the media path, so a full pipe makes the capture thread drop it and
+    // look again, never wait inside `write`.
+    if let Some((id, msg)) = cursor.unsent.take() {
+        match env.outbox.try_send_media(msg) {
+            TryControl::Sent => cursor.shape_id = id,
+            TryControl::Full(back) => cursor.unsent = Some((id, back)),
+            TryControl::Closed => {}
+        }
+    }
     for _ in 0..CURSOR_BURST {
         let Some(update) = source.take_cursor() else { break };
         if let Some(shape) = update.shape {
-            *shape_id = shape.id;
-            env.outbox.send_control(Message::CursorShape(Shape(swapdesk_proto::CursorShape {
+            let id = shape.id;
+            let msg = Message::CursorShape(Shape(swapdesk_proto::CursorShape {
                 header: CursorShapeHeader {
-                    shape_id: shape.id,
+                    shape_id: id,
                     width: shape.width,
                     height: shape.height,
                     hot_x: shape.hot_x,
                     hot_y: shape.hot_y,
                 },
                 rgba: shape.rgba,
-            })));
+            }));
+            // The newest shape replaces one that was never sent: the older would only be shown for an instant.
+            cursor.unsent = None;
+            match env.outbox.try_send_media(msg) {
+                TryControl::Sent => cursor.shape_id = id,
+                TryControl::Full(back) => cursor.unsent = Some((id, back)),
+                TryControl::Closed => {}
+            }
         }
         let pos = CursorPosition {
             visible: update.visible,
             display,
-            seq: *seq,
+            seq: cursor.seq,
             x: to_wire(update.x, dims.0),
             y: to_wire(update.y, dims.1),
-            shape_id: *shape_id,
+            shape_id: cursor.shape_id,
         };
-        *seq = seq.wrapping_add(1);
+        cursor.seq = cursor.seq.wrapping_add(1);
         env.outbox.send_media(Message::CursorPos(pos));
     }
 }
@@ -720,6 +753,11 @@ struct Host<S, E, A> {
     videos: HashMap<u16, VideoRun>,
     frame_ids: HashMap<u16, Arc<AtomicU32>>,
     audio: Option<AudioRun>,
+    /// Capture and audio threads told to stop that have not ended yet. The thread that reads the pipe never joins them:
+    /// one stuck in a send would hide the `Shutdown` that follows. They are joined at the end of the run.
+    retiring: HashMap<u16, JoinHandle<()>>,
+    /// The same for the audio thread (there is one).
+    retiring_audio: Option<JoinHandle<()>>,
     muted: Arc<AtomicBool>,
     input_tx: SyncSender<InputCmd>,
     extras_tx: SyncSender<Message>,
@@ -800,49 +838,92 @@ where
             fault(&self.outbox, ErrorCode::NotFound, format!("video {}: no such display", p.display));
             return;
         }
-        // A second StartVideo for a display restarts it with the new settings.
-        self.stop_video(p.display);
+        // A second StartVideo for a display restarts it with the new settings: the new thread waits for the old one to
+        // end before it opens the source, so the reader of the pipe never does.
+        // A thread stopped earlier and still ending counts too: it is this display's, and it still holds the source.
+        let previous = self
+            .videos
+            .remove(&p.display)
+            .map(|run| {
+                run.ctl.stop.store(true, Ordering::Release);
+                run.handle
+            })
+            .or_else(|| self.retiring.remove(&p.display));
         let ctl = Arc::new(VideoCtl::default());
         let ids = Arc::clone(self.frame_ids.entry(p.display).or_default());
         let env = Arc::clone(&self.capture);
         let thread_ctl = Arc::clone(&ctl);
-        let spawned = std::thread::Builder::new()
-            .name(format!("helper-capture-{}", p.display))
-            .spawn(move || capture_main(&env, p, &thread_ctl, &ids));
+        let spawned = std::thread::Builder::new().name(format!("helper-capture-{}", p.display)).spawn(move || {
+            if let Some(old) = previous {
+                let _ = old.join();
+            }
+            capture_main(&env, p, &thread_ctl, &ids);
+        });
         match spawned {
             Ok(handle) => {
                 self.videos.insert(p.display, VideoRun { ctl, handle });
             }
             Err(e) => fault(&self.outbox, ErrorCode::Internal, format!("video {}: spawn: {e}", p.display)),
         }
+        self.reap();
     }
 
+    /// Tells the capture thread of `display` to stop and goes on; the thread ends on its own (within one capture poll).
     fn stop_video(&mut self, display: u16) {
         if let Some(run) = self.videos.remove(&display) {
             run.ctl.stop.store(true, Ordering::Release);
-            let _ = run.handle.join();
+            // Kept under its display: a `StartVideo` for it waits for this thread before it opens the source again.
+            self.retiring.insert(display, run.handle);
         }
+        self.reap();
     }
 
     fn start_audio(&mut self, exclude_pid: Option<u32>) {
-        self.stop_audio();
+        let previous = self
+            .audio
+            .take()
+            .map(|run| {
+                run.stop.store(true, Ordering::Release);
+                run.handle
+            })
+            .or_else(|| self.retiring_audio.take());
         let stop = Arc::new(AtomicBool::new(false));
         let env = Arc::clone(&self.audio_env);
         let muted = Arc::clone(&self.muted);
         let thread_stop = Arc::clone(&stop);
-        let spawned = std::thread::Builder::new()
-            .name("helper-audio".into())
-            .spawn(move || audio_main(&env, exclude_pid, &thread_stop, &muted));
+        let spawned = std::thread::Builder::new().name("helper-audio".into()).spawn(move || {
+            if let Some(old) = previous {
+                let _ = old.join();
+            }
+            audio_main(&env, exclude_pid, &thread_stop, &muted);
+        });
         match spawned {
             Ok(handle) => self.audio = Some(AudioRun { stop, handle }),
             Err(e) => fault(&self.outbox, ErrorCode::Internal, format!("audio: spawn: {e}")),
         }
+        self.reap();
     }
 
     fn stop_audio(&mut self) {
         if let Some(run) = self.audio.take() {
             run.stop.store(true, Ordering::Release);
-            let _ = run.handle.join();
+            self.retiring_audio = Some(run.handle);
+        }
+        self.reap();
+    }
+
+    /// Joins the stopped threads that have ended (it does not wait for the others).
+    fn reap(&mut self) {
+        let (done, running): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.retiring).into_iter().partition(|(_, h)| h.is_finished());
+        self.retiring = running.into_iter().collect();
+        for (_, h) in done {
+            let _ = h.join();
+        }
+        if self.retiring_audio.as_ref().is_some_and(JoinHandle::is_finished)
+            && let Some(h) = self.retiring_audio.take()
+        {
+            let _ = h.join();
         }
     }
 
@@ -852,6 +933,13 @@ where
             self.stop_video(d);
         }
         self.stop_audio();
+        // The end of the run: now it is right to wait for every thread.
+        for (_, h) in std::mem::take(&mut self.retiring) {
+            let _ = h.join();
+        }
+        if let Some(h) = self.retiring_audio.take() {
+            let _ = h.join();
+        }
         self.pty.stop();
     }
 }
@@ -883,8 +971,19 @@ where
     let mut framed = FrameWriter::new(writer);
     Handshake::client(&mut reader, &mut framed, role, pid)?;
 
-    let HelperDeps { screen, encoder, input, audio, audio_mode, clock, outbox_capacity, clipboard, actions, pty, fs } =
-        deps;
+    let HelperDeps {
+        screen,
+        encoder,
+        input,
+        audio,
+        audio_mode,
+        clock,
+        outbox: outbox_limits,
+        clipboard,
+        actions,
+        pty,
+        fs,
+    } = deps;
 
     let displays = {
         let mut source = screen(DisplayId(0)).map_err(HelperError::Platform)?;
@@ -894,7 +993,7 @@ where
     };
     let wire_list = DisplayList { displays: displays.iter().take(swapdesk_ipc::MAX_DISPLAYS).map(to_proto).collect() };
 
-    let (outbox, rx) = Outbox::new(outbox_capacity);
+    let (outbox, rx) = Outbox::with_limits(outbox_limits);
     let writer_thread = spawn_writer(&outbox, rx, framed).map_err(HelperError::Spawn)?;
     outbox.send_control(Message::Displays(wire_list));
 
@@ -944,6 +1043,8 @@ where
         videos: HashMap::new(),
         frame_ids: HashMap::new(),
         audio: None,
+        retiring: HashMap::new(),
+        retiring_audio: None,
         muted: Arc::new(AtomicBool::new(false)),
         input_tx,
         extras_tx,
@@ -974,6 +1075,8 @@ where
         videos: _,
         frame_ids: _,
         audio: _,
+        retiring: _,
+        retiring_audio: _,
         muted: _,
         pty,
         fs_tx,
@@ -1009,3 +1112,7 @@ where
 #[cfg(test)]
 #[path = "helper_refine_tests.rs"]
 mod refine_tests;
+
+#[cfg(test)]
+#[path = "helper_stall_tests.rs"]
+mod stall_tests;

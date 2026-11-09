@@ -977,6 +977,68 @@ fn a_message_that_is_not_for_a_ui_ends_the_connection() {
     m.finish();
 }
 
+/// A pipe writer that blocks while its gate is shut, as a pipe whose reader (the UI) stopped reading.
+struct ShutGate {
+    inner: PipeWriter,
+    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl std::io::Write for ShutGate {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (m, cv) = &*self.open;
+        let _open = cv.wait_while(lock(m), |open| !*open).unwrap();
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_ui_that_stops_reading_is_cut_and_the_owner_is_told_so_it_can_close_the_pipe() {
+    let m = Machine::new("sala");
+    let (client_end, server_end) = duplex_blocking();
+    let gate = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+    let (cut_tx, cut_rx) = channel();
+    let hub = m.hub.clone();
+    let server_gate = Arc::clone(&gate);
+    let serve = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(server_end.reader);
+        let mut writer = FrameWriter::new(ShutGate { inner: server_end.writer, open: server_gate });
+        Handshake::server(&mut reader, &mut writer, 7)?;
+        hub.serve_cancellable(
+            reader,
+            writer,
+            info(false),
+            Arc::new(move || {
+                let _ = cut_tx.send(());
+            }),
+        )
+    });
+    let (mut reader, mut writer) = (FrameReader::new(client_end.reader), FrameWriter::new(client_end.writer));
+    Handshake::client(&mut reader, &mut writer, IpcRole::Ui, 1).unwrap();
+    wait_for("the connection", || (m.hub.connections() == 1).then_some(()));
+    // The UI stops reading: the pipe's writer stalls, and the service goes on telling the UI things.
+    *lock(&gate.0) = false;
+    for i in 0..3000u32 {
+        m.hub.hub.notify(Notify::ChatRead { session_id: 1, up_to: i });
+    }
+    cut_rx.recv_timeout(Duration::from_secs(5)).expect("the owner is told the connection was cut");
+    // What the owner does with it (cancelling the pipe's I/O): the stalled write returns and the read ends.
+    {
+        let (open, cv) = &*gate;
+        *lock(open) = true;
+        cv.notify_all();
+    }
+    drop(writer);
+    let ended = serve.join().unwrap();
+    assert!(ended.is_ok(), "{ended:?}");
+    assert_eq!(m.hub.connections(), 0);
+    drop(reader);
+    m.finish();
+}
+
 /// Two free UDP ports in a row on 127.0.0.1 (session, pairing), as a typed address implies (PROTOCOL.md 1). They
 /// come from below Windows' dynamic range (49152 and up), which hands out ephemeral ports in sequence and would give
 /// the second one to the next socket bound to port 0.

@@ -6,6 +6,7 @@
 
 mod acl;
 pub mod actions;
+pub mod dirwatch;
 mod env;
 pub mod launch;
 pub mod panic_hook;
@@ -20,6 +21,7 @@ pub mod trace;
 pub mod watcher;
 
 pub use acl::AceInfo;
+pub use dirwatch::DirWatch;
 pub use launch::{
     ChildProcess, HelperRole, InstallError, InstallPolicy, RestartBackoff, TRUSTED_INSTALLER_SID, UserTokenChoice,
     VerifiedExe, active_console_session, build_command_line, check_no_other_writers, choose_user_token, launch_helper,

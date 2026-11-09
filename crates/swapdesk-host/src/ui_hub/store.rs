@@ -4,7 +4,9 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 
 use swapdesk_platform::{Level, SecretStore, TraceSink};
 use swapdesk_proto::codec::Result as CResult;
@@ -233,10 +235,32 @@ impl UnauthRate {
 /// The audit log in two append-only files of length-prefixed records (the `swapdesk-trust` format), with the
 /// recent entries cached in memory. Rotation is by size (the old file becomes `<name>.1`); the unauthenticated
 /// entries go through the rate limit of C5.1 first, so a peer that never authenticates cannot fill the network log.
+///
+/// `append` never touches the disk: the rate limit and the cache are memory, and the file work (`metadata`, `rename`,
+/// `open`, `write`) is done by one writer thread fed through a bounded channel, so a runtime worker that records an
+/// entry (a session ending, a pairing failing) never waits for the disk. The channel holds [`WRITE_QUEUE`] records;
+/// a caller that finds it full waits for room (the bound is the backpressure, nothing is lost and nothing grows).
+/// Dropping the log writes what the limiter still owes and waits for the writer, so the files are complete when the
+/// service stops; [`flush`](Self::flush) is the same wait without the drop.
 pub struct FileAuditLog {
     dir: PathBuf,
     trace: std::sync::Arc<dyn TraceSink>,
     state: Mutex<FileState>,
+    writes: Mutex<Option<SyncSender<Job>>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Records waiting for the writer thread before a caller waits.
+const WRITE_QUEUE: usize = 1024;
+
+enum Job {
+    Record {
+        name: &'static str,
+        cap: u64,
+        record: Vec<u8>,
+    },
+    /// Answered once every record queued before it is written.
+    Flush(SyncSender<()>),
 }
 
 struct FileState {
@@ -260,21 +284,65 @@ impl FileAuditLog {
         if cache.len() > CACHE {
             cache.drain(..cache.len() - CACHE);
         }
-        Ok(Self { dir: dir.to_path_buf(), trace, state: Mutex::new(FileState { cache, rate: UnauthRate::default() }) })
+        let (tx, rx) = sync_channel::<Job>(WRITE_QUEUE);
+        let writer = {
+            let (dir, trace) = (dir.to_path_buf(), std::sync::Arc::clone(&trace));
+            std::thread::Builder::new().name("audit-writer".into()).spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        Job::Record { name, cap, record } => {
+                            if let Err(e) = append_to(&dir, name, cap, &record) {
+                                trace.log(Level::Warn, "audit", format_args!("could not write {name}: {e}"));
+                            }
+                        }
+                        Job::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })?
+        };
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            trace,
+            state: Mutex::new(FileState { cache, rate: UnauthRate::default() }),
+            writes: Mutex::new(Some(tx)),
+            writer: Mutex::new(Some(writer)),
+        })
     }
 
-    fn append_to(&self, name: &str, cap: u64, record: &[u8]) -> std::io::Result<()> {
-        let path = self.dir.join(name);
-        if fs::metadata(&path).is_ok_and(|m| m.len() >= cap) {
-            let rotated = self.dir.join(format!("{name}.1"));
-            // The previous rotated copy goes (no more than two generations).
-            let _ = fs::remove_file(&rotated);
-            fs::rename(&path, &rotated)?;
+    /// Waits until every record appended before this call is in its file.
+    pub fn flush(&self) {
+        let (done_tx, done_rx) = sync_channel(1);
+        if self.queue(Job::Flush(done_tx)).is_ok() {
+            let _ = done_rx.recv();
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-        file.write_all(record)?;
-        file.flush()
     }
+
+    /// Hands a job to the writer; the job comes back when the writer is gone (the log is being dropped, or its thread
+    /// died).
+    fn queue(&self, job: Job) -> Result<(), Job> {
+        // Cloned so the lock is not held while a full channel makes the caller wait.
+        let tx = self.writes.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        match tx {
+            Some(tx) => tx.send(job).map_err(|e| e.0),
+            None => Err(job),
+        }
+    }
+}
+
+/// One record into `name` under `dir`, rotating the file first when it reached `cap`.
+fn append_to(dir: &Path, name: &str, cap: u64, record: &[u8]) -> std::io::Result<()> {
+    let path = dir.join(name);
+    if fs::metadata(&path).is_ok_and(|m| m.len() >= cap) {
+        let rotated = dir.join(format!("{name}.1"));
+        // The previous rotated copy goes (no more than two generations).
+        let _ = fs::remove_file(&rotated);
+        fs::rename(&path, &rotated)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    file.write_all(record)?;
+    file.flush()
 }
 
 fn read_file(path: &Path, now_ms: u64, trace: &dyn TraceSink) -> Vec<AuditEntry> {
@@ -307,7 +375,10 @@ impl FileAuditLog {
         let Ok(record) = entry.encode_record() else { return };
         let (name, cap) =
             if is_network(&entry) { (NETWORK_FILE, NETWORK_LOG_CAP) } else { (SESSIONS_FILE, SESSIONS_LOG_CAP) };
-        if let Err(e) = self.append_to(name, cap, &record) {
+        // The writer thread does the file work. Gone (it never is, but a panic in it would be): write here instead.
+        if let Err(Job::Record { record, .. }) = self.queue(Job::Record { name, cap, record })
+            && let Err(e) = append_to(&self.dir, name, cap, &record)
+        {
             self.trace.log(Level::Warn, "audit", format_args!("could not write {name}: {e}"));
         }
         st.cache.push(entry);
@@ -334,10 +405,17 @@ impl AuditSink for FileAuditLog {
 /// the last entry seen.
 impl Drop for FileAuditLog {
     fn drop(&mut self) {
-        let mut st = lock(&self.state);
-        let now = st.rate.last_seen_ms;
-        if let Some(summary) = st.rate.take_summary(now) {
-            self.write_entry(&mut st, summary);
+        {
+            let mut st = lock(&self.state);
+            let now = st.rate.last_seen_ms;
+            if let Some(summary) = st.rate.take_summary(now) {
+                self.write_entry(&mut st, summary);
+            }
+        }
+        // Close the channel, then wait for the writer to finish what is queued.
+        drop(self.writes.lock().unwrap_or_else(PoisonError::into_inner).take());
+        if let Some(writer) = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let _ = writer.join();
         }
     }
 }
@@ -512,7 +590,7 @@ mod tests {
         log.append(rejected(1, 21_000));
         log.append(rejected(1, 22_000));
         assert_eq!(log.recent(10).len(), 1);
-        drop(log);
+        drop(log); // the drop writes the summary and waits for the writer thread
         let again = FileAuditLog::open(&dir, 30_000, trace).unwrap();
         let events: Vec<_> = again.recent(10).into_iter().map(|e| e.event).collect();
         assert_eq!(
@@ -546,9 +624,39 @@ mod tests {
                 duration_s: None,
             });
         }
+        log.flush();
         let size = fs::metadata(dir.join(NETWORK_FILE)).unwrap().len();
         assert!(size <= PER_HOUR as u64 * one + 64, "the network log grew to {size} bytes ({one} per entry)");
         assert!(log.recent(10_000).len() <= PER_HOUR as usize);
+        drop(log);
+        for name in [SESSIONS_FILE, NETWORK_FILE] {
+            let _ = fs::remove_file(dir.join(name));
+        }
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn a_burst_larger_than_the_writer_queue_loses_nothing_keeps_order_and_the_cache_is_ahead_of_the_disk() {
+        let dir = std::env::temp_dir().join(format!("swapdesk-audit-burst-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let trace: std::sync::Arc<dyn TraceSink> = std::sync::Arc::new(LogCapture::new());
+        let log = FileAuditLog::open(&dir, 10_000, trace).unwrap();
+        let total = WRITE_QUEUE * 3 + 7;
+        for i in 0..total as u64 {
+            log.append(AuditEntry {
+                time_ms: 20_000 + i,
+                device: DeviceRef::Known([1; 16]),
+                event: AuditEvent::Paired,
+                duration_s: None,
+            });
+        }
+        // The cache answers `recent` at once, with no wait for the files.
+        assert_eq!(log.recent(1)[0].time_ms, 20_000 + total as u64 - 1);
+        log.flush();
+        let bytes = fs::read(dir.join(SESSIONS_FILE)).unwrap();
+        let read = decode_log(&bytes).unwrap();
+        assert_eq!(read.entries.len(), total, "every entry reached the file");
+        assert!(read.entries.windows(2).all(|w| w[0].time_ms < w[1].time_ms), "in the order they were appended");
         drop(log);
         for name in [SESSIONS_FILE, NETWORK_FILE] {
             let _ = fs::remove_file(dir.join(name));
@@ -576,6 +684,7 @@ mod tests {
         };
         log.append(known.clone());
         log.append(unknown.clone());
+        log.flush();
         assert!(dir.join(SESSIONS_FILE).exists() && dir.join(NETWORK_FILE).exists());
         assert_eq!(log.recent(10), vec![unknown.clone(), known.clone()], "newest first");
         drop(log);

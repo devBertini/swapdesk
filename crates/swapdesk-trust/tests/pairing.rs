@@ -193,6 +193,35 @@ fn a_crash_between_the_nonce_and_the_result_counts_as_a_provisional_failure() {
 }
 
 #[test]
+fn the_accept_loop_wakes_on_the_mode_closing_not_on_a_timer() {
+    run(async {
+        // Closing the mode with nothing in flight ends the service at once: it sleeps on the mode, not on a 100 ms look.
+        let node = Node::new("b", TestUi::answering(true));
+        node.open_pairing_mode();
+        let server = start_responder(&node);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let closed = std::time::Instant::now();
+        node.mode.close();
+        tokio::time::timeout(Duration::from_secs(5), server.task).await.expect("the service ended").unwrap();
+        let took = closed.elapsed();
+        assert!(took < Duration::from_millis(60), "the service took {took:?} to notice the mode closing");
+
+        // Entering the mode again with the service gone changes nothing; a new service sees the mode that is open.
+        let other = Node::new("c", TestUi::answering(true));
+        other.open_pairing_mode();
+        let server = start_responder(&other);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!server.task.is_finished(), "an open mode keeps the service up");
+        // Re-entering restarts the time and wakes the loop, which finds the mode still open and goes back to sleep.
+        other.open_pairing_mode();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!server.task.is_finished());
+        other.mode.close();
+        tokio::time::timeout(Duration::from_secs(2), server.task).await.expect("ended").unwrap();
+    });
+}
+
+#[test]
 fn unsolicited_pairing_is_refused() {
     run(async {
         // 1. This machine is not in pairing mode: its pairing endpoint does not exist. Nothing answers.

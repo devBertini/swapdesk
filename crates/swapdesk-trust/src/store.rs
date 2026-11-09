@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use swapdesk_platform::SecretStore;
+use swapdesk_platform::{ErrorKind, PlatformError, SecretStore};
 use swapdesk_proto::Wire;
 
 use crate::error::{Result, TrustError};
@@ -81,6 +81,31 @@ impl TrustHandle {
         Ok(out)
     }
 
+    /// [`Self::update`] for an async caller: the change and the write (`trust.bin` goes through DPAPI and the disk) run
+    /// on a blocking thread, never on one of the runtime's few workers.
+    pub async fn update_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut TrustStore) -> R + Send + 'static,
+    ) -> Result<R> {
+        self.try_update_blocking(move |s| Ok(f(s))).await
+    }
+
+    /// [`Self::try_update`] for an async caller, on a blocking thread (see [`Self::update_blocking`]).
+    pub async fn try_update_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut TrustStore) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
+        let this = Arc::clone(self);
+        tokio::task::spawn_blocking(move || this.try_update(f)).await.unwrap_or_else(|e| {
+            Err(TrustError::Secret(PlatformError {
+                kind: ErrorKind::Os,
+                op: "TrustHandle::update",
+                os_code: None,
+                detail: format!("the write task ended early: {e}"),
+            }))
+        })
+    }
+
     pub fn snapshot(&self) -> TrustStore {
         self.read(Clone::clone)
     }
@@ -109,7 +134,6 @@ mod tests {
     use crate::ids::spki_from_public_key;
     use crate::records::PairedDevice;
     use swapdesk_fakes::MemorySecretStore;
-    use swapdesk_platform::{ErrorKind, PlatformError};
     use swapdesk_proto::Os;
 
     fn dev(seed: u8) -> PairedDevice {
@@ -199,6 +223,44 @@ mod tests {
         reader.join().unwrap();
         assert!(looked_up.is_ok(), "a lookup waited for the disk write");
         assert!(h.pinned(&spki_from_public_key(&[1; 32])).is_some(), "the change is published once it is written");
+    }
+
+    #[test]
+    fn an_async_update_runs_on_a_blocking_thread_and_leaves_the_runtime_free() {
+        use std::time::Duration;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let h =
+            TrustHandle::open(Arc::new(SlowStore { entered: Mutex::new(entered_tx), release: Mutex::new(release_rx) }))
+                .unwrap();
+        // One thread runs every task: if the write ran on it, the timer below could not fire while the "disk" is stopped.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let writer_thread = std::thread::current().id();
+        let seen_on = Arc::new(Mutex::new(None));
+        let done = rt.block_on(async {
+            let write = {
+                let (h, seen_on) = (Arc::clone(&h), Arc::clone(&seen_on));
+                tokio::spawn(async move {
+                    h.update_blocking(move |s| {
+                        *guard(&seen_on) = Some(std::thread::current().id());
+                        s.devices.push(dev(1));
+                    })
+                    .await
+                })
+            };
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+                .await
+                .unwrap();
+            // The write is stopped in the store. The only worker is free: a timer fires, and the task is not finished.
+            tokio::time::timeout(Duration::from_millis(300), std::future::pending::<()>()).await.unwrap_err();
+            assert!(!write.is_finished());
+            release_tx.send(()).unwrap();
+            write.await.unwrap().is_ok()
+        });
+        assert!(done, "the write itself succeeds");
+        let ran_on = guard(&seen_on).expect("the closure ran");
+        assert_ne!(ran_on, writer_thread);
+        assert!(h.pinned(&spki_from_public_key(&[1; 32])).is_some());
     }
 
     #[test]

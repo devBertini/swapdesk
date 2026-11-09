@@ -137,12 +137,57 @@ struct SessionTerms {
     events: Mutex<Option<Receiver<TermEvent>>>,
     pumping: AtomicBool,
     /// Commands applied in order: a resize never overtakes the one before it.
-    cmds: mpsc::UnboundedSender<Cmd>,
+    cmds: CmdQueue,
 }
 
+/// Commands waiting for a session's applier before the next one is refused.
+const CMD_QUEUE: usize = 256;
+
 enum Cmd {
-    Resize { term_id: u32, cols: u16, rows: u16 },
-    Close { term_id: u32 },
+    /// Apply the newest size recorded for this terminal (see [`CmdQueue::resize`]).
+    Resize {
+        term_id: u32,
+    },
+    Close {
+        term_id: u32,
+    },
+}
+
+/// The bounded queue of a session's terminal commands, fed by the viewer. A viewer can send a resize for every pixel of
+/// a window drag, so a resize is recorded as "the newest size of this terminal" and queued once: a flood costs one place
+/// per terminal and the shell gets the last size. A close is idempotent: one that finds the queue full is dropped, the
+/// first of them is already waiting. Nothing grows past [`CMD_QUEUE`].
+struct CmdQueue {
+    tx: mpsc::Sender<Cmd>,
+    sizes: Mutex<HashMap<u32, (u16, u16)>>,
+}
+
+impl CmdQueue {
+    fn new() -> (Self, mpsc::Receiver<Cmd>) {
+        let (tx, rx) = mpsc::channel(CMD_QUEUE);
+        (Self { tx, sizes: Mutex::new(HashMap::new()) }, rx)
+    }
+
+    fn resize(&self, term_id: u32, cols: u16, rows: u16) {
+        // The marker is queued with the map locked (`try_send` never waits): a resize that comes meanwhile either finds
+        // the entry and relies on a marker that is really queued, or finds it gone and queues its own. Without the lock
+        // the entry could be removed after a newer size was recorded under it, and that size would be lost.
+        let mut sizes = lock(&self.sizes);
+        let first = sizes.insert(term_id, (cols, rows)).is_none();
+        // Already queued: the applier will read the newer size. Not queued and no room: forget it, a later one tries again.
+        if first && self.tx.try_send(Cmd::Resize { term_id }).is_err() {
+            sizes.remove(&term_id);
+        }
+    }
+
+    fn close(&self, term_id: u32) {
+        let _ = self.tx.try_send(Cmd::Close { term_id });
+    }
+
+    /// The size the applier of `Cmd::Resize` reads: the newest, once.
+    fn take_size(&self, term_id: u32) -> Option<(u16, u16)> {
+        lock(&self.sizes).remove(&term_id)
+    }
 }
 
 impl SessionTerms {
@@ -217,7 +262,7 @@ impl HostInner {
         });
         let spawner: Arc<dyn PtySpawner> = Arc::new(Routing { user, env: Arc::clone(&self.env) });
         let (host, events) = TermHost::new(spawner, EVENT_CAPACITY);
-        let (cmds, mut rx) = mpsc::unbounded_channel();
+        let (cmds, mut rx) = CmdQueue::new();
         let terms = Arc::new(SessionTerms {
             host: Mutex::new(host),
             sinks: Arc::default(),
@@ -238,7 +283,8 @@ impl HostInner {
 
     fn apply(&self, run: &SessionTerms, ctx: &SessionCtx, cmd: Cmd) {
         match cmd {
-            Cmd::Resize { term_id, cols, rows } => {
+            Cmd::Resize { term_id } => {
+                let Some((cols, rows)) = run.cmds.take_size(term_id) else { return };
                 if let Err(code) = lock(&run.host).resize(term_id, cols, rows) {
                     let _ = ctx.try_send(refuse(code, 0x0503, term_id));
                 }
@@ -469,12 +515,12 @@ impl ChannelHandler for HostTerminals {
             }
             Message::TermResize(TermResize { term_id, cols, rows }) => {
                 if let Some(run) = inner.session(ctx) {
-                    let _ = run.cmds.send(Cmd::Resize { term_id, cols, rows });
+                    run.cmds.resize(term_id, cols, rows);
                 }
             }
             Message::TermClose(TermClose { term_id }) => {
                 if let Some(run) = inner.session(ctx) {
-                    let _ = run.cmds.send(Cmd::Close { term_id });
+                    run.cmds.close(term_id);
                 }
             }
             _ => {}
@@ -706,5 +752,95 @@ impl ChannelHandler for ViewerTerms {
                 let _ = out.send(ViewerOut::Term(TermOut::Exited { term_id: *term_id, code: None })).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod cmd_queue_tests {
+    use super::*;
+
+    #[test]
+    fn a_flood_of_resizes_costs_one_place_per_terminal_and_the_last_size_wins() {
+        let (q, mut rx) = CmdQueue::new();
+        for i in 0..10_000u16 {
+            q.resize(1, 80 + i % 100, 24);
+        }
+        q.resize(2, 100, 40);
+        q.resize(1, 132, 43);
+        assert_eq!(rx.len(), 2, "one marker per terminal, however many resizes came");
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Resize { term_id: 1 })));
+        assert_eq!(q.take_size(1), Some((132, 43)), "the newest size of terminal 1");
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Resize { term_id: 2 })));
+        assert_eq!(q.take_size(2), Some((100, 40)));
+        assert_eq!(q.take_size(1), None, "taken once");
+        // After the marker was taken a new resize queues a new one.
+        q.resize(1, 90, 30);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Resize { term_id: 1 })));
+    }
+
+    #[test]
+    fn resizes_racing_a_consumer_over_a_nearly_full_queue_never_leave_an_entry_without_its_marker() {
+        let (q, mut rx) = CmdQueue::new();
+        let q = Arc::new(q);
+        // All but a few places taken, so the queue flips between full and not while the consumer drains.
+        for _ in 0..CMD_QUEUE - 2 {
+            q.close(9);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers: Vec<_> = (0..4u16)
+            .map(|w| {
+                let q = Arc::clone(&q);
+                std::thread::spawn(move || {
+                    for i in 0..3000u16 {
+                        q.resize(1, 80 + w, 24 + i % 7);
+                        q.resize(2, 90 + w, 30);
+                    }
+                })
+            })
+            .collect();
+        let consumer = {
+            let (q, stop) = (Arc::clone(&q), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut seen = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    if let Ok(Cmd::Resize { term_id }) = rx.try_recv() {
+                        seen += usize::from(q.take_size(term_id).is_some());
+                    }
+                }
+                (rx, seen)
+            })
+        };
+        for w in workers {
+            w.join().unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        let (mut rx, seen) = consumer.join().unwrap();
+        assert!(seen > 0, "the consumer applied sizes while the writers ran");
+        let mut markers = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            markers += usize::from(matches!(cmd, Cmd::Resize { .. }));
+        }
+        let entries = lock(&q.sizes).len();
+        assert!(
+            entries <= markers,
+            "{entries} sizes recorded but only {markers} markers queued: a size nobody will apply"
+        );
+    }
+
+    #[test]
+    fn closes_are_bounded_and_a_resize_that_finds_no_room_leaves_no_trace() {
+        let (q, mut rx) = CmdQueue::new();
+        for _ in 0..CMD_QUEUE * 3 {
+            q.close(1);
+        }
+        assert_eq!(rx.len(), CMD_QUEUE, "the queue stops at its bound");
+        // Full: the resize is dropped and its size is not left behind (the map is bounded by the queue too).
+        q.resize(9, 80, 24);
+        assert_eq!(q.take_size(9), None);
+        // Room again: a resize queues as usual.
+        while rx.try_recv().is_ok() {}
+        q.resize(9, 80, 24);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Resize { term_id: 9 })));
+        assert_eq!(q.take_size(9), Some((80, 24)));
     }
 }

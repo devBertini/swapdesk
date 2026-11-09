@@ -3,12 +3,12 @@
 //! The reader thread turns each helper message into a [`HelperEvent`] on a bounded channel (`blocking_send`: a slow
 //! consumer slows the reader, the pipe fills, and the helper's own writer drops media instead of waiting, which is
 //! the policy of [`crate::outbox`]). The writer path is the [`Outbox`] and its writer thread: control messages are
-//! never dropped, and an async caller waits for room with a sleep, never by blocking a runtime thread.
+//! never dropped, and an async caller waits for room on the outbox's own wake-up, never by blocking a runtime thread
+//! and never on a timer.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use swapdesk_files::{FsCaller, Pending, PipeCaller};
 use swapdesk_ipc::{AudioModeKind, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, Message};
@@ -16,15 +16,14 @@ use swapdesk_proto::{CursorPosition, CursorShape, Desktop, Display, DisplayList,
 use tokio::sync::mpsc;
 
 use super::routing::HelperKind;
-use crate::outbox::{Outbox, TryControl, spawn_writer};
+use crate::outbox::{Limits, Outbox, TryControl, spawn_writer};
 use crate::rpc::Rpc;
 
-/// Queued control messages toward a helper before a sender waits.
-const CONTROL_QUEUE: usize = 256;
+/// Queued control messages toward a helper before a sender waits, and the bytes they may hold (a disk write or a
+/// batch of shell input is big; the count alone would let 256 of them pile up).
+const CONTROL_QUEUE: Limits = Limits::new(256, 16 * 1024 * 1024);
 /// Events queued from the reader thread before it waits for the consumer.
 const EVENT_QUEUE: usize = 64;
-/// How long an async sender sleeps between two looks at a full queue.
-const FULL_RETRY: Duration = Duration::from_millis(2);
 
 /// What a helper told the service. `Debug` shows sizes, never the pixels, audio, shell output or fault details.
 pub enum HelperEvent {
@@ -176,17 +175,7 @@ impl HelperLink {
 
     /// Queues a control message; waits (asynchronously) for room. `false` when the pipe is closed.
     pub async fn send(&self, msg: Message) -> bool {
-        let mut msg = msg;
-        loop {
-            match self.outbox.try_send_control(msg) {
-                TryControl::Sent => return true,
-                TryControl::Closed => return false,
-                TryControl::Full(back) => {
-                    msg = back;
-                    tokio::time::sleep(FULL_RETRY).await;
-                }
-            }
-        }
+        self.outbox.send_control_async(msg).await
     }
 
     /// Queues a control message without waiting; a full queue loses it (shutdown paths only).
@@ -228,7 +217,7 @@ where
     if hello.role != role {
         return Err(AttachError::RoleMismatch { expected: role, got: hello.role });
     }
-    let (outbox, rx) = Outbox::new(CONTROL_QUEUE);
+    let (outbox, rx) = Outbox::with_limits(CONTROL_QUEUE);
     // The writer thread ends when every `Outbox` clone is gone; its report is of no use to the service (a broken
     // pipe shows as `Gone` from the reader).
     drop(spawn_writer(&outbox, rx, framed).map_err(AttachError::Spawn)?);

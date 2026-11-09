@@ -155,7 +155,8 @@ impl UiPipes {
             Ok(s) => return refuse(&format!("it runs in session {s}")),
             Err(e) => return refuse(&e.to_string()),
         }
-        let (Ok(for_identity), Ok(for_cancel)) = (conn.try_clone(), conn.try_clone()) else {
+        let (Ok(for_identity), Ok(for_cancel), Ok(for_cut)) = (conn.try_clone(), conn.try_clone(), conn.try_clone())
+        else {
             return refuse("pipe handle");
         };
         let Ok((mut reader_half, writer_half)) = conn.split() else { return refuse("pipe split") };
@@ -206,7 +207,10 @@ impl UiPipes {
         let reader = FrameReader::new(reader_half);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         lock(&self.open).push((id, for_cancel));
-        let end = self.hub.serve(reader, writer, info);
+        // A UI that stops reading its messages is cut by the hub: cancelling the pipe's I/O unblocks the hub's reader and
+        // writer, `serve` ends and the pipe closes, so the UI sees the end of the pipe and reconnects.
+        let for_cut = Mutex::new(for_cut);
+        let end = self.hub.serve_cancellable(reader, writer, info, Arc::new(move || lock(&for_cut).cancel_io()));
         lock(&self.open).retain(|(i, _)| *i != id);
         if let Err(e) = end {
             self.log(Level::Debug, format_args!("a UI connection ended: {e}"));
