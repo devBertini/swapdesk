@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! parent_layer                (the shell's; the toolbar layer is a sibling above the container)
-//!  `- container               black, clips to the video area, geometry flipped (y grows downwards inside it)
+//!  `- container               black, clips to the video area, y grows downwards inside it (flipped unless the parent is)
 //!      |- video               AVSampleBufferDisplayLayer, videoGravity "resize", frame = where the picture lands
 //!      `- cursor              the remote cursor, a layer of its own above the video
 //! ```
@@ -569,7 +569,9 @@ impl Renderer for MacRenderer {
         });
         let container = CALayer::new();
         let cursor = transaction(|| {
-            container.setGeometryFlipped(true);
+            // `geometryFlipped` is relative to the superlayer: a flipped parent (a flipped NSView's layer) already
+            // counts y downwards, and flipping the container again would make the cursor run upside down.
+            container.setGeometryFlipped(!parent.isGeometryFlipped());
             container.setMasksToBounds(true);
             container.setBackgroundColor(Some(&CGColor::new_generic_gray(0.0, 1.0)));
             // SAFETY: both statics are the framework's own; the gravity string is a valid constant.

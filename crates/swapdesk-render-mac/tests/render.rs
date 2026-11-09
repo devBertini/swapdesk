@@ -110,6 +110,21 @@ fn a_flipped_parent_counts_y_from_the_top() {
 }
 
 #[test]
+fn the_container_counts_y_downwards_whether_or_not_the_parent_is_flipped() {
+    // `geometryFlipped` is relative to the superlayer: inside a flipped parent the container must not flip again, or
+    // the cursor (placed from the top) moves upside down.
+    for parent_flipped in [false, true] {
+        let parent = parent();
+        parent.setGeometryFlipped(parent_flipped);
+        let mut r = renderer();
+        r.attach(surface(&parent), area(0, 0, 800, 600)).expect("attach");
+        let container = r.container_layer().expect("container");
+        assert_eq!(container.isGeometryFlipped(), !parent_flipped, "parent flipped: {parent_flipped}");
+        r.detach();
+    }
+}
+
+#[test]
 fn a_cpu_picture_is_enqueued_and_laid_out_to_fit() {
     let parent = parent();
     let mut r = renderer();

@@ -133,6 +133,9 @@ struct MainWindow {
     actions: RefCell<Vec<Action>>,
     fields: RefCell<Vec<(EditId, Retained<NSTextField>)>>,
     last: RefCell<Option<MainModel>>,
+    /// The content view is being replaced: AppKit ends the old field's editing (`textDidEndEditing`, an action) in
+    /// the middle of `setContentView`, and that action is the old view's, not the person's.
+    rebuilding: Cell<bool>,
 }
 
 pub struct Shell {
@@ -223,6 +226,7 @@ pub(crate) fn start(
             actions: RefCell::new(Vec::new()),
             fields: RefCell::new(Vec::new()),
             last: RefCell::new(None),
+            rebuilding: Cell::new(false),
         },
         viewer: RefCell::new(None),
         tick_timer: RefCell::new(None),
@@ -392,6 +396,9 @@ impl Shell {
     // ----- what AppKit tells the shell -----
 
     fn on_action(&self, sender: &AnyObject) {
+        if self.main.rebuilding.get() {
+            return;
+        }
         let Some(control) = sender.downcast_ref::<NSControl>() else { return };
         let tag = control.tag();
         let (idx, parity) = ((tag / 2) as usize, tag % 2);
@@ -615,8 +622,7 @@ impl Shell {
             })
             .map(|(e, _)| *e);
 
-        let mut actions = self.main.actions.borrow_mut();
-        actions.clear();
+        let mut actions = Vec::new();
         let mut fields = Vec::new();
         let mut ctx = Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: 0, fields: &mut fields };
         let root = PaintedView::create(mtm, bounds, Some(pal.canvas));
@@ -681,7 +687,11 @@ impl Shell {
             }
         }
         win.setTitle(&ns(&model.title));
+        // No borrow of the shell's cells is held across `setContentView`: it calls back into `on_action`.
+        self.main.rebuilding.set(true);
         win.setContentView(Some(&view_of(&root)));
+        self.main.rebuilding.set(false);
+        *self.main.actions.borrow_mut() = actions;
         *self.main.fields.borrow_mut() = fields;
 
         if let Some(e) = focused
