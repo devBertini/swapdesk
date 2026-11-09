@@ -222,10 +222,12 @@ impl Hub {
         self.notify(Notify::DevicesChanged(list));
     }
 
-    /// A session went live in either role: apply "keep awake".
+    /// A session went live in either role: apply "keep awake", and the device list shows the peer on the network
+    /// (a device with a live session is reachable whatever DNS-SD says).
     pub fn session_began(&self) {
         let n = self.live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
         self.p.hooks.keep_awake(n > 0 && self.settings().keep_awake);
+        self.devices_changed();
     }
 
     /// A session ended: apply "keep awake".
@@ -334,8 +336,12 @@ impl UiHub {
         *lock(&self.hub.desktop) = desktop;
     }
 
-    /// The network changed: the presence re-reads the interfaces and the UIs get the new status and list.
+    /// The network changed: the session endpoint follows the approved addresses, the presence re-reads the
+    /// interfaces, and the UIs get the new status and list.
     pub fn network_changed(&self) {
+        if let Some(core) = self.hub.core() {
+            core.network_changed();
+        }
         self.hub.p.presence.refresh();
         self.hub.refresh_pair_nets();
         let status = self.hub.network_status();

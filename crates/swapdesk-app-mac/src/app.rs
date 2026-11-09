@@ -186,6 +186,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         params.ports = Some((0, 0));
     }
     params.discovery = options.selftest.is_none();
+    // The network's changes come from SystemConfiguration's dynamic store, once per burst, without a timer.
+    params.network_notices = Some(Box::new(|changed| {
+        swapdesk_net_mac::NetworkWatcher::start(changed)
+            .map(|w| Box::new(w) as Box<dyn Send>)
+            .map_err(|e| format!("network notices: {e}"))
+    }));
     // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
     if options.selftest.is_none() {
         params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));

@@ -236,13 +236,13 @@ impl HostUi for HubHostUi {
                     },
                     None,
                 );
+                // `session_began` also pushes the device list, which now shows the viewer on the network.
                 hub.session_began();
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
                     state: SessionState::Active { since_ms: now, role: Role::Host, granted: granted.bits() },
                 });
-                hub.devices_changed();
             }
             HostEvent::Refused { device, code } => {
                 hub.log(

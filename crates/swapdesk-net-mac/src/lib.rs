@@ -9,6 +9,9 @@
 //!   link-layer addresses, and SystemConfiguration's `SCNetworkInterfaceCopyAll` for each interface's type, since the
 //!   BSD name alone cannot tell a physical `en` interface from a virtual one.
 //!
+//! * [`watch`] says when the network changed (SystemConfiguration's dynamic store on macOS), once per burst, without a
+//!   timer.
+//!
 //! The category and firewall fields of `NetInterface` are Windows facts and stay `None` here.
 //!
 //! Sources (read 2026-11-08): `getifaddrs(3)` man page on macOS; SCNetworkConfiguration reference,
@@ -18,9 +21,14 @@
 //! This crate holds the `unsafe` of the feature; `swapdesk-lan` forbids it.
 
 pub mod classify;
+pub mod watch;
 
 #[cfg(target_os = "macos")]
 mod mac_impl;
+#[cfg(target_os = "macos")]
+mod watch_mac;
+
+pub use watch::NetworkWatcher;
 
 #[cfg(target_os = "macos")]
 pub use mac_impl::{InterfaceReport, MacNetInterfaces, list_interfaces};

@@ -7,7 +7,7 @@
 #![cfg(windows)]
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use swapdesk_lan::discovery::{Config, Discovery, DiscoveryEvent, Peer};
@@ -20,8 +20,8 @@ use swapdesk_proto::Os;
 /// The real list, optionally altered for the instance that plays "another machine".
 struct Nets {
     real: WindowsNetInterfaces,
-    /// Replace this address by that one on every interface.
-    rewrite: Option<(Ipv4Addr, Ipv4Addr)>,
+    /// Replace this address by that one on every interface (a test changes it to play a DHCP change).
+    rewrite: Mutex<Option<(Ipv4Addr, Ipv4Addr)>>,
     /// Pretend every physical interface is virtual (nothing may be announced).
     all_virtual: bool,
 }
@@ -33,7 +33,7 @@ impl NetInterfaces for Nets {
             if self.all_virtual && matches!(i.kind, IfKind::Ethernet | IfKind::WiFi) {
                 i.kind = IfKind::Virtual;
             }
-            if let Some((from, to)) = self.rewrite {
+            if let Some((from, to)) = *self.rewrite.lock().unwrap() {
                 for (a, _) in &mut i.ipv4 {
                     if *a == from {
                         *a = to;
@@ -46,7 +46,7 @@ impl NetInterfaces for Nets {
 }
 
 fn real_nets() -> Arc<dyn NetInterfaces> {
-    Arc::new(Nets { real: WindowsNetInterfaces, rewrite: None, all_virtual: false })
+    Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(None), all_virtual: false })
 }
 
 /// An unused-looking neighbour address in the subnet of the first approved address, or None (skip) when there is none.
@@ -102,7 +102,7 @@ fn two_instances_discover_each_other_on_an_approved_interface_within_5_seconds()
     let Some((real, fake)) = setup() else { return };
     let a_nets = real_nets();
     let b_nets: Arc<dyn NetInterfaces> =
-        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Some((real, fake)), all_virtual: false });
+        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
 
     let a = Discovery::start(a_nets, txt("Alpha", 0xA1, Os::Windows), config(54353, 47820)).unwrap();
     let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::MacOs), config(54353, 47822)).unwrap();
@@ -171,7 +171,7 @@ fn nothing_is_announced_or_browsed_when_no_interface_is_approved() {
     let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(54355, 47820)).unwrap();
     // B sees the same PC but every physical interface looks virtual: the guard approves nothing.
     let b_nets: Arc<dyn NetInterfaces> =
-        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Some((real, fake)), all_virtual: true });
+        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: true });
     let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::Windows), config(54355, 47822)).unwrap();
     assert!(b.applied().is_empty());
     assert!(
@@ -187,7 +187,7 @@ fn nothing_is_announced_or_browsed_when_no_interface_is_approved() {
 fn discovery_also_works_on_the_standard_mdns_port_beside_the_windows_responder() {
     let Some((real, fake)) = setup() else { return };
     let b_nets: Arc<dyn NetInterfaces> =
-        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Some((real, fake)), all_virtual: false });
+        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
     let a = Discovery::start(
         real_nets(),
         txt("Alpha", 0xA1, Os::Windows),
@@ -199,6 +199,42 @@ fn discovery_also_works_on_the_standard_mdns_port_beside_the_windows_responder()
     let (_, took) =
         wait_for(&a, Duration::from_secs(5), |e| found(e, 0xB2).is_some()).expect("A did not find B on port 5353");
     println!("port 5353: A found B in {took:?}");
+    a.shutdown();
+    b.shutdown();
+}
+
+#[test]
+fn an_address_change_starts_a_fresh_daemon_and_both_sides_follow_the_new_address() {
+    // The field case (09/11): DHCP moved a running machine to another address. With mdns-sd's own re-check off, the old
+    // daemon kept the lost address and never joined the mDNS group through the new one; a fresh daemon has no such
+    // memory. (On one PC the OS address does not change, so this proves the replacement and that peers follow it; the
+    // deafness itself shows only on a real address change.)
+    let Some((real, fake)) = setup() else { return };
+    let [a, b, c, d] = fake.octets();
+    let moved = Ipv4Addr::new(a, b, c, if d == 247 { 246 } else { 247 });
+    let b_nets =
+        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
+    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(54356, 47820)).unwrap();
+    let b = Discovery::start(b_nets.clone(), txt("Beta", 0xB2, Os::MacOs), config(54356, 47822)).unwrap();
+    wait_for(&a, Duration::from_secs(5), |e| found(e, 0xB2).is_some_and(|p| p.links.iter().any(|l| l.remote == fake)))
+        .expect("A did not find B at its first address");
+    wait_for(&b, Duration::from_secs(5), |e| found(e, 0xA1).is_some()).expect("B did not find A");
+    assert_eq!(b.daemons_started(), 1);
+    assert!(!b.refresh().unwrap(), "nothing changed, nothing is rebuilt");
+    assert_eq!(b.daemons_started(), 1);
+
+    // B's address changes: a refresh replaces its daemon, A sees B at the new address, and B finds A again.
+    *b_nets.rewrite.lock().unwrap() = Some((real, moved));
+    assert!(b.refresh().unwrap());
+    assert_eq!(b.daemons_started(), 2, "an address change starts a fresh daemon");
+    assert!(b.applied().iter().any(|x| x.addr == moved));
+    let (_, took) = wait_for(&a, Duration::from_secs(5), |e| {
+        found(e, 0xB2).is_some_and(|p| p.links.iter().any(|l| l.remote == moved))
+    })
+    .expect("A did not follow B to its new address");
+    let (_, again) =
+        wait_for(&b, Duration::from_secs(5), |e| found(e, 0xA1).is_some()).expect("B's new daemon did not find A");
+    println!("after the change: A saw B's new address in {took:?}, B found A again in {again:?}");
     a.shutdown();
     b.shutdown();
 }

@@ -34,6 +34,7 @@ use crate::testpipe::{PipeWriter, duplex_blocking};
 mod clip_actions;
 mod extras;
 mod files;
+mod presence;
 mod security;
 mod terminal;
 
@@ -94,6 +95,8 @@ struct Machine {
     hooks: Arc<TestHooks>,
     helpers: Vec<(RecordingInputSink, JoinHandle<()>)>,
     log: LogCapture,
+    /// The interface list the hub and the core read (a test changes it to play a network change).
+    nets: Arc<FakeNetInterfaces>,
 }
 
 impl Machine {
@@ -121,6 +124,7 @@ impl Machine {
         let trace = LogCapture::new();
         let log = trace.clone();
         let interfaces = Arc::new(interfaces);
+        let nets = Arc::clone(&interfaces);
         let clock = Arc::new(MonotonicClock::new());
         let hub = UiHub::new(HubParams {
             os: Os::Windows,
@@ -157,7 +161,7 @@ impl Machine {
         // The UIs of `info()` run in session 1, the console's: what a connection may do (pair, grant, connect, swap)
         // is the console's alone. A test about another session connects with its own `ConnInfo`.
         hub.set_console_session(Some(1));
-        Self { core, hub, identity, trust, secrets, audit, presence, hooks, helpers: Vec::new(), log }
+        Self { core, hub, identity, trust, secrets, audit, presence, hooks, helpers: Vec::new(), log, nets }
     }
 
     fn id(&self) -> DeviceId {
