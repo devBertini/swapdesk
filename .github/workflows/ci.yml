@@ -36,26 +36,39 @@ jobs:
       - name: Install cargo-nextest
         run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
       - name: Tests (interactive and GPU-only tests are ignored by default)
-        run: cargo nextest run --workspace --locked --profile ci
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --locked --profile ci 2>&1 | tee "$RUNNER_TEMP/tests.log"
       - name: Failing tests as annotations
         if: failure()
         shell: python
         run: |
+          import os, re
           import xml.etree.ElementTree as ET
-          root = ET.parse("C:/t/nextest/ci/junit.xml").getroot()
+          def esc(t):
+              return t.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
           shown = 0
-          for case in root.iter("testcase"):
-              bad = case.find("failure")
-              if bad is None:
-                  bad = case.find("error")
-              if bad is None or shown >= 40:
-                  continue
-              shown += 1
-              text = (bad.get("message") or "") + " " + (case.findtext("system-err") or bad.text or "")
-              text = " ".join(text.split())[-900:].replace("%", "%25")
-              title = f"{case.get('classname')} {case.get('name')}"
-              title = title.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
-              print(f"::error title={title}::{text}")
+          junit = "C:/t/nextest/ci/junit.xml"
+          if os.path.exists(junit):
+              for case in ET.parse(junit).getroot().iter("testcase"):
+                  bad = case.find("failure")
+                  if bad is None:
+                      bad = case.find("error")
+                  if bad is None or shown >= 40:
+                      continue
+                  shown += 1
+                  text = (bad.get("message") or "") + " " + (case.findtext("system-err") or bad.text or "")
+                  text = " ".join(text.split())[-900:]
+                  title = f"{case.get('classname')} {case.get('name')}".replace(":", "%3A").replace(",", "%2C")
+                  print(f"::error title={esc(title)}::{esc(text)}")
+          if shown == 0:
+              # No report (the build failed, or the run stopped early): the last lines of the log say why.
+              log = open(os.path.join(os.environ["RUNNER_TEMP"], "tests.log"), encoding="utf-8", errors="replace").read()
+              log = re.sub(r"\x1b\[[0-9;]*m", "", log)
+              lines = [l for l in log.splitlines() if l.strip()]
+              keep = [l for l in lines if re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
+              print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 
   macos:
     runs-on: macos-latest
