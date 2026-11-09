@@ -3,12 +3,15 @@
 //! `swapdesk_ui::UiState` through it and report where every control, text input, video area and terminal grid landed
 //! ([`Output`]), so both systems show the same layout, spacing, type and colours. No OS API lives here.
 
+mod font;
 mod painter;
 mod screens_files;
 mod screens_main;
 mod screens_viewer;
+pub mod svg;
 mod view;
 
+pub use font::{INSTRUMENT_SANS, face_metrics, label_height, line_box};
 pub use painter::{Align, Label, Painter, Rect, rrect_path};
 pub use screens_viewer::banner_size;
 pub use view::{EditSlot, Frame, Interaction, Kind, Output, Widget, button_style, finish, icons};
@@ -23,6 +26,26 @@ pub fn paint(mut frame: Frame<'_>, kind: WindowKind) -> Output {
         WindowKind::Banner => screens_viewer::paint_banner(&mut frame),
     }
     finish(frame, kind == WindowKind::Viewer)
+}
+
+/// Where a frame put things, one line each, rounded to 1/100 DIP: the controls, the text inputs, the video and the
+/// terminal grid. Two shells that agree on this text agree on the layout.
+pub fn layout_dump(out: &Output) -> String {
+    use std::fmt::Write;
+    let r = |r: &Rect| format!("{:.2} {:.2} {:.2} {:.2}", r.x, r.y, r.w, r.h);
+    let mut s = String::new();
+    for w in &out.widgets {
+        let _ = writeln!(s, "widget {:?} {}", w.id, r(&w.rect));
+    }
+    for e in &out.edits {
+        let _ = writeln!(s, "edit {:?} {}", e.id, r(&e.rect));
+    }
+    for (name, area) in [("video", out.video), ("terminal", out.terminal), ("list", out.list_area)] {
+        if let Some(a) = area {
+            let _ = writeln!(s, "{name} {}", r(&a));
+        }
+    }
+    s
 }
 
 /// The window size a scenario's window has in the design.

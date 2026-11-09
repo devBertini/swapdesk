@@ -24,6 +24,10 @@ pub use model::{BannerModel, MainModel, VideoArea, ViewerModel, banner_model, ma
 #[cfg(target_os = "macos")]
 mod banner_window;
 #[cfg(target_os = "macos")]
+mod cg;
+#[cfg(target_os = "macos")]
+pub mod painter;
+#[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
 mod system;
@@ -47,3 +51,5 @@ pub use video::{VideoSlot, VideoSurface, ViewCursor, set_view_cursor};
 
 #[cfg(test)]
 mod model_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod painter_tests;

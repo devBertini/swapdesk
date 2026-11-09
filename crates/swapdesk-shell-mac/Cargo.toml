@@ -19,6 +19,7 @@ unimplemented = "warn"
 
 [dependencies]
 swapdesk-ui = { path = "../swapdesk-ui" }
+swapdesk-paint = { path = "../swapdesk-paint" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

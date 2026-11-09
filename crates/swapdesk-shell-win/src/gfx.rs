@@ -19,8 +19,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::core::{BOOL, HSTRING, Interface, Result};
 
-/// Instrument Sans (SIL OFL 1.1, assets/OFL.txt), embedded so nothing is installed system-wide.
-pub static INSTRUMENT_SANS: &[u8] = include_bytes!("../assets/InstrumentSans[wdth,wght].ttf");
+pub use swapdesk_paint::INSTRUMENT_SANS;
 
 pub use swapdesk_paint::{Align, Label, Rect};
 use swapdesk_paint::Painter;
@@ -137,11 +136,7 @@ impl Fonts {
         };
         // CSS puts the content area in the middle of the line box. Browsers lay text out in device pixels and round
         // the font's ascent and descent there, so the half-leading is worked out the same way.
-        let line_height = st.size * st.line;
-        let ascent_px = (self.ascent * st.size * scale).round();
-        let descent_px = (self.descent * st.size * scale).round();
-        let half_leading = ((line_height * scale - (ascent_px + descent_px)) / 2.0).floor();
-        let baseline = (half_leading + ascent_px) / scale;
+        let (line_height, baseline) = swapdesk_paint::line_box(st, scale, self.ascent, self.descent);
         // SAFETY: plain setter on a format we own.
         unsafe { format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_height, baseline)? };
         self.formats.borrow_mut().insert(key, (format.clone(), baseline));
@@ -237,7 +232,7 @@ impl Fonts {
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
             // Browsers keep layout sizes in 1/64 device pixels, rounded down; sums of them decide where rows land.
-            let h = (m.height * scale * 64.0).floor() / 64.0 / scale;
+            let h = swapdesk_paint::label_height(m.height, scale);
             Ok(Label::new(m.width, h, baseline, layout))
         }
     }
@@ -700,6 +695,14 @@ mod tests {
     use swapdesk_ui::Language;
 
     use super::*;
+
+    /// The Mac reads the face's metrics from the font file; they must be the ones DirectWrite uses here.
+    #[test]
+    fn the_shared_face_metrics_are_directwrites() {
+        let fonts = Fonts::new().expect("fonts");
+        let (a, d) = swapdesk_paint::face_metrics(INSTRUMENT_SANS).expect("metrics");
+        assert_eq!((fonts.ascent, fonts.descent), (a, d));
+    }
 
     #[test]
     fn locale_follows_the_interface_language() {
