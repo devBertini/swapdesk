@@ -71,12 +71,12 @@ jobs:
               lines = log.splitlines()
               notes = 0
               for i, line in enumerate(lines):
-                  m = re.match(r"\s*-+ (?:TRY \d+ )?STD(?:OUT|ERR):\s+(\S+ \S+)", line)
+                  m = re.search(r"STD(?:OUT|ERR):\s+(\S+ \S+)", line)
                   if not m or notes >= 8:
                       continue
                   body = []
                   for nxt in lines[i + 1:i + 120]:
-                      if re.match(r"\s*-+ (?:TRY \d+ )?STD(?:OUT|ERR):", nxt) or re.match(r"\s*(TRY \d+ )?(PASS|FAIL|SIGSEGV)", nxt):
+                      if re.search(r"STD(?:OUT|ERR):", nxt) or re.match(r"\s*(TRY \d+ )?(PASS|FAIL|SIGSEGV)", nxt):
                           break
                       if re.search(r"panicked|assert|left|right|Error|error|failed|denied", nxt):
                           body.append(nxt.strip())
