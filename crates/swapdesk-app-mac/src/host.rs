@@ -1,0 +1,59 @@
+//! The host side of the app (stage 24, slice a): the helper loop of `swapdesk_host::helper` over the Mac platform
+//! crates, run by the service's supervisor ([`crate::service::HostHelper`]) in this process. It is what the Windows
+//! user helper (`swapdesk-helper`) is, with ScreenCaptureKit capture and audio (`swapdesk-capture-mac`), the
+//! VideoToolbox encoder (`swapdesk-codec-mac`), `CGEventPost` input and the general pasteboard (`swapdesk-input-mac`),
+//! and the user's home as the files root.
+//!
+//! Grants (TCC): capture and audio need Screen Recording, input needs Accessibility. Without them the helper still
+//! runs: the sources report `PermissionDenied` to the service, which tells the viewer. [`ask_for_grants`] shows the
+//! system prompts once at start.
+
+use std::sync::Arc;
+
+use swapdesk_capture_mac::audio::MacAudio;
+use swapdesk_capture_mac::screen::MacScreen;
+use swapdesk_codec_mac::VtH264Encoder;
+use swapdesk_files::{FsServer, Roots};
+use swapdesk_host::helper::{HelperDeps, run_helper};
+use swapdesk_input_mac::{MacClipboard, MacInputSink};
+use swapdesk_ipc::IpcRole;
+use swapdesk_platform::{Clock, Level, TraceSink};
+
+use crate::service::HostHelper;
+
+/// The helper loop the supervisor runs, again after each end.
+pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
+    Arc::new(move |reader, writer| {
+        let (screen_clock, encoder_clock, audio_clock) = (Arc::clone(&clock), Arc::clone(&clock), Arc::clone(&clock));
+        let deps = HelperDeps::new(
+            move |_display| MacScreen::new(Arc::clone(&screen_clock)),
+            move |_first, _config, _backend| Ok(VtH264Encoder::new(Arc::clone(&encoder_clock))),
+            || Ok(MacInputSink::new()),
+            move || MacAudio::new(Arc::clone(&audio_clock)),
+            Arc::clone(&clock),
+        )
+        .with_clipboard(|| Ok(MacClipboard::new()));
+        // The user's files (C2.4 "Files"): the root is this user's home, chosen here, never by the service.
+        let deps =
+            match std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|p| p.is_absolute() && p.is_dir()) {
+                Some(home) => deps.with_fs(Arc::new(FsServer::new(Roots::Home {
+                    home,
+                    receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()),
+                }))),
+                None => deps,
+            };
+        run_helper(reader, writer, deps, IpcRole::HelperUser, std::process::id())
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    })
+}
+
+/// Shows the system prompts for the grants hosting needs, once at start and only for those missing: Screen Recording
+/// (capture and audio), then Accessibility and Input Monitoring (`swapdesk_input_mac::request_access`, which the
+/// viewer's shortcut capture shares). macOS shows each prompt only the first time; afterwards the user grants it in
+/// System Settings > Privacy & Security.
+pub fn ask_for_grants(trace: &dyn TraceSink) {
+    let screen = swapdesk_capture_mac::screen_access() || swapdesk_capture_mac::request_screen_access();
+    let input = swapdesk_input_mac::can_post() || swapdesk_input_mac::request_access().complete();
+    trace.log(Level::Info, "app", format_args!("hosting grants: screen recording {screen}, input {input}"));
+}

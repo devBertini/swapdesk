@@ -174,7 +174,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         secrets,
         store.dir().to_path_buf(),
         Arc::new(MacNetInterfaces),
-        clock,
+        Arc::clone(&clock),
         Arc::clone(&trace),
     );
     // A scratch run is a development instance: the system picks the ports (a Mac that runs its own Swapdesk keeps
@@ -183,11 +183,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
         params.ports = Some((0, 0));
     }
     params.discovery = options.selftest.is_none();
+    // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
+    if options.selftest.is_none() {
+        params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
+    }
     let sink: Arc<dyn ViewerSink> = viewer.clone();
     let service = InProcessService::start(params, waker.clone(), Some(sink))
         .map_err(|e| format!("the service did not start: {e}"))?;
     let backend = service.backend();
     viewer.set_out(backend.clone());
+    if options.selftest.is_none() {
+        crate::host::ask_for_grants(&*trace);
+    }
     let addrs = service.local_addrs().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
     trace.log(Level::Info, "app", format_args!("Swapdesk.app started (scratch: {})", options.use_scratch()));
 

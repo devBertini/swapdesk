@@ -32,6 +32,7 @@ path = "src/main.rs"
 swapdesk-app = { path = "../swapdesk-app" }
 swapdesk-audio = { path = "../swapdesk-audio" }
 swapdesk-core-mac = { path = "../swapdesk-core-mac" }
+swapdesk-files = { path = "../swapdesk-files" }
 swapdesk-host = { path = "../swapdesk-host" }
 swapdesk-input-mac = { path = "../swapdesk-input-mac" }
 swapdesk-ipc = { path = "../swapdesk-ipc" }
@@ -48,6 +49,7 @@ tokio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 swapdesk-audio-mac = { path = "../swapdesk-audio-mac" }
+swapdesk-capture-mac = { path = "../swapdesk-capture-mac" }
 swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
 swapdesk-net-mac = { path = "../swapdesk-net-mac" }
 swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
