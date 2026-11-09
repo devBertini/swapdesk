@@ -80,6 +80,8 @@ Each feature is in one of three states, written conservatively:
 | Reachable while logged in, window closed | n/a | Login item and menu bar | Windows service |
 | Unattended (login screen, lock screen, UAC) | Not in 1.0 | Not in 1.0 (macOS allows only logged-in and unlocked) | Not in 1.0 |
 
+**In the interface, both apps:** a home screen with this computer, pairing and recent activity; renaming a paired device in the app (a local name: the other computer is not told); and a theme setting (System, Light, Dark) kept per user with the other personal settings. Checked by hand in the Windows app; the Mac app has them built and unit-tested. Fixed during the 1.0 tests: a Mac that changes its address shows once and on the network, accepting a request from a just-paired computer, and the colours of a display with Windows HDR (Advanced Color) turned on.
+
 The runs between machines are driven by a test harness over the shipped host and viewer code, plus a manual session with the Mac controlling the PC. Windows to Windows across two separate PCs and Mac to Mac are not verified: the project has one PC and one Mac. The flow-by-flow proof map is [docs/FLUXOS.md](docs/FLUXOS.md).
 
 **Dependencies:** the project keeps a small, audited set of third-party crates (`cargo deny` and `cargo vet` in CI); transport and cryptography stay on `quinn`, `rustls` and `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). Their licenses are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

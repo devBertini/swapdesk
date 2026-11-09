@@ -80,6 +80,8 @@ Cada recurso está num de três estados, descritos de forma conservadora:
 | Alcançável com a sessão aberta e a janela fechada | n/a | Item de início e barra de menus | Serviço do Windows |
 | Sem ninguém na frente (tela de login, tela bloqueada, UAC) | Fora da 1.0 | Fora da 1.0 (o macOS só permite com sessão aberta e desbloqueada) | Fora da 1.0 |
 
+**Na interface, nos dois apps:** uma tela Início com este computador, o pareamento e a atividade recente; renomear um dispositivo pareado no próprio app (um nome local: o outro computador não é avisado); e a escolha de tema (Sistema, Claro, Escuro), guardada por usuário com os outros ajustes pessoais. Conferido à mão no app do Windows; no app do Mac está construído e com testes unitários. Corrigido nos testes da 1.0: um Mac que muda de endereço aparece uma vez só e na rede, o aceite de um pedido vindo de um computador recém-pareado, e as cores de uma tela com HDR do Windows (Cor Avançada) ligado.
+
 As execuções entre máquinas são conduzidas por um harness de testes sobre o código de host e visualizador que é distribuído, mais uma sessão manual com o Mac controlando o PC. Windows com Windows em dois PCs separados e Mac com Mac não foram verificados: o projeto tem um PC e um Mac. O mapa de prova fluxo a fluxo é o [docs/FLUXOS.md](docs/FLUXOS.md).
 
 **Dependências:** o projeto mantém um conjunto pequeno e auditado de crates de terceiros (`cargo deny` e `cargo vet` no CI); transporte e criptografia ficam em `quinn`, `rustls` e `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). As licenças delas estão em [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
