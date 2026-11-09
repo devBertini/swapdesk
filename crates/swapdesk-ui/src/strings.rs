@@ -149,7 +149,9 @@ strings! {
     PairWarn => "Se forem diferentes, cancele: outro aparelho pode estar tentando se passar pelo {0}.", "If they differ, cancel: another device may be trying to pose as {0}.";
     PairSame => "Os códigos são iguais", "The codes match";
     PairDifferent => "São diferentes", "They differ";
-    PairOpenBody => "Abra “Parear este computador” também no outro computador dentro desse tempo. Pedidos de pareamento sem isso são ignorados.", "Open “Pair this computer” on the other computer within this time too. Pairing requests without it are ignored.";
+    PairOpenBody => "Abra “Parear este computador” também no outro computador antes que o tempo abaixo acabe. Pedidos de pareamento sem isso são ignorados.", "Open “Pair this computer” on the other computer too, before the time below runs out. Pairing requests without it are ignored.";
+    PairTimeLeft => "Tempo para parear: {0}", "Time left to pair: {0}";
+    PairNotPairedBody => "Este computador ainda não está pareado. Para parear, abra “Parear este computador” nos dois computadores, com no máximo 2 minutos entre um e outro.", "This computer is not paired yet. To pair, open “Pair this computer” on both computers, at most 2 minutes apart.";
     PairSearching => "Procurando computadores com o pareamento aberto…", "Looking for computers with pairing open…";
     PairCancel => "Cancelar", "Cancel";
     PairWaitingTitle => "Esperando o outro computador", "Waiting for the other computer";

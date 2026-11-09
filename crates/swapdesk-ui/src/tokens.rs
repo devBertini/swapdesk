@@ -168,6 +168,8 @@ pub mod text {
     pub const TAB: TextStyle = TextStyle::new(14.0, 500);
     pub const TAB_SELECTED: TextStyle = TextStyle::new(14.0, 600);
     pub const PAIR_CODE: TextStyle = TextStyle::new(64.0, 600).line(1.0).tracking(0.04);
+    /// The time left to pair, beside its bar (board "Esperando o outro computador").
+    pub const COUNTDOWN: TextStyle = TextStyle::new(28.0, 600).line(1.0);
     pub const TABLE_HEAD: TextStyle = TextStyle::new(12.0, 600);
     pub const BAR: TextStyle = TextStyle::new(13.0, 600);
     pub const MONO: TextStyle = TextStyle::new(13.0, 400).line(1.7);
@@ -328,6 +330,9 @@ mod tests {
         let pair = include_str!("../../../docs/design/Pareamento.dc.html");
         assert!(pair.contains("font-size: 64px; font-weight: 600; letter-spacing: 0.04em"));
         assert_eq!((text::PAIR_CODE.size, text::PAIR_CODE.tracking), (64.0, 0.04));
+        let states = include_str!("../../../docs/design/EstadosPareamento.dc.html");
+        assert!(states.contains("font-size: 28px; font-weight: 600; line-height: 1\">1:47"));
+        assert_eq!((text::COUNTDOWN.size, text::COUNTDOWN.weight, text::COUNTDOWN.line), (28.0, 600, 1.0));
     }
 
     #[test]

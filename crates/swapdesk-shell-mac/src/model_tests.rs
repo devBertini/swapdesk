@@ -142,11 +142,11 @@ fn pairing_shows_the_six_digit_code_large_and_the_two_answers() {
     assert!(digits.chars().all(|c| c.is_ascii_digit() || c == ' '), "{digits}");
     let ids: Vec<ControlId> = blocks.iter().flat_map(Block::control_ids).collect();
     assert!(ids.contains(&ControlId::PairSame) && ids.contains(&ControlId::PairDifferent));
-    assert!(
-        blocks
-            .iter()
-            .any(|b| matches!(b, Block::Button(x) if x.id == ControlId::PairSame && x.style == ButtonStyle::Primary))
-    );
+    // Side by side, as on Windows (one interface on both systems).
+    // One row, the negative action at the start and the positive at the end (owner, 09/11).
+    assert!(blocks.iter().any(|b| matches!(b, Block::Actions(v)
+        if v.len() == 2 && v[0].id == ControlId::PairDifferent
+            && v[1].id == ControlId::PairSame && v[1].style == ButtonStyle::Primary)));
 }
 
 #[test]
@@ -305,11 +305,17 @@ fn every_viewer_scenario_maps_and_toolbar_controls_exist_in_the_state() {
 fn reconnecting_and_swap_show_as_a_card_over_the_video() {
     let m = viewer_model(&Scenario::EstadoReconectando.prepared_state()).expect("viewer");
     let card = m.overlay.expect("reconnecting card");
-    assert!(card.iter().any(|b| matches!(b, Block::Button(x) if x.id == ControlId::ReconnectDisconnect)));
+    assert!(
+        card.iter().any(|b| matches!(b, Block::Actions(v) if v.iter().any(|x| x.id == ControlId::ReconnectDisconnect)))
+    );
 
     let m = viewer_model(&Scenario::Inverter.prepared_state()).expect("viewer");
     let card = m.overlay.expect("swap card");
-    assert!(card.iter().any(|b| matches!(b, Block::Button(x) if x.id == ControlId::DialogPrimary)));
+    // The primary at the end of the row (owner, 09/11).
+    assert!(
+        card.iter()
+            .any(|b| matches!(b, Block::Actions(v) if v.last().is_some_and(|x| x.id == ControlId::DialogPrimary)))
+    );
 }
 
 #[test]
@@ -478,11 +484,28 @@ fn renaming_puts_the_action_beside_the_name_and_save_beside_cancel() {
         Block::ButtonRow(v) => Some(v.iter().map(|x| x.id).collect::<Vec<_>>()),
         _ => None,
     });
-    assert_eq!(row, Some(vec![ControlId::RenameSave, ControlId::RenameCancel]));
+    assert_eq!(row, Some(vec![ControlId::RenameCancel, ControlId::RenameSave]), "negative first (owner, 09/11)");
     assert!(blocks.iter().all(|b| !matches!(b, Block::HeadingAction { .. })), "the action gave way to the field");
 
     state.submit_edit(EditId::Rename, "  ".into());
     let texts: Vec<String> =
         content(&state).iter().filter_map(|b| if let Block::Text(t) = b { Some(t.clone()) } else { None }).collect();
     assert!(texts.contains(&state.t(MsgKey::RenameEmpty)), "{texts:?}");
+}
+
+#[test]
+fn pair_this_computer_shows_the_time_its_text_refers_to() {
+    // Owner, 09/11: the screen said "dentro desse tempo" and showed no time (the Mac drew only the title and the text).
+    let state = shell_state(Scenario::ParearEsteComputador);
+    let MainLayout::Card { blocks } = main_of(&state).layout else { panic!("the pairing card") };
+    let at_text = blocks.iter().position(|b| matches!(b, Block::Text(t) if t.contains("tempo abaixo"))).expect("body");
+    match &blocks[at_text + 1] {
+        Block::Countdown { time, left_milli, label } => {
+            assert!(time.contains(':'), "{time}");
+            assert!(*left_milli > 0 && *left_milli <= 1000);
+            assert!(label.contains(time.as_str()), "{label}");
+        }
+        other => panic!("the time comes right after the text that refers to it, got {other:?}"),
+    }
+    assert!(blocks.iter().any(|b| matches!(b, Block::Text(t) if t.starts_with("Procurando"))), "{blocks:?}");
 }

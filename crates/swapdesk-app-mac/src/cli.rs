@@ -19,6 +19,8 @@ pub struct Options {
     pub scratch: bool,
     pub selftest: Option<PathBuf>,
     pub drive_host: Option<PathBuf>,
+    /// Development, with `--mock`: capture the main window to this file once drawn, then quit.
+    pub shot: Option<PathBuf>,
     pub help: bool,
 }
 
@@ -48,7 +50,8 @@ impl core::fmt::Display for CliError {
     }
 }
 
-pub const USAGE: &str = "Swapdesk [--scratch] [--selftest <file>] [--drive-host <dir>] | Swapdesk --mock <scenario>";
+pub const USAGE: &str =
+    "Swapdesk [--scratch] [--selftest <file>] [--drive-host <dir>] | Swapdesk --mock <scenario> [--shot <png>]";
 
 /// Parses the arguments after the program name.
 pub fn parse(args: &[String]) -> Result<Options, CliError> {
@@ -68,6 +71,10 @@ pub fn parse(args: &[String]) -> Result<Options, CliError> {
                 o.drive_host = Some(PathBuf::from(args.get(i + 1).ok_or(CliError::MissingValue("--drive-host"))?));
                 i += 1;
             }
+            "--shot" => {
+                o.shot = Some(PathBuf::from(args.get(i + 1).ok_or(CliError::MissingValue("--shot"))?));
+                i += 1;
+            }
             "--scratch" => o.scratch = true,
             "--help" | "-h" => o.help = true,
             _ => {}
@@ -83,6 +90,13 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_shot_goes_with_a_mock_scenario() {
+        let o = parse(&args(&["--mock", "parear-este-computador", "--shot", "/tmp/p.png"])).unwrap();
+        assert_eq!((o.mock.as_deref(), o.shot), (Some("parear-este-computador"), Some(PathBuf::from("/tmp/p.png"))));
+        assert_eq!(parse(&args(&["--shot"])), Err(CliError::MissingValue("--shot")));
     }
 
     #[test]
@@ -105,7 +119,14 @@ mod tests {
         let o = parse(&args(&["--scratch", "--help", "--mock", "visualizador"])).unwrap();
         assert_eq!(
             o,
-            Options { mock: Some("visualizador".into()), scratch: true, selftest: None, drive_host: None, help: true }
+            Options {
+                mock: Some("visualizador".into()),
+                scratch: true,
+                selftest: None,
+                drive_host: None,
+                shot: None,
+                help: true
+            }
         );
     }
 

@@ -379,14 +379,18 @@ fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
         assert!(!overlap(&rename, &control) && !overlap(&rename, &view), "{size:?}: rename clear of the buttons");
         assert!(rename.right() <= control.x, "{size:?}: inside the title block");
 
-        // Renaming: the field is prefilled, "Salvar" and "Cancelar" follow it, nothing overlaps the connect buttons.
+        // Renaming: the field is prefilled, "Cancelar" then "Salvar" follow it (negative first, owner 09/11), nothing
+        // overlaps the connect buttons.
         state.activate(ControlId::RenameDevice);
         let r = at(&state, size);
         let slot = r.output.edits.iter().find(|e| e.id == EditId::Rename).expect("the rename field");
         assert_eq!(slot.value, "MacBook do escritório");
         let (save, cancel) = (widget(&r, ControlId::RenameSave), widget(&r, ControlId::RenameCancel));
         let (control, view) = (widget(&r, ControlId::Control), widget(&r, ControlId::ViewOnly));
-        assert!(slot.rect.right() <= save.x && save.right() <= cancel.x, "{size:?}: field, Salvar, Cancelar in order");
+        assert!(
+            slot.rect.right() <= cancel.x && cancel.right() <= save.x,
+            "{size:?}: field, Cancelar, Salvar in order"
+        );
         for part in [&save, &cancel, &widget(&r, ControlId::Edit(EditId::Rename))] {
             assert!(!overlap(part, &control) && !overlap(part, &view), "{size:?}: clear of the connect buttons");
         }

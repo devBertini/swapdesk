@@ -180,6 +180,20 @@ struct MainWindow {
     rebuilding: Cell<bool>,
 }
 
+/// The appearance `SWAPDESK_THEME=dark|light` asks for (development), `None` without it.
+fn forced_appearance() -> Option<&'static str> {
+    crate::locale::theme_override(std::env::var("SWAPDESK_THEME").ok().as_deref())
+        .map(|dark| if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" })
+}
+
+static SHOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static SHOT_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Development: the file the main window is captured to once it is drawn (see `Shell::take_shot`).
+pub fn set_shot(path: std::path::PathBuf) {
+    let _ = SHOT.set(path);
+}
+
 pub struct Shell {
     mtm: MainThreadMarker,
     controller: Retained<Controller>,
@@ -301,6 +315,7 @@ fn start_with(
     });
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
+    shell.apply_forced_appearance();
 
     // The window appears before any answer; the requests go out right after, all together.
     if show_now {
@@ -711,13 +726,24 @@ impl Shell {
     /// Gives `NSApp` the appearance the theme setting asks for (Aqua, DarkAqua, or none for Sistema), once per change:
     /// the native controls and the title bars follow it. Back on Sistema the OS's own appearance is read again, since
     /// while one was forced `effectiveAppearance` showed the forced one.
+    /// Sets the appearance once at launch: under `SWAPDESK_THEME` (development) the app's own controls must follow
+    /// the forced theme too, or a light card gets the dark system's white button titles.
+    fn apply_forced_appearance(&self) {
+        if let Some(name) = forced_appearance() {
+            let app = NSApplication::sharedApplication(self.mtm);
+            app.setAppearance(NSAppearance::appearanceNamed(&NSString::from_str(name)).as_deref());
+        }
+    }
+
     fn sync_appearance(&self) -> Changed {
         let theme = self.state.borrow().theme();
         if self.appearance.replace(theme) == theme {
             return Changed::NONE;
         }
         let app = NSApplication::sharedApplication(self.mtm);
-        let appearance = appearance_name(theme).and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
+        let appearance = appearance_name(theme)
+            .or_else(|| (theme == Theme::System).then(forced_appearance).flatten())
+            .and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
         app.setAppearance(appearance.as_deref());
         if theme == Theme::System {
             let dark = system_dark();
@@ -739,6 +765,7 @@ impl Shell {
         self.sync_viewer();
         if changed.hits(WindowKind::Main) || changed.hits(WindowKind::Banner) {
             self.rebuild_main();
+            self.take_shot();
         }
         if changed.hits(WindowKind::Viewer)
             && let Some(v) = self.viewer.borrow().as_ref()
@@ -778,6 +805,23 @@ impl Shell {
             }
             _ => {}
         }
+    }
+
+    /// Development (`--mock <scenario> --shot <file>`): once the main window is drawn, `screencapture` takes it alone
+    /// a second later (the app's own screen recording grant; nothing is asked), then the app quits.
+    fn take_shot(&self) {
+        let Some(path) = SHOT.get() else { return };
+        if SHOT_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let (path, window) = (path.clone(), self.main.window.windowNumber());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let status = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x", "-o", &format!("-l{window}"), &path.to_string_lossy()])
+                .status();
+            std::process::exit(if status.is_ok_and(|s| s.success()) { 0 } else { 1 });
+        });
     }
 
     fn rebuild_main(&self) {

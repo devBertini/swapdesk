@@ -1589,3 +1589,23 @@ fn a_first_start_without_ui_bin_keeps_the_system_language() {
     assert_eq!(s.user_prefs().language, Language::En);
     assert_eq!(s.user_prefs().theme, Theme::System);
 }
+
+#[test]
+fn pairing_texts_never_point_at_a_time_the_screen_does_not_show() {
+    // Owner, 09/11: "dentro desse tempo" with no time shown.
+    let s = Scenario::ParearEsteComputador.prepared_state();
+    let specs = s.controls(WindowKind::Main);
+    let body = specs.iter().position(|c| c.label.contains("tempo abaixo")).expect("the body");
+    let timer = &specs[body + 1];
+    assert_eq!(timer.role, UiRole::Progress, "the time follows the text that refers to it: {timer:?}");
+    let left = timer.value.clone().expect("the time drawn large");
+    assert!(left.contains(':') && timer.label.contains(&left), "{timer:?}");
+
+    // An unpaired device's panel has no countdown: its text names no time.
+    let mut s = Scenario::Dispositivos.prepared_state();
+    let unpaired = s.devices().iter().position(|d| !d.paired).expect("an unpaired device in the scenario");
+    s.activate(ControlId::Device(unpaired as u16));
+    let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Este computador ainda não está pareado")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("desse tempo") || t.contains("tempo abaixo")), "{texts:?}");
+}

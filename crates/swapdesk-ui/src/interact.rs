@@ -367,7 +367,7 @@ impl UiState {
             return;
         }
         if !d.paired {
-            s.text(UiRole::Text, self.name_of(MsgKey::PairOpenBody));
+            s.text(UiRole::Text, self.name_of(MsgKey::PairNotPairedBody));
             return;
         }
         match self.tab {
@@ -676,9 +676,16 @@ impl UiState {
     fn pairing_controls(&self, s: &mut Specs, p: &PairingView) {
         let name = p.device_id.as_ref().and_then(|id| self.device_by_id(id)).map(|d| d.name.clone());
         match &p.state {
-            PairingState::Open { .. } => {
+            PairingState::Open { remaining_s } => {
                 s.text(UiRole::Heading, self.name_of(MsgKey::PairThisComputer));
                 s.text(UiRole::Text, self.name_of(MsgKey::PairOpenBody));
+                // The time the body refers to, next to it: the value is what the screen draws large ("1:42").
+                let left = format::countdown(*remaining_s);
+                s.text(UiRole::Progress, self.tm(&Msg::new(MsgKey::PairTimeLeft).with(left.clone())));
+                if let Some(c) = s.v.last_mut() {
+                    c.value = Some(left);
+                }
+                s.text(UiRole::Text, self.name_of(MsgKey::PairSearching));
                 s.button(ControlId::PairCancel, self.name_of(MsgKey::PairCancel));
             }
             PairingState::Waiting => {

@@ -78,6 +78,13 @@ pub enum Block {
         level: u8,
     },
     Text(String),
+    /// The time left to pair, drawn large beside the bar of what is left (`left_milli`, 0 to 1000); `label` for a
+    /// screen reader.
+    Countdown {
+        time: String,
+        left_milli: u16,
+        label: String,
+    },
     /// The 6-digit pairing code, drawn large.
     Code {
         digits: String,
@@ -118,8 +125,11 @@ pub enum Block {
     },
     /// The home's cards, in order: side by side when the width allows, one under the other otherwise.
     Cards(Vec<Vec<Block>>),
-    /// Buttons side by side ("Salvar", "Cancelar").
+    /// Buttons side by side, negative first ("Cancelar", "Salvar").
     ButtonRow(Vec<ButtonModel>),
+    /// A card's or dialog's actions across its width: the negative ones at the start, the positive ones at the end
+    /// (owner, 09/11: the same order on both systems).
+    Actions(Vec<ButtonModel>),
     /// Placeholder lines while data loads (R-UI-1).
     Skeleton(u8),
 }
@@ -134,7 +144,7 @@ impl Block {
                 vec![(field.id, field.label.clone()), (action.id, action.label.clone())]
             }
             Block::Cards(cards) => cards.iter().flatten().flat_map(Block::labels).collect(),
-            Block::ButtonRow(v) => v.iter().map(|b| (b.id, b.label.clone())).collect(),
+            Block::ButtonRow(v) | Block::Actions(v) => v.iter().map(|b| (b.id, b.label.clone())).collect(),
             Block::Toggle(t) => vec![(t.id, t.label.clone())],
             Block::Field(f) => vec![(f.id, f.label.clone())],
             Block::Select(s) => vec![(s.id, s.label.clone())],
@@ -150,7 +160,7 @@ impl Block {
             Block::HeadingAction { action, .. } => vec![action.id],
             Block::FieldAction { field, action } => vec![field.id, action.id],
             Block::Cards(cards) => cards.iter().flatten().flat_map(Block::control_ids).collect(),
-            Block::ButtonRow(v) => v.iter().map(|b| b.id).collect(),
+            Block::ButtonRow(v) | Block::Actions(v) => v.iter().map(|b| b.id).collect(),
             Block::Toggle(t) => vec![t.id],
             Block::Field(f) => vec![f.id],
             Block::Select(s) => vec![s.id],
@@ -204,7 +214,16 @@ pub fn blocks_from(state: &UiState, specs: &[ControlSpec]) -> Vec<Block> {
             }
             UiRole::Text => out.push(Block::Text(c.label.clone())),
             UiRole::Row => out.push(Block::Row(c.label.clone())),
-            UiRole::Table | UiRole::Cell | UiRole::ColumnHeader | UiRole::Progress => {}
+            UiRole::Progress => {
+                if let (Some(time), Some(PairingView { state: swapdesk_ui::PairingState::Open { remaining_s }, .. })) =
+                    (&c.value, state.pairing())
+                {
+                    let total = u32::from(swapdesk_ui::tokens::layout::PAIR_COUNTDOWN_S).max(1);
+                    let left_milli = (u32::from(*remaining_s) * 1000 / total).min(1000) as u16;
+                    out.push(Block::Countdown { time: time.clone(), left_milli, label: c.label.clone() });
+                }
+            }
+            UiRole::Table | UiRole::Cell | UiRole::ColumnHeader => {}
             UiRole::Tab => {
                 let tab = TabModel { id: c.id, label: c.label.clone(), selected: c.selected };
                 if let Some(Block::Tabs(v)) = out.last_mut() {
@@ -284,7 +303,7 @@ fn join_rows(blocks: Vec<Block>) -> Vec<Block> {
             }
             Block::Button(save) if save.id == ControlId::RenameSave && next_is(&mut it, ControlId::RenameCancel) => {
                 if let Some(Block::Button(cancel)) = it.next() {
-                    out.push(Block::ButtonRow(vec![save, cancel]));
+                    out.push(Block::ButtonRow(vec![cancel, save]));
                 }
             }
             other => out.push(other),
@@ -294,6 +313,31 @@ fn join_rows(blocks: Vec<Block>) -> Vec<Block> {
 }
 
 /// In the pairing card the heading that carries the code becomes the large code itself.
+/// Whether a button is a positive action (confirm, advance, accept, save): it goes at the end of its row.
+pub fn is_positive(b: &ButtonModel) -> bool {
+    // "Só ver" accepts too: it sits beside "Aceitar", as on Windows.
+    b.style == ButtonStyle::Primary || b.id == ControlId::ViewOnlyAccept
+}
+
+/// A card's buttons as one row of actions, as the Windows app draws them (one interface on both systems):
+/// neighbouring buttons join, negative ones first, positive ones last.
+pub fn button_rows(blocks: Vec<Block>) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
+    for b in blocks {
+        match (out.last_mut(), b) {
+            (Some(Block::Actions(row)), Block::Button(btn)) => row.push(btn),
+            (_, Block::Button(btn)) => out.push(Block::Actions(vec![btn])),
+            (_, b) => out.push(b),
+        }
+    }
+    for b in &mut out {
+        if let Block::Actions(row) = b {
+            row.sort_by_key(is_positive);
+        }
+    }
+    out
+}
+
 fn code_blocks(state: &UiState, blocks: Vec<Block>) -> Vec<Block> {
     let Some(PairingView { state: swapdesk_ui::PairingState::ShowCode { code, .. }, .. }) = state.pairing() else {
         return blocks;
@@ -565,7 +609,7 @@ pub fn main_model(state: &UiState) -> MainModel {
     let specs = state.controls(WindowKind::Main);
     let card = state.dialog(WindowKind::Main).is_some() || state.incoming_session_open() || state.pairing().is_some();
     let layout = if card {
-        MainLayout::Card { blocks: code_blocks(state, blocks_from(state, &specs)) }
+        MainLayout::Card { blocks: button_rows(code_blocks(state, blocks_from(state, &specs))) }
     } else {
         let sidebar_specs: Vec<ControlSpec> = specs.iter().filter(|c| c.region == Region::Sidebar).cloned().collect();
         let content_specs: Vec<ControlSpec> = specs.iter().filter(|c| c.region != Region::Sidebar).cloned().collect();
@@ -758,7 +802,8 @@ pub fn viewer_model(state: &UiState) -> Option<ViewerModel> {
     {
         overlay_specs.remove(0);
     }
-    let mut overlay = if overlay_specs.is_empty() { None } else { Some(blocks_from(state, &overlay_specs)) };
+    let mut overlay =
+        if overlay_specs.is_empty() { None } else { Some(button_rows(blocks_from(state, &overlay_specs))) };
     if overlay.is_none() && !matches!(session.state, SessionState::Active { .. }) {
         overlay = Some(vec![
             Block::Heading { text: state.tm(&Msg::new(MsgKey::ConnectingTitle).with(peer.clone())), level: 1 },
