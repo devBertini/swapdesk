@@ -9,3 +9,17 @@
 
 pub mod audio;
 pub mod screen;
+
+/// The Screen Recording grant, without prompting (`CGPreflightScreenCaptureAccess`).
+#[cfg(target_os = "macos")]
+pub fn screen_access() -> bool {
+    objc2_core_graphics::CGPreflightScreenCaptureAccess()
+}
+
+/// Asks macOS for the Screen Recording grant (`CGRequestScreenCaptureAccess`): the first call shows the system's prompt
+/// pointing to System Settings > Privacy & Security > Screen Recording; later calls return the current state without
+/// asking again. The app calls it once at start when it hosts and the grant is missing.
+#[cfg(target_os = "macos")]
+pub fn request_screen_access() -> bool {
+    objc2_core_graphics::CGRequestScreenCaptureAccess()
+}
