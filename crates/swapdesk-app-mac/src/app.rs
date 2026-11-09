@@ -167,6 +167,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Arc::new(FileTrace::open(store.dir(), "trace.log", level, DEFAULT_CAP).map_err(|e| format!("trace log: {e}"))?);
     let clock: Arc<dyn Clock> = Arc::new(Monotonic(Instant::now()));
 
+    // C5.1: the per-user settings (ui.bin under ~/Library/Application Support/Swapdesk) are read before the first
+    // paint. A scratch run (self-test, host drive) never touches the user's file.
+    let prefs_trace = Arc::clone(&trace);
+    if !options.use_scratch()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        swapdesk_ui::prefs::set_note_hook(move |line| prefs_trace.log(Level::Info, "app", format_args!("{line}")));
+        let dir = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
+    }
+
     let viewer =
         MacViewer::new(ViewerOptions::default()).map_err(|e| format!("the viewer pipeline did not start: {e}"))?;
     let secrets: Arc<dyn SecretStore> = store.clone();
@@ -201,6 +212,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("the service did not start: {e}"))?;
     let backend = service.backend();
     viewer.set_out(backend.clone());
+    let user = state.user_prefs();
+    viewer.set_user_prefs(user.keyboard_mode, user.swap_ctrl_cmd);
     if options.selftest.is_none() {
         crate::host::ask_for_grants(&*trace);
     }

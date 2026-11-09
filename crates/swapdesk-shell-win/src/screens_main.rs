@@ -1164,6 +1164,13 @@ fn settings_main(f: &mut Frame) {
                     value: f.st.select_value(SelectId::Language),
                     width: 190.0,
                 },
+                SettingRow::Select {
+                    id: SelectId::Theme,
+                    label: f.t(MsgKey::FieldTheme),
+                    hint: None,
+                    value: f.st.select_value(SelectId::Theme),
+                    width: 190.0,
+                },
                 SettingRow::Toggle {
                     id: ControlId::OpenAtLogin,
                     label: f.t(MsgKey::OpenAtLogin),

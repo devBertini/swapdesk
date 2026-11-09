@@ -621,6 +621,50 @@ fn a_refused_language_change_is_undone() {
 }
 
 #[test]
+fn the_theme_select_follows_the_language_one_and_decides_the_appearance() {
+    let mut s = base();
+    s.navigate(crate::Nav::Settings);
+    let ids: Vec<ControlId> = s.controls(WindowKind::Main).iter().map(|c| c.id).collect();
+    let lang = ids.iter().position(|i| *i == ControlId::Select(SelectId::Language)).unwrap();
+    assert_eq!(ids[lang + 1], ControlId::Select(SelectId::Theme), "Tema sits right after Idioma");
+    assert_eq!(s.select_options(SelectId::Theme).len(), 3);
+    assert_eq!(s.select_value(SelectId::Theme), "Sistema", "the default follows the OS");
+    assert_eq!(s.activate(ControlId::Select(SelectId::Theme)).effect, Some(Effect::Menu(SelectId::Theme)));
+
+    assert!(!s.dark());
+    let a = s.choose(SelectId::Theme, 2);
+    assert!(matches!(&a.commands[0], Command::SetSettings { settings } if settings.theme == Theme::Dark));
+    assert!(s.dark(), "Escuro with a light OS");
+    assert_eq!(s.select_value(SelectId::Theme), "Escuro");
+    s.apply(UiEvent::ThemeChanged { dark: true });
+    s.choose(SelectId::Theme, 1);
+    assert!(!s.dark(), "Claro with a dark OS");
+    s.choose(SelectId::Theme, 0);
+    assert!(s.dark(), "Sistema shows the OS again");
+    assert!(s.apply(UiEvent::ThemeChanged { dark: false }).hits(WindowKind::Main));
+    assert!(!s.dark(), "and follows its changes live");
+    s.choose(SelectId::Language, 1);
+    assert_eq!(s.select_value(SelectId::Theme), "System");
+    assert_eq!(s.t(crate::MsgKey::FieldTheme), "Theme");
+}
+
+#[test]
+fn a_chosen_theme_ignores_os_changes_and_the_services_copy_and_a_refusal_undoes_it() {
+    let mut s = base();
+    let a = s.choose(SelectId::Theme, 2);
+    assert!(s.apply(UiEvent::ThemeChanged { dark: true }).is_none(), "already dark: no redraw");
+    assert!(s.apply(UiEvent::ThemeChanged { dark: false }).is_none(), "the OS no longer matters");
+    assert!(s.dark());
+    let mut set = s.settings().unwrap().clone();
+    set.theme = Theme::Light;
+    s.apply(UiEvent::SettingsChanged(set));
+    assert_eq!(s.theme(), Theme::Dark, "per user: the service's copy never overrides it");
+    assert_eq!(s.settings().unwrap().theme, Theme::Dark);
+    tracked_error(&mut s, &a.commands[0], ApiCode::Refused);
+    assert_eq!(s.theme(), Theme::System, "the undo brings the theme back with the rest of the settings");
+}
+
+#[test]
 fn countdowns_stop_at_zero_and_the_timer_stops_with_them() {
     let mut s = Scenario::ParearEsteComputador.prepared_state();
     for _ in 0..200 {
@@ -1450,4 +1494,98 @@ fn the_sidebar_holds_only_navigation_and_the_device_lists() {
         );
     }
     assert_eq!(side.len(), 2 + s.devices().len());
+}
+
+// ---------- the per-user record (C5.1 ui.bin) ----------
+
+use crate::prefs::{PrefsStore, UserPrefs};
+use std::sync::{Arc, Mutex};
+
+/// A store in memory that keeps what was written, to be handed to a second "process".
+#[derive(Clone, Default)]
+struct MemPrefs(Arc<Mutex<Option<Vec<u8>>>>);
+
+impl PrefsStore for MemPrefs {
+    fn read(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        *self.0.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_changed_theme_language_and_the_rest_are_saved_and_restored_at_start() {
+    let mem = MemPrefs::default();
+    let mut s = base();
+    s.load_prefs(Box::new(mem.clone()));
+    assert_eq!(mem.read().unwrap(), None, "loading writes nothing");
+    s.choose(SelectId::Theme, 2);
+    s.choose(SelectId::Language, 1);
+    s.choose(SelectId::Quality, 2);
+    s.choose(SelectId::Keyboard, 1);
+    s.activate(ControlId::ShowStats);
+    s.activate(ControlId::SwapCtrlCmd);
+    s.set_release_key(crate::ReleaseKey::RightCtrl);
+    let saved = UserPrefs::decode(&mem.read().unwrap().expect("written")).expect("a valid record");
+    assert_eq!(saved.theme, Theme::Dark);
+    assert_eq!(saved.language, Language::En);
+    assert_eq!(saved.quality, Quality::Motion);
+    assert_eq!(saved.keyboard_mode, KeyboardMode::Physical);
+    assert_eq!(saved.release_key, crate::ReleaseKey::RightCtrl);
+    assert_eq!(saved.show_stats, !Scenario::Dispositivos.prepared_state().settings().unwrap().show_stats);
+
+    // A new process: the first frame (no settings yet) already has the chosen theme and language.
+    let mut next = UiState::new(Language::PtBr, false);
+    next.load_prefs(Box::new(mem.clone()));
+    assert!(next.dark(), "Escuro from the first frame, on a light OS");
+    assert_eq!(next.language(), Language::En);
+    assert_eq!(next.theme(), Theme::Dark);
+    // The service answers its defaults for the per-user fields; the UI's copy wins.
+    let from_service = Settings {
+        language: Language::PtBr,
+        theme: Theme::System,
+        quality: Quality::Auto,
+        keyboard_mode: KeyboardMode::Auto,
+        ..base().settings().unwrap().clone()
+    };
+    next.apply(UiEvent::SettingsChanged(from_service));
+    let set = next.settings().unwrap();
+    assert_eq!(
+        (set.theme, set.language, set.quality, set.keyboard_mode),
+        (Theme::Dark, Language::En, Quality::Motion, KeyboardMode::Physical)
+    );
+    assert_eq!(set.show_stats, saved.show_stats);
+    assert_eq!(set.swap_ctrl_cmd, saved.swap_ctrl_cmd);
+    assert_eq!(next.user_prefs(), saved);
+    // Loading again writes nothing new: the file stays as it was.
+    assert_eq!(UserPrefs::decode(&mem.read().unwrap().unwrap()), Ok(saved));
+}
+
+#[test]
+fn a_missing_or_damaged_record_starts_with_the_defaults_and_a_refusal_undoes_the_saved_change() {
+    let mem = MemPrefs::default();
+    *mem.0.lock().unwrap() = Some(b"garbage".to_vec());
+    let mut s = base();
+    s.load_prefs(Box::new(mem.clone()));
+    assert_eq!((s.theme(), s.language()), (Theme::System, Language::PtBr));
+    let a = s.choose(SelectId::Theme, 2);
+    assert_eq!(
+        UserPrefs::decode(&mem.read().unwrap().unwrap()).unwrap().theme,
+        Theme::Dark,
+        "the bad file is replaced"
+    );
+    tracked_error(&mut s, &a.commands[0], ApiCode::Refused);
+    assert_eq!(UserPrefs::decode(&mem.read().unwrap().unwrap()).unwrap().theme, Theme::System, "the undo is saved too");
+    assert_eq!(s.theme(), Theme::System);
+}
+
+#[test]
+fn a_first_start_without_ui_bin_keeps_the_system_language() {
+    // No record yet: the window started in the system's language (English here), and it stays.
+    let mut s = UiState::new(Language::En, false);
+    s.load_prefs(Box::new(MemPrefs::default()));
+    assert_eq!(s.user_prefs().language, Language::En);
+    assert_eq!(s.user_prefs().theme, Theme::System);
 }

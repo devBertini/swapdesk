@@ -232,6 +232,10 @@ strings! {
     FieldLanguage => "Idioma", "Language";
     LangPt => "Português (Brasil)", "Português (Brasil)";
     LangEn => "English", "English";
+    FieldTheme => "Tema", "Theme";
+    ThemeSystem => "Sistema", "System";
+    ThemeLight => "Claro", "Light";
+    ThemeDark => "Escuro", "Dark";
     OpenAtLogin => "Abrir ao ligar o computador", "Open when the computer starts";
     GroupUnattended => "Sem ninguém na frente", "With no one in front";
     ServiceName => "Serviço do Swapdesk", "Swapdesk service";

@@ -318,6 +318,14 @@ impl MacViewer {
     // ----- what the UI exchanges with the backend (main thread) -----
 
     /// Called for every command the UI sends, before it goes on.
+    /// The per-user keyboard settings read from `ui.bin` at start (C5.1), before any session.
+    pub fn set_user_prefs(&self, mode: swapdesk_ui::KeyboardMode, swap_ctrl_cmd: bool) {
+        let mut ui = lock(&self.ui);
+        ui.prefs.mode = mode;
+        ui.prefs.swap_ctrl_cmd = swap_ctrl_cmd;
+        self.apply_config(&ui);
+    }
+
     pub fn observe_command(&self, command: &Command) {
         let mut ui = lock(&self.ui);
         match command {
@@ -371,11 +379,8 @@ impl MacViewer {
                 }
             }
             UiEvent::DevicesChanged(list) => self.learn_devices(&mut ui, list),
-            UiEvent::SettingsChanged(s) | UiEvent::Reply { result: Ok(Reply::Settings(s)), .. } => {
-                ui.prefs.mode = s.keyboard_mode;
-                ui.prefs.swap_ctrl_cmd = s.swap_ctrl_cmd;
-                self.apply_config(&ui);
-            }
+            // The keyboard mode and the Ctrl/Cmd swap are per user (C5.1): the service's copy is a default, so they come
+            // from `set_user_prefs` at start and from the UI's own `SetSettings`, never from these events.
             UiEvent::Reply { result: Ok(Reply::Devices(list)), .. } => self.learn_devices(&mut ui, list),
             UiEvent::Reply { result: Ok(Reply::Device(d)), .. } => self.learn_devices(&mut ui, std::slice::from_ref(d)),
             _ => {}

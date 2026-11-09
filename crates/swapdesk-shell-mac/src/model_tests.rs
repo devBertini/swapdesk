@@ -158,6 +158,31 @@ fn modal_requests_are_cards() {
 }
 
 #[test]
+fn the_theme_setting_decides_the_palette_and_the_appearance_to_apply() {
+    use swapdesk_ui::{SelectId, Theme, UiEvent};
+    let mut s = Scenario::Ajustes.prepared_state();
+    assert_eq!(appearance_name(s.theme()), None, "Sistema clears the override");
+    assert!(!main_of(&s).dark);
+    s.choose(SelectId::Theme, 2);
+    assert_eq!(appearance_name(s.theme()), Some("NSAppearanceNameDarkAqua"));
+    assert!(main_of(&s).dark, "Escuro paints dark on a light OS");
+    s.apply(UiEvent::ThemeChanged { dark: true });
+    s.choose(SelectId::Theme, 1);
+    assert_eq!(appearance_name(s.theme()), Some("NSAppearanceNameAqua"));
+    assert!(!main_of(&s).dark, "Claro paints light on a dark OS");
+    s.choose(SelectId::Theme, 0);
+    assert_eq!(s.theme(), Theme::System);
+    assert!(main_of(&s).dark, "Sistema follows the OS again");
+    // The select is in Ajustes with the three choices.
+    let MainLayout::Browse { content, .. } = main_of(&s).layout else { panic!() };
+    let opts = content.iter().find_map(|b| match b {
+        Block::Select(m) if m.select == SelectId::Theme => Some(m.options.clone()),
+        _ => None,
+    });
+    assert_eq!(opts.map(|o| o.len()), Some(3));
+}
+
+#[test]
 fn language_and_theme_follow_the_state() {
     let light = main_of(&Scenario::Dispositivos.prepared_state());
     let dark = main_of(&Scenario::DispositivosEscuro.prepared_state());

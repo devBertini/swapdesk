@@ -15,20 +15,20 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel,
-    NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK,
+    NSSavePanel, NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSRange, NSTimer, ns_string,
+    NSObjectProtocol, NSPoint, NSRange, NSString, NSTimer, ns_string,
 };
 use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::{layout, palette};
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
-    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, UiBackend,
+    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, Theme, UiBackend,
     UiState, WindowKind,
 };
 
@@ -194,6 +194,8 @@ pub struct Shell {
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce: RefCell<Debouncer>,
     started: std::time::Instant,
+    /// The theme whose `NSApp.appearance` is in force (the app starts with none: Sistema).
+    appearance: std::cell::Cell<Theme>,
     /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
     status_item: RefCell<Option<Retained<NSStatusItem>>>,
 }
@@ -294,6 +296,7 @@ fn start_with(
         debounce_timer: RefCell::new(None),
         debounce: RefCell::new(Debouncer::new()),
         started: std::time::Instant::now(),
+        appearance: std::cell::Cell::new(Theme::System),
         status_item: RefCell::new(None),
     });
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
@@ -705,11 +708,30 @@ impl Shell {
         self.refresh(c);
     }
 
+    /// Gives `NSApp` the appearance the theme setting asks for (Aqua, DarkAqua, or none for Sistema), once per change:
+    /// the native controls and the title bars follow it. Back on Sistema the OS's own appearance is read again, since
+    /// while one was forced `effectiveAppearance` showed the forced one.
+    fn sync_appearance(&self) -> Changed {
+        let theme = self.state.borrow().theme();
+        if self.appearance.replace(theme) == theme {
+            return Changed::NONE;
+        }
+        let app = NSApplication::sharedApplication(self.mtm);
+        let appearance = appearance_name(theme).and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
+        app.setAppearance(appearance.as_deref());
+        if theme == Theme::System {
+            let dark = system_dark();
+            return self.state.borrow_mut().set_dark(dark).union(Changed::MAIN);
+        }
+        Changed::MAIN
+    }
+
     // ----- drawing -----
 
     /// Windows follow the state (a viewer exists while a session does); then what changed is rebuilt, and only when
     /// its model differs from the last one drawn.
     fn refresh(&self, changed: Changed) {
+        let changed = changed.union(self.sync_appearance());
         if changed.is_none() {
             self.sync_timers();
             return;

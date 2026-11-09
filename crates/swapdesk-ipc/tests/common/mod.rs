@@ -174,6 +174,7 @@ pub fn settings() -> BoxedStrategy<Settings> {
         any::<bool>(),
         pick(KeyboardMode::ALL),
         any::<bool>(),
+        pick(Theme::ALL),
     )
         .prop_map(
             |(
@@ -183,6 +184,7 @@ pub fn settings() -> BoxedStrategy<Settings> {
                 show_stats,
                 keyboard_mode,
                 swap_ctrl_cmd,
+                theme,
             )| Settings {
                 name,
                 language,
@@ -194,6 +196,7 @@ pub fn settings() -> BoxedStrategy<Settings> {
                 show_stats,
                 keyboard_mode,
                 swap_ctrl_cmd,
+                theme,
             },
         )
         .boxed()

@@ -80,6 +80,7 @@ impl UiState {
     /// The release key of a viewer session is changed by the settings (it goes to the pipeline as a UI-local command).
     pub fn set_release_key(&mut self, key: ReleaseKey) -> Command {
         self.release_key = key;
+        self.save_prefs();
         Command::SetReleaseKey { key }
     }
 

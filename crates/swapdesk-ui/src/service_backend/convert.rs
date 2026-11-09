@@ -48,6 +48,7 @@ pair_enum!(os_perm_to_wire, os_perm_from_wire, a::OsPermission, w::OsPermission;
 pair_enum!(direction_to_wire, direction_from_wire, a::Direction, w::Direction; Incoming, Outgoing);
 pair_enum!(role_to_wire, role_from_wire, a::Role, w::Role; Viewer, Host);
 pair_enum!(language_to_wire, language_from_wire, a::Language, w::Language; PtBr, En);
+pair_enum!(theme_to_wire, theme_from_wire, a::Theme, w::Theme; System, Light, Dark);
 pair_enum!(keyboard_to_wire, keyboard_from_wire, a::KeyboardMode, w::KeyboardMode; Auto, Physical, Text);
 pair_enum!(keys_to_wire, keys_from_wire, a::SpecialKeys, w::SpecialKeys; CtrlAltDel, AltTab, WinOrCmd, AltF4OrCmdQ, PrintScreen);
 pair_enum!(swap_why_to_wire, swap_why_from_wire, a::SwapWhy, w::SwapWhy; Declined, TimedOut, NobodyPresent, NotPermitted, Busy);
@@ -311,6 +312,7 @@ pub fn settings_to_wire(v: &a::Settings) -> w::Settings {
         show_stats: v.show_stats,
         keyboard_mode: keyboard_to_wire(v.keyboard_mode),
         swap_ctrl_cmd: v.swap_ctrl_cmd,
+        theme: theme_to_wire(v.theme),
     }
 }
 
@@ -326,6 +328,7 @@ pub fn settings_from_wire(v: w::Settings) -> a::Settings {
         show_stats: v.show_stats,
         keyboard_mode: keyboard_from_wire(v.keyboard_mode),
         swap_ctrl_cmd: v.swap_ctrl_cmd,
+        theme: theme_from_wire(v.theme),
     }
 }
 
@@ -617,6 +620,7 @@ mod tests {
             show_stats: true,
             keyboard_mode: a::KeyboardMode::Text,
             swap_ctrl_cmd: true,
+            theme: a::Theme::Dark,
         }
     }
 

@@ -18,6 +18,7 @@ pub mod inflight;
 pub mod interact;
 pub mod list;
 pub mod mock;
+pub mod prefs;
 pub mod service_backend;
 pub mod shortcuts;
 pub mod state;

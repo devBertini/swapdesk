@@ -499,4 +499,41 @@ fn home_renders_for_review() {
     let state = Scenario::Inicio.prepared_state();
     let r = render(&state, WindowKind::Main, (layout::MIN_W, layout::MIN_H), 1.0, &Interaction::default()).unwrap();
     r.save_png(&dir.join("inicio-janela-minima@1x.png")).unwrap();
+    // Ajustes with the "Tema" select, in each choice (the OS is light for the first and third, dark for the second).
+    for (sc, theme, name) in [
+        (Scenario::Ajustes, swapdesk_ui::Theme::Light, "ajustes-claro"),
+        (Scenario::Ajustes, swapdesk_ui::Theme::Dark, "ajustes-escuro"),
+        (Scenario::Ajustes, swapdesk_ui::Theme::System, "ajustes-sistema"),
+    ] {
+        let mut state = sc.prepared_state();
+        state.set_theme(theme);
+        let r = render(&state, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default()).unwrap();
+        r.save_png(&dir.join(format!("{name}@1x.png"))).unwrap();
+    }
+}
+
+#[test]
+fn the_palette_follows_the_theme_setting_and_sistema_follows_the_os() {
+    use swapdesk_ui::{SelectId, Theme, UiEvent};
+    let canvas = |state: &swapdesk_ui::UiState| {
+        render(state, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default())
+            .unwrap()
+            .rgb_at(600, 745)
+    };
+    let mut s = Scenario::Ajustes.prepared_state();
+    assert_eq!(s.theme(), Theme::System);
+    assert_eq!(canvas(&s), LIGHT.canvas.hex(), "Sistema with a light OS");
+    // Choosing "Escuro" in the select (index 2) turns every window dark while the OS stays light.
+    s.choose(SelectId::Theme, 2);
+    assert_eq!(s.theme(), Theme::Dark);
+    assert_eq!(canvas(&s), DARK.canvas.hex());
+    // The OS changing underneath does not matter now; "Claro" wins over a dark OS.
+    s.apply(UiEvent::ThemeChanged { dark: true });
+    s.choose(SelectId::Theme, 1);
+    assert_eq!(canvas(&s), LIGHT.canvas.hex());
+    // "Sistema" again: the dark OS shows, and a later OS change is followed live.
+    s.choose(SelectId::Theme, 0);
+    assert_eq!(canvas(&s), DARK.canvas.hex());
+    s.apply(UiEvent::ThemeChanged { dark: false });
+    assert_eq!(canvas(&s), LIGHT.canvas.hex());
 }
