@@ -60,6 +60,7 @@ swapdesk-capture-mac = { path = "../swapdesk-capture-mac" }
 swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
 swapdesk-net-mac = { path = "../swapdesk-net-mac" }
 swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
+swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }
 dispatch2.workspace = true
 objc2.workspace = true
 

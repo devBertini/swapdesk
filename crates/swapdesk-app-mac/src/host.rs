@@ -17,7 +17,9 @@ use swapdesk_files::{FsServer, Roots};
 use swapdesk_host::helper::{HelperDeps, run_helper};
 use swapdesk_input_mac::{MacClipboard, MacInputSink};
 use swapdesk_ipc::IpcRole;
-use swapdesk_platform::{Clock, Level, TraceSink};
+use swapdesk_platform::{Clock, Level, PtySpawner, TraceSink};
+use swapdesk_sys_mac::actions::MacActions;
+use swapdesk_sys_mac::pty::MacPtySpawner;
 
 use crate::service::HostHelper;
 
@@ -32,7 +34,12 @@ pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
             move || MacAudio::new(Arc::clone(&audio_clock)),
             Arc::clone(&clock),
         )
-        .with_clipboard(|| Ok(MacClipboard::new()));
+        .with_clipboard(|| Ok(MacClipboard::new()))
+        // The user's quick actions and keep-awake (F-ACT-01).
+        .with_actions(|| Ok(MacActions::user()))
+        // Terminals: the shell runs as this process's user. The service's session user is not an input: the spawner never
+        // changes uid, refuses root and refuses `admin`, so nothing the service sends widens that.
+        .with_pty(|_session_user| Arc::new(MacPtySpawner::current_user()) as Arc<dyn PtySpawner>);
         // The user's files (C2.4 "Files"): the root is this user's home, chosen here, never by the service.
         let deps =
             match std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|p| p.is_absolute() && p.is_dir()) {

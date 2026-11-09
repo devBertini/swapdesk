@@ -1,0 +1,26 @@
+[package]
+name = "swapdesk-sys-mac"
+description = "macOS system glue of Swapdesk (contract C3): the openpty PtySpawner for the terminal and the ActionRunner for the quick actions and keep-awake."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (libc calls). The workspace lints are repeated here without
+# `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+# Only for the `Action` type that the ActionRunner takes (C3); a workspace crate, not a third-party one.
+swapdesk-proto = { path = "../swapdesk-proto" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
