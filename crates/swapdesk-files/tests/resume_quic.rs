@@ -81,11 +81,13 @@ fn an_upload_resumes_after_the_quic_link_is_killed_midway() {
         let viewer_sink = Arc::new(Sink::default());
         let viewer_files = FilesHandler::new(src.clone(), None, viewer_sink.clone());
 
-        // Session 1: the upload starts, and the link dies when 6 MiB were written.
+        // Session 1: the upload starts, and the link dies when the host has written 6 MiB. The receiver's count, not
+        // the sender's: under load the sender is megabytes ahead (in flight), and a link killed before the host's
+        // first checkpoint rightly resumes from 0.
         let mut cfg = viewer_config(PermissionSet::VIEW | PermissionSet::FILES);
         cfg.registry = registry_one(viewer_files.clone());
         let s1 = q.open(&v, cfg).await.unwrap();
-        *lock(&viewer_sink.kill) = Some((s1.ctx().connection().unwrap().clone(), KILL_AT));
+        *lock(&host_sink.kill) = Some((s1.ctx().connection().unwrap().clone(), KILL_AT));
         command_when_live(&viewer_files, Command::SendFile { id: 1, path: src.join("big.bin"), dest: None }).await;
         tokio::time::timeout(Duration::from_secs(30), s1.ctx().wait_ended())
             .await
@@ -99,7 +101,7 @@ fn an_upload_resumes_after_the_quic_link_is_killed_midway() {
         assert!(part > 0 && part < SIZE as u64, "partial length {part}");
 
         // Session 2: reconnect, offer the same file again.
-        *lock(&viewer_sink.kill) = None;
+        *lock(&host_sink.kill) = None;
         let mut cfg = viewer_config(PermissionSet::VIEW | PermissionSet::FILES);
         cfg.registry = registry_one(viewer_files.clone());
         let s2 = q.open(&v, cfg).await.unwrap();

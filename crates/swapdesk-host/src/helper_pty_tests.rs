@@ -2,6 +2,8 @@
 //! `PtyClose` to `run_helper` over the in-memory pipe, with the C7 echo PTY as the helper's spawner, and reads what the
 //! helper answers.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -38,6 +40,9 @@ fn deps() -> Deps {
 struct Rig {
     writer: FrameWriter<PipeWriter>,
     inbox: Receiver<Message>,
+    /// Messages a `next` passed over, in order, for the later ones: the shell's first output can come before
+    /// `PtyOpenReply` (the helper starts reading the shell before it answers), and `open` must not drop it.
+    held: RefCell<VecDeque<Message>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -58,15 +63,23 @@ impl Rig {
                 }
             }
         });
-        Self { writer, inbox, thread: Some(thread) }
+        Self { writer, inbox, held: RefCell::default(), thread: Some(thread) }
     }
 
     fn send(&mut self, msg: Message) {
         self.writer.write_message(&msg).expect("the pipe is open");
     }
 
-    /// The next message `f` picks, skipping the rest (the display list, say), within `WAIT`.
+    /// The next message `f` picks, within `WAIT`. The ones it passes over (the display list, say) are kept, in order,
+    /// for the next call.
     fn next<T>(&self, what: &str, mut f: impl FnMut(&Message) -> Option<T>) -> T {
+        let mut held = self.held.borrow_mut();
+        for at in 0..held.len() {
+            if let Some(v) = f(&held[at]) {
+                held.remove(at);
+                return v;
+            }
+        }
         let end = std::time::Instant::now() + WAIT;
         loop {
             let left = end.saturating_duration_since(std::time::Instant::now());
@@ -74,6 +87,7 @@ impl Rig {
             if let Some(v) = f(&m) {
                 return v;
             }
+            held.push_back(m);
         }
     }
 

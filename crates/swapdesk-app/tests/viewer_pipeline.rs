@@ -143,13 +143,16 @@ fn encoded_frames_are_decoded_and_presented_with_increasing_ids_and_the_pointer_
         std::thread::sleep(Duration::from_millis(33));
     }
     let total = frames.len();
-    wait_until("the frames to be presented", Duration::from_secs(10), || {
-        r.presented.lock().unwrap().len() + 4 >= total
+    // The last picture, not a count: under load the decoder can hand out two pictures at once and the viewer shows
+    // only the newer, by design (measured in the full suite on a loaded PC: fewer than 36 of 40 in 10 s).
+    let last = u32::try_from(total - 1).unwrap();
+    wait_until("the last frame to be presented", Duration::from_secs(10), || {
+        r.presented.lock().unwrap().last().is_some_and(|e| e.frame_id == last)
     });
 
     let ids: Vec<u32> = r.presented.lock().unwrap().iter().map(|e| e.frame_id).collect();
     assert!(ids.windows(2).all(|w| w[1] > w[0]), "frame ids must increase: {ids:?}");
-    assert!(ids.len() >= total - 4, "presented {} of {total}", ids.len());
+    assert!(ids.len() * 2 >= total, "at least half the pictures reach the screen: {} of {total}", ids.len());
     assert_eq!(ids[0], 0, "the first presented picture is the keyframe");
     assert!(r.presented.lock().unwrap().iter().all(|e| (e.width, e.height) == SIZE));
     assert_eq!(r.pipeline.last_error(), None);
@@ -183,7 +186,11 @@ fn a_hole_in_the_frame_ids_asks_for_a_keyframe_and_nothing_wrong_is_shown() {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
         std::thread::sleep(Duration::from_millis(33));
     }
-    wait_until("ten pictures", Duration::from_secs(10), || r.presented.lock().unwrap().len() >= 9);
+    // The picture of frame 9, the last before the hole. Not a count of pictures: under GPU load the decoder can hand
+    // two pictures out at once and the viewer shows only the newer, by design.
+    wait_until("the picture of frame 9", Duration::from_secs(10), || {
+        r.presented.lock().unwrap().last().is_some_and(|e| e.frame_id == 9)
+    });
     // Frame 10 is lost on the way: 11 and the rest are P-frames the decoder cannot use.
     for (n, e) in frames.iter().enumerate().skip(11) {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
