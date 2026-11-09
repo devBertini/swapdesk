@@ -784,3 +784,44 @@ pub fn viewer_model(state: &UiState) -> Option<ViewerModel> {
         overlay,
     })
 }
+
+// ---------- the host banner ----------
+
+/// The banner on the host while another computer watches or controls it: who, since when, and how to end it. It is
+/// its own floating panel, so it shows with the main window closed (the app then lives in the menu bar, D32).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BannerModel {
+    pub dark: bool,
+    pub session_id: u64,
+    /// "MacBook do escritório controla este computador", drawn bold.
+    pub who: String,
+    /// "há 12 min", drawn soft.
+    pub since: String,
+    /// "Inverter" and whether it is disabled (a request already went out); `None` when swap is not offered (D34).
+    pub swap: Option<(String, bool)>,
+    pub disconnect: String,
+}
+
+impl BannerModel {
+    /// The whole line, for the panel's accessibility label.
+    pub fn label(&self) -> String {
+        format!("{} {}", self.who, self.since)
+    }
+}
+
+/// The banner while this computer hosts a session, else `None`. No chat button: chat with this Mac's host side is not
+/// in 1.0, and a button that does nothing is worse than none.
+pub fn banner_model(state: &UiState) -> Option<BannerModel> {
+    let h = state.host_session()?;
+    let peer = state.device_by_id(&h.device_id).map(|d| d.name.clone()).unwrap_or_default();
+    let (who, since) = state.banner_parts(&peer, h);
+    let swap = state.swap_offered(h).then(|| (state.t(MsgKey::TbSwap), state.swap_requested()));
+    Some(BannerModel {
+        dark: state.dark(),
+        session_id: h.id,
+        who,
+        since,
+        swap,
+        disconnect: state.t(MsgKey::Disconnect),
+    })
+}

@@ -32,6 +32,7 @@ use swapdesk_ui::{
     UiState, WindowKind,
 };
 
+use crate::banner_window::BannerWindow;
 use crate::input::ViewerInput;
 use crate::model::*;
 use crate::system::{Waker, local_clock, system_dark};
@@ -189,6 +190,8 @@ pub struct Shell {
     hooks: ViewerHooks,
     main: MainWindow,
     viewer: RefCell<Option<ViewerWindow>>,
+    /// The host banner, while another computer watches or controls this Mac.
+    banner: RefCell<Option<BannerWindow>>,
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
     placeholder_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
@@ -291,6 +294,7 @@ fn start_with(
             rebuilding: Cell::new(false),
         },
         viewer: RefCell::new(None),
+        banner: RefCell::new(None),
         tick_timer: RefCell::new(None),
         placeholder_timer: RefCell::new(None),
         debounce_timer: RefCell::new(None),
@@ -494,11 +498,11 @@ impl Shell {
         }
         let Some(control) = sender.downcast_ref::<NSControl>() else { return };
         let tag = control.tag();
-        let (idx, parity) = ((tag / 2) as usize, tag % 2);
-        let action = if parity == 0 {
-            self.main.actions.borrow().get(idx).copied()
-        } else {
-            self.viewer.borrow().as_ref().and_then(|v| v.actions.borrow().get(idx).copied())
+        let (idx, parity) = ((tag / WINDOWS) as usize, tag % WINDOWS);
+        let action = match parity {
+            PARITY_MAIN => self.main.actions.borrow().get(idx).copied(),
+            PARITY_VIEWER => self.viewer.borrow().as_ref().and_then(|v| v.actions.borrow().get(idx).copied()),
+            _ => self.banner.borrow().as_ref().and_then(|b| b.actions.borrow().get(idx).copied()),
         };
         let Some(action) = action else { return };
         let _g = SlowGuard::ui("on_action");
@@ -580,8 +584,13 @@ impl Shell {
     fn text_changed(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
         let Some(field) = obj.downcast_ref::<NSTextField>() else { return };
-        let Some(Action::Edit(EditId::Address)) =
-            self.main.actions.borrow().get((field.tag() / 2) as usize).copied().filter(|_| field.tag() % 2 == 0)
+        let Some(Action::Edit(EditId::Address)) = self
+            .main
+            .actions
+            .borrow()
+            .get((field.tag() / WINDOWS) as usize)
+            .copied()
+            .filter(|_| field.tag() % WINDOWS == PARITY_MAIN)
         else {
             return;
         };
@@ -737,6 +746,9 @@ impl Shell {
             return;
         }
         self.sync_viewer();
+        if changed.hits(WindowKind::Banner) || changed.hits(WindowKind::Main) {
+            self.sync_banner();
+        }
         if changed.hits(WindowKind::Main) || changed.hits(WindowKind::Banner) {
             self.rebuild_main();
         }
@@ -748,6 +760,27 @@ impl Shell {
         }
         self.attention();
         self.sync_timers();
+    }
+
+    /// The banner follows the host session: created with it, rebuilt when its line changes, gone with it.
+    fn sync_banner(&self) {
+        let model = banner_model(&self.state.borrow());
+        let mut slot = self.banner.borrow_mut();
+        match model {
+            Some(m) => {
+                let first = slot.is_none();
+                let b = slot.get_or_insert_with(|| BannerWindow::create(self.mtm));
+                b.update(self.mtm, self.target(), &m);
+                if first && let Some(dir) = crate::banner_window::snapshot_dir() {
+                    b.snapshot(dir);
+                }
+            }
+            None => {
+                if let Some(b) = slot.take() {
+                    b.close();
+                }
+            }
+        }
     }
 
     fn sync_viewer(&self) {
@@ -812,7 +845,8 @@ impl Shell {
 
         let mut actions = Vec::new();
         let mut fields = Vec::new();
-        let mut ctx = Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: 0, fields: &mut fields };
+        let mut ctx =
+            Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: PARITY_MAIN, fields: &mut fields };
         let root = PaintedView::create(mtm, bounds, Some(pal.canvas));
         root.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,

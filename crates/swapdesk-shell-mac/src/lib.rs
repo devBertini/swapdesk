@@ -19,8 +19,10 @@ pub mod model;
 
 pub use input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 pub use locale::{language_from_tags, language_override, theme_override};
-pub use model::{MainModel, VideoArea, ViewerModel, main_model, viewer_model};
+pub use model::{BannerModel, MainModel, VideoArea, ViewerModel, banner_model, main_model, viewer_model};
 
+#[cfg(target_os = "macos")]
+mod banner_window;
 #[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -32,6 +34,8 @@ mod viewer_window;
 #[cfg(target_os = "macos")]
 mod views;
 
+#[cfg(target_os = "macos")]
+pub use banner_window::set_snapshot_dir;
 #[cfg(target_os = "macos")]
 pub use shell::{ViewerHooks, run, run_with_host, selftest};
 #[cfg(target_os = "macos")]

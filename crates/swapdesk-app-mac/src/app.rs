@@ -235,8 +235,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // The host drive owns the backend's events: the window gets a backend that says nothing.
     let observing: Arc<dyn UiBackend> = match &options.drive_host {
         Some(dir) => {
-            crate::drive::start(dir, Arc::clone(&backend), Arc::clone(&trace))?;
-            Arc::new(crate::drive::Silent)
+            let window = Arc::new(crate::drive::Silent::default());
+            let wake_ui = Arc::clone(&waker);
+            let tee = crate::drive::Tee {
+                real: Arc::clone(&backend),
+                window: Arc::clone(&window),
+                wake: Arc::new(move || swapdesk_ui::UiWaker::wake(&*wake_ui)),
+            };
+            crate::drive::start(dir, tee, Arc::clone(&trace))?;
+            swapdesk_shell_mac::set_snapshot_dir(dir.to_path_buf());
+            window
         }
         None => Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer))),
     };

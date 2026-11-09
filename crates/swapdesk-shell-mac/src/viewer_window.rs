@@ -105,7 +105,7 @@ impl ViewerWindow {
         let mut actions = self.actions.borrow_mut();
         actions.clear();
         let mut fields = Vec::new();
-        let mut ctx = Ctx { mtm, target, pal, actions: &mut actions, parity: 1, fields: &mut fields };
+        let mut ctx = Ctx { mtm, target, pal, actions: &mut actions, parity: PARITY_VIEWER, fields: &mut fields };
         let bounds = self.video.bounds();
         let mut chrome: Vec<Retained<NSView>> = Vec::new();
 
@@ -214,7 +214,7 @@ fn tool_view(ctx: &mut Ctx, t: &Tool, show_swap: bool) -> Option<Retained<NSView
             Some(view_of(&pop))
         }
         Tool::Switch { tool, label, on, disabled } => {
-            let tag = ctx.actions.len() as isize * 2 + ctx.parity;
+            let tag = ctx.actions.len() as isize * WINDOWS + ctx.parity;
             ctx.actions.push(Action::ToolSwitch(*tool));
             let b = button_with(ctx, label, help(label).as_deref(), ButtonStyle::Plain, *disabled, tag);
             b.setButtonType(NSButtonType::PushOnPushOff);
@@ -223,7 +223,7 @@ fn tool_view(ctx: &mut Ctx, t: &Tool, show_swap: bool) -> Option<Retained<NSView
             Some(view_of(&b))
         }
         Tool::Swap { label } => {
-            let tag = ctx.actions.len() as isize * 2 + ctx.parity;
+            let tag = ctx.actions.len() as isize * WINDOWS + ctx.parity;
             ctx.actions.push(Action::ToolSwap);
             let b = button_with(ctx, label, None, ButtonStyle::Plain, false, tag);
             iconize(&b, t, label);
@@ -232,7 +232,7 @@ fn tool_view(ctx: &mut Ctx, t: &Tool, show_swap: bool) -> Option<Retained<NSView
             show_swap.then(|| view_of(&b))
         }
         Tool::Disconnect { label } => {
-            let tag = ctx.actions.len() as isize * 2 + ctx.parity;
+            let tag = ctx.actions.len() as isize * WINDOWS + ctx.parity;
             ctx.actions.push(Action::Control(swapdesk_ui::ControlId::TbDisconnect));
             let b = button_with(ctx, label, None, ButtonStyle::Danger, false, tag);
             iconize(&b, t, label);
