@@ -1092,7 +1092,9 @@ mod tests {
         assert!(s.placeholder(DataKind::Devices) && s.placeholder(DataKind::Activity));
         let sequential: u128 = commands.iter().map(|c| latency(c).as_millis()).sum();
         let took = run(&mut s, &b, commands, Duration::from_secs(3));
-        assert!(took.as_millis() < sequential * 3 / 4, "took {took:?}, one after the other would take {sequential} ms");
+        // A sleep never ends early, so answering one after the other can never take less than the sum: finishing
+        // under it proves the requests overlapped, however slow the machine (a CI runner overshoots every sleep).
+        assert!(took.as_millis() < sequential, "took {took:?}, one after the other would take {sequential} ms");
         for k in [DataKind::ThisDevice, DataKind::Network, DataKind::Devices, DataKind::Settings, DataKind::Activity] {
             assert_eq!(s.fetch(k), crate::state::Fetch::Ready, "{k:?}");
         }

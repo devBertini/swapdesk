@@ -1,10 +1,13 @@
 [profile.default.junit]
 path = "junit.xml"
 
-# CI: run everything, retry once to name flaky tests instead of hiding them, keep the JUnit report.
+# CI: retry once to name flaky tests instead of hiding them, keep the JUnit report. The hosted Windows runner has no
+# GPU video engine and no audio endpoint, so the tests that need them run only on a development PC (the gate before a
+# milestone): Media Foundation and NVENC (codec-win), Direct3D presentation (render-win, the viewer pipeline), WASAPI.
 [profile.ci]
 fail-fast = false
 retries = 1
+default-filter = "not (package(swapdesk-codec-win) | package(swapdesk-render-win) | package(swapdesk-audio-win) | binary(viewer_pipeline) | binary(e2e_ui))"
 
 [profile.ci.junit]
 path = "junit.xml"
