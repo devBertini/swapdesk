@@ -29,6 +29,8 @@ pub mod app;
 #[cfg(target_os = "macos")]
 pub mod decode;
 #[cfg(target_os = "macos")]
+pub mod drive;
+#[cfg(target_os = "macos")]
 pub mod host;
 #[cfg(target_os = "macos")]
 pub mod main_side;

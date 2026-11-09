@@ -6,6 +6,9 @@
 //!   ports are chosen by the system and nothing of the owner's real Swapdesk identity is touched; both are removed at exit.
 //! - `--selftest <file>`: development. Implies `--scratch`. Once the main window is up the app writes what it sees (the
 //!   windows, the service) to `<file>` and quits by itself.
+//! - `--drive-host <dir>`: development, only in a build with the `dev-harness` feature. Implies `--scratch` but keeps
+//!   the real ports (47820/47821): a scripted user pairs with the viewer through code files in `<dir>`, accepts its
+//!   session and quits when it ends (`host.log` in `<dir>` holds the markers and `HOST_RESULT`).
 //! - `--help`, `-h`: the usage text on stdout.
 
 use std::path::PathBuf;
@@ -15,13 +18,14 @@ pub struct Options {
     pub mock: Option<String>,
     pub scratch: bool,
     pub selftest: Option<PathBuf>,
+    pub drive_host: Option<PathBuf>,
     pub help: bool,
 }
 
 impl Options {
-    /// Scratch secrets: asked for, or implied by the self-test.
+    /// Scratch secrets: asked for, or implied by the self-test or the host drive.
     pub fn use_scratch(&self) -> bool {
-        self.scratch || self.selftest.is_some()
+        self.scratch || self.selftest.is_some() || self.drive_host.is_some()
     }
 }
 
@@ -38,7 +42,7 @@ impl core::fmt::Display for CliError {
     }
 }
 
-pub const USAGE: &str = "Swapdesk [--scratch] [--selftest <file>] | Swapdesk --mock <scenario>";
+pub const USAGE: &str = "Swapdesk [--scratch] [--selftest <file>] [--drive-host <dir>] | Swapdesk --mock <scenario>";
 
 /// Parses the arguments after the program name.
 pub fn parse(args: &[String]) -> Result<Options, CliError> {
@@ -52,6 +56,10 @@ pub fn parse(args: &[String]) -> Result<Options, CliError> {
             }
             "--selftest" => {
                 o.selftest = Some(PathBuf::from(args.get(i + 1).ok_or(CliError::MissingValue("--selftest"))?));
+                i += 1;
+            }
+            "--drive-host" => {
+                o.drive_host = Some(PathBuf::from(args.get(i + 1).ok_or(CliError::MissingValue("--drive-host"))?));
                 i += 1;
             }
             "--scratch" => o.scratch = true,
@@ -89,7 +97,18 @@ mod tests {
     #[test]
     fn mock_scratch_and_help_parse_in_any_order() {
         let o = parse(&args(&["--scratch", "--help", "--mock", "visualizador"])).unwrap();
-        assert_eq!(o, Options { mock: Some("visualizador".into()), scratch: true, selftest: None, help: true });
+        assert_eq!(
+            o,
+            Options { mock: Some("visualizador".into()), scratch: true, selftest: None, drive_host: None, help: true }
+        );
+    }
+
+    #[test]
+    fn the_host_drive_implies_scratch() {
+        let o = parse(&args(&["--drive-host", "/tmp/drive"])).unwrap();
+        assert_eq!(o.drive_host, Some(PathBuf::from("/tmp/drive")));
+        assert!(o.use_scratch() && !o.scratch);
+        assert_eq!(parse(&args(&["--drive-host"])), Err(CliError::MissingValue("--drive-host")));
     }
 
     #[test]

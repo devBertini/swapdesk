@@ -854,6 +854,7 @@ dependencies = [
  "swapdesk-capture-mac",
  "swapdesk-codec-mac",
  "swapdesk-core-mac",
+ "swapdesk-crossdrive",
  "swapdesk-fakes",
  "swapdesk-files",
  "swapdesk-host",

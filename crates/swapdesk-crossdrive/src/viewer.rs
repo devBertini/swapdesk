@@ -548,7 +548,7 @@ fn pointer_moves(
     let clamp = |v: i32, dim: i64| v.clamp(0, i32::try_from(dim - 1).unwrap_or(0));
     let started = Instant::now();
     log(&format!(
-        "POINTER sending {} small moves within a {} px box around ({ax},{ay}) px on a {w}x{h} display, over {} ms: input goes Mac to PC only",
+        "POINTER sending {} small moves within a {} px box around ({ax},{ay}) px on a {w}x{h} display, over {} ms: input goes viewer to host only",
         WALK.len(),
         cfg.pointer_box_px,
         MOVE_GAP.as_millis() * (WALK.len() as u128)

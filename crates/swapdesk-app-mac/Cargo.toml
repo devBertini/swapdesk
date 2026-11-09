@@ -46,6 +46,13 @@ swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 swapdesk-ui = { path = "../swapdesk-ui" }
 tokio.workspace = true
+# Only with the `dev-harness` feature: the scripted host user of `--drive-host`.
+swapdesk-crossdrive = { path = "../swapdesk-crossdrive", optional = true }
+
+[features]
+# Development builds only (scripts/mac/build-app.sh --dev-harness): `Swapdesk --drive-host <dir>`, the cross-machine
+# proof with no human at the Mac. Never in a release build.
+dev-harness = ["dep:swapdesk-crossdrive"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 swapdesk-audio-mac = { path = "../swapdesk-audio-mac" }

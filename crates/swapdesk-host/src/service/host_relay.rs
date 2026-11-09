@@ -370,11 +370,29 @@ impl HostRelay {
         };
         if !same {
             self.stop_video().await;
+            if want.is_none() && view {
+                self.shared.log(
+                    Level::Debug,
+                    format_args!(
+                        "session {:#x}: VIEW held but no video: media helper {}, displays {}",
+                        self.ctx.session_id(),
+                        media.is_some(),
+                        self.displays.len()
+                    ),
+                );
+            }
             if let Some((helper, display)) = want {
                 let kbps = self.sender.as_ref().map_or(DEFAULT_KBPS, VideoSender::target_kbps);
                 let started = helper
                     .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto })
                     .await;
+                self.shared.log(
+                    Level::Debug,
+                    format_args!(
+                        "session {:#x}: StartVideo display {display} fps {fps} sent: {started}",
+                        self.ctx.session_id()
+                    ),
+                );
                 if started {
                     self.video = Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, kbps_sent: kbps });
                     self.awaiting_key = None;

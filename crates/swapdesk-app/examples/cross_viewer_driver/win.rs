@@ -7,6 +7,12 @@
 //! nothing is forgotten: the pairing outlives the tool.
 //!
 //!     cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
+//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input]
+//!
+//! `--pair` is the full script against a host run by `Swapdesk --drive-host` (a scratch identity on the Mac): it adds
+//! the host by address, prints `VIEWER_CODE <code>`, reads the host's code from `<folder>/peer-code.txt`, waits for
+//! `<folder>/go` (the host has granted) and reads the pointer anchor from `<folder>/anchor` ("x,y" in pointer units);
+//! the orchestrator writes those three files. The pairing is forgotten at the end.
 //!
 //! `--seconds` (default 20) is how long the session stays open at least; `--no-input` sends no pointer move. Markers go
 //! to stdout and the last two lines are the counts (`VIEWER_COUNTS ...`) and `VIEWER_RESULT PASS` or
@@ -81,10 +87,15 @@ fn verdict(r: &ViewerReport) -> Result<(), String> {
 
 pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(device) = value(&args, "--device") else {
-        eprintln!("usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]");
+    let device = value(&args, "--device");
+    let pair = value(&args, "--pair").zip(value(&args, "--dir"));
+    if device.is_none() == pair.is_none() {
+        eprintln!(
+            "usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
+       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input]"
+        );
         return ExitCode::from(2);
-    };
+    }
     let seconds = value(&args, "--seconds").and_then(|v| v.parse::<u64>().ok()).unwrap_or(20);
     let log = |line: &str| println!("{line}");
     let fail = |why: &str| {
@@ -115,28 +126,20 @@ pub fn main() -> ExitCode {
         };
     log(&format!("VIEWER_CONNECTED win_session={}", backend.win_session()));
 
-    let devices = match Pump::new(&backend).ask(Command::ListDevices, Duration::from_secs(10)) {
-        Ok(Reply::Devices(list)) => list,
-        Ok(other) => {
-            media.finish();
-            return fail(&format!("unexpected reply to ListDevices: {other:?}"));
+    let mut cfg = match (&device, &pair) {
+        (Some(device), _) => match paired_config(&backend, device) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                media.finish();
+                return fail(&e);
+            }
+        },
+        (None, Some((ipv4, dir))) => {
+            let dir = PathBuf::from(dir);
+            ViewerConfig::new(ipv4, dir.join("peer-code.txt"), dir.join("go"), dir.join("anchor"))
         }
-        Err(e) => {
-            media.finish();
-            return fail(&e);
-        }
+        (None, None) => unreachable!("checked above"),
     };
-    let id = match pick(&devices, &device) {
-        Ok(id) => id,
-        Err(e) => {
-            media.finish();
-            return fail(&e);
-        }
-    };
-    log(&format!("VIEWER_DEVICE {id}"));
-
-    let mut cfg = ViewerConfig::new("", PathBuf::new(), PathBuf::new(), PathBuf::new());
-    cfg.paired = Some(id);
     cfg.send_input = !args.iter().any(|a| a == "--no-input");
     cfg.hold = Duration::from_secs(seconds);
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
@@ -158,4 +161,17 @@ pub fn main() -> ExitCode {
         (Err(why), Ok(())) => fail(&why),
         (Err(why), Err(e)) => fail(&format!("{why} ({e})")),
     }
+}
+
+/// The paired mode's config: the one paired device `wanted` names.
+fn paired_config(backend: &ServiceBackend, wanted: &str) -> Result<ViewerConfig, String> {
+    let devices = match Pump::new(backend).ask(Command::ListDevices, Duration::from_secs(10))? {
+        Reply::Devices(list) => list,
+        other => return Err(format!("unexpected reply to ListDevices: {other:?}")),
+    };
+    let id = pick(&devices, wanted)?;
+    println!("VIEWER_DEVICE {id}");
+    let mut cfg = ViewerConfig::new("", PathBuf::new(), PathBuf::new(), PathBuf::new());
+    cfg.paired = Some(id);
+    Ok(cfg)
 }

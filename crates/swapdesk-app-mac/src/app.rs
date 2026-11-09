@@ -180,8 +180,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Arc::clone(&trace),
     );
     // A scratch run is a development instance: the system picks the ports (a Mac that runs its own Swapdesk keeps
-    // 47820/47821), and the self-test does not announce itself on the network.
-    if options.use_scratch() {
+    // 47820/47821), and the self-test does not announce itself on the network. The host drive keeps the real ports:
+    // the viewer adds this Mac by its address, which means port 47820.
+    if options.use_scratch() && options.drive_host.is_none() {
         params.ports = Some((0, 0));
     }
     params.discovery = options.selftest.is_none();
@@ -205,8 +206,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         input: Some(Arc::new(viewer.input())),
         show_swap: true,
     };
-    let observing: Arc<dyn UiBackend> = Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer)));
-    let startup = state.startup_commands();
+    // The host drive owns the backend's events: the window gets a backend that says nothing.
+    let observing: Arc<dyn UiBackend> = match &options.drive_host {
+        Some(dir) => {
+            crate::drive::start(dir, Arc::clone(&backend), Arc::clone(&trace))?;
+            Arc::new(crate::drive::Silent)
+        }
+        None => Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer))),
+    };
+    let startup = if options.drive_host.is_some() { Vec::new() } else { state.startup_commands() };
 
     if let Some(file) = options.selftest.clone() {
         crate::selftest::schedule(file, Duration::from_secs(2), addrs, Arc::clone(&viewer));
