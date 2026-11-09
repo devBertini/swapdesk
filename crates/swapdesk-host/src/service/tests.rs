@@ -650,6 +650,22 @@ fn the_guard_keeps_refusing_loopback_unless_the_development_option_is_on() {
 }
 
 #[test]
+fn a_peer_at_a_blocked_address_is_dropped_before_the_handshake_and_costs_no_prompt() {
+    // B is paired with A and dials from loopback (the development option); A has that address in `blocked`.
+    let a = Machine::new("a", true, false);
+    let b = Machine::new("b", true, false);
+    Machine::pair(&a, &b, ALL);
+    a.trust.update(|s| s.blocked.push([127, 0, 0, 1])).expect("host store");
+    let r = b.core.connect(a.addr(), a.device(), Intent::Control);
+    assert!(r.is_err(), "the blocked peer got a session");
+    assert!(a.core.host().sessions().is_empty());
+    assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked peer");
+    wait_for("the ignored connection in A's trace", || {
+        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
+    });
+}
+
+#[test]
 fn a_core_refuses_to_dial_its_own_endpoint() {
     let a = Machine::new("a", true, false);
     let r = a.core.connect(a.addr(), a.device(), Intent::View);

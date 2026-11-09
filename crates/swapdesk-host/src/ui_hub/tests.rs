@@ -34,6 +34,7 @@ use crate::testpipe::{PipeWriter, duplex_blocking};
 mod clip_actions;
 mod extras;
 mod files;
+mod security;
 mod terminal;
 
 /// `UiRequest.op` of `Connect`.
@@ -153,6 +154,9 @@ impl Machine {
         let cfg = if dev { cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port)) } else { cfg };
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
+        // The UIs of `info()` run in session 1, the console's: what a connection may do (pair, grant, connect, swap)
+        // is the console's alone. A test about another session connects with its own `ConnInfo`.
+        hub.set_console_session(Some(1));
         Self { core, hub, identity, trust, secrets, audit, presence, hooks, helpers: Vec::new(), log }
     }
 

@@ -128,16 +128,13 @@ impl Hub {
 
     // ---------- swap ----------
 
-    /// The question for this machine's user: when the machine is the viewer now (it would become the host) the UI that
-    /// owns the viewer session hears it, and always the console's.
+    /// The question for this machine's user. It goes to the console session's UI only, whichever way the swap turns:
+    /// when the machine is the viewer now it would become the host, and only the person at the console may agree to
+    /// that (the swap token then skips the host's prompt and presence check). A UI of another session, even the one
+    /// that owns the viewer session, never hears it.
     fn swap_ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        let mut conns = if prompt.asked_becomes_host { self.conns_of_device(&prompt.device) } else { Vec::new() };
-        for c in self.console_conns() {
-            if !conns.iter().any(|x| x.id == c.id) {
-                conns.push(c);
-            }
-        }
+        let conns = self.console_conns();
         if conns.is_empty() {
             // Nobody to ask: the sender goes, which declines.
             return rx;
@@ -165,8 +162,10 @@ impl Hub {
         }
     }
 
-    /// `AnswerSwap`: the user answered the card; only a connection the card went to may.
+    /// `AnswerSwap`: the user answered the card; only a connection the card went to may, and only while it is still
+    /// the console's (the console can move to another session while the card waits).
     pub fn answer_swap(&self, conn: &Conn, request_id: u32, accept: bool) -> Result<(), ApiCode> {
+        self.require_console(conn, "answer to a swap card from a UI that is not the console's")?;
         let mut swaps = lock(&self.swaps);
         let allowed = swaps.get(&request_id).ok_or(ApiCode::NotFound)?.conns.contains(&conn.id);
         if !allowed {
@@ -182,6 +181,12 @@ impl Hub {
     pub fn request_swap(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64) {
         if !self.can_use_session(conn, session_id) {
             return reply(conn, req, Err(ApiCode::NotFound));
+        }
+        // A swap of a session this connection views makes THIS machine the host, with the swap token skipping the
+        // prompt and the presence check: only the console's UI may ask for that. (A hosted session is the console's
+        // already, by `can_use_session`.)
+        if let Err(code) = self.require_console(conn, "a swap request from a UI that is not the console's") {
+            return reply(conn, req, Err(code));
         }
         let (Some(core), Some(rt)) = (self.core(), self.rt()) else {
             return reply(conn, req, Err(ApiCode::ServiceDown));
@@ -291,6 +296,10 @@ impl Hub {
 
     /// `Wake`: replies with the id of the waking entry, then runs the attempt (F-WAKE-01).
     pub fn wake(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, device_id: &str, intent: Intent) {
+        // The attempt ends in a `Connect`: the same rule.
+        if let Err(code) = self.require_console(conn, "a wake from a UI that is not the console's") {
+            return reply(conn, req, Err(code));
+        }
         let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
         let Some(dev) = self.p.trust.read(|s| s.find_by_id(&id).cloned()) else {
             return reply(conn, req, Err(ApiCode::NotFound));

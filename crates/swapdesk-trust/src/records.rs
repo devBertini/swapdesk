@@ -169,6 +169,19 @@ impl TrustStore {
         self.devices.iter().find(|d| &d.device_id == id)
     }
 
+    /// Whether `ip` is one of the blocked addresses: a peer from it is dropped before any handshake (an IPv4-mapped
+    /// IPv6 address counts as its IPv4 address).
+    pub fn is_blocked(&self, ip: std::net::IpAddr) -> bool {
+        let v4 = match ip {
+            std::net::IpAddr::V4(a) => a,
+            std::net::IpAddr::V6(a) => match a.to_ipv4_mapped() {
+                Some(a) => a,
+                None => return false,
+            },
+        };
+        self.blocked.contains(&v4.octets())
+    }
+
     /// Removes a device and its grants (F-PAIR-04); true if it was there.
     pub fn forget(&mut self, id: &DeviceId) -> bool {
         let before = self.devices.len();
@@ -294,5 +307,17 @@ mod tests {
         assert!(s.forget(&id));
         assert!(!s.forget(&id));
         assert!(s.find_by_id(&id).is_none());
+    }
+
+    #[test]
+    fn a_blocked_address_is_found_in_either_notation_and_others_are_not() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let mut s = TrustStore::default();
+        assert!(!s.is_blocked(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9))));
+        s.blocked.push([192, 168, 0, 9]);
+        assert!(s.is_blocked(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9))));
+        assert!(s.is_blocked(IpAddr::V6(Ipv4Addr::new(192, 168, 0, 9).to_ipv6_mapped())));
+        assert!(!s.is_blocked(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10))));
+        assert!(!s.is_blocked(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     }
 }

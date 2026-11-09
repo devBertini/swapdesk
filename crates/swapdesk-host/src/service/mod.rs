@@ -304,6 +304,13 @@ impl Gate {
         check_incoming(&list, local, remote).map(|_| ())
     }
 
+    /// The peer's address is in the trust store's `blocked` list: it gets no answer at all, before any other check
+    /// and before a handshake or a place is spent on it.
+    fn is_blocked(&self, incoming: &Incoming) -> bool {
+        let ip = incoming.remote_address().ip();
+        self.trust.read(|s| s.is_blocked(ip))
+    }
+
     fn reserve(self: &Arc<Self>) -> Option<Slot> {
         self.handshakes
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_HANDSHAKES).then_some(n + 1))
@@ -314,6 +321,14 @@ impl Gate {
 
 async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
+        if gate.is_blocked(&incoming) {
+            gate.shared.log(
+                Level::Debug,
+                format_args!("ignored a connection from the blocked address {}", incoming.remote_address().ip()),
+            );
+            incoming.ignore();
+            continue;
+        }
         if let Err(why) = gate.judge(&incoming).await {
             gate.shared
                 .log(Level::Warn, format_args!("refused a connection from {}: {why}", incoming.remote_address()));

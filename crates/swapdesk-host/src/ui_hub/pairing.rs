@@ -25,7 +25,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use super::views::{MANUAL_PREFIX, api_of, parse_device_id};
-use super::{Hub, lock};
+use super::{Conn, Hub, lock};
 
 /// How often a busy port is tried again when the endpoints of the last pairing are still closing.
 const BIND_TRIES: u32 = 10;
@@ -34,6 +34,8 @@ const BIND_TRIES: u32 = 10;
 struct Inner {
     /// The pairing screen's id; `None` when no pairing is open.
     id: Option<u32>,
+    /// The connection that opened the screen: it alone gets the pairing states and may start, confirm or cancel.
+    owner: Option<u64>,
     peer_name: Option<String>,
     /// The comparison waits for the user's verdict here.
     confirm: Option<oneshot::Sender<bool>>,
@@ -65,33 +67,36 @@ pub(crate) struct HubPairUi {
 impl PairUi for HubPairUi {
     fn peer_announced(&self, peer: &PeerInfo) {
         let Some(hub) = self.hub.upgrade() else { return };
-        let id = {
+        let (id, owner) = {
             let mut s = lock(&hub.pairing.inner);
             s.peer_name = Some(peer.name.clone());
-            s.id
+            (s.id, s.owner)
         };
         if let Some(id) = id {
-            hub.notify(Notify::Pairing { pairing_id: id, state: PairingState::Waiting });
+            hub.notify_pairing(owner, Notify::Pairing { pairing_id: id, state: PairingState::Waiting });
         }
     }
 
     fn show_code(&self, sas: Sas) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         let Some(hub) = self.hub.upgrade() else { return rx };
-        let (id, peer_name) = {
+        let (id, owner, peer_name) = {
             let mut s = lock(&hub.pairing.inner);
             if s.cancelled || s.id.is_none() {
                 // The screen is gone: the sender drops, which is "São diferentes".
                 return rx;
             }
             s.confirm = Some(tx);
-            (s.id, s.peer_name.clone().unwrap_or_default())
+            (s.id, s.owner, s.peer_name.clone().unwrap_or_default())
         };
         if let Some(id) = id {
-            hub.notify(Notify::Pairing {
-                pairing_id: id,
-                state: PairingState::ShowCode { code: Text(sas.to_string()), peer_name },
-            });
+            hub.notify_pairing(
+                owner,
+                Notify::Pairing {
+                    pairing_id: id,
+                    state: PairingState::ShowCode { code: Text(sas.to_string()), peer_name },
+                },
+            );
         }
         rx
     }
@@ -121,6 +126,25 @@ fn pair_error_code(e: &TrustError) -> ApiCode {
 }
 
 impl Hub {
+    /// A pairing state goes to the connection that opened the screen while it is connected and still the console's;
+    /// otherwise to the console's connections. Never to every UI: the code on the screen is for the person at the
+    /// machine.
+    fn notify_pairing(&self, owner: Option<u64>, n: Notify) {
+        let owned = owner.and_then(|o| self.console_conns().into_iter().find(|c| c.id == o));
+        match owned {
+            Some(c) => {
+                c.queue.control(swapdesk_ipc::Message::UiNotify(n));
+            }
+            None => self.notify_console(n),
+        }
+    }
+
+    /// Whether `conn` opened the pairing screen `pairing_id` (the screen is open and is its).
+    fn owns_pairing(&self, conn: &Conn, pairing_id: u32) -> bool {
+        let s = lock(&self.pairing.inner);
+        s.id == Some(pairing_id) && s.owner == Some(conn.id)
+    }
+
     fn pairing_context(self: &Arc<Self>) -> Arc<PairingContext> {
         let s = self.settings();
         Arc::new(PairingContext {
@@ -214,8 +238,13 @@ impl Hub {
     fn pairing_filter(&self) -> swapdesk_trust::IncomingFilter {
         let (nets, allow_loopback) = (Arc::clone(&self.pairing.nets), self.allow_loopback());
         let rate = Arc::clone(&self.pairing.rate);
+        let trust = Arc::clone(&self.p.trust);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
+            // A blocked address gets no answer, before any other look.
+            if trust.read(|s| s.is_blocked(remote)) {
+                return Decision::Ignore;
+            }
             let local = incoming.local_ip();
             let on_link = if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
                 true
@@ -238,7 +267,7 @@ impl Hub {
     }
 
     /// `PairOpen`: pairing mode for 2 minutes (D12), the endpoints, the `pair=1` announcement, the screen's id.
-    pub fn pair_open(self: &Arc<Self>, device_id: Option<String>) -> Result<u32, ApiCode> {
+    pub fn pair_open(self: &Arc<Self>, conn: &Conn, device_id: Option<String>) -> Result<u32, ApiCode> {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if self.p.trust.pairing_in_progress() {
             return Err(ApiCode::Busy);
@@ -255,6 +284,13 @@ impl Hub {
         let ctx = self.pairing_context();
         let id = {
             let mut s = lock(&self.pairing.inner);
+            // One screen at a time: another connection's open screen is not taken over while that connection lives.
+            if s.id.is_some()
+                && s.owner != Some(conn.id)
+                && s.owner.is_some_and(|o| self.conns().iter().any(|c| c.id == o))
+            {
+                return Err(ApiCode::Busy);
+            }
             self.mode.enter(ModeOptions { expect, replaces: None });
             if self.pairing.serving.load(Ordering::SeqCst) == 0 {
                 match self.open_pair_endpoints(&ctx) {
@@ -266,6 +302,7 @@ impl Hub {
                 }
             }
             let id = *s.id.get_or_insert_with(|| self.fresh_id());
+            s.owner = Some(conn.id);
             s.cancelled = false;
             s.peer_name = None;
             id
@@ -273,7 +310,10 @@ impl Hub {
         self.p.presence.set_pairing(true);
         let me = Arc::clone(self);
         rt.spawn(async move { me.watch_pairing_mode(id).await });
-        self.notify(Notify::Pairing { pairing_id: id, state: PairingState::Open { remaining_s: self.remaining_s() } });
+        self.notify_pairing(
+            Some(conn.id),
+            Notify::Pairing { pairing_id: id, state: PairingState::Open { remaining_s: self.remaining_s() } },
+        );
         Ok(id)
     }
 
@@ -318,7 +358,7 @@ impl Hub {
     }
 
     fn end_pairing_of(self: &Arc<Self>, id: u32, state: PairingState) {
-        {
+        let owner = {
             let mut s = lock(&self.pairing.inner);
             if s.id != Some(id) {
                 return;
@@ -328,17 +368,21 @@ impl Hub {
             s.task = None;
             s.peer_name = None;
             s.endpoints.clear();
-        }
+            s.owner.take()
+        };
         self.mode.close();
         self.p.presence.set_pairing(false);
-        self.notify(Notify::Pairing { pairing_id: id, state });
+        self.notify_pairing(owner, Notify::Pairing { pairing_id: id, state });
     }
 
     /// `PairStart`: this machine's user picked `device_id`; run the initiator against it.
-    pub fn pair_start(self: &Arc<Self>, pairing_id: u32, device_id: &str) -> Result<(), ApiCode> {
+    pub fn pair_start(self: &Arc<Self>, conn: &Conn, pairing_id: u32, device_id: &str) -> Result<(), ApiCode> {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if lock(&self.pairing.inner).id != Some(pairing_id) {
             return Err(ApiCode::Invalid);
+        }
+        if !self.owns_pairing(conn, pairing_id) {
+            return Err(self.api_error(ApiCode::NotPermitted, "start of a pairing another UI opened"));
         }
         if lock(&self.pairing.inner).task.is_some() {
             return Err(ApiCode::Busy);
@@ -385,7 +429,7 @@ impl Hub {
             }
         });
         lock(&self.pairing.inner).task = Some(task.abort_handle());
-        self.notify(Notify::Pairing { pairing_id, state: PairingState::Waiting });
+        self.notify_pairing(Some(conn.id), Notify::Pairing { pairing_id, state: PairingState::Waiting });
         Ok(())
     }
 
@@ -402,11 +446,16 @@ impl Hub {
     }
 
     /// `PairConfirm`: the user's verdict on the code.
-    pub fn pair_confirm(&self, pairing_id: u32, matches: bool) -> Result<(), ApiCode> {
+    pub fn pair_confirm(&self, conn: &Conn, pairing_id: u32, matches: bool) -> Result<(), ApiCode> {
         let tx = {
             let mut s = lock(&self.pairing.inner);
             if s.id != Some(pairing_id) {
                 return Err(ApiCode::NotFound);
+            }
+            // The verdict on the code is the opener's alone: a code shown to one UI cannot be confirmed by another.
+            if s.owner != Some(conn.id) {
+                drop(s);
+                return Err(self.api_error(ApiCode::NotPermitted, "confirmation of a pairing another UI opened"));
             }
             s.confirm.take()
         };
@@ -414,9 +463,12 @@ impl Hub {
     }
 
     /// `PairCancel`: the screen closed. A ceremony past the nonce counts as a failed attempt (F-PAIR-02).
-    pub fn pair_cancel(self: &Arc<Self>, pairing_id: u32) -> Result<(), ApiCode> {
+    pub fn pair_cancel(self: &Arc<Self>, conn: &Conn, pairing_id: u32) -> Result<(), ApiCode> {
         if lock(&self.pairing.inner).id != Some(pairing_id) {
             return Err(ApiCode::NotFound);
+        }
+        if !self.owns_pairing(conn, pairing_id) {
+            return Err(self.api_error(ApiCode::NotPermitted, "cancel of a pairing another UI opened"));
         }
         self.cancel_pairing();
         Ok(())
@@ -427,6 +479,7 @@ impl Hub {
         let (task, endpoints) = {
             let mut s = lock(&self.pairing.inner);
             let had = s.id.take().is_some();
+            s.owner = None;
             s.cancelled = had;
             s.confirm = None;
             s.peer_name = None;

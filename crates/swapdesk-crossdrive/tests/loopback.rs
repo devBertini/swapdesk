@@ -255,6 +255,8 @@ impl Machine {
         let cfg = cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port));
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
+        // The UI of `ui()` runs in session 1, the console's: only the console's UI may connect.
+        hub.set_console_session(Some(1));
         Self { core, hub, trust, log: trace_view, helpers: Vec::new() }
     }
 

@@ -135,6 +135,9 @@ impl Hub {
 
     fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
         if let UiOp::Connect { device_id, intent, unattended } = op {
+            if let Err(code) = self.require_console(conn, "a connect from a UI that is not the console's") {
+                return reply(conn, req, Err(code));
+            }
             // Entry without a prompt needs an administrator connection (D10); the host decides the rest.
             if unattended && !conn.info.admin {
                 return reply(conn, req, Err(ApiCode::NeedsAdmin));
@@ -156,16 +159,35 @@ impl Hub {
         self.console_conns().iter().any(|c| c.id == conn.id)
     }
 
+    /// The ops that change who may reach this machine, or make it reach out (pairing, grants, forgetting a device,
+    /// `Connect`, a swap that would make it the host) belong to the person at the console: a UI of another session
+    /// (a user parked by fast user switching) gets `NotPermitted`.
+    pub(super) fn require_console(&self, conn: &Conn, what: &str) -> Result<(), ApiCode> {
+        if self.is_console(conn) { Ok(()) } else { Err(self.api_error(ApiCode::NotPermitted, what)) }
+    }
+
     fn op(self: &Arc<Self>, conn: &Arc<Conn>, op: UiOp) -> OpResult {
+        // Before any argument is looked at, so a refused UI learns nothing about the device list.
+        if matches!(
+            op,
+            UiOp::PairOpen { .. }
+                | UiOp::PairStart { .. }
+                | UiOp::PairConfirm { .. }
+                | UiOp::PairCancel { .. }
+                | UiOp::SetGrants { .. }
+                | UiOp::ForgetDevice { .. }
+        ) {
+            self.require_console(conn, "a pairing, grants or forget request from a UI that is not the console's")?;
+        }
         match op {
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
             UiOp::AddByAddress { ipv4 } => self.add_by_address(&ipv4).map(ReplyBody::Device),
-            UiOp::PairOpen { device_id } => self.pair_open(device_id).map(ReplyBody::PairingId),
-            UiOp::PairStart { pairing_id, device_id } => done(self.pair_start(pairing_id, &device_id)),
-            UiOp::PairConfirm { pairing_id, matches } => done(self.pair_confirm(pairing_id, matches)),
-            UiOp::PairCancel { pairing_id } => done(self.pair_cancel(pairing_id)),
+            UiOp::PairOpen { device_id } => self.pair_open(conn, device_id).map(ReplyBody::PairingId),
+            UiOp::PairStart { pairing_id, device_id } => done(self.pair_start(conn, pairing_id, &device_id)),
+            UiOp::PairConfirm { pairing_id, matches } => done(self.pair_confirm(conn, pairing_id, matches)),
+            UiOp::PairCancel { pairing_id } => done(self.pair_cancel(conn, pairing_id)),
             UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
             UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
             UiOp::Connect { .. } => Err(ApiCode::Internal),
@@ -271,16 +293,21 @@ impl Hub {
     }
 
     /// `SetGrants`: `grants` validated, `UNATTENDED` and `ADMIN_TERMINAL` only added from an administrator
-    /// connection (C2.3, D7); taking them away is open to any (it narrows).
+    /// connection (C2.3, D7), and so is any bit added while the device has `UNATTENDED` (it would widen entry without
+    /// a prompt); taking bits away is open to any console connection (it narrows).
     fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
         let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let old = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.grants_here)).ok_or(ApiCode::NotFound)?;
         let admin_only = PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL;
-        if new.bits() & !old.bits() & admin_only != 0 && !conn.info.admin {
+        let added = new.bits() & !old.bits();
+        // Adding UNATTENDED or ADMIN_TERMINAL, or adding anything to a device that holds (or is given) UNATTENDED:
+        // the added bits are then entry without a prompt.
+        let unattended_involved = (old.bits() | new.bits()) & PermissionSet::BIT_UNATTENDED != 0;
+        if (added & admin_only != 0 || (unattended_involved && added != 0)) && !conn.info.admin {
             return Err(self.api_error(
                 ApiCode::NeedsAdmin,
-                "granting UNATTENDED or ADMIN_TERMINAL from a connection that is not elevated",
+                "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
             ));
         }
         let user = conn.info.user.clone();

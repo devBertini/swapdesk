@@ -239,6 +239,8 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     config.ui = hub.host_ui();
     let core = Arc::new(ServiceCore::start(config).map_err(|e| format!("the core did not start: {e:?}"))?);
     hub.bind_core(&core);
+    // The one UI below runs in session 1, the console's: only the console's UI may connect.
+    hub.set_console_session(Some(1));
     println!("VIEWER_CORE_UP endpoints={:?}", core.local_addrs());
 
     // The UI pipe: the hub serves one end, the backend of the shells' kind drives the other.
