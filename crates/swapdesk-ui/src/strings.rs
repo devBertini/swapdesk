@@ -463,6 +463,12 @@ strings! {
     ClipSkippedConcealed => "O que foi copiado veio marcado como privado, como uma senha, e não foi enviado.", "What was copied was marked as private, like a password, and was not sent.";
     ClipSkippedUnsupported => "Esse tipo de conteúdo não pode ser copiado entre os computadores.", "This kind of content cannot be copied between the computers.";
     ActionFailed => "{0} não executou a ação.", "{0} did not run the action.";
+
+    // Activity lines of a control session, and of a device no longer paired (after 1.0)
+    AuditControlled => "Controlou este computador", "Controlled this computer";
+    AuditControlledFromHere => "Controlado a partir deste computador", "Controlled from this computer";
+    RemovedDevice => "Dispositivo removido", "Removed device";
+    RemovedDeviceInLine => "dispositivo removido", "removed device";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

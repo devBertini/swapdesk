@@ -82,8 +82,8 @@ impl UiState {
             .take(RECENT_LIMIT)
             .map(|row| {
                 let when = format::table_when(self.language(), row.at_ms, self.clock());
-                let who = if row.alert { self.t(MsgKey::UnknownDevice) } else { row.device_name.clone() };
-                let what = self.tm(&row.what);
+                let who = self.activity_who(row);
+                let what = self.activity_what(row);
                 let label = format!("{when}, {who}, {what}, {}", self.duration_cell(row));
                 RecentLine { when, who, what, alert: row.alert, label }
             })

@@ -557,6 +557,67 @@ fn activity_alert_block_and_export() {
 }
 
 #[test]
+fn a_removed_device_is_named_removed_never_by_its_key() {
+    // Defect after 1.0: the service sends a device no longer paired with no name; both screens name it in words.
+    let mut s = base();
+    let row = |what: Msg| AuditView { at_ms: 1, device_name: String::new(), what, duration_s: None, alert: false };
+    s.apply(reply_ok(Reply::Activity(vec![
+        row(Msg::new(MsgKey::AuditSwap).with("")),
+        row(Msg::new(MsgKey::AuditPaired)),
+    ])));
+    let lines = match s.home().cards.into_iter().find(|c| matches!(c, crate::home::HomeCard::Recent { .. })) {
+        Some(crate::home::HomeCard::Recent { lines, .. }) => lines,
+        _ => panic!("no recent card"),
+    };
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines.iter().all(|l| l.who == "Dispositivo removido"),
+        "{:?}",
+        lines.iter().map(|l| &l.who).collect::<Vec<_>>()
+    );
+    assert!(lines[0].what.ends_with("dispositivo removido"), "{}", lines[0].what);
+    let swap = s.activity()[0].clone();
+    s.apply(UiEvent::LanguageChanged(Language::En));
+    assert_eq!(s.activity_who(&swap), "Removed device");
+    assert!(s.activity_what(&swap).ends_with("removed device"), "{}", s.activity_what(&swap));
+}
+
+#[test]
+fn a_device_list_push_reads_the_activity_again_once_and_a_closed_alert_stays_closed() {
+    // Defect after 1.0: Início missed a session until the app was reopened. The service logs a session before it pushes
+    // the device list, so each push asks for the activity again (one request at a time).
+    let mut s = Scenario::Atividade.prepared_state();
+    let _ = s.take_followups();
+    s.activate(ControlId::BlockAlert);
+    let _ = s.take_followups();
+    assert!(s.alert().is_none());
+    let devices = s.devices().to_vec();
+    let refresh = Command::ActivityList { before_ms: None, limit: 200 };
+
+    s.apply(UiEvent::DevicesChanged(devices.clone()));
+    assert_eq!(s.take_followups(), vec![refresh.clone()]);
+    s.apply(UiEvent::DevicesChanged(devices.clone()));
+    assert!(s.take_followups().is_empty(), "one refresh at a time");
+
+    let mut rows = s.activity().to_vec();
+    rows.insert(
+        0,
+        AuditView {
+            at_ms: 2,
+            device_name: "MacBook".into(),
+            what: Msg::new(MsgKey::AuditControlled),
+            duration_s: Some(60),
+            alert: false,
+        },
+    );
+    s.apply(reply_ok(Reply::Activity(rows)));
+    assert_eq!(s.activity()[0].what.key, MsgKey::AuditControlled, "the new session shows");
+    assert!(s.alert().is_none(), "the old alert row does not raise the closed alert again");
+    s.apply(UiEvent::DevicesChanged(devices));
+    assert_eq!(s.take_followups(), vec![refresh], "the next push asks again");
+}
+
+#[test]
 fn every_setting_toggles_and_every_choice_applies() {
     let mut s = Scenario::Ajustes.prepared_state();
     let before = s.settings().unwrap().clone();

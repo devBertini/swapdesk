@@ -572,14 +572,38 @@ impl UiState {
         s.add(ControlId::Static(900), UiRole::Table, self.name_of(MsgKey::LogLabel));
         for (n, row) in self.activity.iter().enumerate() {
             let when = format::table_when(self.lang, row.at_ms, self.clock);
-            let who = if row.alert { self.name_of(MsgKey::UnknownDevice) } else { row.device_name.clone() };
+            let who = self.activity_who(row);
             let dur = self.duration_cell(row);
             s.add(
                 ControlId::Static(901 + n as u16),
                 UiRole::Row,
-                format!("{when}, {who}, {}, {dur}", self.tm(&row.what)),
+                format!("{when}, {who}, {}, {dur}", self.activity_what(row)),
             );
         }
+    }
+
+    /// The device cell of an activity row: "Desconhecido" for an alert, "Dispositivo removido" for a device no longer
+    /// paired (the service sends it with no name), else the device's name.
+    pub fn activity_who(&self, row: &AuditView) -> String {
+        if row.alert {
+            self.name_of(MsgKey::UnknownDevice)
+        } else if row.device_name.is_empty() {
+            self.name_of(MsgKey::RemovedDevice)
+        } else {
+            row.device_name.clone()
+        }
+    }
+
+    /// The text of an activity row; a device no longer paired is named "dispositivo removido" inside it.
+    pub fn activity_what(&self, row: &AuditView) -> String {
+        if row.alert || !row.device_name.is_empty() {
+            return self.tm(&row.what);
+        }
+        let mut what = row.what.clone();
+        for a in what.args.iter_mut().filter(|a| a.is_empty()) {
+            *a = self.name_of(MsgKey::RemovedDeviceInLine);
+        }
+        self.tm(&what)
     }
 
     /// The duration cell of an activity row: "17 min", "agora" or "–".

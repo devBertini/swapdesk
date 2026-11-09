@@ -1085,11 +1085,11 @@ fn activity_main(f: &mut Frame) {
             let row = &rows[n];
             let ry = list.y + n as f32 * 50.0 - scroll;
             let mut cx = list.x;
-            let who = if row.alert { f.t(MsgKey::UnknownDevice) } else { row.device_name.clone() };
+            let who = f.st.activity_who(row);
             let cells = [
                 (format::table_when(f.st.language(), row.at_ms, f.st.clock()), pal.ink, text::BODY),
                 (who, if row.alert { pal.danger } else { pal.ink }, if row.alert { text::NAME } else { text::BODY }),
-                (f.st.tm(&row.what), pal.ink, text::BODY),
+                (f.st.activity_what(row), pal.ink, text::BODY),
                 (f.st.duration_cell(row), pal.soft, text::BODY),
             ];
             for ((s, color, style), c) in cells.into_iter().zip(cols) {

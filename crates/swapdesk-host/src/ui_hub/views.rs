@@ -14,7 +14,7 @@ use swapdesk_lan::guard::approved_addrs;
 use swapdesk_platform::{NetCategory, NetInterface};
 use swapdesk_proto::{Desktop, ErrorCode, GrantMode, Os, PermissionSet, Preset};
 use swapdesk_session::SessionCtx;
-use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, PairedDevice, device_id_hex};
+use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, Direction, PairedDevice, device_id_hex};
 use swapdesk_ui::strings::MsgKey;
 
 use super::presence::PresencePeer;
@@ -147,6 +147,10 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         }
         AuditEvent::SessionStarted { granted, .. } if !granted.contains(PermissionSet::CONTROL) => {
             (msg(MsgKey::AuditViewOnly, &[]), false)
+        }
+        AuditEvent::SessionStarted { direction: Direction::Incoming, .. } => (msg(MsgKey::AuditControlled, &[]), false),
+        AuditEvent::SessionStarted { direction: Direction::Outgoing, .. } => {
+            (msg(MsgKey::AuditControlledFromHere, &[]), false)
         }
         AuditEvent::Swapped => (msg(MsgKey::AuditSwap, &[device_name.to_string()]), false),
         AuditEvent::FilesSent { count, .. } => (msg(MsgKey::AuditControlFiles, &[count.to_string()]), false),
@@ -405,19 +409,32 @@ impl Hub {
         let names: Vec<(DeviceId, String)> =
             self.p.trust.read(|s| s.devices.iter().map(|d| (d.device_id, d.name.clone())).collect());
         let mut out = Vec::new();
+        // Newest first, so a session's end comes before its start: the end's duration waits here for the start's line.
+        let mut ends: Vec<(DeviceRef, u32)> = Vec::new();
         // Entries without a line are skipped, so read more than `limit` and cut after.
         for e in self.p.audit.recent(limit.saturating_mul(4).max(256)) {
+            if let AuditEvent::SessionEnded(_) = e.event {
+                ends.push((e.device, e.duration_s.unwrap_or(0)));
+                continue;
+            }
+            let mut duration_s = e.duration_s;
+            if let AuditEvent::SessionStarted { .. } = e.event
+                && let Some(at) = ends.iter().position(|(d, _)| *d == e.device)
+            {
+                duration_s = Some(ends.remove(at).1);
+            }
             if before_ms.is_some_and(|b| e.time_ms >= b) {
                 continue;
             }
             let device_name = match &e.device {
                 DeviceRef::Known(id) => {
-                    names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone()).unwrap_or_else(|| device_id_hex(id))
+                    // A device no longer paired has no name here: the interface writes "removed device" in its language.
+                    names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone()).unwrap_or_default()
                 }
                 DeviceRef::Unknown { addr, .. } => Ipv4Addr::from(*addr).to_string(),
             };
             if let Some((what, alert)) = activity_line(&e, &device_name) {
-                out.push(AuditView { at_ms: e.time_ms, device_name, what, duration_s: e.duration_s, alert });
+                out.push(AuditView { at_ms: e.time_ms, device_name, what, duration_s, alert });
                 if out.len() >= limit {
                     break;
                 }
@@ -454,9 +471,7 @@ impl AuditSink for HubAudit {
         let Some(hub) = self.hub.upgrade() else { return };
         hub.p.audit.append(entry.clone());
         let name = match &entry.device {
-            DeviceRef::Known(id) => {
-                hub.p.trust.read(|s| s.find_by_id(id).map(|d| d.name.clone())).unwrap_or_else(|| device_id_hex(id))
-            }
+            DeviceRef::Known(id) => hub.p.trust.read(|s| s.find_by_id(id).map(|d| d.name.clone())).unwrap_or_default(),
             DeviceRef::Unknown { addr, .. } => Ipv4Addr::from(*addr).to_string(),
         };
         if let Some((what, true)) = activity_line(&entry, &name) {

@@ -360,6 +360,8 @@ pub(crate) struct Pending {
 pub struct UiState {
     /// Commands an event calls for (a pairing id that starts the initiator), sent by the shell after `apply`.
     pub(crate) followups: Vec<Command>,
+    /// An activity refresh is out: the next `DevicesChanged` asks for none.
+    activity_refresh: bool,
     pub(crate) lang: Language,
     /// What the OS says (`ThemeChanged`); used while `theme` is `System`.
     pub(crate) dark: bool,
@@ -437,6 +439,7 @@ impl UiState {
     pub fn new(lang: Language, dark: bool) -> UiState {
         UiState {
             followups: Vec::new(),
+            activity_refresh: false,
             lang,
             dark,
             theme: Theme::System,
@@ -1057,6 +1060,9 @@ impl UiState {
     }
 
     fn fail_fetch(&mut self, kind: DataKind) {
+        if kind == DataKind::Activity {
+            self.activity_refresh = false;
+        }
         if self.fetch(kind) != Fetch::Ready {
             self.fetch.insert(kind, Fetch::Missing);
         }
@@ -1155,7 +1161,15 @@ impl UiState {
     pub fn apply(&mut self, event: UiEvent) -> Changed {
         match event {
             UiEvent::Reply { ticket, result } => self.apply_reply(ticket, result),
-            UiEvent::DevicesChanged(devices) => self.set_devices(devices),
+            UiEvent::DevicesChanged(devices) => {
+                // The service writes a session's start and end, and a pairing, to the log before it pushes the device
+                // list: the list's push is when Início and Atividade read the log again.
+                if self.fetch(DataKind::Activity) == Fetch::Ready && !self.activity_refresh {
+                    self.activity_refresh = true;
+                    self.followups.push(Command::ActivityList { before_ms: None, limit: 200 });
+                }
+                self.set_devices(devices)
+            }
             UiEvent::NetworkChanged(n) => {
                 self.network = Some(n);
                 self.finish_fetch(DataKind::Network);
@@ -1520,7 +1534,12 @@ impl UiState {
             }
             Reply::Chat(m) => self.apply(UiEvent::Chat { session_id: 0, message: m }),
             Reply::Activity(a) => {
-                self.alert = a.iter().find(|x| x.alert).cloned();
+                // A refresh leaves the alert as it is: a new one arrives as `ActivityAlert`, and one the user closed
+                // stays closed.
+                if self.fetch(DataKind::Activity) != Fetch::Ready {
+                    self.alert = a.iter().find(|x| x.alert).cloned();
+                }
+                self.activity_refresh = false;
                 self.activity = a;
                 self.finish_fetch(DataKind::Activity);
                 Changed::ALL

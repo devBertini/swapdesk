@@ -19,7 +19,8 @@ use swapdesk_ipc::{
 use swapdesk_platform::MonoMicros;
 use swapdesk_proto::{Desktop, InputEvent, Intent, Os, PermissionSet};
 use swapdesk_trust::{
-    AuditEvent, DeviceId, Identity, MemoryAudit, PairedDevice, SystemWallClock, TrustHandle, UserRef, device_id_hex,
+    AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, Identity, MemoryAudit, PairedDevice, SystemWallClock,
+    TrustHandle, UserRef, device_id_hex,
 };
 use swapdesk_ui::MsgKey;
 
@@ -648,6 +649,57 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
     assert_eq!(plain.call(UiOp::ForgetDevice { device_id: id }).unwrap_err(), ApiCode::NotFound);
 
     drop((plain, admin));
+    m.finish();
+    other.finish();
+}
+
+#[test]
+fn activity_names_a_removed_device_by_no_name_never_by_its_key() {
+    // Defect after 1.0: a forgotten device's lines showed its key in hex. The service now sends an empty name and the
+    // interface writes "Dispositivo removido" in its own language.
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    let mut plain = m.client(info(false));
+    for event in [AuditEvent::Paired, AuditEvent::Swapped] {
+        m.audit.append(AuditEntry { time_ms: 1_000, device: DeviceRef::Known(other.id()), event, duration_s: None });
+    }
+    // A control session from the other machine: one line, with the duration its end recorded.
+    let started = AuditEvent::SessionStarted {
+        direction: swapdesk_trust::Direction::Incoming,
+        mode: swapdesk_proto::GrantMode::Prompted,
+        granted: PermissionSet::VIEW.union(PermissionSet::CONTROL),
+        desktop: Desktop::Default,
+    };
+    let device = DeviceRef::Known(other.id());
+    m.audit.append(AuditEntry { time_ms: 2_000, device, event: started, duration_s: None });
+    let ended = AuditEvent::SessionEnded(swapdesk_proto::ErrorCode::NoError);
+    m.audit.append(AuditEntry { time_ms: 122_000, device, event: ended, duration_s: Some(120) });
+    let lines = |c: &mut Client| {
+        let ReplyBody::Activity(l) = c.call(UiOp::ActivityList { before_ms: None, limit: 10 }).unwrap() else {
+            panic!()
+        };
+        l
+    };
+    let before = lines(&mut plain);
+    assert_eq!(before.len(), 3, "{before:?}");
+    assert_eq!(MsgKey::ALL[usize::from(before[0].what.key)], MsgKey::AuditControlled);
+    assert_eq!(
+        (before[0].at_ms, before[0].duration_s),
+        (2_000, Some(120)),
+        "the line sits at the start, with the end's duration"
+    );
+    assert!(before.iter().all(|l| l.device_name == "other-pc"), "{before:?}");
+
+    assert!(plain.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    let after = lines(&mut plain);
+    assert_eq!(after.len(), 3);
+    for l in &after {
+        assert_eq!(l.device_name, "", "a removed device has no name on the wire: {l:?}");
+        assert!(l.what.args.iter().all(|a| a.0.is_empty()), "nor in its line: {l:?}");
+    }
+
+    drop(plain);
     m.finish();
     other.finish();
 }

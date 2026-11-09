@@ -643,6 +643,8 @@ pub enum TransferState { Queued, Running { done: u64, total: u64, bytes_per_s: u
 pub struct ChatView { pub msg_id: u32, pub mine: bool, pub text: String, pub sent_at_ms: u64, pub read: bool }
 pub enum ActionKind { Lock, Sleep, Restart, TaskMonitor }
 pub struct AuditView { pub at_ms: u64, pub device_name: String, pub what: Msg, pub duration_s: Option<u32>, pub alert: bool }
+// device_name is empty for a device no longer paired (the UI writes "Dispositivo removido"); a session's line sits at its
+// start and carries the duration its end recorded.
 pub struct Settings {
     pub name: String, pub language: Language, pub open_at_login: bool, pub service_enabled: bool,
     pub lock_on_end: bool, pub keep_awake: bool, pub quality: Quality, pub show_stats: bool,
