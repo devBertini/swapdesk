@@ -6,6 +6,11 @@ A remote desktop that works only on your local network, for Windows and macOS, b
 
 > **Status: version 1.0.0.** A Windows PC and a Mac control each other across a real LAN after pairing by a compared code: screen, system audio and mouse in both directions, and the keyboard from the Mac to the PC. Between two Windows PCs everything below runs, including terminal, files, clipboard, swap, chat, Wake-on-LAN and reconnect, proven with two instances on one PC. What is not in 1.0 is listed in [Not in 1.0 yet](#not-in-10-yet); the evidence for each feature is in [Status](#status).
 
+<p>
+  <img src=".github/images/home.png" alt="The Swapdesk home screen on Windows: this computer, the paired MacBook online, pairing and recent activity" width="720">
+  <img src=".github/images/request.png" alt="The request on the controlled PC: MacBook wants to control this computer, with what to allow in this session" width="400">
+</p>
+
 ## What it is and why
 
 AnyDesk and TeamViewer reach your machines through a cloud. Swapdesk is for the case where both machines are yours and on the same LAN, and nothing should leave it.
@@ -68,7 +73,7 @@ Each feature is in one of three states, written conservatively:
 | Mouse | Between machines | Between machines | One PC |
 | Keyboard | Between machines (typing into Notepad) | Built and unit-tested on the Mac, not yet run between machines | One PC |
 | Add by address and the LAN guard | Between machines | Between machines | One PC |
-| Discovery on the LAN (DNS-SD) | Built | Built | One PC |
+| Discovery on the LAN (DNS-SD) | Between machines | Between machines | One PC |
 | Swap, chat, Wake-on-LAN, reconnect | Not in 1.0 | Not in 1.0 | One PC |
 | Terminal, files, clipboard, quick actions | Not in 1.0 | Not in 1.0 | One PC |
 | Full screen and viewer shortcuts | Built | Built | One PC |

@@ -6,6 +6,11 @@ Um acesso remoto que funciona só na sua rede local, para Windows e macOS, feito
 
 > **Status: versão 1.0.0.** Um PC com Windows e um Mac se controlam numa rede local de verdade depois de parear por um código comparado: tela, áudio do sistema e mouse nos dois sentidos, e o teclado do Mac para o PC. Entre dois PCs com Windows roda tudo o que está abaixo, incluindo terminal, arquivos, área de transferência, inversão, chat, Wake-on-LAN e reconexão, provado com duas instâncias num mesmo PC. O que não está na 1.0 está em [Fora da 1.0](#fora-da-10); a prova de cada recurso está em [Status](#status).
 
+<p>
+  <img src=".github/images/home.png" alt="A tela Início do Swapdesk no Windows: este computador, o MacBook pareado online, o pareamento e a atividade recente" width="720">
+  <img src=".github/images/request.png" alt="O pedido no PC controlado: o MacBook quer controlar este computador, com o que permitir nesta sessão" width="400">
+</p>
+
 ## O que é e por quê
 
 AnyDesk e TeamViewer chegam às suas máquinas por uma nuvem. O Swapdesk é para quando as duas máquinas são suas, estão na mesma rede local e nada deve sair dela.
@@ -68,7 +73,7 @@ Cada recurso está num de três estados, descritos de forma conservadora:
 | Mouse | Entre máquinas | Entre máquinas | Um PC |
 | Teclado | Entre máquinas (digitando no Bloco de Notas) | Construído e com testes unitários no Mac, ainda não rodado entre máquinas | Um PC |
 | Adicionar por endereço e a proteção de rede local | Entre máquinas | Entre máquinas | Um PC |
-| Descoberta na rede local (DNS-SD) | Construído | Construído | Um PC |
+| Descoberta na rede local (DNS-SD) | Entre máquinas | Entre máquinas | Um PC |
 | Inversão, chat, Wake-on-LAN, reconexão | Fora da 1.0 | Fora da 1.0 | Um PC |
 | Terminal, arquivos, área de transferência, ações rápidas | Fora da 1.0 | Fora da 1.0 | Um PC |
 | Tela cheia e atalhos do visualizador | Construído | Construído | Um PC |
