@@ -7,7 +7,7 @@ use swapdesk_ui::{
     ActionKind, ControlId, DialogKind, DrawerTab, EditId, Msg, MsgKey, SessionState, SwapPhase, TermPhase, WindowKind,
 };
 
-use crate::gfx::{Align, Rect};
+use crate::painter::{Align, Rect};
 use crate::view::{Frame, Kind, icons};
 
 /// The viewer window.

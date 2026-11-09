@@ -18,9 +18,9 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
 use windows::core::{HSTRING, Interface, Result};
 
-use crate::gfx::{Fonts, Painter, Strokes};
-use crate::view::{Frame, Interaction, Output};
-use crate::{screens_main, screens_viewer, view};
+use swapdesk_paint::{Frame, Interaction, Output};
+
+use crate::gfx::{D2dPainter, Fonts, Strokes};
 
 /// A rendered window: BGRA pixels (premultiplied) and what the frame registered.
 pub struct Rendered {
@@ -131,15 +131,10 @@ pub(crate) fn render_with(
             minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
         };
         let rt: ID2D1RenderTarget = factory.CreateWicBitmapRenderTarget(&bitmap, &props)?;
-        let painter = Painter::new(&rt, &factory, &strokes, fonts, scale)?;
+        let painter = D2dPainter::new(&rt, &factory, &strokes, fonts, scale)?;
         rt.BeginDraw();
-        let mut frame = Frame::new(&painter, state, ix, size, true);
-        match kind {
-            WindowKind::Main => screens_main::paint(&mut frame),
-            WindowKind::Viewer => screens_viewer::paint_viewer(&mut frame),
-            WindowKind::Banner => screens_viewer::paint_banner(&mut frame),
-        }
-        let output = view::finish(frame, kind == WindowKind::Viewer);
+        let frame = Frame::new(&painter, state, ix, size, true);
+        let output = swapdesk_paint::paint(frame, kind);
         rt.EndDraw(None, None)?;
         drop(painter);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -150,10 +145,4 @@ pub(crate) fn render_with(
     }
 }
 
-/// The window size a scenario's window has in the design.
-pub fn design_size(kind: WindowKind) -> (f32, f32) {
-    match kind {
-        WindowKind::Banner => screens_viewer::banner_size(),
-        _ => (swapdesk_ui::tokens::layout::DESIGN_W, swapdesk_ui::tokens::layout::DESIGN_H),
-    }
-}
+pub use swapdesk_paint::design_size;

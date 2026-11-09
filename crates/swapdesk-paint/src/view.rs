@@ -5,7 +5,7 @@
 use swapdesk_ui::tokens::{Color, Palette, TextStyle, layout, palette, text};
 use swapdesk_ui::{ControlId, EditId, UiState};
 
-use crate::gfx::{Align, Painter, Rect, rrect_path};
+use crate::painter::{Align, Painter, Rect, rrect_path};
 
 /// What the pointer and keyboard are doing, owned by the window.
 #[derive(Default, Clone, PartialEq)]
@@ -64,7 +64,7 @@ pub enum Kind {
 }
 
 pub struct Frame<'a> {
-    pub p: &'a Painter<'a>,
+    pub p: &'a dyn Painter,
     pub pal: &'static Palette,
     pub st: &'a UiState,
     pub ix: &'a Interaction,
@@ -77,7 +77,7 @@ pub struct Frame<'a> {
 
 impl<'a> Frame<'a> {
     pub fn new(
-        p: &'a Painter<'a>,
+        p: &'a dyn Painter,
         st: &'a UiState,
         ix: &'a Interaction,
         size: (f32, f32),
@@ -275,8 +275,7 @@ impl<'a> Frame<'a> {
             thickness / 2.0 - 0.01,
             color,
         );
-        let _ =
-            self.p.fill_triangle([(x1 - head_w, cy - head_h / 2.0), (x1, cy), (x1 - head_w, cy + head_h / 2.0)], color);
+        self.p.fill_triangle([(x1 - head_w, cy - head_h / 2.0), (x1, cy), (x1 - head_w, cy + head_h / 2.0)], color);
     }
 }
 

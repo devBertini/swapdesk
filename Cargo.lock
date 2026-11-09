@@ -1147,6 +1147,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "swapdesk-paint"
+version = "1.0.0"
+dependencies = [
+ "swapdesk-ui",
+]
+
+[[package]]
 name = "swapdesk-platform"
 version = "1.0.0"
 dependencies = [
@@ -1259,6 +1266,7 @@ version = "1.0.0"
 dependencies = [
  "accesskit",
  "accesskit_windows",
+ "swapdesk-paint",
  "swapdesk-platform",
  "swapdesk-termview",
  "swapdesk-ui",

@@ -19,6 +19,7 @@ unimplemented = "warn"
 
 [dependencies]
 swapdesk-ui = { path = "../swapdesk-ui" }
+swapdesk-paint = { path = "../swapdesk-paint" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-termview = { path = "../swapdesk-termview" }
 accesskit.workspace = true

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::offscreen::render;
 use crate::system::Waker;
-use crate::view::Interaction;
+use swapdesk_paint::Interaction;
 
 /// A running shell: the window thread and what is needed to read its CPU time.
 struct Live {

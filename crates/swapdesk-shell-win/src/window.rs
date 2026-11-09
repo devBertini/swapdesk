@@ -32,12 +32,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::app::Shared;
-use crate::gfx::{Painter, Rect};
+use crate::gfx::{D2dPainter, Rect};
 use crate::surface::Surface;
 use crate::system::{WM_ACCESS, WM_EDIT_EVENT, WM_WAKE, edit_font, get_x, get_y, hiword, loword};
-use crate::view::{EditSlot, Frame, Interaction, Widget};
+use swapdesk_paint::{EditSlot, Frame, Interaction, Widget};
 use crate::viewer::{KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};
-use crate::{screens_main, screens_viewer, view};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS_NAME: PCWSTR = w!("SwapdeskWindow");
@@ -256,7 +255,7 @@ impl Window {
                 work = info.rcWork;
             }
             let (dw, dh) = match self.kind {
-                WindowKind::Banner => screens_viewer::banner_size(),
+                WindowKind::Banner => swapdesk_paint::banner_size(),
                 _ => (layout::DESIGN_W, layout::DESIGN_H),
             };
             let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
@@ -903,19 +902,14 @@ impl Window {
             // SAFETY: between BeginDraw and EndDraw.
             let size = unsafe { dc.GetSize() };
             let factory = gfx.factory();
-            let Ok(painter) = Painter::new(dc, &factory, &gfx.strokes, &gfx.fonts, scale) else {
+            let Ok(painter) = D2dPainter::new(dc, &factory, &gfx.strokes, &gfx.fonts, scale) else {
                 let _ = surface.end();
                 return;
             };
             let st = self.shared.state.borrow();
             let ix = self.ix.borrow();
-            let mut frame = Frame::new(&painter, &st, &ix, (size.width, size.height), false);
-            match self.kind {
-                WindowKind::Main => screens_main::paint(&mut frame),
-                WindowKind::Viewer => screens_viewer::paint_viewer(&mut frame),
-                WindowKind::Banner => screens_viewer::paint_banner(&mut frame),
-            }
-            out = view::finish(frame, self.kind == WindowKind::Viewer);
+            let frame = Frame::new(&painter, &st, &ix, (size.width, size.height), false);
+            out = swapdesk_paint::paint(frame, self.kind);
             let grid_focused = ix.focus == Some(ControlId::TermGrid);
             drop(ix);
             drop(st);

@@ -11,7 +11,7 @@ use swapdesk_ui::{
     PairingState, Screen, SelectId, SessionState, WindowKind,
 };
 
-use crate::gfx::{Align, Rect};
+use crate::painter::{Align, Rect};
 use crate::view::{Frame, Kind, icons};
 
 const SIDEBAR_W: f32 = layout::SIDEBAR_W;
@@ -479,7 +479,7 @@ fn paint_card(f: &mut Frame, card: &HomeCard, r: Rect, avail: f32) {
             let lx = x + inner - link.w;
             let ly = y + (t.h - link.h) / 2.0;
             p.draw(&link, lx, ly, pal.link);
-            let content = p.fonts.content_height(edit_style);
+            let content = p.content_height(edit_style);
             let link_box = Rect::new(lx, ly + (link.h - content) / 2.0, link.w, content);
             if f.hovered(ControlId::HomeActivityAll) {
                 p.fill_rect(Rect::new(lx, link_box.bottom() - 1.5, link.w, bw), pal.link);
@@ -781,7 +781,7 @@ fn info_panels(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) {
     let edit_x = first.right() - bw - 22.0 - edit.w;
     let edit_y = first.y + bw + 20.0 + (heading_h - edit.h) / 2.0;
     p.draw(&edit, edit_x, edit_y, pal.link);
-    let content = p.fonts.content_height(edit_style);
+    let content = p.content_height(edit_style);
     let edit_box = Rect::new(edit_x, edit_y + (edit.h - content) / 2.0, edit.w, content);
     if f.hovered(ControlId::EditGrants) {
         p.fill_rect(Rect::new(edit_x, edit_box.bottom() - 1.5, edit.w, p.hairline()), pal.link);
@@ -1335,7 +1335,7 @@ fn settings_group(f: &mut Frame, x: f32, y: f32, w: f32, title: &str, rows: &[Se
 }
 
 /// Label, hint and the width of the control at the row's end.
-fn row_parts<'r>(p: &crate::gfx::Painter, row: &'r SettingRow) -> (&'r str, Option<&'r str>, f32) {
+fn row_parts<'r>(p: &dyn crate::painter::Painter, row: &'r SettingRow) -> (&'r str, Option<&'r str>, f32) {
     match row {
         SettingRow::Edit { label, width, .. } => (label.as_str(), None, *width),
         SettingRow::Select { label, hint, width, .. } => (label.as_str(), hint.as_deref(), *width),

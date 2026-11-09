@@ -13,13 +13,9 @@ mod files_dialogs;
 mod fullscreen;
 mod gfx;
 mod offscreen;
-mod screens_files;
-mod screens_main;
-mod screens_viewer;
 mod surface;
 mod system;
 mod terminal;
-mod view;
 mod viewer;
 mod window;
 
@@ -28,9 +24,11 @@ pub use offscreen::{Rendered, design_size, render};
 pub use swapdesk_platform::NativeSurface;
 pub use system::{Waker, logs_dir, message_box, system_dark, system_language, trace_line};
 pub use terminal::terminal_output;
-pub use view::{Interaction, Output, Widget};
+pub use swapdesk_paint::{Interaction, Output, Widget};
 pub use viewer::{HeadlessSurface, KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};
 
+#[cfg(test)]
+mod files_panel_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]

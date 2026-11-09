@@ -9,7 +9,7 @@ use swapdesk_ui::tokens::{DARK, LIGHT};
 use swapdesk_ui::{ControlId, WindowKind};
 
 use crate::offscreen::{design_size, render};
-use crate::view::Interaction;
+use swapdesk_paint::Interaction;
 
 fn shots_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-results/stage11-shots");
@@ -361,7 +361,7 @@ fn settings_list_the_shortcuts_inside_the_window() {
 fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
     use swapdesk_ui::tokens::layout;
     use swapdesk_ui::{EditId, UiState};
-    let overlap = |a: &crate::gfx::Rect, b: &crate::gfx::Rect| {
+    let overlap = |a: &swapdesk_paint::Rect, b: &swapdesk_paint::Rect| {
         a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     };
     let at = |state: &UiState, size: (f32, f32)| {
