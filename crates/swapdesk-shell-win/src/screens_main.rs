@@ -907,6 +907,36 @@ fn settings_main(f: &mut Frame) {
                     label: f.t(MsgKey::SwapCtrlCmd),
                     on: set.swap_ctrl_cmd,
                 },
+                SettingRow::Select {
+                    id: SelectId::ReleaseKey,
+                    label: f.t(MsgKey::ReleaseKeyLabel),
+                    hint: Some(f.t(MsgKey::ReleaseKeyHint)),
+                    value: f.st.select_value(SelectId::ReleaseKey),
+                    width: 150.0,
+                },
+                SettingRow::Select {
+                    id: SelectId::FullscreenMonitor,
+                    label: f.t(MsgKey::FullscreenMonitorLabel),
+                    hint: None,
+                    value: f.st.select_value(SelectId::FullscreenMonitor),
+                    width: 190.0,
+                },
+                // D30: every viewer shortcut, one per line, and the note that they hold with the capture on.
+                SettingRow::Status {
+                    label: f.t(MsgKey::GroupShortcuts),
+                    hint: Some(
+                        f.st.shortcut_rows()
+                            .into_iter()
+                            .map(|(what, keys)| format!("{what}: {keys}"))
+                            .chain(std::iter::once(f.t(MsgKey::ShortcutsKeepHint)))
+                            .collect::<Vec<_>>()
+                            .join(
+                                "
+",
+                            ),
+                    ),
+                    value: None,
+                },
             ],
         ),
         (

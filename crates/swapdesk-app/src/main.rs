@@ -66,6 +66,7 @@ fn main() {
         Ok(p) => p,
         Err(e) => return message_box(&format!("Swapdesk could not start the viewer: {e}")),
     };
+    pipeline.set_waker(waker.clone());
     let backend: Arc<dyn UiBackend> = match connect::connect(&options, waker.clone(), pipeline.clone()) {
         Ok(service) => {
             pipeline.set_out(service.clone());

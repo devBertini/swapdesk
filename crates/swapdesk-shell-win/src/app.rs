@@ -83,6 +83,8 @@ pub fn run_with_host(
     });
     let gfx = Gfx::new()?;
     let mut state = state;
+    // The full-screen monitor setting offers one entry for each monitor.
+    state.set_local_monitors(u8::try_from(crate::fullscreen::monitor_rects().len()).unwrap_or(1));
     // Files are received into this user's Downloads folder until the user picks another (the file panel).
     if state.receive_dir().is_none()
         && let Some(dir) = crate::files_dialogs::default_receive_dir()
@@ -148,6 +150,14 @@ impl Shared {
         self.state.borrow_mut().set_clock(crate::system::local_clock());
         for e in events {
             changed = changed.union(self.state.borrow_mut().apply(e));
+        }
+        // The viewer's own shortcuts (D30), recognised by the pipeline on the window's keys or the system-wide hook.
+        if let Some(host) = &self.host {
+            for action in host.take_shortcuts() {
+                let act = self.state.borrow_mut().run_shortcut(action);
+                self.send_commands(act.commands);
+                changed = changed.union(act.changed);
+            }
         }
         let followups = self.state.borrow_mut().take_followups();
         self.send_commands(followups);
@@ -338,6 +348,13 @@ impl Shared {
             }
         }
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        if let Some(viewer) = windows.iter().find(|w| w.kind == WindowKind::Viewer) {
+            let (on, monitor) = {
+                let st = self.state.borrow();
+                (st.fullscreen(), st.fullscreen_monitor())
+            };
+            viewer.sync_fullscreen(on, monitor);
+        }
         for w in &windows {
             if changed.hits(w.kind) {
                 w.invalidate();

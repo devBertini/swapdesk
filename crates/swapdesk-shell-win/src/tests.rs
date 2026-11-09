@@ -252,3 +252,74 @@ fn every_screen_has_a_complete_accessibility_tree_with_bounds() {
     )
     .unwrap();
 }
+
+// ----- stage 68: full screen and the viewer shortcuts (D30) -----
+
+fn shots68() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-results/stage68-shots");
+    std::fs::create_dir_all(&dir).expect("shots dir");
+    dir
+}
+
+#[test]
+fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
+    use swapdesk_ui::ViewerAction;
+    let (w, h) = design_size(WindowKind::Viewer);
+    let mut state = Scenario::Visualizador.prepared_state();
+    let window = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
+    window.save_png(&shots68().join("visualizador-janela.png")).unwrap();
+    let id = |r: &crate::offscreen::Rendered, c| r.output.widgets.iter().any(|x| x.id == c);
+    assert!(id(&window, ControlId::TbKeys), "the bar shows in a window");
+    let video = window.output.video.expect("video rectangle");
+    assert!(video.y >= swapdesk_ui::tokens::layout::VIEWER_BAR_H && video.w < w);
+
+    state.run_shortcut(ViewerAction::FullScreen);
+    let full = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
+    full.save_png(&shots68().join("visualizador-tela-cheia.png")).unwrap();
+    assert!(!id(&full, ControlId::TbKeys) && !id(&full, ControlId::TbDisconnect), "the bar is hidden");
+    let v = full.output.video.expect("video rectangle");
+    assert!((v.x - (w - v.w) / 2.0).abs() < 0.5 && (v.y - (h - v.h) / 2.0).abs() < 0.5, "centred: {v:?}");
+    assert!(v.w == w || v.h == h, "the 16:10 picture touches two edges of the window: {v:?}");
+    // The viewer's top bar is gone too: its pixel is not the bar's surface colour any more.
+    assert_ne!(full.rgb_at(2, 2), window.rgb_at(2, 2));
+    let missing: Vec<_> =
+        state.controls(WindowKind::Viewer).into_iter().filter(|c| c.id.focusable() && !id(&full, c.id)).collect();
+    assert!(missing.is_empty(), "controls listed but not drawn in full screen: {missing:?}");
+
+    // Ctrl+Alt+B brings the session bar back.
+    state.run_shortcut(ViewerAction::ToggleBar);
+    let shown = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
+    shown.save_png(&shots68().join("visualizador-tela-cheia-com-barra.png")).unwrap();
+    assert!(id(&shown, ControlId::TbKeys) && id(&shown, ControlId::TbDisconnect));
+    let missing: Vec<_> =
+        state.controls(WindowKind::Viewer).into_iter().filter(|c| c.id.focusable() && !id(&shown, c.id)).collect();
+    assert!(missing.is_empty(), "controls listed but not drawn with the bar shown: {missing:?}");
+}
+
+#[test]
+fn the_toolbar_tooltip_draws_the_shortcut_list_under_the_bar_and_only_while_hovered() {
+    let (w, h) = design_size(WindowKind::Viewer);
+    let state = Scenario::Visualizador.prepared_state();
+    let plain = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
+    let ix = Interaction { hover: Some(ControlId::TbKeys), ..Interaction::default() };
+    let hovered = render(&state, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
+    hovered.save_png(&shots68().join("visualizador-dica-atalhos.png")).unwrap();
+    let bar = hovered.output.widgets.iter().find(|x| x.id == ControlId::TbKeys).unwrap().rect;
+    // A pixel inside the tooltip card (under the bar, at its right side) is the dark card colour only when it shows.
+    let (px, py) = ((w / 2.0 + 150.0) as u32, (bar.bottom() + 60.0) as u32);
+    assert_ne!(hovered.rgb_at(px, py), plain.rgb_at(px, py), "the card darkens the picture under it");
+    // Away from the card both frames are the same picture.
+    assert_eq!(hovered.rgb_at(w as u32 - 40, py), plain.rgb_at(w as u32 - 40, py));
+}
+
+#[test]
+fn settings_list_the_shortcuts_inside_the_window() {
+    let (w, h) = design_size(WindowKind::Main);
+    let state = Scenario::Ajustes.prepared_state();
+    let r = render(&state, WindowKind::Main, (w, h), 1.0, &Interaction::default()).unwrap();
+    r.save_png(&shots68().join("ajustes-atalhos.png")).unwrap();
+    let find = |s| r.output.widgets.iter().find(|x| x.id == ControlId::Select(s)).map(|x| x.rect);
+    let release = find(swapdesk_ui::SelectId::ReleaseKey).expect("the release key select is drawn");
+    assert!(find(swapdesk_ui::SelectId::FullscreenMonitor).is_some(), "the monitor select is drawn");
+    assert!(release.bottom() < h, "inside the window at the design size: {release:?}");
+}

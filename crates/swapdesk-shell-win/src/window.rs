@@ -88,6 +88,10 @@ pub struct Window {
     pending_effect: RefCell<Option<Effect>>,
     /// The text of the address field while it waits for 150 ms of quiet (R-UI-4).
     address_wait: RefCell<Debouncer>,
+    /// Full screen (D30): what leaving puts back; `None` while the window has its frame.
+    fullscreen: RefCell<Option<crate::fullscreen::Saved>>,
+    /// The high half of a surrogate pair typed through the IME, waiting for its low half.
+    high_surrogate: Cell<Option<u16>>,
 }
 
 struct Bridge {
@@ -160,6 +164,8 @@ impl Window {
             edit_brush: Cell::new(None),
             pending_effect: RefCell::new(None),
             address_wait: RefCell::new(Debouncer::new()),
+            fullscreen: RefCell::new(None),
+            high_surrogate: Cell::new(None),
         });
         let title = a11y::window_title(&shared.state.borrow(), kind);
         let (style, ex) = match kind {
@@ -382,6 +388,51 @@ impl Window {
             if horizontal { MouseKind::Wheel { dx: delta, dy: 0 } } else { MouseKind::Wheel { dx: 0, dy: delta } };
         let hit = self.hit_test(p.x, p.y);
         self.forward_mouse(kind, p.x, p.y, hit)
+    }
+
+    /// Full screen follows the state (D30): the viewer window covers the chosen monitor with no frame, or has its frame
+    /// back. A change of the chosen monitor while already full screen applies the next time.
+    pub fn sync_fullscreen(&self, on: bool, monitor: Option<u8>) {
+        if self.kind != WindowKind::Viewer {
+            return;
+        }
+        let mut saved = self.fullscreen.borrow_mut();
+        match (on, saved.as_ref()) {
+            (true, None) => {
+                if let Some(target) = crate::fullscreen::target_rect(self.hwnd(), monitor) {
+                    *saved = Some(crate::fullscreen::enter(self.hwnd(), target));
+                }
+            }
+            (false, Some(s)) => {
+                crate::fullscreen::leave(self.hwnd(), s);
+                *saved = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Text the IME composed: the key-downs of an IME arrive as `VK_PROCESSKEY` and carry nothing, the result comes as
+    /// `WM_CHAR`s that nothing else reads in the viewer. They go to the pipeline as a text-only [`KeyMsg`]
+    /// (`vk == 0`), which sends a text record. `Some` when the unit was taken.
+    fn forward_text(&self, unit: u16) -> Option<LRESULT> {
+        let host = self.host()?;
+        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() {
+            return None;
+        }
+        let pair = match (self.high_surrogate.take(), unit) {
+            (Some(high), low) if (0xDC00..0xE000).contains(&low) => vec![high, low],
+            (_, high) if (0xD800..0xDC00).contains(&high) => {
+                self.high_surrogate.set(Some(high));
+                return Some(LRESULT(0));
+            }
+            (_, u) => vec![u],
+        };
+        let text = String::from_utf16(&pair).ok().filter(|t| !t.is_empty() && !t.chars().any(char::is_control));
+        if let Some(text) = text {
+            let key = KeyMsg { vk: 0, scan: 0, extended: false, down: true, text: Some(text), dead: false, locks: 0 };
+            host.key(&key);
+        }
+        Some(LRESULT(0))
     }
 
     /// Offers a key message to the pipeline. `Some` when it takes the key away from the UI.
@@ -875,6 +926,12 @@ impl Window {
         }
         if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
             && let Some(r) = self.forward_key(msg, wparam, lparam)
+        {
+            return Some(r);
+        }
+        if msg == WM_CHAR
+            && self.kind == WindowKind::Viewer
+            && let Some(r) = self.forward_text(wparam.0 as u16)
         {
             return Some(r);
         }

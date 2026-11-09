@@ -565,7 +565,9 @@ pub fn route(c: &a::Command) -> Route {
             Some(op) => op,
             None => return Route::Unsupported,
         },
-        C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } => return Route::LocalDone,
+        C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } | C::SetReleaseKey { .. } => {
+            return Route::LocalDone;
+        }
         C::Elevate { .. }
         | C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.

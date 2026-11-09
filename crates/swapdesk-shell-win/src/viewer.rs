@@ -54,7 +54,8 @@ pub struct MouseMsg {
 }
 
 /// A key message of the viewer window, as the low-level hook would describe it: virtual key, 8-bit scan code and the
-/// extended flag. `text` and `dead` are what the viewer's layout made of the press (from the `WM_CHAR` and
+/// extended flag. A message with `vk == 0` and `down` carries text only (an IME's composed `WM_CHAR`s): no key is
+/// pressed, `text` is what was typed. `text` and `dead` are what the viewer's layout made of the press (from the `WM_CHAR` and
 /// `WM_DEADCHAR` messages that follow it; empty for key-ups, shortcuts and keys with no text). `locks` is the toggle
 /// state: bit 0 Caps, 1 Num, 2 Scroll.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +86,11 @@ pub trait ViewerHost: Send + Sync {
     /// The host's cursor shape while the viewer controls the host: the local pointer takes it over the video, and the
     /// remote arrow is not drawn (it would trail the pointer by a round trip). `None`: the system arrow.
     fn pointer_shape(&self) -> Option<std::sync::Arc<swapdesk_platform::CursorShape>>;
+    /// The viewer's own shortcuts (D30) that fired since the last call, oldest first; the shell runs them on the state.
+    /// The pipeline wakes the UI thread (the shell's waker) when one is queued.
+    fn take_shortcuts(&self) -> Vec<swapdesk_ui::ViewerAction> {
+        Vec::new()
+    }
 }
 
 /// A composition tree with a D3D11 device and a parent visual, and no window: what the renderer needs from a shell,

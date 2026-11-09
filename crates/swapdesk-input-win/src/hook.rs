@@ -8,8 +8,9 @@
 
 use crate::grab::{GrabConfig, GrabState, LlKey, Translated};
 use std::sync::mpsc::{SyncSender, TrySendError, channel};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use swapdesk_keys::shortcuts::ViewerAction;
 use swapdesk_platform::{ErrorKind, InputGrabber, PlatformError, Result};
 use swapdesk_proto::InputEvent;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -24,9 +25,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+/// Called on the hook thread for every viewer shortcut (D30); it only queues (the hook has a deadline).
+pub type ShortcutHandler = Arc<dyn Fn(ViewerAction) + Send + Sync>;
+
 struct Ctx {
     state: GrabState,
     tx: SyncSender<InputEvent>,
+    on_shortcut: Option<ShortcutHandler>,
     /// An event could not be queued (the consumer is behind): a `ReleaseAll` goes first as soon as there is room, so
     /// the host never keeps a key whose release was lost.
     lost: bool,
@@ -126,6 +131,9 @@ fn handle(key: LlKey) -> bool {
     let verdict = c.state.on_key(key, |k, mods| translate(k, mods, locks));
     for e in verdict.events {
         send(c, e);
+    }
+    if let (Some(action), Some(h)) = (verdict.shortcut, c.on_shortcut.as_ref()) {
+        h(action);
     }
     verdict.swallow
 }
@@ -238,12 +246,18 @@ fn spawn_hook_thread() -> Result<Hooked> {
 pub struct WinGrabber {
     config: GrabConfig,
     grab_system_keys: bool,
+    on_shortcut: Option<ShortcutHandler>,
     hooked: Option<Hooked>,
 }
 
 impl WinGrabber {
     pub fn new(config: GrabConfig) -> Self {
-        Self { config, grab_system_keys: false, hooked: None }
+        Self { config, grab_system_keys: false, on_shortcut: None, hooked: None }
+    }
+
+    /// Where the viewer's own shortcuts go (set before `start`; they are recognised when `GrabConfig::release` is set).
+    pub fn set_shortcut_handler(&mut self, handler: ShortcutHandler) {
+        self.on_shortcut = Some(handler);
     }
 
     pub fn is_running(&self) -> bool {
@@ -278,7 +292,7 @@ impl InputGrabber for WinGrabber {
             }
             let mut state = GrabState::new(self.config, crate::winsend::lock_toggles());
             state.set_grab_system_keys(self.grab_system_keys);
-            *guard = Some(Ctx { state, tx: events, lost: false, dropped: 0 });
+            *guard = Some(Ctx { state, tx: events, on_shortcut: self.on_shortcut.clone(), lost: false, dropped: 0 });
         }
         match spawn_hook_thread() {
             Ok(h) => {

@@ -5,6 +5,7 @@
 
 use crate::api::*;
 use crate::format;
+use crate::shortcuts::ReleaseKey;
 use crate::state::*;
 use crate::strings::MsgKey;
 use crate::tokens::layout::PAIR_COUNTDOWN_S;
@@ -582,10 +583,31 @@ impl UiState {
         c.value = Some(self.select_value(SelectId::Keyboard));
         c.description = Some(self.name_of(MsgKey::SendKeysHint));
         s.switch(ControlId::SwapCtrlCmd, self.name_of(MsgKey::SwapCtrlCmd), set.swap_ctrl_cmd, None);
+        s.text(UiRole::Heading, self.name_of(MsgKey::GroupShortcuts));
+        let c = s.add(ControlId::Select(SelectId::ReleaseKey), UiRole::ComboBox, self.name_of(MsgKey::ReleaseKeyLabel));
+        c.value = Some(self.select_value(SelectId::ReleaseKey));
+        c.description = Some(self.name_of(MsgKey::ReleaseKeyHint));
+        let c = s.add(
+            ControlId::Select(SelectId::FullscreenMonitor),
+            UiRole::ComboBox,
+            self.name_of(MsgKey::FullscreenMonitorLabel),
+        );
+        c.value = Some(self.select_value(SelectId::FullscreenMonitor));
+        for (what, keys) in self.shortcut_rows() {
+            s.text(UiRole::Text, format!("{what}: {keys}"));
+        }
+        s.text(UiRole::Text, self.name_of(MsgKey::ShortcutsKeepHint));
     }
 
     /// The options of a select with the current one marked.
     pub fn select_options(&self, id: SelectId) -> Vec<(String, bool)> {
+        match id {
+            SelectId::ReleaseKey => {
+                return ReleaseKey::ALL.iter().map(|k| (self.release_key_name(*k), *k == self.release_key)).collect();
+            }
+            SelectId::FullscreenMonitor => return self.fullscreen_monitor_options(),
+            _ => {}
+        }
         let Some(set) = &self.settings else { return Vec::new() };
         match id {
             SelectId::Language => vec![
@@ -602,6 +624,7 @@ impl UiState {
                 (self.name_of(MsgKey::KeyboardPhysical), set.keyboard_mode == KeyboardMode::Physical),
                 (self.name_of(MsgKey::KeyboardText), set.keyboard_mode == KeyboardMode::Text),
             ],
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor => Vec::new(),
         }
     }
 
@@ -859,7 +882,8 @@ impl UiState {
         let on = self.grab_on;
         let c = s.add(ControlId::TbGrab, UiRole::Button, self.name_of(MsgKey::TbGrab));
         c.toggled = Some(on);
-        s.button(ControlId::TbKeys, self.name_of(MsgKey::TbKeys));
+        let c = s.add(ControlId::TbKeys, UiRole::Button, self.name_of(MsgKey::TbKeys));
+        c.description = Some(self.shortcuts_tooltip());
         for (id, key, tab) in [
             (ControlId::TbTerminal, MsgKey::TbTerminal, DrawerTab::Terminal),
             (ControlId::TbFiles, MsgKey::TbFiles, DrawerTab::Files),
@@ -883,6 +907,10 @@ impl UiState {
             c.disabled = true;
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
+        if !self.session_bar_visible() {
+            // Full screen with the bar hidden: its controls are not on screen, so they are not reachable either.
+            s.v.retain(|c| c.region != Region::Toolbar);
+        }
         if let Some(open) = self.drawer {
             s.region(Region::Drawer);
             for (tab, key) in [
@@ -1499,6 +1527,15 @@ impl UiState {
 
     /// The user chose option `index` of a select.
     pub fn choose(&mut self, id: SelectId, index: usize) -> Activation {
+        match id {
+            SelectId::ReleaseKey => {
+                let key = ReleaseKey::ALL[index.min(ReleaseKey::ALL.len() - 1)];
+                let command = self.set_release_key(key);
+                return Activation { changed: Changed::ALL, commands: vec![command], ..Activation::default() };
+            }
+            SelectId::FullscreenMonitor => return self.choose_fullscreen_monitor(index),
+            _ => {}
+        }
         let mut a = Activation { changed: Changed::ALL, ..Activation::default() };
         self.toggle_setting(&mut a, |s| match id {
             SelectId::Language => s.language = if index == 0 { Language::PtBr } else { Language::En },
@@ -1506,6 +1543,7 @@ impl UiState {
             SelectId::Keyboard => {
                 s.keyboard_mode = [KeyboardMode::Auto, KeyboardMode::Physical, KeyboardMode::Text][index.min(2)]
             }
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor => {}
         });
         if id == SelectId::Language {
             self.lang = self.settings.as_ref().map_or(self.lang, |s| s.language);

@@ -107,6 +107,10 @@ pub enum SelectId {
     Language,
     Quality,
     Keyboard,
+    /// The chord that releases the keyboard in the viewer (UI-local, D30).
+    ReleaseKey,
+    /// The monitor full screen goes to (UI-local).
+    FullscreenMonitor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -378,6 +382,14 @@ pub struct UiState {
     pub(crate) quality: Quality,
     /// The shell's viewer toolbar offers the quality select and the view-only switch (the Windows toolbar does not).
     pub(crate) viewer_extras: bool,
+    /// The viewer's shortcuts (D30): the viewer's OS, the release chord, full screen, the session bar shown in full
+    /// screen, the monitor full screen goes to and how many monitors there are.
+    pub(crate) viewer_os: crate::shortcuts::ViewerOs,
+    pub(crate) release_key: crate::shortcuts::ReleaseKey,
+    pub(crate) fullscreen: bool,
+    pub(crate) bar_shown: bool,
+    pub(crate) fullscreen_monitor: Option<u8>,
+    pub(crate) local_monitors: u8,
     pub(crate) connect_end: Option<ConnectEnd>,
     /// The viewer session whose display list was asked for by [`UiState::take_display_request`].
     pub(crate) displays_asked: Option<u64>,
@@ -436,6 +448,12 @@ impl UiState {
             view_only: false,
             quality: Quality::Auto,
             viewer_extras: false,
+            viewer_os: crate::shortcuts::ViewerOs::Windows,
+            release_key: crate::shortcuts::ReleaseKey::CtrlAlt,
+            fullscreen: false,
+            bar_shown: false,
+            fullscreen_monitor: None,
+            local_monitors: 1,
             connect_end: None,
             displays_asked: None,
             error: None,
@@ -896,6 +914,7 @@ impl UiState {
                 | Command::SetScale { .. }
                 | Command::SetQuality { .. }
                 | Command::SetViewOnly { .. }
+                | Command::SetReleaseKey { .. }
         ) {
             self.undo_slot.take()
         } else {
@@ -1214,6 +1233,8 @@ impl UiState {
             }
             if self.viewer_session().is_none() {
                 self.view_only = false;
+                self.fullscreen = false;
+                self.bar_shown = false;
                 self.quality = Quality::Auto;
                 self.drawer = None;
                 self.chat.clear();

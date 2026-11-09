@@ -541,50 +541,171 @@ pub enum Command {
     GetThisDevice,
     GetNetwork,
     ListDevices,
-    AddByAddress { ipv4: String },
-    PairOpen { device_id: Option<String> },
-    PairStart { pairing_id: u32, device_id: String },
-    PairConfirm { pairing_id: u32, matches: bool },
-    PairCancel { pairing_id: u32 },
-    SetGrants { device_id: String, grants: Permissions },
-    ForgetDevice { device_id: String },
-    Elevate { action: ElevatedAction },
-    Connect { device_id: String, intent: Intent, unattended: bool },
-    Disconnect { session_id: u64 },
-    AnswerIncoming { request_id: u32, decision: Decision },
-    ListDisplays { session_id: u64 },
-    SelectDisplay { session_id: u64, display_id: u16 },
-    SetScale { session_id: u64, scale: Scale },
-    SetQuality { session_id: u64, quality: Quality },
-    SetAudio { session_id: u64, on: bool },
-    SetKeyboardMode { session_id: u64, mode: KeyboardMode },
-    SetGrab { session_id: u64, on: bool },
-    SetViewOnly { session_id: u64, on: bool },
-    SendKeys { session_id: u64, keys: SpecialKeys },
-    RequestSwap { session_id: u64 },
-    AnswerSwap { request_id: u32, accept: bool },
-    CancelSwap { request_id: u32 },
-    TermOpen { session_id: u64, admin: bool, cols: u16, rows: u16 },
-    TermWrite { term_id: u32, bytes: Vec<u8> },
-    TermResize { term_id: u32, cols: u16, rows: u16 },
-    TermClose { term_id: u32 },
-    RunAction { session_id: u64, action: ActionKind },
-    FilesList { session_id: u64, path: Option<String> },
-    FilesSend { session_id: u64, local_paths: Vec<PathBuf>, remote_dir: Option<String> },
-    FilesGet { session_id: u64, remote_path: String, local_dir: PathBuf },
-    TransferPause { transfer_id: u32 },
-    TransferResume { transfer_id: u32 },
-    TransferCancel { transfer_id: u32 },
-    SetClipboardSync { session_id: u64, on: bool },
-    ChatSend { session_id: u64, text: String },
-    ChatMarkRead { session_id: u64, up_to: u32 },
-    Wake { device_id: String },
-    ActivityList { before_ms: Option<u64>, limit: u32 },
-    ActivityExport { path: PathBuf },
-    BlockAddress { ipv4: String },
+    AddByAddress {
+        ipv4: String,
+    },
+    PairOpen {
+        device_id: Option<String>,
+    },
+    PairStart {
+        pairing_id: u32,
+        device_id: String,
+    },
+    PairConfirm {
+        pairing_id: u32,
+        matches: bool,
+    },
+    PairCancel {
+        pairing_id: u32,
+    },
+    SetGrants {
+        device_id: String,
+        grants: Permissions,
+    },
+    ForgetDevice {
+        device_id: String,
+    },
+    Elevate {
+        action: ElevatedAction,
+    },
+    Connect {
+        device_id: String,
+        intent: Intent,
+        unattended: bool,
+    },
+    Disconnect {
+        session_id: u64,
+    },
+    AnswerIncoming {
+        request_id: u32,
+        decision: Decision,
+    },
+    ListDisplays {
+        session_id: u64,
+    },
+    SelectDisplay {
+        session_id: u64,
+        display_id: u16,
+    },
+    SetScale {
+        session_id: u64,
+        scale: Scale,
+    },
+    SetQuality {
+        session_id: u64,
+        quality: Quality,
+    },
+    SetAudio {
+        session_id: u64,
+        on: bool,
+    },
+    SetKeyboardMode {
+        session_id: u64,
+        mode: KeyboardMode,
+    },
+    SetGrab {
+        session_id: u64,
+        on: bool,
+    },
+    /// The chord that releases the keyboard (UI-local: the viewer pipeline applies it).
+    SetReleaseKey {
+        key: crate::shortcuts::ReleaseKey,
+    },
+    SetViewOnly {
+        session_id: u64,
+        on: bool,
+    },
+    SendKeys {
+        session_id: u64,
+        keys: SpecialKeys,
+    },
+    RequestSwap {
+        session_id: u64,
+    },
+    AnswerSwap {
+        request_id: u32,
+        accept: bool,
+    },
+    CancelSwap {
+        request_id: u32,
+    },
+    TermOpen {
+        session_id: u64,
+        admin: bool,
+        cols: u16,
+        rows: u16,
+    },
+    TermWrite {
+        term_id: u32,
+        bytes: Vec<u8>,
+    },
+    TermResize {
+        term_id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    TermClose {
+        term_id: u32,
+    },
+    RunAction {
+        session_id: u64,
+        action: ActionKind,
+    },
+    FilesList {
+        session_id: u64,
+        path: Option<String>,
+    },
+    FilesSend {
+        session_id: u64,
+        local_paths: Vec<PathBuf>,
+        remote_dir: Option<String>,
+    },
+    FilesGet {
+        session_id: u64,
+        remote_path: String,
+        local_dir: PathBuf,
+    },
+    TransferPause {
+        transfer_id: u32,
+    },
+    TransferResume {
+        transfer_id: u32,
+    },
+    TransferCancel {
+        transfer_id: u32,
+    },
+    SetClipboardSync {
+        session_id: u64,
+        on: bool,
+    },
+    ChatSend {
+        session_id: u64,
+        text: String,
+    },
+    ChatMarkRead {
+        session_id: u64,
+        up_to: u32,
+    },
+    Wake {
+        device_id: String,
+    },
+    ActivityList {
+        before_ms: Option<u64>,
+        limit: u32,
+    },
+    ActivityExport {
+        path: PathBuf,
+    },
+    BlockAddress {
+        ipv4: String,
+    },
     GetSettings,
-    SetSettings { settings: Settings },
-    OpenSystemSettings { target: SettingsTarget },
+    SetSettings {
+        settings: Settings,
+    },
+    OpenSystemSettings {
+        target: SettingsTarget,
+    },
     RequestOsPermissions,
 }
 
@@ -619,6 +740,7 @@ impl core::fmt::Debug for Command {
             Self::SetAudio { session_id, on } => dbg_fields!("SetAudio", session_id, on),
             Self::SetKeyboardMode { session_id, mode } => dbg_fields!("SetKeyboardMode", session_id, mode),
             Self::SetGrab { session_id, on } => dbg_fields!("SetGrab", session_id, on),
+            Self::SetReleaseKey { key } => dbg_fields!("SetReleaseKey", key),
             Self::SetViewOnly { session_id, on } => dbg_fields!("SetViewOnly", session_id, on),
             Self::SendKeys { session_id, keys } => dbg_fields!("SendKeys", session_id, keys),
             Self::RequestSwap { session_id } => dbg_fields!("RequestSwap", session_id),
@@ -781,6 +903,7 @@ impl Command {
                 | Command::SetAudio { .. }
                 | Command::SetKeyboardMode { .. }
                 | Command::SetGrab { .. }
+                | Command::SetReleaseKey { .. }
                 | Command::SetViewOnly { .. }
                 | Command::SetClipboardSync { .. }
                 | Command::OpenSystemSettings { .. }

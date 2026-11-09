@@ -10,6 +10,7 @@ mod app;
 mod cursor;
 mod dialogs;
 mod files_dialogs;
+mod fullscreen;
 mod gfx;
 mod offscreen;
 mod screens_files;
