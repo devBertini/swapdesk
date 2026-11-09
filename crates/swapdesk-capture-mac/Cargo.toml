@@ -1,0 +1,34 @@
+[package]
+name = "swapdesk-capture-mac"
+description = "ScreenSource and AudioSource for macOS (contract C3) over ScreenCaptureKit, with the cursor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (ScreenCaptureKit, CoreMedia, CoreVideo, CoreGraphics calls).
+# The workspace lints are repeated here without `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-platform = { path = "../swapdesk-platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+block2 = { workspace = true }
+dispatch2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSError", "NSString", "NSValue", "NSGeometry"] }
+objc2-app-kit = { workspace = true, features = ["std", "NSCursor", "NSImage", "NSGraphics", "NSImageRep", "NSBitmapImageRep", "objc2-core-graphics", "objc2-core-foundation"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFBase", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFCGTypes"] }
+objc2-core-graphics = { workspace = true, features = ["std", "CGDirectDisplay", "CGDisplayConfiguration", "CGEvent", "CGEventTypes", "CGImage", "CGGeometry", "CGError", "CGWindowLevel"] }
+objc2-core-media = { workspace = true, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-video = { workspace = true, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-screen-capture-kit = { workspace = true, features = ["std", "SCError", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
