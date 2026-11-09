@@ -63,11 +63,26 @@ jobs:
                   title = f"{case.get('classname')} {case.get('name')}".replace(":", "%3A").replace(",", "%2C")
                   print(f"::error title={esc(title)}::{esc(text)}")
           if shown == 0:
-              # No report (the build failed, or the run stopped early): the last lines of the log say why.
+              # No report (the build failed, or the run stopped early): the log says why. One annotation per failing
+              # test with the lines of its output that explain it, then the tail of the log.
               log = open(os.path.join(os.environ["RUNNER_TEMP"], "tests.log"), encoding="utf-8", errors="replace").read()
               log = re.sub(r"\x1b\[[0-9;]*m", "", log)
-              lines = [l for l in log.splitlines() if l.strip()]
-              keep = [l for l in lines if re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
+              lines = log.splitlines()
+              notes = 0
+              for i, line in enumerate(lines):
+                  m = re.match(r"\s*-+ (?:TRY \d+ )?STD(?:OUT|ERR):\s+(\S+ \S+)", line)
+                  if not m or notes >= 8:
+                      continue
+                  body = []
+                  for nxt in lines[i + 1:i + 120]:
+                      if re.match(r"\s*-+ (?:TRY \d+ )?STD(?:OUT|ERR):", nxt) or re.match(r"\s*(TRY \d+ )?(PASS|FAIL|SIGSEGV)", nxt):
+                          break
+                      if re.search(r"panicked|assert|left|right|Error|error|failed|denied", nxt):
+                          body.append(nxt.strip())
+                  if body:
+                      notes += 1
+                      print(f"::error title={esc(m.group(1))}::{esc(chr(10).join(body)[-3500:])}")
+              keep = [l for l in lines if l.strip() and re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
               print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 
   macos:
