@@ -10,7 +10,9 @@ use swapdesk_ipc::{
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
-use swapdesk_proto::{DisplayList, ErrorCode, InputEvent, Intent, Os, PermissionSet, Special, VideoSettings};
+use swapdesk_proto::{
+    DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special, VideoSettings,
+};
 use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
 use tokio::time::Instant;
 
@@ -47,6 +49,8 @@ fn apply_code(e: ApplyError) -> ApiCode {
     match e {
         ApplyError::NoSuchSession | ApplyError::Closed => ApiCode::NotFound,
         ApplyError::NotPermitted => ApiCode::NotPermitted,
+        // The queue is full: the batch was dropped and the session releases every key behind it.
+        ApplyError::Full => ApiCode::Busy,
         ApplyError::NotAViewerRequest => ApiCode::Invalid,
     }
 }
@@ -464,6 +468,7 @@ impl Hub {
         let mut next_tick = Instant::now() + Duration::from_secs(1);
         let mut began = false;
         let mut reconnecting = false;
+        let (mut skipping_video, mut last_good) = (false, 0u32);
         let mut end_code = ErrorCode::NoError;
         loop {
             let item = match tokio::time::timeout_at(next_tick, messages.recv()).await {
@@ -485,11 +490,29 @@ impl Hub {
             };
             match item {
                 ViewerOut::Message(m) => match &m {
-                    Ipc::ViewerVideo { payload, .. } => {
-                        frames = frames.saturating_add(1);
-                        bytes = bytes.saturating_add(payload.0.len() as u64);
-                        if !conn.queue.video(m).await {
-                            break;
+                    Ipc::ViewerVideo { header, payload, .. } => {
+                        let (key, display, id) =
+                            (header.keyframe || header.discontinuity, header.display_id, header.frame_id);
+                        let len = payload.0.len() as u64;
+                        // The UI's pipe is behind: video is dropped, not waited for (a wait would hold back the audio
+                        // and the terminal behind it), up to the next keyframe, which is asked for.
+                        if skipping_video && !key {
+                            let _ = handle.request_keyframe(KeyframeRequest { display, last_good_frame: last_good });
+                            continue;
+                        }
+                        match conn.queue.try_video(m) {
+                            None => {
+                                skipping_video = false;
+                                last_good = id;
+                                frames = frames.saturating_add(1);
+                                bytes = bytes.saturating_add(len);
+                            }
+                            Some(_) if conn.queue.is_closed() => break,
+                            Some(_) => {
+                                skipping_video = true;
+                                let _ =
+                                    handle.request_keyframe(KeyframeRequest { display, last_good_frame: last_good });
+                            }
                         }
                     }
                     // Realtime: a UI that falls behind loses audio and cursor moves.

@@ -5,15 +5,17 @@
 //!   not reading, so the connection is cut (the queue closes and the UI reconnects and asks again) instead of growing
 //!   without end. A `Stats` notice of a session replaces the one still queued for it ("the newest wins"), so a busy
 //!   session never fills the queue with numbers nobody will read;
-//! * video: ordered and decodable, so it is never dropped either, but the producer waits for room (bytes bounded:
-//!   the receiver upstream bounds what it holds, so a slow UI slows the host's stream instead of growing memory);
+//! * video: ordered and decodable, bytes bounded. A producer that must not hold anything else back uses
+//!   [`UiQueue::try_video`] and, when there is no room, drops video up to the next keyframe and asks for one (the
+//!   pump of a viewer session does); [`UiQueue::video`] waits for room instead;
 //! * realtime media (audio datagrams, cursor positions): dropped when the queue is full and counted.
 //!
 //! * terminal bytes and ends: ordered like video (never dropped, the producer waits for room), a queue of their own so
 //!   a stalled terminal never holds back the video;
 //!
-//! The writer sends control first, then terminal bytes, then video, then realtime media. A producer that waits for
-//! room is woken by the writer taking a message, never by a timer.
+//! The writer sends control first, then realtime media (a few small messages at most, so audio is never behind a video
+//! backlog), then terminal bytes, then video. A producer that waits for room is woken by the writer taking a message,
+//! never by a timer.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -27,8 +29,8 @@ use tokio::sync::Notify as Wake;
 
 use crate::outbox::weight;
 
-/// Bytes of video waiting for the pipe before the producer waits.
-const VIDEO_BYTES: usize = 24 * 1024 * 1024;
+/// Bytes of video waiting for the pipe before the next frame is refused (a few frames of 1080p: more is only delay).
+const VIDEO_BYTES: usize = 8 * 1024 * 1024;
 /// Bytes of terminal output waiting for the pipe before the producer waits.
 const TERM_BYTES: usize = 1024 * 1024;
 /// Realtime messages waiting before the next one is dropped.
@@ -152,6 +154,7 @@ impl UiQueue {
     }
 
     /// Queues video, waiting (asynchronously) for room. `false` when the connection closed first.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn video(&self, msg: Message) -> bool {
         self.wait_for_room(msg, Self::try_video).await
     }
@@ -263,6 +266,9 @@ impl UiQueue {
                 q.control_bytes -= len;
                 return Some(msg);
             }
+            if let Some(msg) = q.realtime.pop_front() {
+                return Some(msg);
+            }
             if let Some((msg, len)) = q.term.pop_front() {
                 q.term_bytes -= len;
                 drop(q);
@@ -273,9 +279,6 @@ impl UiQueue {
                 q.video_bytes -= len;
                 drop(q);
                 self.inner.room.notify_waiters();
-                return Some(msg);
-            }
-            if let Some(msg) = q.realtime.pop_front() {
                 return Some(msg);
             }
             if q.done {
@@ -348,6 +351,9 @@ mod tests {
         assert!(!q.realtime(Message::ViewerAudio { session_id: 1, datagram: Bytes(vec![1]) }));
         assert_eq!(q.dropped(), 1);
         assert!(matches!(q.next(), Some(Message::Bye { .. })), "control first");
+        for _ in 0..REALTIME_MESSAGES {
+            assert!(matches!(q.next(), Some(Message::ViewerAudio { .. })), "then realtime, ahead of the video backlog");
+        }
         assert!(matches!(q.next(), Some(Message::ViewerVideo { .. })), "then video");
         assert!(q.try_video(video(2000)).is_none(), "room again");
         q.close();

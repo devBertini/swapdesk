@@ -4,10 +4,12 @@
 //! levels (grants, pause) after every event, so a revocation takes effect whether or not an event carried it:
 //!
 //! * `VIEW` held: `StartVideo` on the display the viewer selected (the primary one by default), helper frames go
-//!   to the session's [`VideoSender`], the sender's wants (keyframes, bitrate) go back as `ForceKeyframe` and
-//!   `SetRate`, cursor positions and shapes go to the viewer. `VIEW` revoked: `set_paused(true)` and `StopVideo`.
-//! * `AUDIO` held and the viewer asked (`AudioControl`): `StartAudio`, helper packets go out as QUIC datagrams;
-//!   either one gone: `StopAudio`.
+//!   to the session's [`VideoPath`] (a newest-wins slot and a task of its own that feeds the [`VideoSender`]), the
+//!   sender's wants (keyframes, bitrate) go back as `ForceKeyframe` and `SetRate`. `VIEW` revoked:
+//!   `set_paused(true)` and `StopVideo`.
+//! * `AUDIO` held and the viewer asked (`AudioControl`): `StartAudio`; either one gone: `StopAudio`.
+//! * Video frames, audio packets and cursor positions and shapes do not pass through the relay: the helper pump hands
+//!   them to the session's [`VideoPath`] and [`DirectOut`] (stage 64), so a stalled video send holds nothing else.
 //! * Input does not pass through the relay: the input stream's task (gated on `CONTROL`, so a revocation aborts it
 //!   at once) forwards records to the helper that [`input_helper`] picks. The relay sends `ReleaseAll` when `CONTROL`
 //!   goes, so nothing stays pressed.
@@ -15,20 +17,20 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use quinn::{RecvStream, VarInt};
 use swapdesk_ipc::{Events, Message as Ipc, VideoBackend};
 use swapdesk_platform::Level;
 use swapdesk_proto::{
-    CodecError, DisplayList, ErrorCode, HostMute, InputEvent, Message as Ctl, PermissionSet, Preset, StreamKind,
-    VideoHeader, Wire,
+    CodecError, DisplayList, ErrorCode, HostMute, InputEvent, Message as Ctl, PermissionSet, Preset, StreamKind, Wire,
 };
 use swapdesk_session::{ChannelHandler, Forwarded, IncomingStream, SessionCtx, SessionEnd, VIDEO_CONTROL_TYPES};
-use swapdesk_video::{Frame, SenderConfig, VideoSender};
+use swapdesk_video::{SenderConfig, VideoSender};
 use tokio::sync::mpsc;
 
 use super::helper_link::HelperLink;
+use super::media_path::{DirectOut, VideoPath, VideoRun};
 use super::routing::{HelperKind, input_helper};
 use super::shared::{MediaEv, RelayEv, RelayHandle, Shared};
 
@@ -36,8 +38,6 @@ use super::shared::{MediaEv, RelayEv, RelayHandle, Shared};
 const RELAY_QUEUE: usize = 512;
 /// The relay's housekeeping beat (keyframe wants that no frame prompts).
 const TICK: Duration = Duration::from_millis(100);
-/// How long P-frames are held back after a `ForceKeyframe` before it is asked again.
-const KEY_WAIT: Duration = Duration::from_millis(500);
 /// Bitrate of a `StartVideo` when there is no sender to ask (a test link without a connection).
 const DEFAULT_KBPS: u32 = 8_000;
 /// Records forwarded to the helper in one `Input` message (each is at most 259 bytes: well under 64 KiB).
@@ -103,8 +103,13 @@ impl ChannelHandler for HostRelays {
     fn on_start(&self, ctx: &SessionCtx) {
         let (tx, rx) = mpsc::channel(RELAY_QUEUE);
         let ended = Arc::new(AtomicBool::new(false));
-        self.shared.register_relay(ctx.session_id(), RelayHandle { tx: tx.clone(), ended: Arc::clone(&ended) });
-        let relay = HostRelay::new(Arc::clone(&self.shared), ctx.clone(), tx.clone(), ended);
+        let video = VideoPath::new();
+        let out = Arc::new(DirectOut::new(Some(ctx.clone()), ctx.connection().cloned()));
+        self.shared.register_relay(
+            ctx.session_id(),
+            RelayHandle { tx: tx.clone(), ended: Arc::clone(&ended), video: Arc::clone(&video), out: Arc::clone(&out) },
+        );
+        let relay = HostRelay::new(Arc::clone(&self.shared), ctx.clone(), tx.clone(), ended, video, out);
         self.shared.rt.spawn(relay.run(rx));
         self.shared.rt.spawn(ticker(tx));
     }
@@ -146,14 +151,22 @@ struct HostRelay {
     preset: Preset,
     max_fps: u16,
     video: Option<RunVideo>,
+    path: Arc<VideoPath>,
+    out: Arc<DirectOut>,
     audio_on: bool,
     audio: Option<Arc<HelperLink>>,
-    awaiting_key: Option<Instant>,
     last_grants: PermissionSet,
 }
 
 impl HostRelay {
-    fn new(shared: Arc<Shared>, ctx: SessionCtx, tx: mpsc::Sender<RelayEv>, ended: Arc<AtomicBool>) -> Self {
+    fn new(
+        shared: Arc<Shared>,
+        ctx: SessionCtx,
+        tx: mpsc::Sender<RelayEv>,
+        ended: Arc<AtomicBool>,
+        path: Arc<VideoPath>,
+        out: Arc<DirectOut>,
+    ) -> Self {
         let target_kbps = Arc::new(AtomicU32::new(0));
         let sender = ctx.connection().cloned().map(|conn| {
             let (rate, wake) = (Arc::clone(&target_kbps), tx);
@@ -163,6 +176,10 @@ impl HostRelay {
             };
             VideoSender::new(conn, SenderConfig::default(), Arc::new(sink))
         });
+        // The video task lives as long as the relay: it ends when `cleanup` closes the path.
+        if let Some(sender) = sender.clone() {
+            shared.rt.spawn(Arc::clone(&path).run(sender));
+        }
         Self {
             displays: shared.media_displays(),
             last_grants: ctx.granted(),
@@ -177,7 +194,8 @@ impl HostRelay {
             video: None,
             audio_on: false,
             audio: None,
-            awaiting_key: None,
+            path,
+            out,
         }
     }
 
@@ -187,13 +205,15 @@ impl HostRelay {
             let _ = self.ctx.send(DisplayList { displays: self.displays.clone() }).await;
         }
         self.reconcile().await;
+        self.out.set(self.audio.is_some(), self.video.is_some());
         while let Some(ev) = rx.recv().await {
             if self.ended.load(Ordering::Acquire) || self.ctx.ended().is_some() {
                 break;
             }
             self.on_event(ev).await;
-            self.poll_keyframe().await;
+            self.poll_keyframe();
             self.reconcile().await;
+            self.out.set(self.audio.is_some(), self.video.is_some());
         }
         self.cleanup().await;
     }
@@ -252,80 +272,22 @@ impl HostRelay {
             MediaEv::HelperGone(id) => {
                 if self.video.as_ref().is_some_and(|v| v.helper.id == id) {
                     self.video = None;
-                    self.awaiting_key = None;
+                    self.path.set_run(None);
                 }
                 if self.audio.as_ref().is_some_and(|a| a.id == id) {
                     self.audio = None;
                 }
             }
-            MediaEv::Video { header, payload } => self.video_frame(header, payload).await,
-            MediaEv::CursorPos(pos) => {
-                if self.shows_screen()
-                    && let (Some(conn), Ok(bytes)) = (self.ctx.connection(), pos.encode())
-                {
-                    let _ = conn.send_datagram(bytes.into());
-                }
-            }
-            MediaEv::CursorShape(shape) => {
-                if self.shows_screen() {
-                    let ctx = self.ctx.clone();
-                    self.ctx.spawn(async move {
-                        let Ok(bytes) = shape.encode() else { return };
-                        if let Ok(mut stream) = ctx.open_uni(StreamKind::CursorShape).await
-                            && stream.write_all(&bytes).await.is_ok()
-                        {
-                            let _ = stream.finish();
-                        }
-                    });
-                }
-            }
-            MediaEv::Audio(datagram) => {
-                if self.audio.is_some()
-                    && self.ctx.granted().contains(PermissionSet::AUDIO)
-                    && !self.ctx.is_paused()
-                    && let Some(conn) = self.ctx.connection()
-                    && datagram.len() <= conn.max_datagram_size().unwrap_or(0)
-                {
-                    let _ = conn.send_datagram(datagram.into());
-                }
-            }
+            // The helper pump hands these to the session's `VideoPath` and `DirectOut` itself.
+            MediaEv::Video { .. } | MediaEv::CursorPos(_) | MediaEv::CursorShape(_) | MediaEv::Audio(_) => {}
         }
-    }
-
-    fn shows_screen(&self) -> bool {
-        self.video.is_some() && self.ctx.granted().contains(PermissionSet::VIEW) && !self.ctx.is_paused()
-    }
-
-    async fn video_frame(&mut self, header: VideoHeader, payload: Vec<u8>) {
-        let (Some(sender), Some(run)) = (self.sender.clone(), &self.video) else { return };
-        if header.display_id != run.display {
-            return;
-        }
-        if let Some(since) = self.awaiting_key {
-            if header.keyframe || header.discontinuity {
-                self.awaiting_key = None;
-            } else {
-                // A keyframe was asked for and has not come: what follows would not decode at the viewer. Ask again
-                // when it takes too long.
-                if since.elapsed() > KEY_WAIT {
-                    let (helper, display) = (Arc::clone(&run.helper), run.display);
-                    self.awaiting_key = Some(Instant::now());
-                    helper.send(Ipc::ForceKeyframe { display }).await;
-                }
-                return;
-            }
-        }
-        let _ = sender.send(Frame { header, payload }).await;
     }
 
     /// The sender's wants (the viewer's `KeyframeRequest`, a reset backlog, a resume after a pause) become a
-    /// `ForceKeyframe` to the helper. The sender spaces them itself (`min_keyframe_interval`).
-    async fn poll_keyframe(&mut self) {
-        let (Some(sender), Some(run)) = (&self.sender, &self.video) else { return };
-        if self.awaiting_key.is_none() && sender.take_keyframe_request(run.display) {
-            let (helper, display) = (Arc::clone(&run.helper), run.display);
-            self.awaiting_key = Some(Instant::now());
-            helper.send(Ipc::ForceKeyframe { display }).await;
+    /// `ForceKeyframe` to the helper.
+    fn poll_keyframe(&self) {
+        if let Some(sender) = &self.sender {
+            self.path.poll_keyframe(sender);
         }
     }
 
@@ -395,7 +357,15 @@ impl HostRelay {
                 );
                 if started {
                     self.video = Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, kbps_sent: kbps });
-                    self.awaiting_key = None;
+                    let (link, rt) = (Arc::clone(helper), self.shared.rt.clone());
+                    // A keyframe is asked for from the video task, which must not wait on the helper's queue.
+                    let key = Arc::new(move || {
+                        let link = Arc::clone(&link);
+                        rt.spawn(async move {
+                            link.send(Ipc::ForceKeyframe { display }).await;
+                        });
+                    });
+                    self.path.set_run(Some(VideoRun { display, key }));
                 }
             }
         }
@@ -432,7 +402,7 @@ impl HostRelay {
         if let Some(run) = self.video.take() {
             run.helper.send(Ipc::StopVideo { display: run.display }).await;
         }
-        self.awaiting_key = None;
+        self.path.set_run(None);
     }
 
     async fn stop_audio(&mut self) {
@@ -454,6 +424,12 @@ impl HostRelay {
         self.stop_video().await;
         self.stop_audio().await;
         self.release_all().await;
+        self.out.set(false, false);
+        self.path.close();
+        self.shared.log(
+            Level::Debug,
+            format_args!("session {:#x}: video path at its end: {:?}", self.ctx.session_id(), self.path.stats()),
+        );
         if let Some(sender) = &self.sender {
             sender.set_paused(true);
         }
@@ -466,8 +442,7 @@ impl HostRelay {
 async fn input_task(shared: Arc<Shared>, ctx: SessionCtx, mut recv: RecvStream) {
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = vec![0u8; 16 * 1024];
-    let mut last: Option<HelperKind> = None;
-    let mut warned = false;
+    let mut state = InputState::default();
     loop {
         let n = match recv.read(&mut chunk).await {
             Ok(Some(n)) => n,
@@ -483,7 +458,7 @@ async fn input_task(shared: Arc<Shared>, ctx: SessionCtx, mut recv: RecvStream) 
                     used_total += used;
                     batch.push(event);
                     if batch.len() >= MAX_BATCH {
-                        deliver(&shared, &ctx, std::mem::take(&mut batch), &mut last, &mut warned).await;
+                        deliver(&shared, &ctx, std::mem::take(&mut batch), &mut state).await;
                     }
                 }
                 Err(CodecError::Truncated) => break,
@@ -500,26 +475,36 @@ async fn input_task(shared: Arc<Shared>, ctx: SessionCtx, mut recv: RecvStream) 
             ctx.bye(ErrorCode::ProtocolViolation);
             return;
         }
-        deliver(&shared, &ctx, batch, &mut last, &mut warned).await;
+        deliver(&shared, &ctx, batch, &mut state).await;
     }
 }
 
-async fn deliver(
-    shared: &Shared,
-    ctx: &SessionCtx,
-    events: Vec<InputEvent>,
-    last: &mut Option<HelperKind>,
-    warned: &mut bool,
-) {
-    if events.is_empty() || !ctx.can_inject() {
+/// What the input task remembers between batches.
+#[derive(Default)]
+struct InputState {
+    /// The helper that got the last batch.
+    last: Option<HelperKind>,
+    warned: bool,
+    /// A batch was dropped (paused host, no helper, a closed pipe): the next one that goes through is preceded by a
+    /// `ReleaseAll`, since the dropped batch may have held the key-up of a key that is down at the helper (D9).
+    dropped: bool,
+}
+
+async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st: &mut InputState) {
+    if events.is_empty() {
+        return;
+    }
+    if !ctx.can_inject() {
         // Not granted any more, or the host is paused (D11, F-SESS-01): the records are dropped.
+        st.dropped = true;
         return;
     }
     let kind = input_helper(ctx.granted());
     let Some(helper) = shared.helper(kind) else {
         // Never the other helper: a prompted session must not reach the SYSTEM injector (D11).
-        if !*warned {
-            *warned = true;
+        st.dropped = true;
+        if !st.warned {
+            st.warned = true;
             shared.log(
                 Level::Warn,
                 format_args!("no {kind:?} helper attached: input of session {:#x} is dropped", ctx.session_id()),
@@ -527,13 +512,18 @@ async fn deliver(
         }
         return;
     };
-    if let Some(prev) = *last
+    if let Some(prev) = st.last
         && prev != kind
         && let Some(old) = shared.helper(prev)
     {
         // The injector changed (UNATTENDED gained or lost): the old one lets go of everything it holds.
         old.send(Ipc::ReleaseAll).await;
     }
-    *last = Some(kind);
-    helper.send(Ipc::Input { events: Events(events) }).await;
+    st.last = Some(kind);
+    if std::mem::take(&mut st.dropped) {
+        helper.send(Ipc::ReleaseAll).await;
+    }
+    if !helper.send(Ipc::Input { events: Events(events) }).await {
+        st.dropped = true;
+    }
 }

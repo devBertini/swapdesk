@@ -18,6 +18,7 @@ mod extras;
 mod files;
 mod helper_link;
 mod host_relay;
+mod media_path;
 mod pty_proxy;
 mod routing;
 mod shared;

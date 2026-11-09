@@ -1051,6 +1051,7 @@ dependencies = [
  "swapdesk-files",
  "swapdesk-ipc",
  "swapdesk-lan",
+ "swapdesk-netsim",
  "swapdesk-platform",
  "swapdesk-proto",
  "swapdesk-session",

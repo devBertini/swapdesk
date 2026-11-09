@@ -11,9 +11,10 @@
 
 use std::future::Future;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quinn::Endpoint;
 use swapdesk_extras::chat::{ChatEntry, ChatError};
@@ -41,8 +42,14 @@ use super::terminal::ViewerTerms;
 use crate::proxy::PipeClipboard;
 use swapdesk_extras::clipboard::ClipboardHandler;
 
-/// Messages toward the UI before the producers wait (video) or drop (audio, cursor).
+/// Messages toward the UI before the producers wait (control, terminal) or drop (audio, cursor).
 const OUT_QUEUE: usize = 256;
+/// Bytes of video toward the UI before the next frame is dropped (one frame always fits an empty budget).
+const OUT_VIDEO_BYTES: usize = 6 * 1024 * 1024;
+/// Video frames toward the UI before the next one is dropped, so video never fills the queue audio shares.
+const OUT_VIDEO_FRAMES: usize = 32;
+/// A keyframe asked for because video was dropped is asked again after this long if it has not come.
+const KEY_REASK: Duration = Duration::from_millis(500);
 /// Input batches queued toward the writer task.
 const INPUT_QUEUE: usize = 1024;
 /// How long a quick action waits for the host's result.
@@ -85,26 +92,73 @@ pub enum TermOut {
     Exited { term_id: u32, code: Option<i32> },
 }
 
+/// Video queued toward the UI, counted in frames and bytes (the channel counts messages only).
+#[derive(Default)]
+pub(crate) struct VideoBudget {
+    bytes: AtomicUsize,
+    frames: AtomicUsize,
+}
+
+impl VideoBudget {
+    /// Takes room for a frame of `len` bytes; `false` when the UI is behind.
+    fn reserve(&self, len: usize) -> bool {
+        let (bytes, frames) = (self.bytes.load(Ordering::Acquire), self.frames.load(Ordering::Acquire));
+        if frames > 0 && (frames >= OUT_VIDEO_FRAMES || bytes + len > OUT_VIDEO_BYTES) {
+            return false;
+        }
+        self.bytes.fetch_add(len, Ordering::AcqRel);
+        self.frames.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    fn release(&self, len: usize) {
+        self.bytes.fetch_sub(len, Ordering::AcqRel);
+        self.frames.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+}
+
 /// The receiving end of a viewer session's output.
 pub struct ViewerMessages {
     rx: mpsc::Receiver<ViewerOut>,
     rt: Handle,
+    video: Arc<VideoBudget>,
 }
 
 impl ViewerMessages {
     /// The next item; `None` when the session is over and everything was read.
     pub async fn recv(&mut self) -> Option<ViewerOut> {
-        self.rx.recv().await
+        let item = self.rx.recv().await;
+        self.account(item.as_ref());
+        item
     }
 
     /// From a thread that is not on the runtime: waits up to `limit` for the next item. `Ok(None)` is the end.
     pub fn recv_timeout(&mut self, limit: Duration) -> Result<Option<ViewerOut>, Timeout> {
         let rx = &mut self.rx;
-        self.rt.block_on(async { tokio::time::timeout(limit, rx.recv()).await }).map_err(|_| Timeout)
+        let item = self.rt.block_on(async { tokio::time::timeout(limit, rx.recv()).await }).map_err(|_| Timeout)?;
+        self.account(item.as_ref());
+        Ok(item)
     }
 
     pub fn try_recv(&mut self) -> Option<ViewerOut> {
-        self.rx.try_recv().ok()
+        let item = self.rx.try_recv().ok();
+        self.account(item.as_ref());
+        item
+    }
+
+    /// Bytes of video waiting to be read.
+    pub fn video_bytes(&self) -> usize {
+        self.video.bytes()
+    }
+
+    fn account(&self, item: Option<&ViewerOut>) {
+        if let Some(ViewerOut::Message(Ipc::ViewerVideo { payload, .. })) = item {
+            self.video.release(payload.0.len());
+        }
     }
 }
 
@@ -147,8 +201,11 @@ pub enum ApplyError {
     NoSuchSession,
     /// Input needs `CONTROL`, which the host has not granted (or took away).
     NotPermitted,
-    /// The session is over or its queue is full.
+    /// The session is over.
     Closed,
+    /// The input queue is full: this batch was dropped, and a `ReleaseAll` follows once the queue drains so no key
+    /// stays down at the host (D9). The caller may tell the user.
+    Full,
     /// Not a message a viewer's UI sends to the service.
     NotAViewerRequest,
 }
@@ -234,6 +291,8 @@ pub(crate) struct Inner {
     cell: Arc<CtxCell>,
     device: DeviceId,
     input: mpsc::Sender<Vec<InputEvent>>,
+    /// An input batch was dropped (a full queue, no stream): the writer sends `ReleaseAll` after the queue drains.
+    input_lost: Arc<AtomicBool>,
     rt: Handle,
     stop: Arc<Stop>,
     chat: Arc<ChatRouter>,
@@ -283,7 +342,7 @@ impl ViewerHandle {
     }
 
     /// `ViewerInput`: the records go, in order, on the session's input stream. Never blocks: a full queue is
-    /// `Closed`. Without `CONTROL` nothing is sent.
+    /// `Full` (the batch is dropped and a `ReleaseAll` follows). Without `CONTROL` nothing is sent.
     pub fn send_input(&self, events: Vec<InputEvent>) -> Result<(), ApplyError> {
         let ctx = self.inner.cell.get();
         if !ctx.granted().contains(PermissionSet::CONTROL) {
@@ -292,7 +351,13 @@ impl ViewerHandle {
         if ctx.ended().is_some() {
             return Err(ApplyError::Closed);
         }
-        self.inner.input.try_send(events).map_err(|_| ApplyError::Closed)
+        self.inner.input.try_send(events).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                self.inner.input_lost.store(true, Ordering::Release);
+                ApplyError::Full
+            }
+            mpsc::error::TrySendError::Closed(_) => ApplyError::Closed,
+        })
     }
 
     /// `ViewerKeyframe`.
@@ -757,14 +822,48 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     };
     drive.emit(active(&ctx, since_ms), None).await;
 
-    // Video: ordered, decodable frames to the UI, waiting for room (the receiver bounds what it holds).
+    // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
+    // the queue is full) the frame is dropped, and so is every P-frame after it until a keyframe, which is asked for.
+    let video_budget = Arc::new(VideoBudget::default());
     {
         let out = out_tx.clone();
+        let (budget, cell) = (Arc::clone(&video_budget), Arc::clone(&cell));
         rt.spawn(async move {
+            let (mut skipping, mut last_good, mut asked): (bool, u32, Option<Instant>) = (false, 0, None);
             while let Some(f) = frames.recv().await {
+                let key = f.header.keyframe || f.header.discontinuity;
+                let display = f.header.display_id;
+                let ask = |asked: &mut Option<Instant>, last_good: u32| {
+                    if asked.is_none_or(|t| t.elapsed() >= KEY_REASK) {
+                        *asked = Some(Instant::now());
+                        let _ = cell.get().try_send(KeyframeRequest { display, last_good_frame: last_good });
+                    }
+                };
+                if skipping && !key {
+                    ask(&mut asked, last_good);
+                    continue;
+                }
+                let (id, len) = (f.header.frame_id, f.payload.len());
+                if !budget.reserve(len) {
+                    skipping = true;
+                    ask(&mut asked, last_good);
+                    continue;
+                }
                 let msg = Ipc::ViewerVideo { session_id, header: f.header, payload: Bytes(f.payload) };
-                if out.send(ViewerOut::Message(msg)).await.is_err() {
-                    return;
+                match out.try_send(ViewerOut::Message(msg)) {
+                    Ok(()) => {
+                        if key {
+                            skipping = false;
+                            asked = None;
+                        }
+                        last_good = id;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        budget.release(len);
+                        skipping = true;
+                        ask(&mut asked, last_good);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
         });
@@ -773,9 +872,11 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     // The input stream: one long-lived unidirectional stream, opened with the first batch and again after a break
     // or a resume.
     let (input_tx, mut input_rx) = mpsc::channel::<Vec<InputEvent>>(INPUT_QUEUE);
+    let input_lost = Arc::new(AtomicBool::new(false));
     {
         let cell = Arc::clone(&cell);
         let trace = Arc::clone(&trace);
+        let lost = Arc::clone(&input_lost);
         rt.spawn(async move {
             let mut stream: Option<quinn::SendStream> = None;
             let mut seen = 0;
@@ -801,6 +902,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
                         Ok(s) => stream = Some(s),
                         Err(c) => {
                             trace.log(Level::Debug, "service", format_args!("input stream not opened: {c:?}"));
+                            // The batch is lost, key-ups included: let go of everything once a stream is back (D9).
+                            lost.store(true, Ordering::Release);
                             continue;
                         }
                     }
@@ -810,6 +913,25 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
                 {
                     // The host stopped the stream (CONTROL revoked): the next batch opens a new one if allowed.
                     stream = None;
+                    lost.store(true, Ordering::Release);
+                }
+                // After a dropped batch, `ReleaseAll` goes behind everything already queued (so no queued key-down
+                // lands after it) as soon as the queue is empty.
+                if input_rx.is_empty() && lost.swap(false, Ordering::AcqRel) {
+                    let release = InputEvent::ReleaseAll.encode().unwrap_or_default();
+                    if stream.is_none()
+                        && let Ok(s) = ctx.open_uni(StreamKind::Input).await
+                    {
+                        stream = Some(s);
+                    }
+                    let sent = match stream.as_mut() {
+                        Some(s) => s.write_all(&release).await.is_ok(),
+                        None => false,
+                    };
+                    if !sent {
+                        stream = None;
+                        lost.store(true, Ordering::Release);
+                    }
                 }
             }
             if let Some(mut s) = stream {
@@ -849,6 +971,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         cell,
         device,
         input: input_tx,
+        input_lost,
         rt: rt.clone(),
         stop,
         chat,
@@ -860,5 +983,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         files,
         _endpoint: endpoint,
     };
-    Ok(Opened { handle: ViewerHandle { inner: Arc::new(inner) }, messages: ViewerMessages { rx: out_rx, rt } })
+    Ok(Opened {
+        handle: ViewerHandle { inner: Arc::new(inner) },
+        messages: ViewerMessages { rx: out_rx, rt, video: video_budget },
+    })
 }

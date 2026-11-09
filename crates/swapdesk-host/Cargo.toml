@@ -29,3 +29,4 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 swapdesk-fakes = { path = "../swapdesk-fakes" }
+swapdesk-netsim = { path = "../swapdesk-netsim" }

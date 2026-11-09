@@ -14,6 +14,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use super::helper_link::{HelperEvent, HelperLink};
+use super::media_path::{DirectOut, VideoPath};
 use super::pty_proxy::PtyRoutes;
 use super::routing::{HelperKind, media_helper};
 
@@ -89,6 +90,10 @@ pub(crate) enum RelayEv {
 pub(crate) struct RelayHandle {
     pub tx: mpsc::Sender<RelayEv>,
     pub ended: Arc<std::sync::atomic::AtomicBool>,
+    /// Video frames of the session: a newest-wins slot and a sending task of its own.
+    pub video: Arc<VideoPath>,
+    /// Audio and cursor, sent straight from the helper pump.
+    pub out: Arc<DirectOut>,
 }
 
 #[derive(Default)]
@@ -240,8 +245,35 @@ impl Shared {
         lock(&self.relays).values().cloned().collect()
     }
 
-    /// Hands `ev` to every live relay, waiting for room (media backpressure reaches the helper's pipe).
+    /// Hands `ev` to every live session. Video goes to the session's slot, audio and cursor leave at once; none of
+    /// them waits (stage 64). Display lists and a helper's end go through the relay's queue, waiting for room.
     pub async fn fan(&self, ev: MediaEv) {
+        match ev {
+            MediaEv::Video { header, payload } => {
+                for h in self.relays() {
+                    h.video.offer(header, payload.clone());
+                }
+            }
+            MediaEv::Audio(datagram) => {
+                for h in self.relays() {
+                    h.out.audio(datagram.clone());
+                }
+            }
+            MediaEv::CursorPos(pos) => {
+                for h in self.relays() {
+                    h.out.cursor_pos(&pos);
+                }
+            }
+            MediaEv::CursorShape(shape) => {
+                for h in self.relays() {
+                    h.out.cursor_shape(&shape);
+                }
+            }
+            ev @ (MediaEv::Displays(_) | MediaEv::HelperGone(_)) => self.fan_queued(ev).await,
+        }
+    }
+
+    async fn fan_queued(&self, ev: MediaEv) {
         let mut handles = self.relays().into_iter().peekable();
         let mut ev = Some(ev);
         while let Some(h) = handles.next() {
