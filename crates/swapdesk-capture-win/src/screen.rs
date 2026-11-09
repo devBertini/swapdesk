@@ -6,11 +6,14 @@
 
 use crate::clock::ticks_to_mono;
 use crate::desktop::InputDesktop;
+use crate::enumerate::DpiScope;
 use crate::enumerate::{self, OutputEntry};
 use crate::errors::{self, DXGI_ERROR_WAIT_TIMEOUT, Phase};
 use crate::geometry::{self, DisplayChange};
 use crate::gpu::{DevicePool, GpuFrame, TexturePool};
+use crate::hdr::{self, ScrgbToSrgb};
 use crate::pointer;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread::ThreadId;
@@ -20,10 +23,11 @@ use swapdesk_platform::{
     PlatformError, Rect, Result, ScreenSource,
 };
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO, IDXGIOutputDuplication,
-    IDXGIResource,
+    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO, IDXGIOutput1, IDXGIOutput5,
+    IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -47,12 +51,37 @@ pub struct CaptureStats {
     pub access_lost: u64,
     pub reacquires: u64,
     pub textures_created: u64,
+    /// Frames that came as FP16 scRGB (an Advanced Color display) and were converted to sRGB at the SDR white level.
+    pub converted: u64,
 }
 
 struct Open {
     dup: IDXGIOutputDuplication,
     textures: Arc<TexturePool>,
     luid: u64,
+    /// The GDI name of the output (`\.\DISPLAY5`), for its SDR white level.
+    gdi_name: String,
+    /// The SDR white level in scRGB units and when it was read; re-read every [`WHITE_REFRESH`] while FP16 frames come.
+    white: Cell<(f32, Option<Instant>)>,
+    /// Made at the first FP16 frame.
+    converter: RefCell<Option<ScrgbToSrgb>>,
+}
+
+/// How often the SDR white level is read again (the user can move the slider during a session).
+const WHITE_REFRESH: Duration = Duration::from_secs(2);
+
+/// Duplicates `output`, asking for FP16 too (`DuplicateOutput1`), so an Advanced Color desktop arrives with its full
+/// range instead of clamped to 8 bits; the legacy `DuplicateOutput` when the newer call is missing or refused.
+fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> windows::core::Result<IDXGIOutputDuplication> {
+    if let Ok(o5) = output.cast::<IDXGIOutput5>() {
+        let _dpi = DpiScope::enter();
+        // SAFETY: a device made on this output's adapter; the format list lives across the call.
+        if let Ok(d) = unsafe { o5.DuplicateOutput1(device, 0, &[hdr::FP16, DXGI_FORMAT_B8G8R8A8_UNORM]) } {
+            return Ok(d);
+        }
+    }
+    // SAFETY: as above, the legacy call.
+    unsafe { output.DuplicateOutput(device) }
 }
 
 #[derive(Default)]
@@ -186,7 +215,7 @@ impl DxgiScreen {
         let luid = entry.key.adapter_luid;
         let gpu = self.pool.device_for(luid, &entry.adapter)?;
         // SAFETY: the device was created on the adapter that enumerated this output (windows.md 2a).
-        let dup = match unsafe { entry.output.DuplicateOutput(&gpu.device) } {
+        let dup = match duplicate(&entry.output, &gpu.device) {
             Ok(d) => d,
             Err(e) => {
                 if !gpu.is_healthy() {
@@ -206,7 +235,21 @@ impl DxgiScreen {
         if w == 0 || h == 0 {
             return Err(state_error("DuplicateOutput", "the duplication reports an empty mode"));
         }
-        Ok(Open { dup, textures: TexturePool::new(gpu, w, h), luid })
+        // SAFETY: plain query on a live output.
+        let gdi_name = unsafe { entry.output.GetDesc() }
+            .map(|d| {
+                let end = d.DeviceName.iter().position(|&c| c == 0).unwrap_or(d.DeviceName.len());
+                String::from_utf16_lossy(&d.DeviceName[..end])
+            })
+            .unwrap_or_default();
+        Ok(Open {
+            dup,
+            textures: TexturePool::new(gpu, w, h),
+            luid,
+            gdi_name,
+            white: Cell::new((1.0, None)),
+            converter: RefCell::new(None),
+        })
     }
 
     fn ms_ceil(d: Duration) -> u32 {
@@ -416,8 +459,16 @@ impl ScreenSource for DxgiScreen {
                 .cast()
                 .map_err(|e| errors::from_hresult(Phase::Frame, "IDXGIResource::cast", e.code().0, &e.message()))?;
             let target = open.textures.take()?;
-            // SAFETY: both textures belong to the device of this adapter and share size and format.
-            unsafe { open.textures.gpu.context.CopyResource(target.texture(), &src) };
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: GetDesc only fills the struct.
+            unsafe { src.GetDesc(&mut desc) };
+            if desc.Format == hdr::FP16 {
+                convert_fp16(&open, &src, target.texture(), (width, height))?;
+                self.stats.converted += 1;
+            } else {
+                // SAFETY: both textures belong to the device of this adapter and share size and format.
+                unsafe { open.textures.gpu.context.CopyResource(target.texture(), &src) };
+            }
             let ticks = u64::try_from(info.LastPresentTime).unwrap_or(0);
             let captured = ticks_to_mono(ticks).0.max(self.last_captured);
             self.last_captured = captured;
@@ -511,6 +562,21 @@ impl ScreenSource for DxgiScreen {
         self.cursor.pending = false;
         self.cursor.pending_shape = None;
     }
+}
+
+/// An FP16 scRGB frame into the BGRA frame texture, at the output's SDR white level.
+fn convert_fp16(open: &Open, src: &ID3D11Texture2D, dst: &ID3D11Texture2D, size: (u32, u32)) -> Result<()> {
+    let (mut white, read_at) = open.white.get();
+    if read_at.is_none_or(|t| t.elapsed() >= WHITE_REFRESH) {
+        white = hdr::sdr_white(&open.gdi_name).unwrap_or(white);
+        open.white.set((white, Some(Instant::now())));
+    }
+    let mut converter = open.converter.borrow_mut();
+    if converter.is_none() {
+        *converter = Some(ScrgbToSrgb::new(&open.textures.gpu.device)?);
+    }
+    let gpu = &open.textures.gpu;
+    converter.as_mut().expect("made above").convert(&gpu.context, src, dst, size, white)
 }
 
 fn open_device_ok(open: &Open) -> bool {

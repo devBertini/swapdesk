@@ -157,3 +157,51 @@ fn color_patches_round_trip_within_delta_e() {
     }
     assert!(ran > 0, "no encoder to test on this PC");
 }
+
+/// The colour signalling of the first SPS of a stream.
+fn sps_color(encoded: &[EncodedFrame], who: &str) -> Option<swapdesk_codec_win::annexb::SpsColor> {
+    let first = encoded.iter().find(|e| e.keyframe).unwrap_or_else(|| panic!("{who}: no keyframe"));
+    swapdesk_codec_win::annexb::parse_sps(&first.annex_b).unwrap_or_else(|| panic!("{who}: no SPS")).color
+}
+
+#[test]
+fn every_encoder_signals_the_same_colour_in_the_sps() {
+    let data = patch_rows();
+    let mut seen = Vec::new();
+    if let Some(nv) =
+        list_adapters().expect("adapters").into_iter().find(|a| a.vendor_id == VENDOR_NVIDIA && !a.software)
+    {
+        for preset in [Preset::Auto, Preset::Text, Preset::Motion] {
+            let who = format!("NVENC {preset:?}");
+            let uploader = TextureUploader::new(nv.id).expect("uploader");
+            let mut enc = NvencEncoder::new(NvencOptions { device: Some(uploader.device()), ..Default::default() });
+            enc.configure(&EncoderConfig { width: W, height: H, fps: 60, kbps: 20_000, preset, adapter: nv.id })
+                .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+            let encoded = enc.encode(&frame(&data, 0), false).expect("encode");
+            seen.push((who.clone(), sps_color(&encoded, &who)));
+        }
+    }
+    for c in candidates() {
+        let who = format!("MF {}", c.name);
+        let mut enc = encoder(c);
+        enc.configure(&config(c, Preset::Auto, 60, 20_000)).unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+        let mut encoded = enc.encode(&frame(&data, 0), false).expect("encode");
+        encoded.extend(enc.flush().expect("flush"));
+        seen.push((who.clone(), sps_color(&encoded, &who)));
+    }
+    // The samples are BT.709 limited range on every path (the patches round-trip above). A colour description, when an
+    // encoder writes one, must say exactly that, so a viewer that honours the VUI (VideoToolbox) treats every encoder
+    // alike; Quick Sync and the software MFT write none and are taken as BT.709 at HD sizes (codec-mac tests/color.rs).
+    for (who, color) in &seen {
+        println!("SPS colour {who}: {color:?}");
+        if let Some(c) = color {
+            assert!(!c.full_range, "{who}: full range signalled for limited-range samples");
+            if let Some(d) = c.description {
+                assert_eq!(d, (1, 1, 1), "{who}: primaries, transfer and matrix other than BT.709");
+            }
+        }
+        if who.starts_with("NVENC") || who.contains("NVIDIA") {
+            assert_eq!(color.and_then(|c| c.description), Some((1, 1, 1)), "{who}: NVIDIA encoders say BT.709");
+        }
+    }
+}

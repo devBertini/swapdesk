@@ -72,10 +72,10 @@ fn rect_of(r: &RECT) -> Rect {
 
 /// Makes the calling thread per-monitor DPI aware (v2) for as long as it lives and restores the previous mode after:
 /// the DPI and coordinates read inside are physical, whatever the host process declared.
-struct DpiScope(DPI_AWARENESS_CONTEXT);
+pub(crate) struct DpiScope(DPI_AWARENESS_CONTEXT);
 
 impl DpiScope {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         // SAFETY: plain thread-state call; the previous context is restored in `drop`.
         Self(unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) })
     }

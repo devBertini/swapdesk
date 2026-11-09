@@ -9,7 +9,7 @@ use crate::nvenc::{NvencEncoder, NvencOptions, NvencSummary};
 use crate::sys::{self, device_adapter, err};
 
 /// PCI vendor id of NVIDIA.
-pub const VENDOR_NVIDIA: u32 = 0x10DE;
+pub const VENDOR_NVIDIA: u32 = crate::preset::VENDOR_NVIDIA;
 
 /// Which encoder family may serve a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -81,7 +81,7 @@ pub enum Message {
         muted: bool,
     },
     Shutdown,
-    // 0x30 to 0x38: helper to service.
+    // 0x30 to 0x39: helper to service.
     Displays(DisplayList),
     /// The header's `payload_len` equals `payload.len()`.
     VideoFrame {
@@ -98,6 +98,11 @@ pub enum Message {
     SasRequest,
     HelperFault {
         code: ErrorCode,
+        what: Text,
+    },
+    /// 0x39: what the helper chose that is worth the service's log at INFO (the encoder serving a display, why a
+    /// faster one was not used, a rebuild). Same rule as `HelperFault`: never a never-logged value.
+    HelperNote {
         what: Text,
     },
     // 0x40 to 0x42: UI.
@@ -247,7 +252,7 @@ pub enum Message {
 pub const fn limit_of(ty: u64) -> Option<usize> {
     match ty {
         0x24 | 0x54 => Some(MAX_INPUT_MESSAGE),
-        0x01..=0x03 | 0x20..=0x29 | 0x30 | 0x32 | 0x33 | 0x35..=0x38 => Some(MAX_OTHER_MESSAGE),
+        0x01..=0x03 | 0x20..=0x29 | 0x30 | 0x32 | 0x33 | 0x35..=0x39 => Some(MAX_OTHER_MESSAGE),
         0x40..=0x42 | 0x52 | 0x53 | 0x55 | 0x56 => Some(MAX_OTHER_MESSAGE),
         0x31 | 0x50 => Some(MAX_VIDEO_MESSAGE),
         0x34 => Some(MAX_AUDIO_DATAGRAM),
@@ -360,6 +365,7 @@ impl Message {
             Self::DesktopChanged(_) => 0x36,
             Self::SasRequest => 0x37,
             Self::HelperFault { .. } => 0x38,
+            Self::HelperNote { .. } => 0x39,
             Self::UiRequest { .. } => 0x40,
             Self::UiReply { .. } => 0x41,
             Self::UiNotify(_) => 0x42,
@@ -431,6 +437,7 @@ impl Message {
                 code.put(w, 0)?;
                 what.put(w, MAX_FAULT_TEXT)?;
             }
+            Self::HelperNote { what } => what.put(w, MAX_FAULT_TEXT)?,
             Self::UiRequest { req, op } => {
                 w.put_u32(*req);
                 w.put_u16(op.code());
@@ -563,6 +570,7 @@ impl Message {
             0x36 => Self::DesktopChanged(Desktop::get(r, 0)?),
             0x37 => Self::SasRequest,
             0x38 => Self::HelperFault { code: ErrorCode::get(r, 0)?, what: Text::get(r, MAX_FAULT_TEXT)? },
+            0x39 => Self::HelperNote { what: Text::get(r, MAX_FAULT_TEXT)? },
             0x40 => {
                 let req = r.u32()?;
                 let op = r.u16()?;

@@ -20,17 +20,16 @@ fn peak_bitrate_and_buffer_follow_the_mean_on_configure_and_on_a_live_change() {
     for c in candidates() {
         let who = format!("{} ({})", c.name, if c.hardware { "hardware" } else { "software" });
         // Auto runs a VBR mode and Motion runs CBR where the MFT takes it; an MFT without CBR falls back to VBR (peak 2x).
+        // The NVIDIA MFT runs CBR in every preset (it follows a live rate only there: `preset::LiveRate`).
         for preset in [Preset::Auto, Preset::Motion] {
             let mut enc = encoder(c);
             enc.configure(&config(c, preset, 60, 20_000)).unwrap_or_else(|e| panic!("{who}: configure: {e}"));
             let (max, max_ok) = asked(&enc, "AVEncCommonMaxBitRate", &who);
             let (buf, buf_ok) = asked(&enc, "AVEncCommonBufferSize", &who);
-            assert!([20_000_000, 40_000_000].contains(&max), "{who} {preset:?}: peak {max}");
-            if preset == Preset::Auto {
-                assert!(
-                    max == 40_000_000 || enc.rate_modes().iter().all(|(m, ok)| !ok || *m == 0),
-                    "{who}: VBR peak is 2x"
-                );
+            let (mode, _) = asked(&enc, "AVEncCommonRateControlMode", &who);
+            assert_eq!(max, if mode == 0 { 20_000_000 } else { 40_000_000 }, "{who} {preset:?}: peak in mode {mode}");
+            if preset == Preset::Auto && !c.name.contains("NVIDIA") {
+                assert!(mode != 0 || enc.rate_modes().iter().all(|(m, ok)| !ok || *m == 0), "{who}: Auto runs VBR");
             }
             assert_eq!(buf, 1_000_000, "{who} {preset:?}: three frames of 20 Mbit/s at 60 fps");
             println!("{who} {preset:?}: peak {max} (taken {max_ok}), buffer {buf} (taken {buf_ok})");

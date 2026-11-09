@@ -421,7 +421,7 @@ impl Active {
         let bitstream = bits.bitstreamBuffer;
 
         let seq_header = sequence_header(&api, session);
-        let level = level_idc(cfg.width, cfg.height, coded_fps);
+        let level = level_idc(cfg.width, cfg.height, coded_fps, eff.kbps);
         let info = EncoderInfo {
             name: format!("NVIDIA NVENC H.264 on {}", gpu.adapter.name),
             hardware: true,

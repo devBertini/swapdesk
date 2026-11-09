@@ -132,6 +132,19 @@ pub struct SpsInfo {
     pub height: u32,
     /// `max_num_reorder_frames` when the VUI says so; `None` when absent.
     pub num_reorder_frames: Option<u32>,
+    /// The VUI colour signalling (`video_signal_type`); `None` when the SPS has none, which leaves the decoder to guess.
+    pub color: Option<SpsColor>,
+}
+
+/// The colour description of the VUI (H.264 E.1.1, E.2.1): what range and matrix the YUV samples are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpsColor {
+    pub video_format: u8,
+    /// `video_full_range_flag`: 0 is limited range (luma 16 to 235), 1 full range (0 to 255).
+    pub full_range: bool,
+    /// `colour_primaries`, `transfer_characteristics`, `matrix_coefficients` (1 is BT.709, 2 unspecified, 6 BT.601
+    /// 525); `None` when `colour_description_present_flag` is 0.
+    pub description: Option<(u8, u8, u8)>,
 }
 
 /// Parses the first SPS (profile, level, chroma format, cropped size, reorder depth).
@@ -209,6 +222,7 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
     let width = mbs_w * 16 - (cl + cr) * sub_w;
     let height = (2 - frame_mbs_only) * map_h * 16 - (ct + cb) * crop_unit_y;
     let mut num_reorder_frames = None;
+    let mut color = None;
     if b.bit()? == 1 {
         // VUI
         if b.bit()? == 1 && b.bits(8)? == 255 {
@@ -218,10 +232,11 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
             b.bit()?;
         }
         if b.bit()? == 1 {
-            b.bits(4)?;
-            if b.bit()? == 1 {
-                b.bits(24)?;
-            }
+            let video_format = b.bits(3)? as u8;
+            let full_range = b.bit()? == 1;
+            let description =
+                if b.bit()? == 1 { Some((b.bits(8)? as u8, b.bits(8)? as u8, b.bits(8)? as u8)) } else { None };
+            color = Some(SpsColor { video_format, full_range, description });
         }
         if b.bit()? == 1 {
             b.ue()?;
@@ -253,7 +268,7 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
             num_reorder_frames = Some(b.ue()?);
         }
     }
-    Some(SpsInfo { profile_idc, level_idc, chroma_format_idc, width, height, num_reorder_frames })
+    Some(SpsInfo { profile_idc, level_idc, chroma_format_idc, width, height, num_reorder_frames, color })
 }
 
 fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
