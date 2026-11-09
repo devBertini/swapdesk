@@ -37,6 +37,25 @@ jobs:
         run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
       - name: Tests (interactive and GPU-only tests are ignored by default)
         run: cargo nextest run --workspace --locked --profile ci
+      - name: Failing tests as annotations
+        if: failure()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          root = ET.parse("C:/t/nextest/ci/junit.xml").getroot()
+          shown = 0
+          for case in root.iter("testcase"):
+              bad = case.find("failure")
+              if bad is None:
+                  bad = case.find("error")
+              if bad is None or shown >= 40:
+                  continue
+              shown += 1
+              text = (bad.get("message") or "") + " " + (case.findtext("system-err") or bad.text or "")
+              text = " ".join(text.split())[-900:].replace("%", "%25")
+              title = f"{case.get('classname')} {case.get('name')}"
+              title = title.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
+              print(f"::error title={title}::{text}")
 
   macos:
     runs-on: macos-latest
