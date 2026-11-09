@@ -3,11 +3,12 @@
 //! boxes; the numbers in comments are the design's paddings and gaps.
 
 use swapdesk_ui::format;
+use swapdesk_ui::home::{HomeCard, RecentLine};
 use swapdesk_ui::list::{max_scroll, visible_rows};
 use swapdesk_ui::tokens::{Color, fixed, layout, text};
 use swapdesk_ui::{
     ControlId, DataKind, DeviceStatus, DeviceTab, DeviceView, DialogKind, EditId, Msg, MsgKey, Nav, NoticeKind,
-    PairingState, Ready, Screen, SelectId, SessionState, WindowKind,
+    PairingState, Screen, SelectId, SessionState, WindowKind,
 };
 
 use crate::gfx::{Align, Rect};
@@ -22,6 +23,7 @@ pub fn paint(f: &mut Frame) {
     } else {
         sidebar(f);
         match f.st.nav() {
+            Nav::Home => home_main(f),
             Nav::Devices => devices_main(f),
             Nav::Activity => activity_main(f),
             Nav::Settings => settings_main(f),
@@ -62,7 +64,7 @@ fn sidebar(f: &mut Frame) {
     p.fill_rect(Rect::new(0.0, 0.0, SIDEBAR_W, h), pal.sunken);
     p.fill_rect(Rect::new(SIDEBAR_W - bw, 0.0, bw, h), pal.line);
 
-    // padding 18 12; the rows are 247 px wide (272 - 2 x 12 - the 1 px border).
+    // padding 18 12; the rows are as wide as the sidebar less 2 x 12 and the 1 px border.
     let x = 12.0;
     let w = SIDEBAR_W - 24.0 - bw;
     let mut y = 18.0;
@@ -73,28 +75,31 @@ fn sidebar(f: &mut Frame) {
     p.draw(&logo, x + 10.0 + 22.0 + 10.0, y, pal.ink);
     y += logo.h + 22.0;
 
-    // This computer.
-    let this_row = match (f.st.this_device(), f.st.settings()) {
-        (Some(t), _) => Some((
-            t.name.clone(),
-            f.t(match t.ready {
-                Ready::ReadyToReceive => MsgKey::ReadyToReceive,
-                Ready::ServiceOff => MsgKey::ReadyServiceOff,
-                Ready::ServiceNeedsApproval => MsgKey::ReadyServiceNeedsApproval,
-                Ready::NoNetwork => MsgKey::ReadyNoNetwork,
-            }),
-            if t.ready == Ready::ReadyToReceive { pal.ok } else { pal.danger },
-        )),
-        _ => None,
-    };
-    let loading_this = f.st.placeholder(DataKind::ThisDevice);
-    let rows: Vec<Row> = this_row
-        .map(|(name, status, c)| Row { id: None, name, status, dot: Dot::Solid(c), selected: false })
-        .into_iter()
-        .collect();
-    y += group(f, x, y, w, &f.t(MsgKey::SidebarThisComputer), &rows, if loading_this { 1 } else { 0 }) + 22.0;
+    // Início: the first item, selected while the home is shown.
+    nav_row(
+        f,
+        ControlId::NavHome,
+        Rect::new(x, y, w, 40.0),
+        icons20::HOUSE,
+        &f.t(MsgKey::NavHome),
+        f.st.nav() == Nav::Home,
+    );
+    y += 40.0 + 22.0;
+
+    // Ajustes hangs from the window's bottom edge; the lists are clipped above it.
+    let settings_y = h - 18.0 - 40.0;
+    let settings = f.t(MsgKey::NavSettings);
+    nav_row(
+        f,
+        ControlId::NavSettings,
+        Rect::new(x, settings_y, w, 40.0),
+        icons20::GEAR,
+        &settings,
+        f.st.nav() == Nav::Settings,
+    );
 
     // Paired and on the network.
+    p.push_clip(Rect::new(0.0, y - 4.0, SIDEBAR_W - bw, (settings_y - 8.0 - (y - 4.0)).max(0.0)));
     let loading_devices = f.st.placeholder(DataKind::Devices);
     let (paired, network) = f.st.device_groups();
     let nav_devices = f.st.nav() == Nav::Devices;
@@ -122,50 +127,8 @@ fn sidebar(f: &mut Frame) {
                 + 22.0;
         }
     }
-
-    // The bottom block hangs from the window's bottom edge: network line, then three 40 px buttons, gap 2.
-    let net_text = f.st.network().map(|n| match &n.address {
-        Some(a) => f.st.tm(&Msg::new(MsgKey::NetworkLine).with(n.label.clone()).with(a.clone())),
-        None => f.st.tm(&Msg::new(MsgKey::NetworkLineNoAddress).with(n.label.clone())),
-    });
-    let net = p.label_in(net_text.as_deref().unwrap_or("A"), text::SMALL, w - 20.0, Align::Start);
-    let net_y = h - 18.0 - net.h;
-    let buttons_y = net_y - 22.0 - 124.0;
-    address_field(f, x, y, w, buttons_y - 12.0);
-    f.button(
-        ControlId::PairThisComputer,
-        Rect::new(x, buttons_y, w, 40.0),
-        Kind::Default,
-        &f.t(MsgKey::PairThisComputer),
-        true,
-    );
-    let k = if f.st.nav() == Nav::Activity { Kind::Selected } else { Kind::Quiet };
-    f.button(ControlId::NavActivity, Rect::new(x, buttons_y + 42.0, w, 40.0), k, &f.t(MsgKey::NavActivity), true);
-    let k = if f.st.nav() == Nav::Settings { Kind::Selected } else { Kind::Quiet };
-    f.button(ControlId::NavSettings, Rect::new(x, buttons_y + 84.0, w, 40.0), k, &f.t(MsgKey::NavSettings), true);
-    if net_text.is_some() {
-        p.draw(&net, x + 10.0, net_y, pal.soft);
-    } else if f.st.placeholder(DataKind::Network) {
-        f.block(Rect::new(x + 10.0, net_y + 2.0, 170.0, net.h - 4.0), 4.0);
-    }
-}
-
-/// F-FIND-03: the manual address field at the end of the device list: a caption over a native input (the caption
-/// is cut with an ellipsis inside the sidebar's width). On a short window (`limit` is the top of the bottom block's
-/// free band) the caption goes first and the field keeps its place right after the list, named for assistive
-/// technology; if even that does not fit it is pinned just above the bottom block, so it is never unreachable.
-fn address_field(f: &mut Frame, x: f32, y: f32, w: f32, limit: f32) {
-    let p = f.p;
-    let caption = p.label_ellipsis(&f.t(MsgKey::AddressLabel), text::GROUP, w - 20.0);
-    let placeholder = f.t(MsgKey::AddressPlaceholder);
-    let with_caption = caption.h + 4.0 + layout::FIELD_H;
-    if y + with_caption <= limit {
-        p.draw(&caption, x + 10.0, y, f.pal.soft);
-        f.edit_field(EditId::Address, Rect::new(x, y + caption.h + 4.0, w, layout::FIELD_H), "", &placeholder);
-    } else {
-        let top = (y - 8.0).max(0.0).min(limit - layout::FIELD_H);
-        f.edit_field(EditId::Address, Rect::new(x, top, w, layout::FIELD_H), "", &placeholder);
-    }
+    let _ = y;
+    p.pop_clip();
 }
 
 /// A caption and its rows, gap 4; `skeleton` rows are drawn as blocks instead. Returns the height used.
@@ -237,6 +200,329 @@ fn logo_mark(f: &Frame, x: f32, y: f32) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Início (D35), after the board "22. Início"
+
+/// Icons of the board, drawn in its 20-unit box (the painter's paths are 24-unit: see [`icon20`]).
+mod icons20 {
+    pub const HOUSE: &str = "M3 9l7-5.5L17 9v7.5a1 1 0 0 1-1 1h-3.5v-5h-5v5H4a1 1 0 0 1-1-1z";
+    pub const GEAR: &str = "M7.5 10a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4";
+    pub const WIFI: &str = "M2.5 8a11 11 0 0 1 15 0M5 10.75a7.25 7.25 0 0 1 10 0M7.5 13.5a3.5 3.5 0 0 1 5 0M10 16h.01";
+    pub const DESKTOP: &str = "M4.25 2.75h11.5a.75.75 0 0 1 .75.75v8a.75.75 0 0 1-.75.75H4.25a.75.75 0 0 1-.75-.75v-8a.75.75 0 0 1 .75-.75zM5.5 4.75h9v5.5h-9zM3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9";
+    pub const LAPTOP: &str = "M4.75 3.5h10.5a1.25 1.25 0 0 1 1.25 1.25v7a1.25 1.25 0 0 1-1.25 1.25H4.75A1.25 1.25 0 0 1 3.5 11.75v-7A1.25 1.25 0 0 1 4.75 3.5zM1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z";
+}
+
+/// Strokes a board icon (20-unit box, 1.75 stroke) at `(x, y)` as `px` DIPs.
+fn icon20(f: &Frame, path: &str, x: f32, y: f32, px: f32, color: Color) {
+    f.p.svg(path, x, y, px * 1.2, 1.75, color);
+}
+
+/// A sidebar navigation row (Início, Ajustes): icon, label, the device rows' selected look.
+fn nav_row(f: &mut Frame, id: ControlId, r: Rect, icon: &str, label: &str, selected: bool) {
+    let (p, pal) = (f.p, f.pal);
+    if selected {
+        let ring = p.hairline();
+        p.fill_rrect(Rect::new(r.x - ring, r.y - ring, r.w + 2.0 * ring, r.h + 2.0 * ring), 8.0 + ring, pal.line);
+        p.fill_rrect(r, 8.0, pal.surface);
+    }
+    f.tint(id, r, 8.0, pal.ink, 0.06, 0.11);
+    icon20(f, icon, r.x + 10.0, r.y + (r.h - 20.0) / 2.0, 20.0, pal.ink);
+    let l = p.label_ellipsis(label, if selected { text::NAME } else { text::BTN }, r.w - 10.0 - 20.0 - 12.0 - 10.0);
+    p.draw(&l, r.x + 10.0 + 20.0 + 12.0, r.y + (r.h - l.h) / 2.0, pal.ink);
+    f.register(id, r, 8.0);
+}
+
+/// The narrowest a card gets: two columns need two of them and the gap.
+const CARD_MIN_W: f32 = 300.0;
+const CARD_GAP: f32 = 20.0;
+/// Padding of a card inside its 1 px border (the board: 22 above and below, 24 at the sides).
+const CARD_PAD_X: f32 = 24.0;
+const CARD_PAD_Y: f32 = 22.0;
+/// The time column of the recent-activity list and its gap to the line.
+const TIME_W: f32 = 84.0;
+const TIME_GAP: f32 = 14.0;
+
+fn home_main(f: &mut Frame) {
+    let (p, pal) = (f.p, f.pal);
+    let a = area(f);
+    let mut y = 32.0;
+    let home = f.st.home();
+
+    // Header: the 40 px computer icon, the name over the state line, the network pill at the right.
+    let title_h = p.label("A", text::H1).h;
+    let body_h = p.label("A", text::BODY).h;
+    // Narrow content: the pill drops under the header instead of cutting its text.
+    let below = a.cw < 700.0;
+    let pill_max = if below { a.cw } else { a.cw * 0.38 };
+    let pill = home.network.as_ref().map(|c| {
+        let l = p.label_ellipsis(&c.text, text::CAPTION, (pill_max - 14.0 - 20.0 - 8.0 - 14.0).max(60.0));
+        (l, c.warn)
+    });
+    let pill_w = pill.as_ref().map_or(0.0, |(l, _)| 14.0 + 20.0 + 8.0 + l.w + 14.0);
+    let head_w = if pill_w > 0.0 && !below { (a.cw - pill_w - 16.0).max(120.0) } else { a.cw };
+    let block_h = title_h + 4.0 + body_h;
+    let head_h = block_h.max(40.0);
+    if let Some(os) = home.os {
+        let path = if os == swapdesk_ui::Os::MacOs { icons20::LAPTOP } else { icons20::DESKTOP };
+        icon20(f, path, a.x, y + (head_h - 40.0) / 2.0, 40.0, pal.ink);
+    }
+    let tx = a.x + 40.0 + 16.0;
+    let ty = y + (head_h - block_h) / 2.0;
+    match &home.name {
+        Some(name) => {
+            let l = p.label_ellipsis(name, text::H1, head_w - 56.0);
+            p.draw(&l, tx, ty, pal.ink);
+        }
+        None if f.st.placeholder(DataKind::ThisDevice) => f.block(Rect::new(tx, ty + 2.0, 220.0, title_h - 4.0), 6.0),
+        None => {}
+    }
+    match &home.status {
+        Some(status) => {
+            let dot = if home.ready { pal.ok } else { pal.danger };
+            let sy = ty + title_h + 4.0;
+            p.fill_circle((tx + 4.0, sy + body_h / 2.0), 4.0, dot);
+            let l = p.label_ellipsis(status, text::BODY, head_w - 56.0 - 16.0);
+            p.draw(&l, tx + 16.0, sy, pal.soft);
+        }
+        None if f.st.placeholder(DataKind::ThisDevice) => {
+            f.block(Rect::new(tx, ty + title_h + 4.0 + 3.0, 180.0, body_h - 6.0), 4.0);
+        }
+        None => {}
+    }
+    let mut pill_y = y + (head_h - 36.0) / 2.0;
+    let mut pill_x = a.x + a.cw - pill_w;
+    if below {
+        pill_y = y + head_h + 16.0;
+        pill_x = a.x;
+    }
+    if let Some((l, warn)) = &pill {
+        let r = Rect::new(pill_x, pill_y, pill_w, 36.0);
+        let (fill, ink) = if *warn { (pal.danger_tint, pal.danger) } else { (pal.surface, pal.soft) };
+        p.fill_rrect(r, 18.0, fill);
+        icon20(f, icons20::WIFI, r.x + 14.0, r.y + 8.0, 20.0, ink);
+        p.draw(l, r.x + 14.0 + 20.0 + 8.0, r.y + (r.h - l.h) / 2.0, ink);
+    } else if f.st.placeholder(DataKind::Network) {
+        f.block(Rect::new(pill_x.min(a.x + a.cw - 200.0), pill_y, 200.0, 36.0), 18.0);
+    }
+    if below && (pill.is_some() || f.st.placeholder(DataKind::Network)) {
+        y += 36.0 + 16.0;
+    }
+    y += head_h + 28.0;
+
+    // The crash notice, the "no computer found" card or the plain empty line.
+    y += home_notices(f, &a, y);
+
+    // The cards, as a list: two columns when the content is wide enough, one otherwise; each as tall as it needs.
+    let cols = if a.cw >= 2.0 * CARD_MIN_W + CARD_GAP { 2 } else { 1 };
+    let card_w = (a.cw - CARD_GAP * (cols as f32 - 1.0)) / cols as f32;
+    let mut i = 0;
+    while i < home.cards.len() {
+        let row = &home.cards[i..(i + cols).min(home.cards.len())];
+        // What is left below this row: the activity card shows as many lines as fit.
+        let avail = (f.h - y - 32.0).max(0.0);
+        let mut row_h = 0.0f32;
+        for (n, card) in row.iter().enumerate() {
+            let h = card_height(f, card, card_w, avail);
+            let r = Rect::new(a.x + n as f32 * (card_w + CARD_GAP), y, card_w, h);
+            paint_card(f, card, r, avail);
+            row_h = row_h.max(h);
+        }
+        y += row_h + CARD_GAP;
+        i += cols;
+    }
+}
+
+/// The crash notice, the "no computer found" card or the empty line, as the device page had them. Returns the height
+/// used, with the gap after it.
+fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
+    let (p, pal) = (f.p, f.pal);
+    let mut used = 0.0;
+    if f.st.fetch(DataKind::Devices) != swapdesk_ui::Fetch::Ready {
+        return used;
+    }
+    if f.st.crash_notice() {
+        used += notice_cards(f, a, y, &[NoticeKind::Crash]) + 20.0;
+    }
+    if f.st.no_computer_card() {
+        // F20: discovery found nothing for 10 s; the action focuses the address field.
+        let (title, body, button) =
+            (f.t(MsgKey::NoComputerTitle), f.t(MsgKey::NoComputerBody), f.t(MsgKey::NoComputerButton));
+        let w = ((a.cw - 40.0) / 3.0).max(320.0).min(a.cw);
+        let h = state_card(
+            f,
+            (a.x, y + used, w),
+            icons::WIFI,
+            (pal.link_tint, pal.link),
+            (&title, &body, &button),
+            ControlId::NoComputerAddress,
+        );
+        used += h + 20.0;
+    } else if f.st.devices().is_empty() {
+        let l = p.label_in(&f.t(MsgKey::EmptyDevices), text::BODY, a.cw, Align::Start);
+        p.draw(&l, a.x, y + used, pal.soft);
+        used += l.h + 20.0;
+    }
+    used
+}
+
+/// Height of a recent-activity row: the device name (one line) over the event (wrapped), 10 px above and below.
+fn recent_row_h(f: &Frame, line: &RecentLine, text_w: f32) -> f32 {
+    let p = f.p;
+    let who = if line.who.is_empty() { 0.0 } else { p.label("A", text::NAME).h };
+    let what = p.label_in(&line.what, text::CAPTION, text_w, Align::Start).h;
+    (who + what).max(p.label("A", text::SMALL).h + 1.0) + 20.0
+}
+
+fn recent_text_w(inner: f32) -> f32 {
+    (inner - TIME_W - TIME_GAP).max(60.0)
+}
+
+/// How many entries fit in `room` DIPs of list height (at most all of them).
+fn recent_fit(f: &Frame, room: f32, lines: &[RecentLine], text_w: f32) -> usize {
+    let mut used = 0.0;
+    for (n, line) in lines.iter().enumerate() {
+        used += recent_row_h(f, line, text_w);
+        if used > room {
+            return n;
+        }
+    }
+    lines.len()
+}
+
+/// The part of a card's height that is not its list: border, padding and the title row.
+fn recent_fixed(f: &Frame) -> f32 {
+    let p = f.p;
+    2.0 * p.hairline() + 2.0 * CARD_PAD_Y + p.label("A", text::H2).h + 6.0
+}
+
+fn card_height(f: &Frame, card: &HomeCard, w: f32, avail: f32) -> f32 {
+    let p = f.p;
+    let bw = p.hairline();
+    let inner = w - 2.0 * bw - 2.0 * CARD_PAD_X;
+    let title_h = p.label("A", text::H2).h;
+    match card {
+        HomeCard::Pair { body, address_label, address_hint, .. } => {
+            let body_h = f.para_height(body, text::BODY, inner);
+            let label_h = p.label("A", text::NAME).h;
+            let hint_h = f.para_height(address_hint, text::SMALL, inner);
+            let _ = address_label;
+            // title, body, button, divider, label, hint (tucked 4 px up into the label), field; gap 16 / 8.
+            2.0 * bw
+                + 2.0 * CARD_PAD_Y
+                + title_h
+                + 16.0
+                + body_h
+                + 16.0
+                + 40.0
+                + 16.0
+                + 1.0
+                + 16.0
+                + label_h
+                + 8.0
+                + hint_h
+                - 4.0
+                + 8.0
+                + 40.0
+        }
+        HomeCard::Recent { lines, .. } => {
+            let tw = recent_text_w(inner);
+            let list_h = if f.st.placeholder(DataKind::Activity) {
+                3.0 * (p.label("A", text::BODY).h + 20.0)
+            } else if lines.is_empty() {
+                p.label("A", text::BODY).h + 10.0
+            } else {
+                let n = recent_fit(f, (avail - recent_fixed(f)).max(0.0), lines, tw);
+                lines.iter().take(n).map(|l| recent_row_h(f, l, tw)).sum()
+            };
+            2.0 * bw + 2.0 * CARD_PAD_Y + title_h + 6.0 + list_h
+        }
+    }
+}
+
+fn paint_card(f: &mut Frame, card: &HomeCard, r: Rect, avail: f32) {
+    let (p, pal) = (f.p, f.pal);
+    let bw = p.hairline();
+    let (x, inner) = (r.x + bw + CARD_PAD_X, r.w - 2.0 * bw - 2.0 * CARD_PAD_X);
+    let mut y = r.y + bw + CARD_PAD_Y;
+    f.panel(r, pal.surface);
+    match card {
+        HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
+            let t = p.label_ellipsis(title, text::H2, inner);
+            p.draw(&t, x, y, pal.ink);
+            y += t.h + 16.0;
+            y += f.para(body, text::BODY, x, y, inner, pal.soft, Align::Start) + 16.0;
+            let bwid = f.button_width(button, Kind::Primary).min(inner);
+            f.button(ControlId::PairThisComputer, Rect::new(x, y, bwid, 40.0), Kind::Primary, button, false);
+            y += 40.0 + 16.0;
+            p.fill_rect(Rect::new(x, y, inner, 1.0_f32.max(bw)), pal.line);
+            y += 1.0 + 16.0;
+            let cap = p.label_ellipsis(address_label, text::NAME, inner);
+            p.draw(&cap, x, y, pal.ink);
+            y += cap.h + 8.0 - 4.0;
+            y += f.para(address_hint, text::SMALL, x, y, inner, pal.soft, Align::Start) + 8.0;
+            let add_w = f.button_width(add, Kind::Default);
+            let placeholder = f.t(MsgKey::AddressPlaceholder);
+            let field_w = (inner - add_w - 8.0).max(80.0);
+            f.edit_field(
+                EditId::Address,
+                Rect::new(x, y + (40.0 - layout::FIELD_H) / 2.0, field_w, layout::FIELD_H),
+                "",
+                &placeholder,
+            );
+            f.button(ControlId::AddAddress, Rect::new(x + field_w + 8.0, y, add_w, 40.0), Kind::Default, add, false);
+        }
+        HomeCard::Recent { title, lines, empty, all } => {
+            // "Ver tudo" is an inline link at the right of the title, as "Editar" is on the device page.
+            let edit_style = text::NAME;
+            let link = p.label(all, edit_style);
+            let t = p.label_ellipsis(title, text::H2, inner - link.w - 12.0);
+            p.draw(&t, x, y, pal.ink);
+            let lx = x + inner - link.w;
+            let ly = y + (t.h - link.h) / 2.0;
+            p.draw(&link, lx, ly, pal.link);
+            let content = p.fonts.content_height(edit_style);
+            let link_box = Rect::new(lx, ly + (link.h - content) / 2.0, link.w, content);
+            if f.hovered(ControlId::HomeActivityAll) {
+                p.fill_rect(Rect::new(lx, link_box.bottom() - 1.5, link.w, bw), pal.link);
+            }
+            f.register(ControlId::HomeActivityAll, link_box, 0.0);
+            y += t.h + 6.0;
+            let tw = recent_text_w(inner);
+            if f.st.placeholder(DataKind::Activity) {
+                for _ in 0..3 {
+                    f.block(Rect::new(x, y + 12.0, TIME_W - 14.0, 10.0), 4.0);
+                    f.block(Rect::new(x + TIME_W + TIME_GAP, y + 10.0, tw * 0.8, 14.0), 4.0);
+                    y += p.label("A", text::BODY).h + 20.0;
+                }
+            } else if lines.is_empty() {
+                let l = p.label_ellipsis(empty, text::BODY, inner);
+                p.draw(&l, x, y + 10.0, pal.soft);
+            } else {
+                let shown = recent_fit(f, (avail - recent_fixed(f)).max(0.0), lines, tw);
+                for (n, line) in lines.iter().take(shown).enumerate() {
+                    let rh = recent_row_h(f, line, tw);
+                    if n > 0 {
+                        p.fill_rect(Rect::new(x, y, inner, bw), pal.line);
+                    }
+                    let when = p.label_ellipsis(&line.when, text::SMALL, TIME_W);
+                    p.draw(&when, x, y + 10.0 + 1.0, pal.soft);
+                    // The device name (600, ink) over the event (13 px, soft; danger for an alert).
+                    let tx = x + TIME_W + TIME_GAP;
+                    let mut ly = y + 10.0;
+                    if !line.who.is_empty() {
+                        let who = p.label_ellipsis(&line.who, text::NAME, tw);
+                        p.draw(&who, tx, ly, pal.ink);
+                        ly += who.h;
+                    }
+                    let what = p.label_in(&line.what, text::CAPTION, tw, Align::Start);
+                    p.draw(&what, tx, ly, if line.alert { pal.danger } else { pal.soft });
+                    y += rh;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Devices
 
 struct Area {
@@ -257,28 +543,7 @@ fn devices_main(f: &mut Frame) {
         return;
     }
     let Some(d) = f.st.selected_device().cloned() else {
-        if f.st.fetch(DataKind::Devices) == swapdesk_ui::Fetch::Ready {
-            if f.st.crash_notice() {
-                y += notice_cards(f, &a, y, &[NoticeKind::Crash]) + 20.0;
-            }
-            if f.st.no_computer_card() {
-                // F20: discovery found nothing for 10 s; the action focuses the address field.
-                let (title, body, button) =
-                    (f.t(MsgKey::NoComputerTitle), f.t(MsgKey::NoComputerBody), f.t(MsgKey::NoComputerButton));
-                let w = ((a.cw - 40.0) / 3.0).max(320.0).min(a.cw);
-                state_card(
-                    f,
-                    (a.x, y, w),
-                    icons::WIFI,
-                    (pal.link_tint, pal.link),
-                    (&title, &body, &button),
-                    ControlId::NoComputerAddress,
-                );
-            } else {
-                let l = p.label_in(&f.t(MsgKey::EmptyDevices), text::BODY, a.cw, Align::Start);
-                p.draw(&l, a.x, y, pal.soft);
-            }
-        }
+        home_main(f);
         return;
     };
     let waking = f.st.waking_session().filter(|s| s.device_id == d.id).cloned();

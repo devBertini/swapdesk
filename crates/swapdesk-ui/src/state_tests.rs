@@ -1,7 +1,7 @@
 //! Unit tests of `UiState`: every event and every activation that changes what a screen shows.
 
 use crate::api::*;
-use crate::interact::ControlId;
+use crate::interact::{ControlId, UiRole};
 use crate::mock::{AIR, DESKTOP, MAC, Scenario};
 use crate::state::*;
 use crate::strings::MsgKey;
@@ -61,7 +61,9 @@ fn selecting_and_navigating_change_the_screen() {
     assert_eq!(s.screen(), Screen::Devices);
     s.activate(ControlId::NavSettings);
     assert_eq!(s.screen(), Screen::Settings);
-    s.activate(ControlId::NavActivity);
+    s.activate(ControlId::NavHome);
+    assert_eq!(s.screen(), Screen::Home);
+    s.activate(ControlId::HomeActivityAll);
     assert_eq!(s.screen(), Screen::Activity);
     let i = s.devices().iter().position(|d| d.id == DESKTOP).unwrap() as u16;
     s.activate(ControlId::Device(i));
@@ -168,7 +170,7 @@ fn pairing_can_be_cancelled_refused_failed_and_retried() {
     let mut s = Scenario::ParearEsteComputador.prepared_state();
     let a = s.activate(ControlId::PairCancel);
     assert_eq!(a.commands, vec![Command::PairCancel { pairing_id: 1 }]);
-    assert_eq!(s.screen(), Screen::Devices);
+    assert_eq!(s.screen(), Screen::Home, "closing the pairing from Início returns there");
 
     let mut s = base();
     s.activate(ControlId::PairThisComputer);
@@ -635,7 +637,8 @@ fn countdowns_stop_at_zero_and_the_timer_stops_with_them() {
 fn the_keyboard_order_starts_in_the_sidebar_and_every_device_is_reachable() {
     let s = base();
     let c = s.controls(WindowKind::Main);
-    assert!(matches!(c[0].id, ControlId::Device(_)));
+    assert_eq!(c[0].id, ControlId::NavHome);
+    assert!(matches!(c[1].id, ControlId::Device(_)));
     let devices = c.iter().filter(|c| matches!(c.id, ControlId::Device(_))).count();
     assert_eq!(devices, 3);
     // Tab order: sidebar, then header, tabs, content.
@@ -1368,4 +1371,83 @@ fn the_banner_timer_is_due_at_the_next_minute_boundary_and_only_while_hosting() 
     s.apply(UiEvent::Session { session_id: 2, device_id: DESKTOP.into(), state: SessionState::Ended { reason: None } });
     assert_eq!(s.banner_minute_delay_ms(since), None);
     assert_eq!(viewer().banner_minute_delay_ms(0), None, "a viewer session has no banner");
+}
+
+// ---------- D35: the home screen ----------
+
+#[test]
+fn the_window_starts_on_the_home_and_a_device_page_is_left_with_inicio() {
+    let mut s = Scenario::Inicio.prepared_state();
+    assert_eq!(s.screen(), Screen::Home);
+    assert!(s.is_home());
+    let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(!ids.contains(&ControlId::Control), "no device page behind the home");
+    let i = s.devices().iter().position(|d| d.id == DESKTOP).unwrap() as u16;
+    s.activate(ControlId::Device(i));
+    assert_eq!(s.screen(), Screen::Devices);
+    s.activate(ControlId::NavHome);
+    assert_eq!(s.screen(), Screen::Home);
+    s.activate(ControlId::NavSettings);
+    assert_eq!(s.screen(), Screen::Settings);
+    s.activate(ControlId::NavHome);
+    assert_eq!(s.screen(), Screen::Home);
+}
+
+#[test]
+fn the_home_shows_the_name_the_state_the_network_chip_and_the_two_cards() {
+    let s = Scenario::Inicio.prepared_state();
+    let h = s.home();
+    assert_eq!(h.name.as_deref(), Some("Notebook da sala"));
+    assert_eq!(h.status.as_deref(), Some("Pronto para receber"));
+    assert!(h.ready);
+    let chip = h.network.expect("chip");
+    assert_eq!(chip.text, "Só na rede local: Wi-Fi Casa, 192.168.0.12");
+    assert!(!chip.warn);
+    assert_eq!(h.cards.len(), 2);
+    let crate::home::HomeCard::Recent { lines, .. } = &h.cards[1] else { panic!("recent card") };
+    assert_eq!(lines.len(), 5, "the latest five of six entries");
+    assert_eq!(lines[0].who, "MacBook do escritório");
+    // The same lines the Atividade screen lists, newest first.
+    let rows: Vec<_> = s.controls(WindowKind::Main).into_iter().filter(|c| c.role == UiRole::Row).collect();
+    assert_eq!(rows.len(), 5);
+    assert!(rows[0].label.starts_with(&lines[0].when));
+}
+
+#[test]
+fn the_network_chip_warns_on_a_public_network_and_the_recent_card_has_an_empty_line() {
+    let s = Scenario::EstadoRedePublica.prepared_state();
+    assert!(s.home().network.expect("chip").warn);
+    let mut s = Scenario::Inicio.prepared_state();
+    s.apply(UiEvent::Reply { ticket: Ticket(0), result: Ok(Reply::Activity(Vec::new())) });
+    let c = s.controls(WindowKind::Main);
+    assert!(c.iter().any(|c| c.label == "Ainda não aconteceu nada por aqui."));
+    assert!(c.iter().any(|c| c.id == ControlId::HomeActivityAll), "Ver tudo stays");
+    assert!(c.iter().all(|c| c.role != UiRole::Row));
+}
+
+#[test]
+fn ver_tudo_opens_atividade_and_forgetting_the_last_device_page_falls_back_to_the_home() {
+    let mut s = Scenario::Inicio.prepared_state();
+    let a = s.activate(ControlId::HomeActivityAll);
+    assert_eq!(s.screen(), Screen::Activity);
+    assert!(a.commands.is_empty(), "the log is cached");
+    s.activate(ControlId::NavHome);
+    s.apply(UiEvent::DevicesChanged(Vec::new()));
+    s.navigate(Nav::Devices);
+    assert_eq!(s.screen(), Screen::Home, "a device page with no device is the home");
+}
+
+#[test]
+fn the_sidebar_holds_only_navigation_and_the_device_lists() {
+    let s = Scenario::Inicio.prepared_state();
+    let side: Vec<_> =
+        s.controls(WindowKind::Main).into_iter().filter(|c| c.region == crate::Region::Sidebar).collect();
+    for c in &side {
+        assert!(
+            matches!(c.id, ControlId::NavHome | ControlId::NavSettings | ControlId::Device(_)),
+            "{:?} does not belong in the sidebar",
+            c.id
+        );
+    }
+    assert_eq!(side.len(), 2 + s.devices().len());
 }

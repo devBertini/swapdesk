@@ -36,7 +36,7 @@ strings! {
     AddressPlaceholder => "192.168.0.21", "192.168.0.21";
     AddressRefusedWhy => "Só endereços desta rede local servem: não o de outra rede, não o de loopback e não o deste computador.", "Only addresses on this local network work: not one from another network, not loopback and not this computer's own.";
     SidebarNavLabel => "Dispositivos", "Devices";
-    NavActivity => "Atividade", "Activity";
+    NavHome => "Início", "Home";
     NavSettings => "Ajustes", "Settings";
     NetworkLine => "Só na rede local: {0}, {1}", "Local network only: {0}, {1}";
     NetworkLineNoAddress => "Só na rede local: {0}", "Local network only: {0}";
@@ -54,6 +54,15 @@ strings! {
     OsLabel => "{0} {1}", "{0} {1}";
     DeviceCaptionThis => "Este computador", "This computer";
     EmptyDevices => "Nenhum computador encontrado ainda.", "No computers found yet.";
+
+    // Home (D35)
+    HomePairTitle => "Parear", "Pair";
+    HomePairBody => "Os dois computadores se conhecem uma vez, conferindo o mesmo código de 6 dígitos nas duas telas. Depois disso, um pode ver e controlar o outro.", "The two computers get to know each other once, by checking the same 6-digit code on both screens. After that, one can see and control the other.";
+    HomeAddressHint => "Se o outro computador não aparece em Na rede, digite o IPv4 dele.", "If the other computer does not show up under On the network, type its IPv4 address.";
+    HomeAddressAdd => "Adicionar", "Add";
+    HomeRecentTitle => "Atividade recente", "Recent activity";
+    HomeRecentEmpty => "Ainda não aconteceu nada por aqui.", "Nothing has happened here yet.";
+    HomeRecentAll => "Ver tudo", "See all";
 
     // Device header and tabs
     DetailOnline => "Online em {0}, resposta em {1} ms", "Online at {0}, {1} ms response";

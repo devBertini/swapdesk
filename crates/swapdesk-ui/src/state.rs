@@ -48,6 +48,8 @@ pub enum WindowKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nav {
+    /// "Início": the home screen (D35).
+    Home,
     Devices,
     Activity,
     Settings,
@@ -161,6 +163,7 @@ pub const PLACEHOLDER_AFTER_MS: u64 = 100;
 /// The body of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    Home,
     Devices,
     Activity,
     Settings,
@@ -433,7 +436,7 @@ impl UiState {
             network: None,
             devices: Vec::new(),
             selected: None,
-            nav: Nav::Devices,
+            nav: Nav::Home,
             tab: DeviceTab::Overview,
             pairing: None,
             incoming: None,
@@ -498,8 +501,9 @@ impl UiState {
     pub fn devices(&self) -> &[DeviceView] {
         &self.devices
     }
+    /// The page shown. A device page with no device to show (the last one was forgotten) is the home.
     pub fn nav(&self) -> Nav {
-        self.nav
+        if self.nav == Nav::Devices && self.selected_device().is_none() { Nav::Home } else { self.nav }
     }
     pub fn tab(&self) -> DeviceTab {
         self.tab
@@ -783,7 +787,8 @@ impl UiState {
         if self.pairing.is_some() {
             return Screen::Pairing;
         }
-        match self.nav {
+        match self.nav() {
+            Nav::Home => Screen::Home,
             Nav::Devices => Screen::Devices,
             Nav::Activity => Screen::Activity,
             Nav::Settings => Screen::Settings,

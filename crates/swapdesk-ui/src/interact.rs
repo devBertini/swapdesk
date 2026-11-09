@@ -22,9 +22,14 @@ pub(crate) use files_panel::FilesPanel;
 pub enum ControlId {
     // sidebar
     Device(u16),
-    PairThisComputer,
-    NavActivity,
+    NavHome,
     NavSettings,
+    // home
+    PairThisComputer,
+    /// "Adicionar" beside the address field: sends what the field holds, as Enter does.
+    AddAddress,
+    /// "Ver tudo" on the home's recent activity card: opens the Atividade screen.
+    HomeActivityAll,
     // device header, tabs, overview
     /// "Renomear": turns the header's name into the inline field.
     RenameDevice,
@@ -188,7 +193,7 @@ impl ControlSpec {
     }
 }
 
-struct Specs {
+pub(crate) struct Specs {
     v: Vec<ControlSpec>,
     next_static: u16,
     region: Region,
@@ -201,14 +206,14 @@ impl Specs {
     fn region(&mut self, region: Region) {
         self.region = region;
     }
-    fn add(&mut self, id: ControlId, role: UiRole, label: impl Into<String>) -> &mut ControlSpec {
+    pub(crate) fn add(&mut self, id: ControlId, role: UiRole, label: impl Into<String>) -> &mut ControlSpec {
         self.v.push(ControlSpec::new(id, role, self.region, label));
         self.v.last_mut().expect("just pushed")
     }
-    fn button(&mut self, id: ControlId, label: impl Into<String>) {
+    pub(crate) fn button(&mut self, id: ControlId, label: impl Into<String>) {
         self.add(id, UiRole::Button, label);
     }
-    fn text(&mut self, role: UiRole, label: impl Into<String>) {
+    pub(crate) fn text(&mut self, role: UiRole, label: impl Into<String>) {
         let id = ControlId::Static(self.next_static);
         self.next_static += 1;
         self.add(id, role, label);
@@ -256,28 +261,27 @@ impl UiState {
             self.pairing_controls(&mut s, p);
             return s.v;
         }
-        // sidebar
+        // sidebar: Início, the device lists, Ajustes
         s.region(Region::Sidebar);
+        let c = s.add(ControlId::NavHome, UiRole::Button, self.name_of(MsgKey::NavHome));
+        c.selected = self.nav() == Nav::Home;
         let (paired, network) = self.device_groups();
         for i in paired.iter().chain(network.iter()) {
             let d = &self.devices[*i];
             let label = format!("{}, {}", d.name, format::status_line(lang, d));
-            let selected = self.selected_device().is_some_and(|x| x.id == d.id) && self.nav == Nav::Devices;
+            let selected = self.selected_device().is_some_and(|x| x.id == d.id) && self.nav() == Nav::Devices;
             let c = s.add(ControlId::Device(*i as u16), UiRole::Button, label);
             c.selected = selected;
         }
-        s.add(ControlId::Edit(EditId::Address), UiRole::TextInput, self.name_of(MsgKey::AddressLabel));
-        s.button(ControlId::PairThisComputer, self.name_of(MsgKey::PairThisComputer));
-        let c = s.add(ControlId::NavActivity, UiRole::Button, self.name_of(MsgKey::NavActivity));
-        c.selected = self.nav == Nav::Activity;
         let c = s.add(ControlId::NavSettings, UiRole::Button, self.name_of(MsgKey::NavSettings));
-        c.selected = self.nav == Nav::Settings;
+        c.selected = self.nav() == Nav::Settings;
         s.region(Region::Content);
         if let Some(e) = &self.error {
             s.text(UiRole::Text, self.error_text(e));
             s.button(ControlId::ErrorClose, self.name_of(MsgKey::Close));
         }
-        match self.nav {
+        match self.nav() {
+            Nav::Home => self.home_controls(&mut s),
             Nav::Devices => self.devices_controls(&mut s),
             Nav::Activity => self.activity_controls(&mut s),
             Nav::Settings => self.settings_controls(&mut s),
@@ -285,22 +289,28 @@ impl UiState {
         s.v
     }
 
+    /// The crash notice and the "no computer found" card (or the plain empty line): what the home shows when no
+    /// device page is open.
+    pub(crate) fn crash_and_empty_controls(&self, s: &mut Specs) {
+        if self.crash_notice {
+            let (title, body, button) = self.notice_texts(NoticeKind::Crash);
+            s.text(UiRole::Heading, title);
+            s.text(UiRole::Text, body);
+            s.button(ControlId::Notice(NoticeKind::Crash), button);
+        }
+        if self.no_computer_card() {
+            s.text(UiRole::Heading, self.name_of(MsgKey::NoComputerTitle));
+            s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
+            s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
+        } else if self.devices.is_empty() && self.fetch(DataKind::Devices) == Fetch::Ready {
+            s.text(UiRole::Text, self.name_of(MsgKey::EmptyDevices));
+        }
+    }
+
     fn devices_controls(&self, s: &mut Specs) {
         let lang = self.lang;
         let Some(d) = self.selected_device() else {
-            if self.crash_notice {
-                let (title, body, button) = self.notice_texts(NoticeKind::Crash);
-                s.text(UiRole::Heading, title);
-                s.text(UiRole::Text, body);
-                s.button(ControlId::Notice(NoticeKind::Crash), button);
-            }
-            if self.no_computer_card() {
-                s.text(UiRole::Heading, self.name_of(MsgKey::NoComputerTitle));
-                s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
-                s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
-            } else {
-                s.text(UiRole::Text, self.name_of(MsgKey::EmptyDevices));
-            }
+            self.crash_and_empty_controls(s);
             return;
         };
         match self.renaming().filter(|_| self.rename_available(d)) {
@@ -1076,7 +1086,8 @@ impl UiState {
                     a.changed = self.select_device(&id);
                 }
             }
-            ControlId::NavActivity => {
+            ControlId::NavHome => a.changed = self.navigate(Nav::Home),
+            ControlId::HomeActivityAll => {
                 a.changed = self.navigate(Nav::Activity);
                 // Cached (R-UI-3): asked once, then kept fresh by events. Built on first open (R-UI-11).
                 if self.fetch(DataKind::Activity) == Fetch::Missing {
@@ -1090,6 +1101,10 @@ impl UiState {
                     self.begin_fetch(DataKind::Settings);
                     a.commands.push(Command::GetSettings);
                 }
+            }
+            ControlId::AddAddress => {
+                a.effect = Some(Effect::SubmitEdit(EditId::Address));
+                a.changed = Changed::NONE;
             }
             ControlId::PairThisComputer => {
                 self.pairing = Some(PairingView {

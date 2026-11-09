@@ -798,14 +798,17 @@ impl Shell {
 
         match &model.layout {
             MainLayout::Browse { sidebar: sb, content } => {
-                let side = sidebar(&mut ctx, sb, h, &values);
+                let side = sidebar(&mut ctx, sb, h);
                 root.addSubview(&side);
                 let cw = w - f64::from(layout::SIDEBAR_W);
                 let mut views: Vec<Retained<NSView>> = Vec::new();
                 if let Some(s) = &model.strip {
                     views.push(strip(&mut ctx, s, 560.0));
                 }
-                let body = blocks_stack(&mut ctx, content, 560.0, &values);
+                // The home's cards use the width of the window (up to 920); every other page keeps its 560 column.
+                let wide = content.iter().any(|b| matches!(b, Block::Cards(_)));
+                let body_w = if wide { (cw - 64.0).clamp(560.0, 920.0) } else { 560.0 };
+                let body = blocks_stack(&mut ctx, content, body_w, &values);
                 views.push(view_of(&body));
                 let col = vstack(&ctx, &views, 16.0);
                 let inner = fit(&col);

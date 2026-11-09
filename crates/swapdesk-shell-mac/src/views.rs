@@ -280,14 +280,15 @@ fn field(ctx: &mut Ctx, f: &FieldModel, value: Option<&str>) -> Retained<NSView>
     describe(&*tf, &f.label, None, None);
     ctx.fields.push((f.edit, tf.clone()));
     let caption = label_view(ctx, &f.label, tx::SMALL_BOLD, ctx.pal.soft, None);
-    let col = vstack(ctx, &[view_of(&caption), view_of(&tf)], 4.0);
-    // The field is as wide as the column it sits in.
-    let width = tf.widthAnchor().constraintEqualToConstant(if f.edit == EditId::Address {
-        f64::from(layout::SIDEBAR_W) - 40.0
-    } else {
-        320.0
-    });
-    width.setActive(true);
+    let mut column = vec![view_of(&caption)];
+    if let Some(h) = &f.hint {
+        let hint = label_view(ctx, h, tx::SMALL, ctx.pal.soft, Some(420.0));
+        hint.setAccessibilityElement(false);
+        column.push(view_of(&hint));
+    }
+    column.push(view_of(&tf));
+    let col = vstack(ctx, &column, 4.0);
+    tf.widthAnchor().constraintEqualToConstant(if f.hint.is_some() { 260.0 } else { 320.0 }).setActive(true);
     view_of(&col)
 }
 
@@ -348,6 +349,50 @@ fn skeleton(ctx: &Ctx, lines: u8) -> Retained<NSView> {
     view_of(&stack)
 }
 
+/// The narrowest a home card gets, and the gap between cards.
+const CARD_MIN_W: f64 = 300.0;
+const CARD_GAP: f64 = 20.0;
+
+/// The network line as a rounded pill (surface, or the danger tint when it warns).
+fn pill(ctx: &Ctx, text: &str, warn: bool) -> Retained<NSView> {
+    let ink = if warn { ctx.pal.danger } else { ctx.pal.soft };
+    let l = label_view(ctx, text, tx::CAPTION, ink, None);
+    let inner = l.fittingSize();
+    let boxed = NSBox::new(ctx.mtm);
+    boxed.setBoxType(NSBoxType::Custom);
+    boxed.setTitlePosition(NSTitlePosition::NoTitle);
+    boxed.setBorderWidth(0.0);
+    boxed.setCornerRadius(18.0);
+    boxed.setFillColor(&color(if warn { ctx.pal.danger_tint } else { ctx.pal.surface }));
+    boxed.setContentViewMargins(size(14.0, 8.0));
+    boxed.setContentView(Some(&view_of(&l)));
+    let (w, h) = (inner.width + 28.0, 36.0);
+    boxed.setFrameSize(size(w, h));
+    boxed.widthAnchor().constraintEqualToConstant(w).setActive(true);
+    boxed.heightAnchor().constraintEqualToConstant(h).setActive(true);
+    view_of(&boxed)
+}
+
+/// A home card: the blocks on a surface with a border, padding 24 / 22.
+fn card(ctx: &mut Ctx, blocks: &[Block], width: f64, values: &[(EditId, String)]) -> Retained<NSView> {
+    let stack = blocks_stack(ctx, blocks, width - 48.0, values);
+    let content = fit(&stack);
+    let boxed = NSBox::new(ctx.mtm);
+    boxed.setBoxType(NSBoxType::Custom);
+    boxed.setTitlePosition(NSTitlePosition::NoTitle);
+    boxed.setBorderWidth(1.0);
+    boxed.setBorderColor(&color(ctx.pal.line));
+    boxed.setCornerRadius(f64::from(layout::PANEL_RADIUS));
+    boxed.setFillColor(&color(ctx.pal.surface));
+    boxed.setContentViewMargins(size(24.0, 22.0));
+    boxed.setContentView(Some(&view_of(&stack)));
+    let h = content.height + 44.0;
+    boxed.setFrameSize(size(width, h));
+    boxed.widthAnchor().constraintEqualToConstant(width).setActive(true);
+    boxed.heightAnchor().constraintEqualToConstant(h).setActive(true);
+    view_of(&boxed)
+}
+
 /// One block as a view.
 pub fn block(ctx: &mut Ctx, b: &Block, width: f64, values: &[(EditId, String)]) -> Retained<NSView> {
     match b {
@@ -357,17 +402,65 @@ pub fn block(ctx: &mut Ctx, b: &Block, width: f64, values: &[(EditId, String)]) 
             describe(&*l, text, None, Some("AXHeading"));
             view_of(&l)
         }
-        Block::HeadingAction { text, action } => {
-            let l = label_view(ctx, text, tx::H1, ctx.pal.ink, Some(width));
+        Block::HeadingAction { text, level, action } => {
+            let style = if *level == 1 { tx::H1 } else { tx::H2 };
+            let l = label_view(ctx, text, style, ctx.pal.ink, Some(width));
             describe(&*l, text, None, Some("AXHeading"));
             let b = button(ctx, action);
             view_of(&hstack(ctx, &[view_of(&l), view_of(&b)], 12.0))
+        }
+        Block::FieldAction { field: f, action } => {
+            let kept = values.iter().find(|(e, _)| *e == f.edit).map(|(_, v)| v.as_str());
+            let input = field(ctx, f, kept);
+            let btn = button(ctx, action);
+            let row = hstack(ctx, &[input, view_of(&btn)], 8.0);
+            row.setAlignment(NSLayoutAttribute::Bottom);
+            view_of(&row)
+        }
+        Block::Pill { text, warn } => pill(ctx, text, *warn),
+        Block::Cards(cards) => {
+            // Two columns when the width allows two cards, one otherwise (the same rule as the Windows shell).
+            let cols = if width >= 2.0 * CARD_MIN_W + CARD_GAP { 2 } else { 1 };
+            let card_w = (width - CARD_GAP * (cols as f64 - 1.0)) / cols as f64;
+            let views: Vec<Retained<NSView>> = cards.iter().map(|c| card(ctx, c, card_w, values)).collect();
+            let rows: Vec<Retained<NSView>> = views
+                .chunks(cols)
+                .map(|r| {
+                    let row = hstack(ctx, r, CARD_GAP);
+                    row.setAlignment(NSLayoutAttribute::Top);
+                    view_of(&row)
+                })
+                .collect();
+            view_of(&vstack(ctx, &rows, CARD_GAP))
         }
         Block::ButtonRow(buttons) => {
             let views: Vec<Retained<NSView>> = buttons.iter().map(|b| view_of(&button(ctx, b))).collect();
             view_of(&hstack(ctx, &views, 8.0))
         }
         Block::Text(text) => view_of(&label_view(ctx, text, tx::BODY, ctx.pal.soft, Some(width))),
+        Block::Entry { when, who, what, alert, label } => {
+            let time = label_view(ctx, when, tx::SMALL, ctx.pal.soft, None);
+            time.widthAnchor().constraintEqualToConstant(84.0).setActive(true);
+            let name = label_view(ctx, who, tx::NAME, ctx.pal.ink, Some((width - 98.0).max(60.0)));
+            let event = label_view(
+                ctx,
+                what,
+                tx::CAPTION,
+                if *alert { ctx.pal.danger } else { ctx.pal.soft },
+                Some((width - 98.0).max(60.0)),
+            );
+            let col = if who.is_empty() {
+                vstack(ctx, &[view_of(&event)], 0.0)
+            } else {
+                vstack(ctx, &[view_of(&name), view_of(&event)], 0.0)
+            };
+            let row = hstack(ctx, &[view_of(&time), view_of(&col)], 14.0);
+            row.setAlignment(NSLayoutAttribute::Top);
+            // One element for a screen reader, named as the Atividade row is.
+            row.setAccessibilityElement(true);
+            describe(&*row, label, None, Some("AXGroup"));
+            view_of(&row)
+        }
         Block::Row(text) => view_of(&label_view(ctx, text, tx::SMALL, ctx.pal.ink, Some(width))),
         Block::Code { digits, label } => {
             let l = label_view(ctx, digits, tx::PAIR_CODE, ctx.pal.ink, None);
@@ -439,16 +532,25 @@ pub fn strip(ctx: &mut Ctx, s: &Strip, width: f64) -> Retained<NSView> {
     view_of(&boxed)
 }
 
-/// The sidebar: this computer, the device list, the address field, pairing and navigation.
-pub fn sidebar(ctx: &mut Ctx, sb: &Sidebar, height: f64, values: &[(EditId, String)]) -> Retained<PaintedView> {
+/// A navigation item of the sidebar (Início, Ajustes), the selected one pressed in.
+fn nav_button(ctx: &mut Ctx, n: &NavItem) -> Retained<NSView> {
+    let tag = ctx.tag(Action::Control(n.id));
+    let b = button_with(ctx, &n.label, None, ButtonStyle::Plain, false, tag);
+    b.setButtonType(NSButtonType::PushOnPushOff);
+    b.setBezelStyle(NSBezelStyle::AccessoryBar);
+    b.setState(if n.selected { NSControlStateValueOn } else { NSControlStateValueOff });
+    view_of(&b)
+}
+
+/// The sidebar: the app's name, Início, the device lists and Ajustes at the bottom.
+pub fn sidebar(ctx: &mut Ctx, sb: &Sidebar, height: f64) -> Retained<PaintedView> {
     let w = f64::from(layout::SIDEBAR_W);
     let root = PaintedView::create(ctx.mtm, frame(0.0, 0.0, w, height), Some(ctx.pal.sunken));
     root.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable);
 
     let mut top: Vec<Retained<NSView>> = Vec::new();
-    top.push(view_of(&label_view(ctx, &sb.this_name, tx::NAME, ctx.pal.ink, None)));
-    top.push(view_of(&label_view(ctx, &sb.this_status, tx::SMALL, ctx.pal.soft, Some(w - 40.0))));
-    top.push(view_of(&label_view(ctx, &sb.network_line, tx::SMALL, ctx.pal.soft, Some(w - 40.0))));
+    top.push(view_of(&label_view(ctx, &sb.app_name, tx::LOGO, ctx.pal.ink, None)));
+    top.push(nav_button(ctx, &sb.home));
     if sb.loading {
         top.push(skeleton(ctx, 4));
     }
@@ -468,21 +570,12 @@ pub fn sidebar(ctx: &mut Ctx, sb: &Sidebar, height: f64, values: &[(EditId, Stri
             top.push(view_of(&col));
         }
     }
-    top.push(field_in_sidebar(ctx, &sb.address, values));
     let upper = vstack(ctx, &top, 8.0);
     fit(&upper);
     upper.setFrameOrigin(NSPoint::new(20.0, 20.0));
     root.addSubview(&upper);
 
-    let mut bottom: Vec<Retained<NSView>> = vec![view_of(&button(ctx, &sb.pair))];
-    for n in &sb.nav {
-        let tag = ctx.tag(Action::Control(n.id));
-        let b = button_with(ctx, &n.label, None, ButtonStyle::Plain, false, tag);
-        b.setButtonType(NSButtonType::PushOnPushOff);
-        b.setBezelStyle(NSBezelStyle::AccessoryBar);
-        b.setState(if n.selected { NSControlStateValueOn } else { NSControlStateValueOff });
-        bottom.push(view_of(&b));
-    }
+    let bottom: Vec<Retained<NSView>> = sb.nav.iter().map(|n| nav_button(ctx, n)).collect();
     let lower = vstack(ctx, &bottom, 8.0);
     let s = fit(&lower);
     lower.setFrameOrigin(NSPoint::new(20.0, (height - s.height - 20.0).max(0.0)));
@@ -491,8 +584,4 @@ pub fn sidebar(ctx: &mut Ctx, sb: &Sidebar, height: f64, values: &[(EditId, Stri
     let root_view: &NSView = &root;
     describe(root_view, "Dispositivos", None, Some("AXGroup"));
     root
-}
-
-fn field_in_sidebar(ctx: &mut Ctx, f: &FieldModel, values: &[(EditId, String)]) -> Retained<NSView> {
-    block(ctx, &Block::Field(f.clone()), f64::from(layout::SIDEBAR_W) - 40.0, values)
 }
