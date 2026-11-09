@@ -7,8 +7,10 @@
 //! drawer draws a `swapdesk-termview` model fed by [`terminal_output`] (stage 43).
 
 mod app;
+mod cursor;
 mod dialogs;
 mod files_dialogs;
+mod fullscreen;
 mod gfx;
 mod offscreen;
 mod screens_files;
@@ -24,7 +26,7 @@ mod window;
 pub use app::{native_surface, run, run_with_host, video_area};
 pub use offscreen::{Rendered, design_size, render};
 pub use swapdesk_platform::NativeSurface;
-pub use system::{Waker, logs_dir, message_box, system_dark, system_language};
+pub use system::{Waker, logs_dir, message_box, system_dark, system_language, trace_line};
 pub use terminal::terminal_output;
 pub use view::{Interaction, Output, Widget};
 pub use viewer::{HeadlessSurface, KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};

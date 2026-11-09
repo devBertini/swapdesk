@@ -6,6 +6,18 @@
 //! `hub.bind_core`. The config is built before the hub (the hub needs the identity, the trust store and the settings it
 //! holds), so it starts with a placeholder `HostUi` that is replaced by the hub's.
 //!
+//! Hosting (stage 24, slice a): when [`ServiceParams::host_helper`] is set, a supervisor thread runs the host's helper
+//! loop (`swapdesk_host::helper::run_helper` over the Mac capture, encoder, input and audio crates, chosen by
+//! [`crate::app`]) on its own thread and attaches it to the core as the user helper over a bounded in-memory pipe
+//! ([`crate::pipe::bounded_duplex`]), restarting it when it ends. This is the in-process stand-in for the Aqua agent of
+//! `docs/CONTRACTS.md` C2.2 until the daemon and the agent exist.
+//!
+//! Network changes: [`ServiceParams::network_notices`] starts the source that says when the network changed
+//! ([`crate::app`] gives SystemConfiguration's dynamic store, `swapdesk_net_mac::NetworkWatcher`; tests inject one), and
+//! each notice calls `UiHub::network_changed`: the session endpoint and DNS-SD move to the new address and the shell
+//! hears of it. No timer looks. Without it a Mac whose Wi-Fi address changed under the running app kept listening and
+//! announcing on the old one and vanished from every other machine's list.
+//!
 //! Everything here is generic over the C3 traits: the macOS pieces (login keychain, physical interfaces) are chosen by
 //! [`crate::app`], so this module builds and is tested on any host with the C7 fakes.
 
@@ -20,7 +32,7 @@ use swapdesk_host::service::ServiceCore;
 use swapdesk_host::ui_hub::{
     ConnInfo, DnsSdPresence, FileAuditLog, HubParams, NoHooks, NoPresence, Presence, SystemHooks, UiHub,
 };
-use swapdesk_ipc::{FrameReader, FrameWriter, Handshake};
+use swapdesk_ipc::{FrameReader, FrameWriter, Handshake, IpcRole};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
 use swapdesk_platform::{Clock, Level, NetInterfaces, SecretStore, TraceSink};
@@ -34,6 +46,20 @@ use tokio::sync::oneshot;
 /// The console session of the in-process hub: the one UI of this process is the host's user (prompts and the host
 /// banner go to it).
 const UI_SESSION: u32 = 1;
+/// Chunks queued toward either side of the host helper's pipe before a write waits (see [`crate::pipe::bounded_duplex`]).
+const HELPER_PIPE_BOUND: usize = 32;
+/// Pause before the host helper is started again after it ended; doubled after each quick end, up to the maximum.
+const HELPER_RESTART: Duration = Duration::from_millis(500);
+const HELPER_RESTART_MAX: Duration = Duration::from_secs(10);
+/// Starts a source of network change notices: it calls the given function once per burst of changes until the
+/// returned guard is dropped.
+pub type NetworkNotices = Box<dyn FnOnce(Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Send>, String> + Send>;
+/// A helper that ran at least this long ended normally: the next restart starts from [`HELPER_RESTART`] again.
+const HELPER_HEALTHY: Duration = Duration::from_secs(30);
+
+/// Runs the host's helper loop over the two ends of its pipe until the service closes it or it fails; `Err` carries
+/// why. Called on a thread of its own by the supervisor, again after each end.
+pub type HostHelper = Arc<dyn Fn(crate::pipe::PipeReader, crate::pipe::PipeWriter) -> Result<(), String> + Send + Sync>;
 
 /// What the service is built from.
 pub struct ServiceParams {
@@ -53,6 +79,10 @@ pub struct ServiceParams {
     /// Development and tests: override the session and pairing ports (0 lets the system choose).
     pub ports: Option<(u16, u16)>,
     pub hooks: Arc<dyn SystemHooks>,
+    /// This Mac hosts sessions: the helper loop the supervisor runs and attaches (`None`: viewer only).
+    pub host_helper: Option<HostHelper>,
+    /// Where network change notices come from (`None`: none, the network is taken as it was at the start).
+    pub network_notices: Option<NetworkNotices>,
 }
 
 impl ServiceParams {
@@ -77,6 +107,8 @@ impl ServiceParams {
             dev_loopback: None,
             ports: None,
             hooks: Arc::new(NoHooks),
+            host_helper: None,
+            network_notices: None,
         }
     }
 }
@@ -103,7 +135,11 @@ pub struct InProcessService {
     cancel: Arc<std::sync::atomic::AtomicBool>,
     core: Option<Arc<ServiceCore>>,
     serve: Option<JoinHandle<()>>,
+    /// The host helper's supervisor, when this Mac hosts.
+    supervisor: Option<JoinHandle<()>>,
     backend: Arc<ServiceBackend>,
+    /// The network notices' guard; dropped first at shutdown.
+    net_watch: Option<Box<dyn Send>>,
 }
 
 impl InProcessService {
@@ -121,6 +157,8 @@ impl InProcessService {
             dev_loopback,
             ports,
             hooks,
+            host_helper,
+            network_notices,
         } = p;
         let MacServiceSetup { mut config, identity, trust, settings } = mac_service_config(MacServiceParams {
             default_name,
@@ -175,9 +213,23 @@ impl InProcessService {
         hub.bind_core(&core);
         hub.set_console_session(Some(UI_SESSION));
         trace.log(Level::Info, "app", format_args!("service core up on {:?}", core.local_addrs()));
+        let net_watch = match network_notices {
+            Some(start) => {
+                let (hub, trace) = (hub.clone(), Arc::clone(&trace));
+                Some(start(Box::new(move || {
+                    trace.log(Level::Info, "app", format_args!("the network changed"));
+                    hub.network_changed();
+                }))?)
+            }
+            None => None,
+        };
 
-        let (client_end, mut server_end) = crate::pipe::duplex();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let supervisor = match host_helper {
+            Some(helper) => Some(spawn_supervisor(&core, helper, Arc::clone(&cancel), Arc::clone(&trace))?),
+            None => None,
+        };
+        let (client_end, mut server_end) = crate::pipe::duplex();
         server_end.reader.cancel_with(Arc::clone(&cancel));
         let serving = hub.clone();
         let log = Arc::clone(&trace);
@@ -202,7 +254,15 @@ impl InProcessService {
         let backend =
             ServiceBackend::start_with_sink(client_end.reader, client_end.writer, waker, std::process::id(), sink)
                 .map_err(|e| format!("hub handshake: {e}"))?;
-        Ok(Self { hub, cancel, core: Some(core), serve: Some(serve), backend: Arc::new(backend) })
+        Ok(Self {
+            hub,
+            cancel,
+            core: Some(core),
+            serve: Some(serve),
+            supervisor,
+            backend: Arc::new(backend),
+            net_watch,
+        })
     }
 
     /// The C6 backend the shell talks to (also the pipeline's output side).
@@ -214,6 +274,11 @@ impl InProcessService {
         &self.hub
     }
 
+    /// A host helper is attached to the core right now (this Mac can be viewed and controlled).
+    pub fn host_helper_attached(&self) -> bool {
+        self.core.as_ref().is_some_and(|c| c.helper(swapdesk_host::service::HelperKind::User).is_some())
+    }
+
     /// The addresses the session endpoint listens on.
     pub fn local_addrs(&self) -> Vec<std::net::SocketAddr> {
         self.core.as_ref().map(|c| c.local_addrs().to_vec()).unwrap_or_default()
@@ -221,10 +286,16 @@ impl InProcessService {
 
     /// Stops the hub and the core, waiting a few seconds for the last handles. Safe to call twice.
     pub fn shutdown(&mut self) {
+        // No network news for a hub that is going away.
+        drop(self.net_watch.take());
         self.hub.shutdown();
         self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(t) = self.serve.take() {
             // The hub says goodbye and the cancelled read ends its serve loop; the thread then returns.
+            let _ = t.join();
+        }
+        if let Some(t) = self.supervisor.take() {
+            // The cancelled reads end the helper loop and the service's reader of it; the supervisor then stops.
             let _ = t.join();
         }
         let end = Instant::now() + Duration::from_secs(3);
@@ -240,6 +311,60 @@ impl InProcessService {
             }
         }
     }
+}
+
+/// Starts the thread that keeps the host helper attached: a fresh bounded pipe, the helper on its own thread at one end,
+/// `attach_helper` (user helper) at the other; when the helper ends it is started again after a pause, until `cancel`.
+/// The thread holds the core only weakly, so shutdown is not kept waiting for it.
+fn spawn_supervisor(
+    core: &Arc<ServiceCore>,
+    helper: HostHelper,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    trace: Arc<dyn TraceSink>,
+) -> Result<JoinHandle<()>, String> {
+    let core = Arc::downgrade(core);
+    std::thread::Builder::new()
+        .name("swapdesk-host-helper".into())
+        .spawn(move || {
+            let mut pause = HELPER_RESTART;
+            while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                let (mut service_end, mut helper_end) = crate::pipe::bounded_duplex(HELPER_PIPE_BOUND);
+                service_end.reader.cancel_with(Arc::clone(&cancel));
+                helper_end.reader.cancel_with(Arc::clone(&cancel));
+                let run = Arc::clone(&helper);
+                let started = Instant::now();
+                let thread = match std::thread::Builder::new()
+                    .name("swapdesk-host-helper-loop".into())
+                    .spawn(move || run(helper_end.reader, helper_end.writer))
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        trace.log(Level::Error, "app", format_args!("host helper thread: {e}"));
+                        return;
+                    }
+                };
+                let attached = match core.upgrade() {
+                    Some(core) => core.attach_helper(IpcRole::HelperUser, service_end.reader, service_end.writer),
+                    None => return,
+                };
+                if let Err(e) = &attached {
+                    trace.log(Level::Warn, "app", format_args!("the host helper did not attach: {e:?}"));
+                }
+                let ended = thread.join();
+                match ended {
+                    Ok(Ok(())) => trace.log(Level::Info, "app", format_args!("the host helper ended")),
+                    Ok(Err(e)) => trace.log(Level::Warn, "app", format_args!("the host helper failed: {e}")),
+                    Err(_) => trace.log(Level::Error, "app", format_args!("the host helper panicked")),
+                }
+                pause = if started.elapsed() >= HELPER_HEALTHY { HELPER_RESTART } else { pause };
+                let until = Instant::now() + pause;
+                while Instant::now() < until && !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                pause = (pause * 2).min(HELPER_RESTART_MAX);
+            }
+        })
+        .map_err(|e| format!("host helper supervisor: {e}"))
 }
 
 impl Drop for InProcessService {
@@ -291,6 +416,160 @@ mod tests {
             assert!(Instant::now() < end, "no reply from the hub (wakes: {})", waker.0.load(Ordering::SeqCst));
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Emits the encode counter as the payload; keyframe on the first and on forced frames.
+    struct Passthrough(u32);
+
+    impl swapdesk_platform::VideoEncoder for Passthrough {
+        fn configure(
+            &mut self,
+            _config: &swapdesk_platform::EncoderConfig,
+        ) -> swapdesk_platform::Result<swapdesk_platform::EncoderInfo> {
+            self.0 = 0;
+            Ok(swapdesk_platform::EncoderInfo {
+                name: "passthrough".into(),
+                hardware: false,
+                profile: swapdesk_proto::H264Profile::Main,
+                level: 40,
+                low_latency: true,
+            })
+        }
+        fn encode(
+            &mut self,
+            frame: &swapdesk_platform::Frame,
+            force_keyframe: bool,
+        ) -> swapdesk_platform::Result<Vec<swapdesk_platform::EncodedFrame>> {
+            let first = self.0 == 0;
+            self.0 += 1;
+            Ok(vec![swapdesk_platform::EncodedFrame {
+                captured_at: frame.captured_at,
+                encode_us: 1,
+                keyframe: first || force_keyframe,
+                config_change: first,
+                width: frame.width as u16,
+                height: frame.height as u16,
+                annex_b: self.0.to_be_bytes().to_vec(),
+            }])
+        }
+        fn set_rate(&mut self, _kbps: u32, _fps: u16) -> swapdesk_platform::Result<()> {
+            Ok(())
+        }
+        fn flush(&mut self) -> swapdesk_platform::Result<Vec<swapdesk_platform::EncodedFrame>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn fake_helper(runs: Arc<AtomicUsize>) -> HostHelper {
+        Arc::new(move |reader, writer| {
+            runs.fetch_add(1, Ordering::SeqCst);
+            let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
+            let audio_clock = Arc::clone(&clock);
+            let deps = swapdesk_host::helper::HelperDeps::new(
+                |_| Ok(swapdesk_fakes::SyntheticScreen::new(320, 200, 30)),
+                |_, _, _| Ok(Passthrough(0)),
+                || Ok(swapdesk_fakes::RecordingInputSink::new()),
+                move || Ok(swapdesk_fakes::SineSource::new(Arc::clone(&audio_clock))),
+                clock,
+            );
+            swapdesk_host::helper::run_helper(reader, writer, deps, IpcRole::HelperUser, std::process::id())
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        })
+    }
+
+    #[test]
+    fn the_host_helper_is_attached_kept_and_stopped_with_the_service() {
+        let (mut p, dir) = params("host");
+        let runs = Arc::new(AtomicUsize::new(0));
+        p.host_helper = Some(fake_helper(Arc::clone(&runs)));
+        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let mut svc = InProcessService::start(p, waker, None).expect("the service starts");
+        let end = Instant::now() + Duration::from_secs(10);
+        while !svc.host_helper_attached() {
+            assert!(Instant::now() < end, "the host helper never attached");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "a healthy helper is not restarted");
+        let stopping = Instant::now();
+        svc.shutdown();
+        assert!(stopping.elapsed() < Duration::from_secs(5), "shutdown waits for the helper only briefly");
+        assert!(!svc.host_helper_attached());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_host_helper_that_fails_is_started_again() {
+        let (mut p, dir) = params("restart");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        p.host_helper = Some(Arc::new(move |_reader, _writer| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err("no screen".into())
+        }));
+        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let mut svc = InProcessService::start(p, waker, None).expect("the service starts");
+        let end = Instant::now() + Duration::from_secs(5);
+        while runs.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < end, "the failed helper was not started again");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        svc.shutdown();
+        let after = runs.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(runs.load(Ordering::SeqCst), after, "nothing restarts after shutdown");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_address_change_under_the_running_app_reaches_the_hub_and_the_shell() {
+        // The field case (09/11): the app started on 192.168.1.2, DHCP moved the Wi-Fi to 192.168.1.3, and nothing told
+        // the hub, so DNS-SD stayed on the old address and the PC listed this Mac as offline.
+        let (mut p, dir) = params("netnotice");
+        let wifi = |last: u8| swapdesk_platform::NetInterface {
+            index: 11,
+            name: "en0".into(),
+            kind: swapdesk_platform::IfKind::WiFi,
+            up: true,
+            mac: None,
+            ipv4: vec![(std::net::Ipv4Addr::new(192, 168, 1, last), 24)],
+            category: None,
+            inbound_blocked: None,
+        };
+        let nets = Arc::new(FakeNetInterfaces::new(vec![wifi(2)]));
+        p.interfaces = nets.clone();
+        // The notice source the app gives is SystemConfiguration's; this one hands its callback to the test.
+        type Notify = Box<dyn Fn() + Send + Sync>;
+        let notify: Arc<std::sync::Mutex<Option<Notify>>> = Arc::default();
+        let slot = Arc::clone(&notify);
+        p.network_notices = Some(Box::new(move |changed| {
+            *slot.lock().unwrap() = Some(changed);
+            Ok(Box::new(()) as Box<dyn Send>)
+        }));
+        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let mut svc = InProcessService::start(p, waker, None).expect("the service starts");
+        let backend = svc.backend();
+        nets.set(vec![wifi(3)]);
+        // No notice, no news: nothing looks at the list on its own.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!backend.drain().iter().any(|e| matches!(e, UiEvent::NetworkChanged(_))), "nothing polls");
+        (notify.lock().unwrap().as_ref().expect("the source was started"))();
+        let end = Instant::now() + Duration::from_secs(10);
+        let status = 'found: loop {
+            for e in backend.drain() {
+                if let UiEvent::NetworkChanged(s) = e {
+                    break 'found s;
+                }
+            }
+            assert!(Instant::now() < end, "the shell never heard of the network change");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.address.as_deref(), Some("192.168.1.3"));
+        let stopping = Instant::now();
+        svc.shutdown();
+        assert!(stopping.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

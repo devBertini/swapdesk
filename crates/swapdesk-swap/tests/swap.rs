@@ -414,8 +414,8 @@ impl Machine {
         let server = open_session_endpoint(UdpSocket::bind(lo()).unwrap(), &who.identity, trust.clone()).unwrap();
         let addr = server.local_addr().unwrap();
         let task = tokio::spawn({
-            let (host, server) = (host.clone(), server.clone());
-            async move { host.run_endpoint(server).await }
+            let (host, trust, server) = (host.clone(), trust.clone(), server.clone());
+            serve_endpoint(host, trust, server)
         });
         let client = endpoint_from_socket(UdpSocket::bind(lo()).unwrap(), None).unwrap();
         Self {

@@ -48,6 +48,8 @@ pub enum WindowKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nav {
+    /// "Início": the home screen (D35).
+    Home,
     Devices,
     Activity,
     Settings,
@@ -105,14 +107,21 @@ pub enum NoticeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelectId {
     Language,
+    Theme,
     Quality,
     Keyboard,
+    /// The chord that releases the keyboard in the viewer (UI-local, D30).
+    ReleaseKey,
+    /// The monitor full screen goes to (UI-local).
+    FullscreenMonitor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EditId {
     Name,
     Chat,
+    /// The inline field that renames a paired device (acts on Enter or "Salvar", never on a timer).
+    Rename,
     /// The manual address field (F-FIND-03); acts 150 ms after the last key (R-UI-4).
     Address,
 }
@@ -155,6 +164,7 @@ pub const PLACEHOLDER_AFTER_MS: u64 = 100;
 /// The body of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    Home,
     Devices,
     Activity,
     Settings,
@@ -260,6 +270,13 @@ pub enum SwapPhase {
     Declined(SwapWhy),
 }
 
+/// A paired device's name being edited on its page: which device, and why the last save did not go through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameDraft {
+    pub device_id: String,
+    pub error: Option<ApiError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapView {
     pub session_id: u64,
@@ -344,7 +361,14 @@ pub struct UiState {
     /// Commands an event calls for (a pairing id that starts the initiator), sent by the shell after `apply`.
     pub(crate) followups: Vec<Command>,
     pub(crate) lang: Language,
+    /// What the OS says (`ThemeChanged`); used while `theme` is `System`.
     pub(crate) dark: bool,
+    /// The theme chosen in Ajustes (per user, like the language: the UI's copy wins over the service's).
+    pub(crate) theme: Theme,
+    /// The per-user record of C5.1 once a store is attached (`load_prefs`): the UI's own copy of the per-user
+    /// settings, which wins over what the service answers and is written on each change.
+    pub(crate) ui: Option<crate::prefs::UserPrefs>,
+    prefs_store: Option<Box<dyn crate::prefs::PrefsStore>>,
     pub(crate) clock: Clock,
     pub(crate) this: Option<ThisDevice>,
     pub(crate) network: Option<NetworkStatus>,
@@ -357,6 +381,7 @@ pub struct UiState {
     pub(crate) elevation: Option<Elevation>,
     pub(crate) sessions: Vec<SessionView>,
     pub(crate) swap: Option<SwapView>,
+    pub(crate) rename: Option<RenameDraft>,
     pub(crate) activity: Vec<AuditView>,
     pub(crate) alert: Option<AuditView>,
     pub(crate) settings: Option<Settings>,
@@ -378,6 +403,14 @@ pub struct UiState {
     pub(crate) quality: Quality,
     /// The shell's viewer toolbar offers the quality select and the view-only switch (the Windows toolbar does not).
     pub(crate) viewer_extras: bool,
+    /// The viewer's shortcuts (D30): the viewer's OS, the release chord, full screen, the session bar shown in full
+    /// screen, the monitor full screen goes to and how many monitors there are.
+    pub(crate) viewer_os: crate::shortcuts::ViewerOs,
+    pub(crate) release_key: crate::shortcuts::ReleaseKey,
+    pub(crate) fullscreen: bool,
+    pub(crate) bar_shown: bool,
+    pub(crate) fullscreen_monitor: Option<u8>,
+    pub(crate) local_monitors: u8,
     pub(crate) connect_end: Option<ConnectEnd>,
     /// The viewer session whose display list was asked for by [`UiState::take_display_request`].
     pub(crate) displays_asked: Option<u64>,
@@ -406,12 +439,15 @@ impl UiState {
             followups: Vec::new(),
             lang,
             dark,
+            theme: Theme::System,
+            ui: None,
+            prefs_store: None,
             clock: Clock::default(),
             this: None,
             network: None,
             devices: Vec::new(),
             selected: None,
-            nav: Nav::Devices,
+            nav: Nav::Home,
             tab: DeviceTab::Overview,
             pairing: None,
             incoming: None,
@@ -436,6 +472,12 @@ impl UiState {
             view_only: false,
             quality: Quality::Auto,
             viewer_extras: false,
+            viewer_os: crate::shortcuts::ViewerOs::Windows,
+            release_key: crate::shortcuts::ReleaseKey::CtrlAlt,
+            fullscreen: false,
+            bar_shown: false,
+            fullscreen_monitor: None,
+            local_monitors: 1,
             connect_end: None,
             displays_asked: None,
             error: None,
@@ -446,6 +488,7 @@ impl UiState {
             pair_confirming: false,
             crash_notice: false,
             empty_s: 0,
+            rename: None,
         }
     }
 
@@ -454,8 +497,16 @@ impl UiState {
     pub fn language(&self) -> Language {
         self.lang
     }
+    /// Whether the interface is drawn dark: the choice of Ajustes, or the OS's while it is `Sistema`.
     pub fn dark(&self) -> bool {
-        self.dark
+        match self.theme {
+            Theme::System => self.dark,
+            Theme::Light => false,
+            Theme::Dark => true,
+        }
+    }
+    pub fn theme(&self) -> Theme {
+        self.theme
     }
     pub fn clock(&self) -> Clock {
         self.clock
@@ -469,8 +520,9 @@ impl UiState {
     pub fn devices(&self) -> &[DeviceView] {
         &self.devices
     }
+    /// The page shown. A device page with no device to show (the last one was forgotten) is the home.
     pub fn nav(&self) -> Nav {
-        self.nav
+        if self.nav == Nav::Devices && self.selected_device().is_none() { Nav::Home } else { self.nav }
     }
     pub fn tab(&self) -> DeviceTab {
         self.tab
@@ -639,6 +691,12 @@ impl UiState {
     }
 
     /// The selected device (the first paired one when nothing is selected).
+    /// The rename in progress for the device on screen (the field replaces its name in the header).
+    pub fn renaming(&self) -> Option<&RenameDraft> {
+        let d = self.selected_device()?;
+        self.rename.as_ref().filter(|r| r.device_id == d.id)
+    }
+
     pub fn selected_device(&self) -> Option<&DeviceView> {
         self.selected
             .as_ref()
@@ -748,7 +806,8 @@ impl UiState {
         if self.pairing.is_some() {
             return Screen::Pairing;
         }
-        match self.nav {
+        match self.nav() {
+            Nav::Home => Screen::Home,
             Nav::Devices => Screen::Devices,
             Nav::Activity => Screen::Activity,
             Nav::Settings => Screen::Settings,
@@ -819,6 +878,16 @@ impl UiState {
             && matches!(self.incoming.as_ref().map(|i| &i.request.kind), Some(RequestKind::Session { .. }))
     }
 
+    /// Milliseconds from `now_ms` to the next whole minute of the host banner's duration ("há 12 min"), or `None`
+    /// while no session is being hosted. The shell arms one timer for it, re-arms it after each firing and stops it
+    /// when the banner closes: the banner's text changes only on these minutes, so it needs no steadier tick.
+    pub fn banner_minute_delay_ms(&self, now_ms: u64) -> Option<u64> {
+        let SessionState::Active { since_ms, .. } = self.host_session()?.state else { return None };
+        const MINUTE_MS: u64 = 60_000;
+        let elapsed = now_ms.saturating_sub(since_ms);
+        Some(MINUTE_MS - elapsed % MINUTE_MS)
+    }
+
     /// True while something counts seconds down (the shell then runs a one-second timer, otherwise none).
     pub fn needs_tick(&self) -> bool {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
@@ -842,12 +911,65 @@ impl UiState {
         self.clock = clock;
     }
 
+    /// The OS's appearance changed (or was read): it shows only while the theme is `Sistema`.
     pub fn set_dark(&mut self, dark: bool) -> Changed {
-        if self.dark == dark {
-            return Changed::NONE;
-        }
+        let before = self.dark();
         self.dark = dark;
-        Changed::ALL
+        if self.dark() == before { Changed::NONE } else { Changed::ALL }
+    }
+
+    /// Attaches the per-user record (C5.1) and applies it: language, theme, release key and the rest of the
+    /// per-user settings. Call before the first paint. A record that cannot be used reads as the defaults (a trace
+    /// line, never a failure).
+    pub fn load_prefs(&mut self, store: Box<dyn crate::prefs::PrefsStore>) {
+        // No record yet (first start): the language the window started with, the system's, stays.
+        let p = crate::prefs::load_or(&*store, crate::prefs::UserPrefs { language: self.lang, ..Default::default() });
+        self.lang = p.language;
+        self.theme = p.theme;
+        self.release_key = p.release_key;
+        if let Some(s) = self.settings.take() {
+            self.settings = Some(p.overlay(s));
+        }
+        self.ui = Some(p);
+        self.prefs_store = Some(store);
+    }
+
+    /// The per-user settings in force (what `ui.bin` holds), for the shells that start the viewer pipeline with them.
+    pub fn user_prefs(&self) -> crate::prefs::UserPrefs {
+        let mut p = match &self.settings {
+            Some(s) => crate::prefs::UserPrefs::from_settings(s, self.release_key),
+            None => self.ui.unwrap_or_default(),
+        };
+        p.language = self.lang;
+        p.theme = self.theme;
+        p.release_key = self.release_key;
+        p
+    }
+
+    /// Writes `ui.bin` when a store is attached and a per-user field changed since the last write.
+    pub(crate) fn save_prefs(&mut self) {
+        if self.prefs_store.is_none() || self.ui == Some(self.user_prefs()) {
+            return;
+        }
+        self.write_prefs();
+    }
+
+    /// Takes the per-user settings in force as the record and writes it, changed or not.
+    fn write_prefs(&mut self) {
+        let Some(store) = &self.prefs_store else { return };
+        let p = self.user_prefs();
+        self.ui = Some(p);
+        crate::prefs::save(&**store, &p);
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) -> Changed {
+        let before = self.dark();
+        self.theme = theme;
+        if let Some(set) = &mut self.settings {
+            set.theme = theme;
+        }
+        self.save_prefs();
+        if self.dark() == before { Changed::NONE } else { Changed::ALL }
     }
 
     pub fn set_language(&mut self, lang: Language) -> Changed {
@@ -855,11 +977,13 @@ impl UiState {
             return Changed::NONE;
         }
         self.lang = lang;
+        self.save_prefs();
         Changed::ALL
     }
 
     pub fn navigate(&mut self, nav: Nav) -> Changed {
         self.nav = nav;
+        self.rename = None;
         self.crash_notice = false;
         Changed::MAIN
     }
@@ -867,6 +991,7 @@ impl UiState {
     pub fn select_device(&mut self, id: &str) -> Changed {
         if self.devices.iter().any(|d| d.id == id) {
             self.selected = Some(id.to_owned());
+            self.rename = None;
             self.crash_notice = false;
             self.nav = Nav::Devices;
             self.tab = DeviceTab::Overview;
@@ -876,6 +1001,7 @@ impl UiState {
 
     pub fn select_tab(&mut self, tab: DeviceTab) -> Changed {
         self.tab = tab;
+        self.rename = None;
         Changed::MAIN
     }
 
@@ -896,6 +1022,7 @@ impl UiState {
                 | Command::SetScale { .. }
                 | Command::SetQuality { .. }
                 | Command::SetViewOnly { .. }
+                | Command::SetReleaseKey { .. }
         ) {
             self.undo_slot.take()
         } else {
@@ -1186,7 +1313,11 @@ impl UiState {
     fn set_settings(&mut self, s: Settings) {
         // The language is per user (C5.1): the service does not keep it and always answers its default, so the UI's
         // own choice wins over the service's copy.
-        self.settings = Some(Settings { language: self.lang, ..s });
+        let s = match &self.ui {
+            Some(p) => p.overlay(s),
+            None => Settings { language: self.lang, theme: self.theme, ..s },
+        };
+        self.settings = Some(s);
         self.finish_fetch(DataKind::Settings);
     }
 
@@ -1214,6 +1345,8 @@ impl UiState {
             }
             if self.viewer_session().is_none() {
                 self.view_only = false;
+                self.fullscreen = false;
+                self.bar_shown = false;
                 self.quality = Quality::Auto;
                 self.drawer = None;
                 self.chat.clear();
@@ -1251,6 +1384,12 @@ impl UiState {
         }
         if self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
             self.connect_end = None;
+        }
+        let was_active = self.sessions.iter().any(|s| s.id == id && matches!(s.state, SessionState::Active { .. }));
+        if !was_active && matches!(state, SessionState::Active { role: Role::Viewer, .. }) {
+            // The host captures sound only once it is told to (D16): the toolbar's switch is sent as the session
+            // comes up, or the button shows on while nothing plays.
+            self.followups.push(Command::SetAudio { session_id: id, on: self.audio_on });
         }
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
             s.state = state;
@@ -1295,6 +1434,16 @@ impl UiState {
                 }
                 Some(Command::Disconnect { session_id }) => {
                     self.sessions.retain(|s| s.id != session_id);
+                    Changed::ALL
+                }
+                // The service stored the trimmed name; the pushed device list says so too, this just does not wait.
+                Some(Command::RenameDevice { device_id, name }) => {
+                    if let Some(d) = self.devices.iter_mut().find(|d| d.id == device_id) {
+                        d.name = name;
+                    }
+                    if self.rename.as_ref().is_some_and(|r| r.device_id == device_id) {
+                        self.rename = None;
+                    }
                     Changed::ALL
                 }
                 _ => Changed::NONE,
@@ -1421,7 +1570,12 @@ impl UiState {
             }
             Some(Undo::Settings(old)) => {
                 self.lang = old.language;
+                self.theme = old.theme;
+                if self.ui.is_some() {
+                    self.ui = Some(crate::prefs::UserPrefs::from_settings(&old, self.release_key));
+                }
                 self.set_settings(*old);
+                self.write_prefs();
             }
             Some(Undo::Quality(old)) => self.quality = old,
             Some(Undo::Toggle(which, old)) => match which {
@@ -1471,6 +1625,13 @@ impl UiState {
                 self.elevation = Some(Elevation { action, phase: ElevPhase::Ask });
                 return Changed::ALL;
             }
+        }
+        // A refused rename is told inline, under the field that is still open.
+        if let Command::RenameDevice { device_id, .. } = &pending.command
+            && let Some(r) = self.rename.as_mut().filter(|r| &r.device_id == device_id)
+        {
+            r.error = Some(error);
+            return Changed::MAIN;
         }
         if let Command::PairOpen { .. } | Command::PairStart { .. } = pending.command {
             self.pairing =

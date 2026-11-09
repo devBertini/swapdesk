@@ -18,7 +18,7 @@ use crate::surface::Gfx;
 use crate::system::{Waker, register_gdi_font, system_dark};
 use crate::terminal::{PUMP_BUDGET, TerminalPane, set_terminal_waker};
 use crate::viewer::ViewerHost;
-use crate::window::{TIMER_PLACEHOLDER, TIMER_TICK, Window};
+use crate::window::{TIMER_BANNER, TIMER_PLACEHOLDER, TIMER_TICK, Window};
 
 pub struct Shared {
     pub gfx: Gfx,
@@ -30,6 +30,10 @@ pub struct Shared {
     windows: RefCell<Vec<Rc<Window>>>,
     tick_on: Cell<bool>,
     placeholder_on: Cell<bool>,
+    /// The banner's minute timer is armed (one-shot in effect: re-armed after each firing).
+    banner_on: Cell<bool>,
+    /// The appearance the windows (their DWM title bars) were last given: the state's effective theme.
+    dark_applied: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
     pub terminal: RefCell<TerminalPane>,
 }
@@ -83,12 +87,15 @@ pub fn run_with_host(
     });
     let gfx = Gfx::new()?;
     let mut state = state;
+    // The full-screen monitor setting offers one entry for each monitor.
+    state.set_local_monitors(u8::try_from(crate::fullscreen::monitor_rects().len()).unwrap_or(1));
     // Files are received into this user's Downloads folder until the user picks another (the file panel).
     if state.receive_dir().is_none()
         && let Some(dir) = crate::files_dialogs::default_receive_dir()
     {
         let _ = state.set_receive_dir(dir);
     }
+    let dark_now = state.dark();
     let shared = Rc::new(Shared {
         gfx,
         state: RefCell::new(state),
@@ -98,6 +105,8 @@ pub fn run_with_host(
         windows: RefCell::new(Vec::new()),
         tick_on: Cell::new(false),
         placeholder_on: Cell::new(false),
+        banner_on: Cell::new(false),
+        dark_applied: Cell::new(dark_now),
         terminal: RefCell::new(TerminalPane::default()),
     });
     // Terminal output arrives on the pipe's reader thread and wakes this thread to pump and repaint.
@@ -148,6 +157,14 @@ impl Shared {
         self.state.borrow_mut().set_clock(crate::system::local_clock());
         for e in events {
             changed = changed.union(self.state.borrow_mut().apply(e));
+        }
+        // The viewer's own shortcuts (D30), recognised by the pipeline on the window's keys or the system-wide hook.
+        if let Some(host) = &self.host {
+            for action in host.take_shortcuts() {
+                let act = self.state.borrow_mut().run_shortcut(action);
+                self.send_commands(act.commands);
+                changed = changed.union(act.changed);
+            }
         }
         let followups = self.state.borrow_mut().take_followups();
         self.send_commands(followups);
@@ -284,6 +301,19 @@ impl Shared {
         self.refresh(c);
     }
 
+    /// The banner's minute came: the clock moves, the banner repaints, and `refresh` arms the next minute.
+    pub fn banner_tick(self: &Rc<Self>) {
+        if let Some(h) = self.main_hwnd() {
+            // SAFETY: our window; the timer is re-armed by `sync_timers` through `refresh`.
+            unsafe {
+                let _ = KillTimer(Some(h), TIMER_BANNER);
+            }
+        }
+        self.banner_on.set(false);
+        self.state.borrow_mut().set_clock(crate::system::local_clock());
+        self.refresh(Changed::BANNER);
+    }
+
     pub fn arm_placeholders(self: &Rc<Self>) {
         if let Some(h) = self.main_hwnd() {
             // SAFETY: our window; the placeholder timer is one-shot.
@@ -299,12 +329,21 @@ impl Shared {
     pub fn system_theme_changed(self: &Rc<Self>) {
         let dark = system_dark();
         let c = self.state.borrow_mut().set_dark(dark);
+        self.refresh(c);
+    }
+
+    /// Gives every window the state's effective appearance (title bar and canvas) when it differs from the last one
+    /// applied: the OS changed while the theme is "Sistema", or Ajustes chose another theme.
+    fn sync_theme(&self) {
+        let dark = self.state.borrow().dark();
+        if self.dark_applied.replace(dark) == dark {
+            return;
+        }
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
         let kinds: Vec<WindowKind> = windows.iter().map(|w| w.kind).collect();
         for i in crate::window::theme_targets(&kinds) {
             windows[i].theme_changed();
         }
-        self.refresh(c);
     }
 
     /// The viewer's close button: the session ends through the service, the window goes when it has.
@@ -337,7 +376,15 @@ impl Shared {
                 let _ = DestroyWindow(w.hwnd());
             }
         }
+        self.sync_theme();
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        if let Some(viewer) = windows.iter().find(|w| w.kind == WindowKind::Viewer) {
+            let (on, monitor) = {
+                let st = self.state.borrow();
+                (st.fullscreen(), st.fullscreen_monitor())
+            };
+            viewer.sync_fullscreen(on, monitor);
+        }
         for w in &windows {
             if changed.hits(w.kind) {
                 w.invalidate();
@@ -377,9 +424,11 @@ impl Shared {
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
         let Some(h) = self.main_hwnd() else { return };
-        let (tick, placeholder) = {
+        let (tick, placeholder, banner) = {
             let st = self.state.borrow();
-            (st.needs_tick(), st.has_pending_fetch())
+            let now = crate::system::local_clock().now_ms;
+            // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
+            (st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
         // SAFETY: our window.
         unsafe {
@@ -389,6 +438,15 @@ impl Shared {
             } else if !tick && self.tick_on.get() {
                 let _ = KillTimer(Some(h), TIMER_TICK);
                 self.tick_on.set(false);
+            }
+            if let Some(ms) = banner {
+                if !self.banner_on.get() {
+                    SetTimer(Some(h), TIMER_BANNER, u32::try_from(ms).unwrap_or(60_000), None);
+                    self.banner_on.set(true);
+                }
+            } else if self.banner_on.get() {
+                let _ = KillTimer(Some(h), TIMER_BANNER);
+                self.banner_on.set(false);
             }
             if placeholder && !self.placeholder_on.get() {
                 SetTimer(Some(h), TIMER_PLACEHOLDER, 100, None);

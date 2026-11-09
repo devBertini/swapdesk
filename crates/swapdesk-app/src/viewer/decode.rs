@@ -55,8 +55,13 @@ pub struct Shared {
     pub decode_errors: AtomicU64,
     /// The renderer is attached.
     pub attached: AtomicBool,
-    /// The remote cursor is drawn (its shape is known): the local pointer may be hidden.
+    /// The remote cursor is drawn (its shape is known and the viewer does not control).
     pub cursor_drawn: AtomicBool,
+    /// The viewer controls the host: the local pointer is shown with the host's shape and the remote arrow is not
+    /// drawn. Written by the pipeline, read here.
+    pub local_pointer: AtomicBool,
+    /// The host's current cursor shape, for the local pointer.
+    pub pointer_shape: Mutex<Option<Arc<swapdesk_platform::CursorShape>>>,
     /// The last renderer or decoder failure, for the trace (never content).
     pub last_error: Mutex<Option<String>>,
     pub audio_underruns: Arc<std::sync::atomic::AtomicU32>,
@@ -192,6 +197,10 @@ impl Worker {
                 }
                 self.publish_map();
             }
+            Cmd::CursorMode => {
+                let update = self.cursor.refresh(self.frame);
+                self.apply_cursor(update);
+            }
             Cmd::Detach(ack) => {
                 self.surface = None;
                 self.detach();
@@ -228,6 +237,7 @@ impl Worker {
         self.frame = None;
         self.shared.attached.store(false, Ordering::SeqCst);
         self.shared.cursor_drawn.store(false, Ordering::SeqCst);
+        *self.shared.pointer_shape.lock().unwrap_or_else(PoisonError::into_inner) = None;
         *self.shared.map.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
@@ -258,9 +268,15 @@ impl Worker {
     }
 
     fn apply_cursor(&mut self, update: Option<swapdesk_platform::CursorUpdate>) {
-        let (Some(update), Some(r)) = (update, self.renderer.as_mut()) else { return };
-        match r.set_cursor(&update) {
-            Ok(()) => self.shared.cursor_drawn.store(self.cursor.has_shape() && update.visible, Ordering::SeqCst),
+        let Some(update) = update else { return };
+        if let Some(shape) = &update.shape {
+            *self.shared.pointer_shape.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(shape.clone()));
+        }
+        let Some(r) = self.renderer.as_mut() else { return };
+        let local = self.shared.local_pointer.load(Ordering::SeqCst);
+        let shown = crate::shared::cursor::shown(&update, local);
+        match r.set_cursor(&shown) {
+            Ok(()) => self.shared.cursor_drawn.store(self.cursor.has_shape() && shown.visible, Ordering::SeqCst),
             Err(e) => self.shared.error("cursor", e),
         }
     }

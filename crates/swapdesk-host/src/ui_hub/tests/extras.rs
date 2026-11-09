@@ -107,6 +107,10 @@ fn ended(ui: &mut Client, session_id: u64) -> Option<ApiCode> {
     })
 }
 
+fn ask_card(m: &Ipc) -> bool {
+    matches!(m, Ipc::UiNotify(Notify::Swap { note: SwapNote::Asked { .. }, .. }))
+}
+
 fn asked(ui: &mut Client, session_id: u64) -> (u32, String, u16) {
     ui.notify("the swap card", |n| match n {
         Notify::Swap { session_id: id, note: SwapNote::Asked { request_id, by, remaining_s } } if *id == session_id => {
@@ -238,6 +242,35 @@ fn a_declined_or_refused_swap_leaves_the_session_alone_and_says_why() {
     d.finish();
 }
 
+// ---------- swap is for two machines of the same OS ----------
+
+#[test]
+fn a_swap_toward_another_os_is_refused_asking_and_asked() {
+    use swapdesk_proto::Os;
+    let mut d = Duo::new();
+    let s = d.open();
+
+    // Outgoing: the viewer's trust record says the host is a Mac (this test machine is Windows): refused at once.
+    d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
+    assert_eq!(d.viewer_ui.call(UiOp::RequestSwap { session_id: s }).unwrap_err(), ApiCode::NotPermitted);
+    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "nothing was sent to the other side");
+    d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
+
+    // Incoming: the host's record says the viewer is a Mac: the question never reaches the user and the asker is
+    // refused.
+    d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
+    request_swap(&mut d.viewer_ui, s);
+    assert!(matches!(swap_note(&mut d.viewer_ui, s), SwapNote::Declined { .. }));
+    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "no card at the asked user");
+
+    // Same OS again: the swap card comes as before.
+    d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
+    request_swap(&mut d.viewer_ui, s);
+    let (card, _, _) = asked(&mut d.host_ui, s);
+    assert!(d.host_ui.call(UiOp::AnswerSwap { request_id: card, accept: false }).is_ok());
+    d.finish();
+}
+
 // ---------- F-CHAT-01 ----------
 
 #[test]
@@ -245,7 +278,8 @@ fn chat_travels_both_ways_with_its_read_state_and_vanishes_when_the_session_ends
     let mut d = Duo::new();
     let s = d.open();
 
-    let send = |ui: &mut Client, text: &str| ui.call(UiOp::ChatSend { session_id: s, text: text.into() });
+    let send =
+        |ui: &mut Client, text: &str| ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text(text.into()) });
     let ReplyBody::Chat(mine) = send(&mut d.viewer_ui, "oi").unwrap() else { panic!() };
     assert_eq!((mine.msg_id, mine.text.0.as_str()), (1, "oi"), "the reply is the message as stored");
     let theirs = d.host_ui.notify("the message at the host", |n| match n {
@@ -274,11 +308,14 @@ fn chat_travels_both_ways_with_its_read_state_and_vanishes_when_the_session_ends
     // Empty text and unknown sessions are refused; another connection's session id is not a capability.
     assert_eq!(send(&mut d.viewer_ui, "   ").unwrap_err(), ApiCode::Invalid);
     assert_eq!(
-        d.viewer_ui.call(UiOp::ChatSend { session_id: s + 1, text: "x".into() }).unwrap_err(),
+        d.viewer_ui.call(UiOp::ChatSend { session_id: s + 1, text: swapdesk_ipc::Text("x".into()) }).unwrap_err(),
         ApiCode::NotFound
     );
     let mut other = d.viewer.client(info(false));
-    assert_eq!(other.call(UiOp::ChatSend { session_id: s, text: "x".into() }).unwrap_err(), ApiCode::NotFound);
+    assert_eq!(
+        other.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("x".into()) }).unwrap_err(),
+        ApiCode::NotFound
+    );
     assert_eq!(other.call(UiOp::ChatMarkRead { session_id: s }).unwrap_err(), ApiCode::NotFound);
     let _ = CHAT_SEND_OP;
 
@@ -404,7 +441,7 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
     );
     // The handle works on the new connection: a control message, a chat message and media all cross it.
     assert!(d.viewer_ui.call(UiOp::SetAudio { session_id: s, on: true }).is_ok());
-    assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: "voltei".into() }).is_ok());
+    assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("voltei".into()) }).is_ok());
     d.host_ui.notify("chat after the resume", |n| {
         matches!(n, Notify::Chat { session_id, .. } if *session_id == s).then_some(())
     });
@@ -583,4 +620,45 @@ fn wake_gives_up_after_its_window_and_a_cancel_stops_it() {
     drop(ui);
     m.finish();
     other.finish();
+}
+
+// ---------- review: a swap that makes this machine the host is the console's to ask and to answer ----------
+
+#[test]
+fn a_ui_outside_the_console_neither_hears_nor_answers_nor_asks_for_a_swap_that_makes_this_machine_the_host() {
+    let mut d = Duo::new();
+    let first = d.open();
+
+    // The user at the console of the viewer machine moves to session 2; the UI of session 1 stays connected and
+    // still owns the viewer session.
+    d.viewer.hub.set_console_session(Some(2));
+    let mut console = d.viewer.client(ConnInfo { session_id: 2, user: user("S-1-5-21-3"), admin: false });
+
+    // It cannot ask for the swap itself: that would make this machine the host, with the swap token skipping the
+    // prompt and the presence check.
+    assert_eq!(d.viewer_ui.call(UiOp::RequestSwap { session_id: first }).unwrap_err(), ApiCode::NotPermitted);
+
+    // The host asks: the card goes to the console's UI, not to the UI that owns the viewer session.
+    let req = d.host_ui.request(UiOp::RequestSwap { session_id: first });
+    assert!(matches!(
+        d.host_ui.reply(req, UiOp::RequestSwap { session_id: first }.code()),
+        Ok(ReplyBody::RequestId(_))
+    ));
+    let (card, _, _) = console.notify("the swap card", |n| match n {
+        Notify::Swap { note: SwapNote::Asked { request_id, by, remaining_s }, .. } => {
+            Some((*request_id, by.clone(), *remaining_s))
+        }
+        _ => None,
+    });
+    assert!(d.viewer_ui.nothing_within(Duration::from_millis(500), ask_card), "the other session's UI got the card");
+    // Nor can that UI answer it, whatever it guessed of the number.
+    assert_eq!(
+        d.viewer_ui.call(UiOp::AnswerSwap { request_id: card, accept: true }).unwrap_err(),
+        ApiCode::NotPermitted
+    );
+    // The console's UI can.
+    assert!(console.call(UiOp::AnswerSwap { request_id: card, accept: false }).is_ok());
+
+    drop(console);
+    d.finish();
 }

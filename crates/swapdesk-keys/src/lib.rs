@@ -8,6 +8,7 @@
 //! No OS call and no `unsafe`: the crate builds on every host (it is checked for `aarch64-apple-darwin` too).
 
 pub mod mode;
+pub mod shortcuts;
 pub mod swap;
 mod table;
 

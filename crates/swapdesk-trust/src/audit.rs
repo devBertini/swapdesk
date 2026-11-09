@@ -115,6 +115,11 @@ pub enum AuditEvent {
     KeyReplaced {
         old: DeviceId,
     },
+    /// Addition to C5.1 (the "`PairFailed` before step 2" of its rate limit): a pairing attempt that ended before the
+    /// responder committed to a nonce, so before any failure was counted (busy, no pairing mode, a bad first message,
+    /// a stall). It is the kind an unauthenticated peer can produce at will, and the one the audit rate limit covers;
+    /// `PairFailed` is reserved for attempts that reached step 2.
+    PairRefused(ErrorCode),
 }
 
 impl Wire for AuditEvent {
@@ -184,6 +189,10 @@ impl Wire for AuditEvent {
                 w.put_u8(16);
                 old.put(w, 0)?;
             }
+            Self::PairRefused(c) => {
+                w.put_u8(17);
+                c.put(w, 0)?;
+            }
         }
         Ok(())
     }
@@ -216,6 +225,7 @@ impl Wire for AuditEvent {
             14 => Self::Forgotten,
             15 => Self::AddressBlocked(r.array()?),
             16 => Self::KeyReplaced { old: r.array()? },
+            17 => Self::PairRefused(ErrorCode::get(r, 0)?),
             tag => return Err(CodecError::UnknownTag { what: "AuditEvent", tag: u64::from(tag) }),
         })
     }
@@ -357,11 +367,12 @@ mod tests {
             AuditEvent::GrantsChanged {
                 from: PermissionSet::EMPTY,
                 to: PermissionSet::UNATTENDED,
-                by: UserRef { id: "501".into(), name: "claudio".into() },
+                by: UserRef { id: "501".into(), name: "alex".into() },
             },
             AuditEvent::Forgotten,
             AuditEvent::AddressBlocked([10, 0, 0, 5]),
             AuditEvent::KeyReplaced { old: [4; 16] },
+            AuditEvent::PairRefused(ErrorCode::Busy),
         ]
     }
 

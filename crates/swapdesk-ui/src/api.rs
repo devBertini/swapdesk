@@ -440,13 +440,26 @@ pub enum TransferState {
     Failed { reason: ApiCode },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChatView {
     pub msg_id: u32,
     pub mine: bool,
     pub text: String,
     pub sent_at_ms: u64,
     pub read: bool,
+}
+
+/// Chat text is never logged (CONTRACTS.md C2.3): `Debug` shows its size only.
+impl core::fmt::Debug for ChatView {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChatView")
+            .field("msg_id", &self.msg_id)
+            .field("mine", &self.mine)
+            .field("text", &swapdesk_proto::RedactedLen(self.text.len()))
+            .field("sent_at_ms", &self.sent_at_ms)
+            .field("read", &self.read)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -480,12 +493,22 @@ pub struct Settings {
     pub show_stats: bool,
     pub keyboard_mode: KeyboardMode,
     pub swap_ctrl_cmd: bool,
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     PtBr,
     En,
+}
+
+/// The theme chosen in Ajustes; `System` follows the OS (live).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,56 +546,258 @@ impl From<MsgKey> for Msg {
 
 // ---------- commands ----------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Command {
     GetThisDevice,
     GetNetwork,
     ListDevices,
-    AddByAddress { ipv4: String },
-    PairOpen { device_id: Option<String> },
-    PairStart { pairing_id: u32, device_id: String },
-    PairConfirm { pairing_id: u32, matches: bool },
-    PairCancel { pairing_id: u32 },
-    SetGrants { device_id: String, grants: Permissions },
-    ForgetDevice { device_id: String },
-    Elevate { action: ElevatedAction },
-    Connect { device_id: String, intent: Intent, unattended: bool },
-    Disconnect { session_id: u64 },
-    AnswerIncoming { request_id: u32, decision: Decision },
-    ListDisplays { session_id: u64 },
-    SelectDisplay { session_id: u64, display_id: u16 },
-    SetScale { session_id: u64, scale: Scale },
-    SetQuality { session_id: u64, quality: Quality },
-    SetAudio { session_id: u64, on: bool },
-    SetKeyboardMode { session_id: u64, mode: KeyboardMode },
-    SetGrab { session_id: u64, on: bool },
-    SetViewOnly { session_id: u64, on: bool },
-    SendKeys { session_id: u64, keys: SpecialKeys },
-    RequestSwap { session_id: u64 },
-    AnswerSwap { request_id: u32, accept: bool },
-    CancelSwap { request_id: u32 },
-    TermOpen { session_id: u64, admin: bool, cols: u16, rows: u16 },
-    TermWrite { term_id: u32, bytes: Vec<u8> },
-    TermResize { term_id: u32, cols: u16, rows: u16 },
-    TermClose { term_id: u32 },
-    RunAction { session_id: u64, action: ActionKind },
-    FilesList { session_id: u64, path: Option<String> },
-    FilesSend { session_id: u64, local_paths: Vec<PathBuf>, remote_dir: Option<String> },
-    FilesGet { session_id: u64, remote_path: String, local_dir: PathBuf },
-    TransferPause { transfer_id: u32 },
-    TransferResume { transfer_id: u32 },
-    TransferCancel { transfer_id: u32 },
-    SetClipboardSync { session_id: u64, on: bool },
-    ChatSend { session_id: u64, text: String },
-    ChatMarkRead { session_id: u64, up_to: u32 },
-    Wake { device_id: String },
-    ActivityList { before_ms: Option<u64>, limit: u32 },
-    ActivityExport { path: PathBuf },
-    BlockAddress { ipv4: String },
+    AddByAddress {
+        ipv4: String,
+    },
+    PairOpen {
+        device_id: Option<String>,
+    },
+    PairStart {
+        pairing_id: u32,
+        device_id: String,
+    },
+    PairConfirm {
+        pairing_id: u32,
+        matches: bool,
+    },
+    PairCancel {
+        pairing_id: u32,
+    },
+    SetGrants {
+        device_id: String,
+        grants: Permissions,
+    },
+    ForgetDevice {
+        device_id: String,
+    },
+    /// A local name for a paired device (the alias this machine shows; the peer is not told).
+    RenameDevice {
+        device_id: String,
+        name: String,
+    },
+    Elevate {
+        action: ElevatedAction,
+    },
+    Connect {
+        device_id: String,
+        intent: Intent,
+        unattended: bool,
+    },
+    Disconnect {
+        session_id: u64,
+    },
+    AnswerIncoming {
+        request_id: u32,
+        decision: Decision,
+    },
+    ListDisplays {
+        session_id: u64,
+    },
+    SelectDisplay {
+        session_id: u64,
+        display_id: u16,
+    },
+    SetScale {
+        session_id: u64,
+        scale: Scale,
+    },
+    SetQuality {
+        session_id: u64,
+        quality: Quality,
+    },
+    SetAudio {
+        session_id: u64,
+        on: bool,
+    },
+    SetKeyboardMode {
+        session_id: u64,
+        mode: KeyboardMode,
+    },
+    SetGrab {
+        session_id: u64,
+        on: bool,
+    },
+    /// The chord that releases the keyboard (UI-local: the viewer pipeline applies it).
+    SetReleaseKey {
+        key: crate::shortcuts::ReleaseKey,
+    },
+    SetViewOnly {
+        session_id: u64,
+        on: bool,
+    },
+    SendKeys {
+        session_id: u64,
+        keys: SpecialKeys,
+    },
+    RequestSwap {
+        session_id: u64,
+    },
+    AnswerSwap {
+        request_id: u32,
+        accept: bool,
+    },
+    CancelSwap {
+        request_id: u32,
+    },
+    TermOpen {
+        session_id: u64,
+        admin: bool,
+        cols: u16,
+        rows: u16,
+    },
+    TermWrite {
+        term_id: u32,
+        bytes: Vec<u8>,
+    },
+    TermResize {
+        term_id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    TermClose {
+        term_id: u32,
+    },
+    RunAction {
+        session_id: u64,
+        action: ActionKind,
+    },
+    FilesList {
+        session_id: u64,
+        path: Option<String>,
+    },
+    FilesSend {
+        session_id: u64,
+        local_paths: Vec<PathBuf>,
+        remote_dir: Option<String>,
+    },
+    FilesGet {
+        session_id: u64,
+        remote_path: String,
+        local_dir: PathBuf,
+    },
+    TransferPause {
+        transfer_id: u32,
+    },
+    TransferResume {
+        transfer_id: u32,
+    },
+    TransferCancel {
+        transfer_id: u32,
+    },
+    SetClipboardSync {
+        session_id: u64,
+        on: bool,
+    },
+    ChatSend {
+        session_id: u64,
+        text: String,
+    },
+    ChatMarkRead {
+        session_id: u64,
+        up_to: u32,
+    },
+    Wake {
+        device_id: String,
+    },
+    ActivityList {
+        before_ms: Option<u64>,
+        limit: u32,
+    },
+    ActivityExport {
+        path: PathBuf,
+    },
+    BlockAddress {
+        ipv4: String,
+    },
     GetSettings,
-    SetSettings { settings: Settings },
-    OpenSystemSettings { target: SettingsTarget },
+    SetSettings {
+        settings: Settings,
+    },
+    OpenSystemSettings {
+        target: SettingsTarget,
+    },
     RequestOsPermissions,
+}
+
+/// Typed chat text and terminal input are never logged (CONTRACTS.md C2.3): `Debug` shows their size only. Written
+/// by hand because a derive would print them.
+impl core::fmt::Debug for Command {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        macro_rules! dbg_fields {
+            ($name:literal $(, $field:ident)*) => {
+                f.debug_struct($name)$(.field(stringify!($field), $field))*.finish()
+            };
+        }
+        match self {
+            Self::GetThisDevice => f.write_str("GetThisDevice"),
+            Self::GetNetwork => f.write_str("GetNetwork"),
+            Self::ListDevices => f.write_str("ListDevices"),
+            Self::AddByAddress { ipv4 } => dbg_fields!("AddByAddress", ipv4),
+            Self::PairOpen { device_id } => dbg_fields!("PairOpen", device_id),
+            Self::PairStart { pairing_id, device_id } => dbg_fields!("PairStart", pairing_id, device_id),
+            Self::PairConfirm { pairing_id, matches } => dbg_fields!("PairConfirm", pairing_id, matches),
+            Self::PairCancel { pairing_id } => dbg_fields!("PairCancel", pairing_id),
+            Self::SetGrants { device_id, grants } => dbg_fields!("SetGrants", device_id, grants),
+            Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
+            Self::RenameDevice { device_id, name } => dbg_fields!("RenameDevice", device_id, name),
+            Self::Elevate { action } => dbg_fields!("Elevate", action),
+            Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
+            Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),
+            Self::AnswerIncoming { request_id, decision } => dbg_fields!("AnswerIncoming", request_id, decision),
+            Self::ListDisplays { session_id } => dbg_fields!("ListDisplays", session_id),
+            Self::SelectDisplay { session_id, display_id } => dbg_fields!("SelectDisplay", session_id, display_id),
+            Self::SetScale { session_id, scale } => dbg_fields!("SetScale", session_id, scale),
+            Self::SetQuality { session_id, quality } => dbg_fields!("SetQuality", session_id, quality),
+            Self::SetAudio { session_id, on } => dbg_fields!("SetAudio", session_id, on),
+            Self::SetKeyboardMode { session_id, mode } => dbg_fields!("SetKeyboardMode", session_id, mode),
+            Self::SetGrab { session_id, on } => dbg_fields!("SetGrab", session_id, on),
+            Self::SetReleaseKey { key } => dbg_fields!("SetReleaseKey", key),
+            Self::SetViewOnly { session_id, on } => dbg_fields!("SetViewOnly", session_id, on),
+            Self::SendKeys { session_id, keys } => dbg_fields!("SendKeys", session_id, keys),
+            Self::RequestSwap { session_id } => dbg_fields!("RequestSwap", session_id),
+            Self::AnswerSwap { request_id, accept } => dbg_fields!("AnswerSwap", request_id, accept),
+            Self::CancelSwap { request_id } => dbg_fields!("CancelSwap", request_id),
+            Self::TermOpen { session_id, admin, cols, rows } => dbg_fields!("TermOpen", session_id, admin, cols, rows),
+            Self::TermResize { term_id, cols, rows } => dbg_fields!("TermResize", term_id, cols, rows),
+            Self::TermClose { term_id } => dbg_fields!("TermClose", term_id),
+            Self::RunAction { session_id, action } => dbg_fields!("RunAction", session_id, action),
+            Self::FilesList { session_id, path } => dbg_fields!("FilesList", session_id, path),
+            Self::FilesSend { session_id, local_paths, remote_dir } => {
+                dbg_fields!("FilesSend", session_id, local_paths, remote_dir)
+            }
+            Self::FilesGet { session_id, remote_path, local_dir } => {
+                dbg_fields!("FilesGet", session_id, remote_path, local_dir)
+            }
+            Self::TransferPause { transfer_id } => dbg_fields!("TransferPause", transfer_id),
+            Self::TransferResume { transfer_id } => dbg_fields!("TransferResume", transfer_id),
+            Self::TransferCancel { transfer_id } => dbg_fields!("TransferCancel", transfer_id),
+            Self::SetClipboardSync { session_id, on } => dbg_fields!("SetClipboardSync", session_id, on),
+            Self::ChatMarkRead { session_id, up_to } => dbg_fields!("ChatMarkRead", session_id, up_to),
+            Self::Wake { device_id } => dbg_fields!("Wake", device_id),
+            Self::ActivityList { before_ms, limit } => dbg_fields!("ActivityList", before_ms, limit),
+            Self::ActivityExport { path } => dbg_fields!("ActivityExport", path),
+            Self::BlockAddress { ipv4 } => dbg_fields!("BlockAddress", ipv4),
+            Self::GetSettings => f.write_str("GetSettings"),
+            Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),
+            Self::OpenSystemSettings { target } => dbg_fields!("OpenSystemSettings", target),
+            Self::RequestOsPermissions => f.write_str("RequestOsPermissions"),
+            Self::TermWrite { term_id, bytes } => f
+                .debug_struct("TermWrite")
+                .field("term_id", term_id)
+                .field("bytes", &swapdesk_proto::RedactedLen(bytes.len()))
+                .finish(),
+            Self::ChatSend { session_id, text } => f
+                .debug_struct("ChatSend")
+                .field("session_id", session_id)
+                .field("text", &swapdesk_proto::RedactedLen(text.len()))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -694,6 +919,7 @@ impl Command {
                 | Command::SetAudio { .. }
                 | Command::SetKeyboardMode { .. }
                 | Command::SetGrab { .. }
+                | Command::SetReleaseKey { .. }
                 | Command::SetViewOnly { .. }
                 | Command::SetClipboardSync { .. }
                 | Command::OpenSystemSettings { .. }
@@ -713,5 +939,31 @@ impl Command {
             Command::ActivityList { .. } | Command::FilesList { .. } | Command::ActivityExport { .. } => 10,
             _ => 5,
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_of_a_command_shows_the_size_of_typed_text_and_terminal_input_and_never_the_content() {
+        let chat = format!("{:?}", Command::ChatSend { session_id: 2, text: "segredo-do-chat".into() });
+        assert!(!chat.contains("segredo") && chat.contains("<redacted 15 bytes>") && chat.contains("session_id: 2"));
+        let term = format!("{:?}", Command::TermWrite { term_id: 1, bytes: b"senha-no-shell".to_vec() });
+        assert!(!term.contains("senha") && term.contains("<redacted 14 bytes>"), "{term}");
+        let bytes = format!("{:?}", Command::TermWrite { term_id: 1, bytes: vec![233; 4] });
+        assert!(!bytes.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "{bytes}");
+        // The other commands print as before.
+        assert_eq!(format!("{:?}", Command::GetThisDevice), "GetThisDevice");
+        assert!(format!("{:?}", Command::Disconnect { session_id: 9 }).contains("session_id: 9"));
+    }
+
+    #[test]
+    fn debug_of_a_chat_view_shows_its_size_and_never_the_text() {
+        let view = ChatView { msg_id: 1, mine: false, text: "segredo-do-chat".into(), sent_at_ms: 2, read: true };
+        let shown = format!("{view:?}");
+        assert!(!shown.contains("segredo"), "chat text leaked: {shown}");
+        assert!(shown.contains("<redacted 15 bytes>"), "{shown}");
     }
 }

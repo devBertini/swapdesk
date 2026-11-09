@@ -186,6 +186,7 @@ fn settings() -> Settings {
         show_stats: false,
         keyboard_mode: KeyboardMode::Auto,
         swap_ctrl_cmd: false,
+        theme: Theme::System,
     }
 }
 
@@ -369,7 +370,7 @@ fn produced_events_drive_the_devices_screen() {
     for e in collect(&b, 1) {
         state.apply(e);
     }
-    assert_eq!(state.screen(), Screen::Devices);
+    assert_eq!(state.screen(), Screen::Home, "the window starts on Início");
     assert_eq!(state.devices().len(), 2);
     svc.write(Message::UiNotify(Notify::DevicesChanged(vec![cv::device_to_wire(&device("b"))])));
     for e in collect(&b, 1) {
@@ -435,7 +436,7 @@ fn swap_chat_and_wake_commands_travel_as_their_ops_and_come_back_as_events() {
     // Chat: the reply is this side's own message, a notification is the peer's, and the read mark goes out.
     let t = b.send(Command::ChatSend { session_id: 7, text: "oi".into() });
     let (req, op) = svc.request();
-    assert_eq!(op, UiOp::ChatSend { session_id: 7, text: "oi".into() });
+    assert_eq!(op, UiOp::ChatSend { session_id: 7, text: swapdesk_ipc::Text("oi".into()) });
     svc.reply(req, ReplyBody::Chat(ChatItem { msg_id: 1, text: Text("oi".into()), sent_at_ms: 55 }));
     svc.write(Message::UiNotify(Notify::Chat {
         session_id: 7,
@@ -556,12 +557,12 @@ fn an_open_terminal_is_an_id_then_the_account_and_input_is_written_as_messages()
     let t = b.send(Command::TermOpen { session_id: 4, admin: false, cols: 100, rows: 30 });
     let (req, op) = svc.request();
     assert_eq!(op, UiOp::TermOpen { session_id: 4, cols: 100, rows: 30, admin: false });
-    svc.reply(req, term_opened(7, swapdesk_ipc::TermOutcome::Opened, "claudio"));
+    svc.reply(req, term_opened(7, swapdesk_ipc::TermOutcome::Opened, "alex"));
     assert_eq!(
         collect(&b, 2),
         vec![
             UiEvent::Reply { ticket: t, result: Ok(Reply::TermId(7)) },
-            UiEvent::Term { term_id: 7, event: TermEvent::Opened { account: "claudio".into() } }
+            UiEvent::Term { term_id: 7, event: TermEvent::Opened { account: "alex".into() } }
         ],
         "the id answers the command, the account follows as the terminal's own event"
     );

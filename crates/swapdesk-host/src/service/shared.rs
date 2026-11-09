@@ -3,18 +3,23 @@
 //! point here without a cycle.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use swapdesk_platform::{Level, TraceSink};
-use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, VideoHeader};
+use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, RedactedLen, VideoHeader};
 use swapdesk_session::{Forwarded, HostService};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use super::helper_link::{HelperEvent, HelperLink};
+use super::media_path::{DirectOut, VideoPath};
 use super::pty_proxy::PtyRoutes;
 use super::routing::{HelperKind, media_helper};
+
+/// Events queued for the core's owner before an advisory one is dropped.
+pub const CORE_EVENTS: usize = 64;
 
 /// What the core tells its owner (the binary's supervisor, the UI dispatcher of the next slice).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +46,7 @@ pub enum CoreEvent {
 }
 
 /// What the media helper sent, as the relays of live sessions see it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum MediaEv {
     Displays(Vec<Display>),
     Video {
@@ -53,6 +58,22 @@ pub(crate) enum MediaEv {
     Audio(Vec<u8>),
     /// A helper's pipe ended (its link id).
     HelperGone(u64),
+}
+
+/// Screen pixels and system audio never show in `Debug` (CONTRACTS.md C2.3): sizes only.
+impl core::fmt::Debug for MediaEv {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Displays(d) => f.debug_tuple("Displays").field(d).finish(),
+            Self::Video { header, payload } => {
+                f.debug_struct("Video").field("header", header).field("payload", &RedactedLen(payload.len())).finish()
+            }
+            Self::CursorPos(p) => f.debug_tuple("CursorPos").field(p).finish(),
+            Self::CursorShape(s) => f.debug_tuple("CursorShape").field(s).finish(),
+            Self::Audio(a) => f.debug_tuple("Audio").field(&RedactedLen(a.len())).finish(),
+            Self::HelperGone(id) => f.debug_tuple("HelperGone").field(id).finish(),
+        }
+    }
 }
 
 /// Everything a host relay's task can be woken by.
@@ -68,7 +89,11 @@ pub(crate) enum RelayEv {
 #[derive(Clone)]
 pub(crate) struct RelayHandle {
     pub tx: mpsc::Sender<RelayEv>,
-    pub ended: Arc<AtomicBool>,
+    pub ended: Arc<std::sync::atomic::AtomicBool>,
+    /// Video frames of the session: a newest-wins slot and a sending task of its own.
+    pub video: Arc<VideoPath>,
+    /// Audio and cursor, sent straight from the helper pump.
+    pub out: Arc<DirectOut>,
 }
 
 #[derive(Default)]
@@ -99,7 +124,11 @@ pub(crate) struct Shared {
     pub audio_exclude_pid: u32,
     slots: Mutex<Slots>,
     relays: Mutex<HashMap<u64, RelayHandle>>,
-    events: Mutex<std::sync::mpsc::Sender<CoreEvent>>,
+    events: SyncSender<CoreEvent>,
+    /// Told after every event is queued, so the owner's loop sleeps until there is one.
+    waker: OnceLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Advisory events dropped because the owner was not reading.
+    events_dropped: AtomicU64,
     /// The shells the user helper runs for the terminal proxy.
     pub ptys: PtyRoutes,
 }
@@ -109,19 +138,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    pub fn new(
-        rt: Handle,
-        trace: Arc<dyn TraceSink>,
-        audio_exclude_pid: u32,
-        events: std::sync::mpsc::Sender<CoreEvent>,
-    ) -> Self {
+    pub fn new(rt: Handle, trace: Arc<dyn TraceSink>, audio_exclude_pid: u32, events: SyncSender<CoreEvent>) -> Self {
         Self {
             rt,
             trace,
             audio_exclude_pid,
             slots: Mutex::default(),
             relays: Mutex::default(),
-            events: Mutex::new(events),
+            events,
+            waker: OnceLock::new(),
+            events_dropped: AtomicU64::new(0),
             ptys: PtyRoutes::default(),
         }
     }
@@ -130,9 +156,49 @@ impl Shared {
         self.trace.log(level, "service", what);
     }
 
+    /// Queues `event` for the owner. The queue is bounded ([`CORE_EVENTS`]): a helper that faults or asks for the secure
+    /// attention sequence in a loop cannot fill it, because those two are advisory and dropped (counted) when the owner
+    /// is not reading. `HelperAttached` and `HelperGone` change what the supervisor does, so they are always delivered:
+    /// when there is no room a blocking thread waits for it (a helper starts at most once per second of backoff).
     pub fn emit(&self, event: CoreEvent) {
-        // A closed receiver means nobody listens: not an error.
-        let _ = lock(&self.events).send(event);
+        let essential = matches!(event, CoreEvent::HelperAttached { .. } | CoreEvent::HelperGone { .. });
+        match self.events.try_send(event) {
+            Ok(()) => self.wake(),
+            Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Full(event)) if essential => {
+                let tx = self.events.clone();
+                let waker = self.waker.get().cloned();
+                self.rt.spawn_blocking(move || {
+                    // A closed receiver means nobody listens: not an error.
+                    if tx.send(event).is_ok()
+                        && let Some(wake) = waker
+                    {
+                        wake();
+                    }
+                });
+            }
+            Err(TrySendError::Full(_)) => {
+                if self.events_dropped.fetch_add(1, Ordering::Relaxed) == 0 {
+                    self.log(Level::Warn, format_args!("the core's event queue is full: advisory events are dropped"));
+                }
+            }
+        }
+    }
+
+    /// Advisory events dropped so far.
+    pub fn events_dropped(&self) -> u64 {
+        self.events_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Sets what runs after every event is queued (once).
+    pub fn set_waker(&self, waker: Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.waker.set(waker).is_ok()
+    }
+
+    fn wake(&self) {
+        if let Some(wake) = self.waker.get() {
+            wake();
+        }
     }
 
     pub fn helper(&self, kind: HelperKind) -> Option<Arc<HelperLink>> {
@@ -179,8 +245,35 @@ impl Shared {
         lock(&self.relays).values().cloned().collect()
     }
 
-    /// Hands `ev` to every live relay, waiting for room (media backpressure reaches the helper's pipe).
+    /// Hands `ev` to every live session. Video goes to the session's slot, audio and cursor leave at once; none of
+    /// them waits (stage 64). Display lists and a helper's end go through the relay's queue, waiting for room.
     pub async fn fan(&self, ev: MediaEv) {
+        match ev {
+            MediaEv::Video { header, payload } => {
+                for h in self.relays() {
+                    h.video.offer(header, payload.clone());
+                }
+            }
+            MediaEv::Audio(datagram) => {
+                for h in self.relays() {
+                    h.out.audio(datagram.clone());
+                }
+            }
+            MediaEv::CursorPos(pos) => {
+                for h in self.relays() {
+                    h.out.cursor_pos(&pos);
+                }
+            }
+            MediaEv::CursorShape(shape) => {
+                for h in self.relays() {
+                    h.out.cursor_shape(&shape);
+                }
+            }
+            ev @ (MediaEv::Displays(_) | MediaEv::HelperGone(_)) => self.fan_queued(ev).await,
+        }
+    }
+
+    async fn fan_queued(&self, ev: MediaEv) {
         let mut handles = self.relays().into_iter().peekable();
         let mut ev = Some(ev);
         while let Some(h) = handles.next() {
@@ -253,6 +346,7 @@ pub(crate) async fn pump(
             HelperEvent::PtyOpenReply { .. } | HelperEvent::PtyOutput { .. } | HelperEvent::PtyExited { .. } => {
                 shared.log(Level::Warn, format_args!("{kind:?} helper sent a terminal message: ignored"));
             }
+            HelperEvent::Note { what } => shared.log(Level::Info, format_args!("{kind:?} helper: {what}")),
             HelperEvent::Fault { code, what } => {
                 shared.log(Level::Warn, format_args!("{kind:?} helper fault {code:?}: {what}"));
                 shared.emit(CoreEvent::HelperFault { kind, code, what });
@@ -272,5 +366,80 @@ pub(crate) async fn pump(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    use swapdesk_fakes::LogCapture;
+
+    use super::*;
+
+    fn shared() -> (tokio::runtime::Runtime, Arc<Shared>, std::sync::mpsc::Receiver<CoreEvent>) {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(CORE_EVENTS);
+        let shared = Arc::new(Shared::new(rt.handle().clone(), Arc::new(LogCapture::new()), 0, tx));
+        (rt, shared, rx)
+    }
+
+    #[test]
+    fn advisory_events_stop_at_the_bound_and_a_helper_gone_is_still_delivered_once_the_owner_reads() {
+        let (_rt, shared, rx) = shared();
+        let fault = |n: usize| CoreEvent::HelperFault {
+            kind: HelperKind::User,
+            code: ErrorCode::Internal,
+            what: n.to_string(),
+        };
+        // A helper that faults in a loop while the owner does not read.
+        for n in 0..(CORE_EVENTS * 8) {
+            shared.emit(fault(n));
+        }
+        assert_eq!(
+            shared.events_dropped(),
+            (CORE_EVENTS * 7) as u64,
+            "everything past the bound is dropped and counted"
+        );
+        // The queue is full and a helper's end must still reach the supervisor.
+        shared.emit(CoreEvent::HelperGone { kind: HelperKind::User, pid: 77, error: None });
+        let mut seen = 0;
+        let gone = loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("the owner is told the helper is gone") {
+                CoreEvent::HelperGone { pid, .. } => break pid,
+                CoreEvent::HelperFault { .. } => seen += 1,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(gone, 77);
+        assert_eq!(seen, CORE_EVENTS, "the first events, in order, are the ones that were kept");
+    }
+
+    #[test]
+    fn the_waker_runs_after_each_queued_event_and_the_owner_wakes_on_it_not_on_a_timer() {
+        let (_rt, shared, rx) = shared();
+        let woke = Arc::new(AtomicUsize::new(0));
+        let (ping_tx, ping_rx) = std::sync::mpsc::channel();
+        {
+            let (woke, ping) = (Arc::clone(&woke), Mutex::new(ping_tx));
+            assert!(shared.set_waker(Arc::new(move || {
+                woke.fetch_add(1, Ordering::SeqCst);
+                let _ = lock(&ping).send(());
+            })));
+        }
+        let emitter = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                shared.emit(CoreEvent::SasRequested { kind: HelperKind::System });
+            })
+        };
+        let began = std::time::Instant::now();
+        ping_rx.recv_timeout(Duration::from_secs(10)).expect("the waker ran");
+        assert!(began.elapsed() >= Duration::from_millis(150), "nothing woke the owner before the event");
+        assert!(matches!(rx.try_recv(), Ok(CoreEvent::SasRequested { .. })), "the event is queued when the waker runs");
+        emitter.join().unwrap();
+        assert_eq!(woke.load(Ordering::SeqCst), 1);
     }
 }

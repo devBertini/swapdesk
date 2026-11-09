@@ -16,6 +16,7 @@ use swapdesk_input_win::sink::Injector;
 use swapdesk_input_win::{WinGrabber, WinInputSink, open_sink};
 use swapdesk_keys::mode::KeyboardMode;
 use swapdesk_keys::modifier;
+use swapdesk_keys::shortcuts::{ReleaseKey, ViewerAction};
 use swapdesk_platform::{InputGrabber, InputSink};
 use swapdesk_proto::InputEvent;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -103,6 +104,10 @@ struct Rig {
 }
 
 fn rig(config: GrabConfig) -> Rig {
+    rig_with(config, None)
+}
+
+fn rig_with(config: GrabConfig, on_shortcut: Option<swapdesk_input_win::ShortcutHandler>) -> Rig {
     let serial = serial();
     aware();
     let displays = displays().expect("displays");
@@ -113,6 +118,9 @@ fn rig(config: GrabConfig) -> Rig {
     let observer = Observer::start();
     let (tx, rx) = sync_channel(256);
     let mut grabber = WinGrabber::new(config);
+    if let Some(h) = on_shortcut {
+        grabber.set_shortcut_handler(h);
+    }
     grabber.start(tx).expect("start the grabber");
     Rig { grabber, observer, sink, win, rx, injected: Vec::new(), _serial: serial }
 }
@@ -362,5 +370,55 @@ fn text_mode_turns_printable_keys_into_unicode_text_and_keeps_shortcuts_physical
     assert!(letter_keys.is_empty(), "{letter_keys:?}");
     assert!(got.contains(&k(0x06, true, modifier::LCTRL)), "Ctrl+C stays physical: {got:?}");
     assert!(got.contains(&k(0x06, false, modifier::LCTRL)), "{got:?}");
+    r.grabber.stop();
+}
+
+#[test]
+#[ignore = "interactive: injects real keyboard/mouse input; run on an idle PC with --run-ignored only"]
+fn the_release_key_and_the_viewer_shortcuts_reach_the_handler_and_stay_from_the_os() {
+    let fired: std::sync::Arc<Mutex<Vec<ViewerAction>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&fired);
+    let handler: swapdesk_input_win::ShortcutHandler =
+        std::sync::Arc::new(move |a| sink.lock().unwrap_or_else(|p| p.into_inner()).push(a));
+    let config = GrabConfig { release: Some(ReleaseKey::CtrlAlt), ..injected_only() };
+    let mut r = rig_with(config, Some(handler));
+    r.grabber.set_grab_system_keys(true).unwrap();
+    let got = |r: &Rig| {
+        r.win.settle(Duration::from_millis(150));
+        fired.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    };
+
+    // Ctrl+Alt pressed and let go with nothing between: the keyboard is released.
+    r.key(0xE0, true, modifier::LCTRL);
+    r.key(0xE2, true, modifier::LCTRL | modifier::LALT);
+    r.key(0xE2, false, modifier::LCTRL);
+    r.key(0xE0, false, 0);
+    assert_eq!(got(&r), vec![ViewerAction::ReleaseKeyboard]);
+
+    // Ctrl+Alt+B shows the bar, Ctrl+Alt+End sends Ctrl+Alt+Del, Ctrl+Alt+Q disconnects, F11 is full screen; none of
+    // their letters reaches the OS (the observer sits after the grabber in the hook chain).
+    fired.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    r.observer.clear();
+    let ca = modifier::LCTRL | modifier::LALT;
+    r.key(0xE0, true, modifier::LCTRL);
+    r.key(0xE2, true, ca);
+    r.tap(0x05, ca);
+    r.tap(0x4D, ca);
+    r.tap(0x14, ca);
+    r.key(0xE2, false, modifier::LCTRL);
+    r.key(0xE0, false, 0);
+    r.tap(0x44, 0);
+    let seen_vks = {
+        r.win.settle(Duration::from_millis(150));
+        r.observer.vks()
+    };
+    let fired_now = got(&r);
+    assert_eq!(
+        fired_now,
+        vec![ViewerAction::ToggleBar, ViewerAction::CtrlAltDel, ViewerAction::Disconnect, ViewerAction::FullScreen]
+    );
+    for vk in [0x42u32, 0x23, 0x51, 0x7A] {
+        assert!(!seen_vks.contains(&vk), "vk {vk:#x} reached the OS: {seen_vks:?}");
+    }
     r.grabber.stop();
 }

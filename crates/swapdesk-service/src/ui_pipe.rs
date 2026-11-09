@@ -48,12 +48,36 @@ pub struct UiPipes {
     /// A second owner of every open connection's pipe, to cancel its blocked read at shutdown.
     open: Mutex<Vec<(u64, PipeConn)>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
-    sessions: Mutex<Vec<u32>>,
+    sessions: OpenSessions,
     next: std::sync::atomic::AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The sessions whose UI pipe has a bound listener.
+#[derive(Default)]
+struct OpenSessions(Mutex<Vec<u32>>);
+
+impl OpenSessions {
+    /// Runs `open` unless `session` is served already, and counts the session as served only when `open` returned
+    /// `Some`: a session whose pipe could not be made (no user token yet at the logon screen after boot, a squatted
+    /// name) is tried again by the next call. The lock is held across `open`, so two callers never bind one name.
+    fn ensure<T>(&self, session: u32, open: impl FnOnce() -> Option<T>) -> Option<T> {
+        let mut served = lock(&self.0);
+        if served.contains(&session) {
+            return None;
+        }
+        let opened = open()?;
+        served.push(session);
+        Some(opened)
+    }
+
+    /// The session's listener is gone: the next `ensure` opens a new one.
+    fn forget(&self, session: u32) {
+        lock(&self.0).retain(|s| *s != session);
+    }
 }
 
 impl UiPipes {
@@ -66,7 +90,7 @@ impl UiPipes {
             stop,
             open: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
-            sessions: Mutex::new(Vec::new()),
+            sessions: OpenSessions::default(),
             next: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -75,15 +99,16 @@ impl UiPipes {
         self.trace.log(level, "ui-pipe", what);
     }
 
-    /// Makes sure `ui-<session>` has a listener (once per session id).
+    /// Makes sure `ui-<session>` has a listener (once per session id). A session counts as served only once its
+    /// listener is bound: a failed attempt (no user token yet at the logon screen, a squatted name) is tried again at
+    /// the next call, which is the next console change or logon of that session.
     pub fn ensure(self: &Arc<Self>, session: u32) {
-        {
-            let mut seen = lock(&self.sessions);
-            if seen.contains(&session) {
-                return;
-            }
-            seen.push(session);
-        }
+        let Some(listener) = self.sessions.ensure(session, || self.bind(session)) else { return };
+        self.accept_on(session, listener);
+    }
+
+    /// Creates the listener of `session`'s pipe with the ACL its mode calls for; `None` (logged) when it cannot.
+    fn bind(&self, session: u32) -> Option<PipeListener> {
         // The user the pipe is for.
         let acl = match self.mode {
             Mode::Dev => PipeAcl::dev(),
@@ -91,7 +116,7 @@ impl UiPipes {
                 Ok(sid) => Ok(PipeAcl::system_and_user(sid)),
                 Err(e) => {
                     self.log(Level::Error, format_args!("alert: no UI pipe for session {session}: {e}"));
-                    return;
+                    return None;
                 }
             },
         };
@@ -99,23 +124,29 @@ impl UiPipes {
             Ok(a) => a,
             Err(e) => {
                 self.log(Level::Error, format_args!("no UI pipe for session {session}: {e}"));
-                return;
+                return None;
             }
         };
         let mut spec = PipeSpec::ui(session, acl);
         spec.name.push_str(&self.suffix);
-        let mut listener = match PipeListener::bind(spec) {
+        let listener = match PipeListener::bind(spec) {
             Ok(l) => l,
             Err(PipeError::Squatted { name }) => {
                 self.log(Level::Error, format_args!("alert: the UI pipe name {name} is already owned by another process; no UI pipe for session {session}"));
-                return;
+                return None;
             }
             Err(e) => {
                 self.log(Level::Error, format_args!("cannot create the UI pipe of session {session}: {e}"));
-                return;
+                return None;
             }
         };
         self.log(Level::Info, format_args!("UI pipe {} is open", listener.name()));
+        Some(listener)
+    }
+
+    /// Accepts the connections of `session`'s pipe on a thread of their own. When the pipe fails or the thread cannot
+    /// start, the session is forgotten so the next `ensure` makes a new listener.
+    fn accept_on(self: &Arc<Self>, session: u32, mut listener: PipeListener) {
         let me = Arc::clone(self);
         let accept = std::thread::Builder::new().name(format!("ui-pipe-{session}")).spawn(move || {
             while !me.stop.load(Ordering::Acquire) {
@@ -133,6 +164,7 @@ impl UiPipes {
                     Err(PipeError::Timeout) => {}
                     Err(e) => {
                         me.log(Level::Error, format_args!("the UI pipe of session {session} failed: {e}"));
+                        me.sessions.forget(session);
                         return;
                     }
                 }
@@ -140,7 +172,10 @@ impl UiPipes {
         });
         match accept {
             Ok(h) => lock(&self.threads).push(h),
-            Err(e) => self.log(Level::Error, format_args!("cannot start the UI pipe thread: {e}")),
+            Err(e) => {
+                self.log(Level::Error, format_args!("cannot start the UI pipe thread: {e}"));
+                self.sessions.forget(session);
+            }
         }
     }
 
@@ -155,7 +190,8 @@ impl UiPipes {
             Ok(s) => return refuse(&format!("it runs in session {s}")),
             Err(e) => return refuse(&e.to_string()),
         }
-        let (Ok(for_identity), Ok(for_cancel)) = (conn.try_clone(), conn.try_clone()) else {
+        let (Ok(for_identity), Ok(for_cancel), Ok(for_cut)) = (conn.try_clone(), conn.try_clone(), conn.try_clone())
+        else {
             return refuse("pipe handle");
         };
         let Ok((mut reader_half, writer_half)) = conn.split() else { return refuse("pipe split") };
@@ -206,7 +242,10 @@ impl UiPipes {
         let reader = FrameReader::new(reader_half);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         lock(&self.open).push((id, for_cancel));
-        let end = self.hub.serve(reader, writer, info);
+        // A UI that stops reading its messages is cut by the hub: cancelling the pipe's I/O unblocks the hub's reader and
+        // writer, `serve` ends and the pipe closes, so the UI sees the end of the pipe and reconnects.
+        let for_cut = Mutex::new(for_cut);
+        let end = self.hub.serve_cancellable(reader, writer, info, Arc::new(move || lock(&for_cut).cancel_io()));
         lock(&self.open).retain(|(i, _)| *i != id);
         if let Err(e) = end {
             self.log(Level::Debug, format_args!("a UI connection ended: {e}"));
@@ -223,5 +262,56 @@ impl UiPipes {
         for t in threads {
             let _ = t.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::OpenSessions;
+
+    /// The SID lookup of a session, scripted: it fails until the user has logged on.
+    struct Sids {
+        logged_on: Cell<bool>,
+        asked: Cell<u32>,
+    }
+
+    impl Sids {
+        fn lookup(&self, session: u32) -> Result<String, String> {
+            self.asked.set(self.asked.get() + 1);
+            if self.logged_on.get() {
+                Ok(format!("S-1-5-21-{session}"))
+            } else {
+                Err(format!("no user token for session {session}"))
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_whose_sid_lookup_failed_at_the_logon_screen_gets_its_pipe_at_the_next_try() {
+        let sessions = OpenSessions::default();
+        let sids = Sids { logged_on: Cell::new(false), asked: Cell::new(0) };
+        let open = || sids.lookup(2).ok();
+        // Boot: the console is the logon screen, nobody has a token yet.
+        assert!(sessions.ensure(2, open).is_none());
+        // The user logs on: the ConsoleChanged that follows must try again and succeed.
+        sids.logged_on.set(true);
+        assert_eq!(sessions.ensure(2, open).as_deref(), Some("S-1-5-21-2"));
+        assert_eq!(sids.asked.get(), 2);
+        // Served now: no second listener for the same session.
+        assert!(sessions.ensure(2, open).is_none());
+        assert_eq!(sids.asked.get(), 2, "a served session is not looked up again");
+    }
+
+    #[test]
+    fn a_listener_that_ended_is_made_again_and_sessions_are_independent() {
+        let sessions = OpenSessions::default();
+        assert_eq!(sessions.ensure(1, || Some("pipe-1")), Some("pipe-1"));
+        assert_eq!(sessions.ensure(3, || Some("pipe-3")), Some("pipe-3"));
+        assert_eq!(sessions.ensure(1, || Some("again")), None);
+        sessions.forget(1);
+        assert_eq!(sessions.ensure(1, || Some("pipe-1b")), Some("pipe-1b"));
+        assert_eq!(sessions.ensure(3, || Some("again")), None, "forgetting one session leaves the other served");
     }
 }

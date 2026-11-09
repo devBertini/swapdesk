@@ -14,9 +14,10 @@ use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
-use swapdesk_platform::{DecodedFrame, ErrorKind, NativeSurface, Rect, Renderer, ScaleMode};
+use swapdesk_app::shared::cursor::shown as cursor_shown;
+use swapdesk_platform::{CursorShape, CursorUpdate, DecodedFrame, ErrorKind, NativeSurface, Rect, Renderer, ScaleMode};
 use swapdesk_render_mac::{Counters, MacRenderer, RendererOptions};
-use swapdesk_shell_mac::VideoArea;
+use swapdesk_shell_mac::{VideoArea, ViewCursor, set_view_cursor};
 
 use crate::decode::Shared;
 use crate::handoff::{Drained, Handoff};
@@ -76,6 +77,16 @@ pub struct MainSide {
     layout: Arc<LayoutState>,
     handoff: Arc<Handoff<MainFrame>>,
     observer: Option<PresentObserver>,
+    /// The last cursor update applied, without its shape, and whether it was drawn: applied again when the local
+    /// pointer switch flips.
+    last_cursor: Option<(CursorUpdate, bool)>,
+    /// The local pointer switch the renderer's cursor was last set under.
+    local_applied: bool,
+    /// The host's current cursor shape, for the local pointer.
+    shape: Option<CursorShape>,
+    /// What the video view's pointer was last set to: the shape id and the backing scale it was built for, or `None`
+    /// for the system arrow.
+    view_cursor: Option<(u32, u64)>,
 }
 
 impl MainSide {
@@ -95,8 +106,23 @@ impl MainSide {
     ) -> Result<Self, String> {
         let mut renderer = MacRenderer::new(RendererOptions { backing_scale: Some(backing) });
         renderer.attach(NativeSurface::MacOs { parent_layer }, area).map_err(|e| format!("renderer attach: {e:?}"))?;
-        let mut side =
-            Self { renderer, view, area, backing, scale, frame: None, display: 0, shared, layout, handoff, observer };
+        let mut side = Self {
+            renderer,
+            view,
+            area,
+            backing,
+            scale,
+            frame: None,
+            display: 0,
+            shared,
+            layout,
+            handoff,
+            observer,
+            last_cursor: None,
+            local_applied: false,
+            shape: None,
+            view_cursor: None,
+        };
         let _ = side.renderer.set_scale(scale);
         // Anything the decode thread queued before the window was up is not for this renderer; the wake is re-armed.
         side.handoff.clear();
@@ -171,12 +197,63 @@ impl MainSide {
         if let Some(f) = drained.frame {
             self.present(f);
         }
+        let local = self.shared.local_pointer.load(Ordering::SeqCst);
+        let flipped = local != self.local_applied;
+        self.local_applied = local;
+        let had_items = !drained.cursors.is_empty();
         for item in drained.cursors {
-            match self.renderer.set_cursor(&item.update) {
-                Ok(()) => self.shared.cursor_drawn.store(item.drawn, Ordering::SeqCst),
-                Err(e) => self.shared.error("cursor", format!("{e:?}")),
-            }
+            self.set_cursor(&item.update, item.drawn, local);
+            self.last_cursor = Some((CursorUpdate { shape: None, ..item.update }, item.drawn));
         }
+        if flipped
+            && !had_items
+            && let Some((last, drawn)) = self.last_cursor.clone()
+        {
+            self.set_cursor(&last, drawn, local);
+        }
+    }
+
+    fn set_cursor(&mut self, update: &CursorUpdate, drawn: bool, local: bool) {
+        if let Some(s) = &update.shape {
+            self.shape = Some(s.clone());
+        }
+        let shown = cursor_shown(update, local);
+        match self.renderer.set_cursor(&shown) {
+            Ok(()) => self.shared.cursor_drawn.store(drawn && !local, Ordering::SeqCst),
+            Err(e) => self.shared.error("cursor", format!("{e:?}")),
+        }
+        self.apply_view_cursor(local);
+    }
+
+    /// While the viewer controls, the pointer over the video takes the host's shape (at its pixel size, as the drawn
+    /// arrow had it); otherwise the system arrow.
+    fn apply_view_cursor(&mut self, local: bool) {
+        let want = if local { self.shape.as_ref().map(|s| (s.id, self.backing.to_bits())) } else { None };
+        if want == self.view_cursor {
+            return;
+        }
+        let Some(view) = self.view.clone() else { return };
+        match (want, &self.shape) {
+            (Some(_), Some(shape)) => match swapdesk_render_mac::cursor_image(shape) {
+                Ok(image) => {
+                    let b = self.backing;
+                    set_view_cursor(
+                        &view,
+                        ViewCursor::Image {
+                            image: &image,
+                            size: (f64::from(shape.width) / b, f64::from(shape.height) / b),
+                            hot: (f64::from(shape.hot_x) / b, f64::from(shape.hot_y) / b),
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.shared.error("cursor", format!("{e:?}"));
+                    set_view_cursor(&view, ViewCursor::System);
+                }
+            },
+            _ => set_view_cursor(&view, ViewCursor::System),
+        }
+        self.view_cursor = want;
     }
 
     fn present(&mut self, f: MainFrame) {
@@ -220,6 +297,9 @@ impl MainSide {
 
 impl Drop for MainSide {
     fn drop(&mut self) {
+        if let Some(view) = &self.view {
+            set_view_cursor(view, ViewCursor::System);
+        }
         self.layout.set(None);
         self.shared.cursor_drawn.store(false, Ordering::SeqCst);
         self.renderer.detach();

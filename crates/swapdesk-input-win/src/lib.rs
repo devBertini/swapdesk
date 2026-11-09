@@ -20,7 +20,7 @@ mod hook;
 mod winsend;
 
 #[cfg(windows)]
-pub use hook::WinGrabber;
+pub use hook::{ShortcutHandler, WinGrabber};
 #[cfg(windows)]
 pub use winsend::{SendInputInjector, virtual_screen};
 

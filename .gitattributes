@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+# Windows scripts are stored with CRLF as written, never converted (the .ps1 files carry a BOM and run on Windows PowerShell 5.1).
+*.cmd -text
+*.ps1 -text
+
+*.png binary
+*.ico binary
+*.icns binary
+*.wav binary
+*.ttf binary
+*.h264 binary
+*.zip binary

@@ -46,3 +46,14 @@ fn tokens_nonces_and_bodies_are_redacted_in_debug() {
     };
     assert_hidden(&format!("{key:?}"), &["127", "usage:"]);
 }
+
+#[test]
+fn a_cursor_shape_shows_its_size_and_never_its_pixels() {
+    let shape = CursorShape {
+        header: CursorShapeHeader { shape_id: 1, width: 2, height: 2, hot_x: 0, hot_y: 0 },
+        rgba: vec![233; 16],
+    };
+    let shown = format!("{shape:?}");
+    assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "pixels leaked: {shown}");
+    assert!(shown.contains("<redacted 16 bytes>"), "{shown}");
+}

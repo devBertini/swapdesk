@@ -492,6 +492,56 @@ fn events_flow_through_the_channel_and_a_repeated_resume_arrives_once() {
 }
 
 #[test]
+fn a_wake_returns_next_event_at_once_with_no_event_and_does_not_end_the_watcher() {
+    let (tx, mut watcher) = session_channel();
+    let began = std::time::Instant::now();
+    let waker = {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            tx.wake();
+        })
+    };
+    // A long wait is cut short by the wake, which reads as "nothing to report, look at your own queues".
+    assert_eq!(watcher.next_event(Duration::from_secs(20)).unwrap(), None);
+    let waited = began.elapsed();
+    assert!((Duration::from_millis(100)..Duration::from_secs(5)).contains(&waited), "waited {waited:?}");
+    waker.join().unwrap();
+    tx.network_changed();
+    assert_eq!(watcher.next_event(Duration::from_millis(200)).unwrap(), Some(SessionEvent::NetworkChanged));
+}
+
+#[test]
+fn a_dir_watch_sleeps_until_a_file_appears_and_wakes_for_each_change() {
+    let dir = Temp::new();
+    let watch = std::sync::Arc::new(DirWatch::new(&dir.0).unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = {
+        let watch = std::sync::Arc::clone(&watch);
+        std::thread::spawn(move || {
+            while watch.wait().is_ok() {
+                if tx.send(()).is_err() {
+                    return;
+                }
+            }
+        })
+    };
+    // Nothing changes: the thread sleeps in the kernel and reports nothing.
+    assert!(rx.recv_timeout(Duration::from_millis(400)).is_err());
+    let began = std::time::Instant::now();
+    fs::write(dir.0.join("stop"), b"").unwrap();
+    rx.recv_timeout(WAIT).expect("woken by the new file");
+    assert!(began.elapsed() < Duration::from_secs(2), "woke {:?} after the file", began.elapsed());
+    // Armed again: deleting it is the next change.
+    fs::remove_file(dir.0.join("stop")).unwrap();
+    rx.recv_timeout(WAIT).expect("woken by the removal");
+    drop(rx);
+    // The waiter ends at its next wake (the send fails): make one.
+    fs::write(dir.0.join("again"), b"").unwrap();
+    waiter.join().unwrap();
+}
+
+#[test]
 fn a_dropped_sender_closes_the_watcher() {
     let (tx, mut watcher) = session_channel();
     drop(tx);

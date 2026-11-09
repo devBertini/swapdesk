@@ -7,12 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use quinn::{Connection, Endpoint, VarInt};
+use quinn::{Connection, VarInt};
 use swapdesk_platform::Clock;
 use swapdesk_proto::{
     Capabilities, Desktop, Display, ErrorCode, Feature, GrantMode, Hello, Intent, Os, PermissionSet, PromptPending,
 };
-use swapdesk_trust::{DeviceId, TrustHandle, accept_session};
+use swapdesk_trust::{DeviceId, TrustHandle};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::actor::{Actor, Side};
@@ -341,19 +341,6 @@ impl HostService {
                 changed: Notify::new(),
                 next_request: AtomicU64::new(1),
             }),
-        }
-    }
-
-    /// Accepts connections on the session endpoint until it closes: the handshake and the post-handshake gate
-    /// (`swapdesk-trust`), then one task per session. The LAN guard belongs to the caller of `accept`.
-    pub async fn run_endpoint(&self, endpoint: Endpoint) {
-        while let Some(incoming) = endpoint.accept().await {
-            let me = self.clone();
-            tokio::spawn(async move {
-                if let Ok((conn, device)) = accept_session(incoming, &*me.inner.trust).await {
-                    me.serve(conn, device).await;
-                }
-            });
         }
     }
 

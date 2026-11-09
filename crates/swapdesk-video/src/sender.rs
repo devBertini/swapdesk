@@ -30,10 +30,20 @@ pub const VIDEO_PRIORITY: i32 = 1;
 pub const RESET_STALE: u32 = 0x1001;
 
 /// A frame to send: the header says what it is; `payload_len` is set from the payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
     pub header: swapdesk_proto::VideoHeader,
     pub payload: Vec<u8>,
+}
+
+/// The payload is the screen's pixels (up to 8 MiB): `Debug` shows its size only (CONTRACTS.md C2.3).
+impl std::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame")
+            .field("header", &self.header)
+            .field("payload", &swapdesk_proto::RedactedLen(self.payload.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -395,5 +405,31 @@ async fn push(stream: &mut SendStream, wire: &[u8], reset: &Notify, limit: Durat
             let _ = stream.reset(VarInt::from_u32(RESET_STALE));
             PushEnd::TimedOut
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use swapdesk_proto::{Codec, VideoHeader};
+
+    #[test]
+    fn debug_of_a_frame_shows_its_size_and_never_its_bytes() {
+        let header = VideoHeader {
+            keyframe: true,
+            config: false,
+            discontinuity: false,
+            display_id: 0,
+            frame_id: 3,
+            capture_us: 0,
+            encode_us: 0,
+            width: 1920,
+            height: 1080,
+            codec: Codec::H264,
+            payload_len: 64,
+        };
+        let shown = format!("{:?}", Frame { header, payload: vec![233; 64] });
+        assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "payload bytes leaked: {shown}");
+        assert!(shown.contains("<redacted 64 bytes>"), "{shown}");
     }
 }

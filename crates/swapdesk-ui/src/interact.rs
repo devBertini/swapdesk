@@ -5,9 +5,13 @@
 
 use crate::api::*;
 use crate::format;
+use crate::shortcuts::ReleaseKey;
 use crate::state::*;
 use crate::strings::MsgKey;
 use crate::tokens::layout::PAIR_COUNTDOWN_S;
+
+/// Longest local name of a paired device, in bytes: what the trust record stores.
+const MAX_DEVICE_NAME: usize = 64;
 
 mod files_panel;
 pub use files_panel::FILES_PAGE;
@@ -18,10 +22,19 @@ pub(crate) use files_panel::FilesPanel;
 pub enum ControlId {
     // sidebar
     Device(u16),
-    PairThisComputer,
-    NavActivity,
+    NavHome,
     NavSettings,
+    // home
+    PairThisComputer,
+    /// "Adicionar" beside the address field: sends what the field holds, as Enter does.
+    AddAddress,
+    /// "Ver tudo" on the home's recent activity card: opens the Atividade screen.
+    HomeActivityAll,
     // device header, tabs, overview
+    /// "Renomear": turns the header's name into the inline field.
+    RenameDevice,
+    RenameSave,
+    RenameCancel,
     ViewOnly,
     Control,
     /// "Acordar": wake an asleep paired device (F-WAKE-01).
@@ -180,7 +193,7 @@ impl ControlSpec {
     }
 }
 
-struct Specs {
+pub(crate) struct Specs {
     v: Vec<ControlSpec>,
     next_static: u16,
     region: Region,
@@ -193,14 +206,14 @@ impl Specs {
     fn region(&mut self, region: Region) {
         self.region = region;
     }
-    fn add(&mut self, id: ControlId, role: UiRole, label: impl Into<String>) -> &mut ControlSpec {
+    pub(crate) fn add(&mut self, id: ControlId, role: UiRole, label: impl Into<String>) -> &mut ControlSpec {
         self.v.push(ControlSpec::new(id, role, self.region, label));
         self.v.last_mut().expect("just pushed")
     }
-    fn button(&mut self, id: ControlId, label: impl Into<String>) {
+    pub(crate) fn button(&mut self, id: ControlId, label: impl Into<String>) {
         self.add(id, UiRole::Button, label);
     }
-    fn text(&mut self, role: UiRole, label: impl Into<String>) {
+    pub(crate) fn text(&mut self, role: UiRole, label: impl Into<String>) {
         let id = ControlId::Static(self.next_static);
         self.next_static += 1;
         self.add(id, role, label);
@@ -248,28 +261,27 @@ impl UiState {
             self.pairing_controls(&mut s, p);
             return s.v;
         }
-        // sidebar
+        // sidebar: Início, the device lists, Ajustes
         s.region(Region::Sidebar);
+        let c = s.add(ControlId::NavHome, UiRole::Button, self.name_of(MsgKey::NavHome));
+        c.selected = self.nav() == Nav::Home;
         let (paired, network) = self.device_groups();
         for i in paired.iter().chain(network.iter()) {
             let d = &self.devices[*i];
             let label = format!("{}, {}", d.name, format::status_line(lang, d));
-            let selected = self.selected_device().is_some_and(|x| x.id == d.id) && self.nav == Nav::Devices;
+            let selected = self.selected_device().is_some_and(|x| x.id == d.id) && self.nav() == Nav::Devices;
             let c = s.add(ControlId::Device(*i as u16), UiRole::Button, label);
             c.selected = selected;
         }
-        s.add(ControlId::Edit(EditId::Address), UiRole::TextInput, self.name_of(MsgKey::AddressLabel));
-        s.button(ControlId::PairThisComputer, self.name_of(MsgKey::PairThisComputer));
-        let c = s.add(ControlId::NavActivity, UiRole::Button, self.name_of(MsgKey::NavActivity));
-        c.selected = self.nav == Nav::Activity;
         let c = s.add(ControlId::NavSettings, UiRole::Button, self.name_of(MsgKey::NavSettings));
-        c.selected = self.nav == Nav::Settings;
+        c.selected = self.nav() == Nav::Settings;
         s.region(Region::Content);
         if let Some(e) = &self.error {
             s.text(UiRole::Text, self.error_text(e));
             s.button(ControlId::ErrorClose, self.name_of(MsgKey::Close));
         }
-        match self.nav {
+        match self.nav() {
+            Nav::Home => self.home_controls(&mut s),
             Nav::Devices => self.devices_controls(&mut s),
             Nav::Activity => self.activity_controls(&mut s),
             Nav::Settings => self.settings_controls(&mut s),
@@ -277,25 +289,47 @@ impl UiState {
         s.v
     }
 
+    /// The crash notice and the "no computer found" card (or the plain empty line): what the home shows when no
+    /// device page is open.
+    pub(crate) fn crash_and_empty_controls(&self, s: &mut Specs) {
+        if self.crash_notice {
+            let (title, body, button) = self.notice_texts(NoticeKind::Crash);
+            s.text(UiRole::Heading, title);
+            s.text(UiRole::Text, body);
+            s.button(ControlId::Notice(NoticeKind::Crash), button);
+        }
+        if self.no_computer_card() {
+            s.text(UiRole::Heading, self.name_of(MsgKey::NoComputerTitle));
+            s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
+            s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
+        } else if self.devices.is_empty() && self.fetch(DataKind::Devices) == Fetch::Ready {
+            s.text(UiRole::Text, self.name_of(MsgKey::EmptyDevices));
+        }
+    }
+
     fn devices_controls(&self, s: &mut Specs) {
         let lang = self.lang;
         let Some(d) = self.selected_device() else {
-            if self.crash_notice {
-                let (title, body, button) = self.notice_texts(NoticeKind::Crash);
-                s.text(UiRole::Heading, title);
-                s.text(UiRole::Text, body);
-                s.button(ControlId::Notice(NoticeKind::Crash), button);
-            }
-            if self.no_computer_card() {
-                s.text(UiRole::Heading, self.name_of(MsgKey::NoComputerTitle));
-                s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
-                s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
-            } else {
-                s.text(UiRole::Text, self.name_of(MsgKey::EmptyDevices));
-            }
+            self.crash_and_empty_controls(s);
             return;
         };
-        s.text(UiRole::Heading, d.name.clone());
+        match self.renaming().filter(|_| self.rename_available(d)) {
+            Some(r) => {
+                let c = s.add(ControlId::Edit(EditId::Rename), UiRole::TextInput, self.name_of(MsgKey::RenameLabel));
+                c.value = Some(d.name.clone());
+                s.button(ControlId::RenameSave, self.name_of(MsgKey::RenameSave));
+                s.button(ControlId::RenameCancel, self.name_of(MsgKey::Cancel));
+                if let Some(e) = &r.error {
+                    s.text(UiRole::Text, self.rename_error_text(e));
+                }
+            }
+            None => {
+                s.text(UiRole::Heading, d.name.clone());
+                if self.rename_available(d) {
+                    s.button(ControlId::RenameDevice, self.name_of(MsgKey::RenameAction));
+                }
+            }
+        }
         s.text(UiRole::Text, format::detail_line(lang, d));
         if let Some(w) = self.waking_session().filter(|w| w.device_id == d.id) {
             let _ = w;
@@ -564,6 +598,8 @@ impl UiState {
         c.value = Some(set.name.clone());
         let c = s.add(ControlId::Select(SelectId::Language), UiRole::ComboBox, self.name_of(MsgKey::FieldLanguage));
         c.value = Some(self.select_value(SelectId::Language));
+        let c = s.add(ControlId::Select(SelectId::Theme), UiRole::ComboBox, self.name_of(MsgKey::FieldTheme));
+        c.value = Some(self.select_value(SelectId::Theme));
         s.switch(ControlId::OpenAtLogin, self.name_of(MsgKey::OpenAtLogin), set.open_at_login, None);
         s.text(
             UiRole::Text,
@@ -582,15 +618,41 @@ impl UiState {
         c.value = Some(self.select_value(SelectId::Keyboard));
         c.description = Some(self.name_of(MsgKey::SendKeysHint));
         s.switch(ControlId::SwapCtrlCmd, self.name_of(MsgKey::SwapCtrlCmd), set.swap_ctrl_cmd, None);
+        s.text(UiRole::Heading, self.name_of(MsgKey::GroupShortcuts));
+        let c = s.add(ControlId::Select(SelectId::ReleaseKey), UiRole::ComboBox, self.name_of(MsgKey::ReleaseKeyLabel));
+        c.value = Some(self.select_value(SelectId::ReleaseKey));
+        c.description = Some(self.name_of(MsgKey::ReleaseKeyHint));
+        let c = s.add(
+            ControlId::Select(SelectId::FullscreenMonitor),
+            UiRole::ComboBox,
+            self.name_of(MsgKey::FullscreenMonitorLabel),
+        );
+        c.value = Some(self.select_value(SelectId::FullscreenMonitor));
+        for (what, keys) in self.shortcut_rows() {
+            s.text(UiRole::Text, format!("{what}: {keys}"));
+        }
+        s.text(UiRole::Text, self.name_of(MsgKey::ShortcutsKeepHint));
     }
 
     /// The options of a select with the current one marked.
     pub fn select_options(&self, id: SelectId) -> Vec<(String, bool)> {
+        match id {
+            SelectId::ReleaseKey => {
+                return ReleaseKey::ALL.iter().map(|k| (self.release_key_name(*k), *k == self.release_key)).collect();
+            }
+            SelectId::FullscreenMonitor => return self.fullscreen_monitor_options(),
+            _ => {}
+        }
         let Some(set) = &self.settings else { return Vec::new() };
         match id {
             SelectId::Language => vec![
                 (self.name_of(MsgKey::LangPt), set.language == Language::PtBr),
                 (self.name_of(MsgKey::LangEn), set.language == Language::En),
+            ],
+            SelectId::Theme => vec![
+                (self.name_of(MsgKey::ThemeSystem), set.theme == Theme::System),
+                (self.name_of(MsgKey::ThemeLight), set.theme == Theme::Light),
+                (self.name_of(MsgKey::ThemeDark), set.theme == Theme::Dark),
             ],
             SelectId::Quality => vec![
                 (self.name_of(MsgKey::QualityAuto), set.quality == Quality::Auto),
@@ -602,6 +664,7 @@ impl UiState {
                 (self.name_of(MsgKey::KeyboardPhysical), set.keyboard_mode == KeyboardMode::Physical),
                 (self.name_of(MsgKey::KeyboardText), set.keyboard_mode == KeyboardMode::Text),
             ],
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor => Vec::new(),
         }
     }
 
@@ -859,7 +922,8 @@ impl UiState {
         let on = self.grab_on;
         let c = s.add(ControlId::TbGrab, UiRole::Button, self.name_of(MsgKey::TbGrab));
         c.toggled = Some(on);
-        s.button(ControlId::TbKeys, self.name_of(MsgKey::TbKeys));
+        let c = s.add(ControlId::TbKeys, UiRole::Button, self.name_of(MsgKey::TbKeys));
+        c.description = Some(self.shortcuts_tooltip());
         for (id, key, tab) in [
             (ControlId::TbTerminal, MsgKey::TbTerminal, DrawerTab::Terminal),
             (ControlId::TbFiles, MsgKey::TbFiles, DrawerTab::Files),
@@ -875,14 +939,21 @@ impl UiState {
             let c = s.add(id, UiRole::Button, label);
             c.toggled = Some(open);
         }
-        s.button(ControlId::TbSwap, self.name_of(MsgKey::TbSwap));
-        // A request is waiting for the other side: one at a time, so the button waits too.
-        if self.swap_requested()
-            && let Some(c) = s.v.last_mut()
-        {
-            c.disabled = true;
+        // Swap between Windows and macOS is not in 1.0: the button exists only toward a machine of this OS.
+        if self.viewer_session().is_none_or(|v| self.swap_offered(v)) {
+            s.button(ControlId::TbSwap, self.name_of(MsgKey::TbSwap));
+            // A request is waiting for the other side: one at a time, so the button waits too.
+            if self.swap_requested()
+                && let Some(c) = s.v.last_mut()
+            {
+                c.disabled = true;
+            }
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
+        if !self.session_bar_visible() {
+            // Full screen with the bar hidden: its controls are not on screen, so they are not reachable either.
+            s.v.retain(|c| c.region != Region::Toolbar);
+        }
         if let Some(open) = self.drawer {
             s.region(Region::Drawer);
             for (tab, key) in [
@@ -953,14 +1024,26 @@ impl UiState {
             self.name_of(MsgKey::BannerOpenChat)
         };
         s.button(ControlId::BannerChat, chat_label);
-        s.button(ControlId::BannerSwap, self.name_of(MsgKey::TbSwap));
-        if self.swap_requested()
-            && let Some(c) = s.v.last_mut()
-        {
-            c.disabled = true;
+        if self.swap_offered(h) {
+            s.button(ControlId::BannerSwap, self.name_of(MsgKey::TbSwap));
+            if self.swap_requested()
+                && let Some(c) = s.v.last_mut()
+            {
+                c.disabled = true;
+            }
         }
         s.button(ControlId::BannerDisconnect, self.name_of(MsgKey::Disconnect));
         s.v
+    }
+
+    /// Whether "Inverter" is offered in session `s`: swap between Windows and macOS is not in 1.0, so only when the
+    /// peer runs this machine's OS. When either OS is not known yet the control stays (the service refuses a swap
+    /// toward another OS on its own).
+    pub fn swap_offered(&self, s: &SessionView) -> bool {
+        match (self.this.as_ref(), self.device_by_id(&s.device_id)) {
+            (Some(this), Some(peer)) => this.os == peer.os,
+            _ => true,
+        }
     }
 
     /// "MacBook do escritório controla este computador há 12 min".
@@ -1010,7 +1093,8 @@ impl UiState {
                     a.changed = self.select_device(&id);
                 }
             }
-            ControlId::NavActivity => {
+            ControlId::NavHome => a.changed = self.navigate(Nav::Home),
+            ControlId::HomeActivityAll => {
                 a.changed = self.navigate(Nav::Activity);
                 // Cached (R-UI-3): asked once, then kept fresh by events. Built on first open (R-UI-11).
                 if self.fetch(DataKind::Activity) == Fetch::Missing {
@@ -1024,6 +1108,10 @@ impl UiState {
                     self.begin_fetch(DataKind::Settings);
                     a.commands.push(Command::GetSettings);
                 }
+            }
+            ControlId::AddAddress => {
+                a.effect = Some(Effect::SubmitEdit(EditId::Address));
+                a.changed = Changed::NONE;
             }
             ControlId::PairThisComputer => {
                 self.pairing = Some(PairingView {
@@ -1068,6 +1156,17 @@ impl UiState {
                     }
                     a.commands.push(Command::SetGrants { device_id: d.id, grants });
                 }
+            }
+            ControlId::RenameDevice => {
+                if let Some(d) = self.selected_device().filter(|d| d.paired) {
+                    self.rename = Some(RenameDraft { device_id: d.id.clone(), error: None });
+                    a.changed = Changed::MAIN;
+                }
+            }
+            ControlId::RenameSave => a.effect = Some(Effect::SubmitEdit(EditId::Rename)),
+            ControlId::RenameCancel => {
+                self.rename = None;
+                a.changed = Changed::MAIN;
             }
             ControlId::Forget => {
                 if let Some(d) = self.selected_device() {
@@ -1257,6 +1356,9 @@ impl UiState {
             ControlId::TbTerminal => self.toggle_drawer(DrawerTab::Terminal, &mut a),
             ControlId::TbFiles => self.toggle_drawer(DrawerTab::Files, &mut a),
             ControlId::TbChat => self.toggle_drawer(DrawerTab::Chat, &mut a),
+            // Not offered toward another OS (never drawn): an activation that still arrives does nothing.
+            ControlId::TbSwap if self.viewer_session().is_some_and(|v| !self.swap_offered(v)) => {}
+            ControlId::BannerSwap if self.host_session().is_some_and(|h| !self.swap_offered(h)) => {}
             ControlId::TbSwap | ControlId::BannerSwap if self.swap_requested() => a.changed = Changed::NONE,
             ControlId::TbSwap | ControlId::BannerSwap => {
                 if id == ControlId::TbSwap {
@@ -1383,9 +1485,12 @@ impl UiState {
         let mut new = old.clone();
         f(&mut new);
         self.undo_slot = Some(Undo::Settings(Box::new(old)));
+        self.lang = new.language;
+        self.theme = new.theme;
         self.settings = Some(new.clone());
         a.changed = Changed::ALL;
         a.commands.push(Command::SetSettings { settings: new });
+        self.save_prefs();
     }
 
     fn activate_dialog(&mut self, id: ControlId, a: &mut Activation) {
@@ -1499,18 +1604,46 @@ impl UiState {
 
     /// The user chose option `index` of a select.
     pub fn choose(&mut self, id: SelectId, index: usize) -> Activation {
+        match id {
+            SelectId::ReleaseKey => {
+                let key = ReleaseKey::ALL[index.min(ReleaseKey::ALL.len() - 1)];
+                let command = self.set_release_key(key);
+                return Activation { changed: Changed::ALL, commands: vec![command], ..Activation::default() };
+            }
+            SelectId::FullscreenMonitor => return self.choose_fullscreen_monitor(index),
+            _ => {}
+        }
         let mut a = Activation { changed: Changed::ALL, ..Activation::default() };
         self.toggle_setting(&mut a, |s| match id {
             SelectId::Language => s.language = if index == 0 { Language::PtBr } else { Language::En },
+            SelectId::Theme => s.theme = [Theme::System, Theme::Light, Theme::Dark][index.min(2)],
             SelectId::Quality => s.quality = [Quality::Auto, Quality::Text, Quality::Motion][index.min(2)],
             SelectId::Keyboard => {
                 s.keyboard_mode = [KeyboardMode::Auto, KeyboardMode::Physical, KeyboardMode::Text][index.min(2)]
             }
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor => {}
         });
         if id == SelectId::Language {
             self.lang = self.settings.as_ref().map_or(self.lang, |s| s.language);
         }
+        if id == SelectId::Theme {
+            self.theme = self.settings.as_ref().map_or(self.theme, |s| s.theme);
+        }
+        self.save_prefs();
         a
+    }
+
+    /// "Renomear" is offered on the page of a paired device, except while it is being woken (that card replaces the page).
+    pub fn rename_available(&self, d: &DeviceView) -> bool {
+        d.paired && self.waking_session().is_none_or(|w| w.device_id != d.id)
+    }
+
+    /// The line under the rename field: what was wrong with the name, or the service's refusal.
+    pub fn rename_error_text(&self, error: &ApiError) -> String {
+        match &error.detail {
+            Some(m) => self.tm(m),
+            None => self.error_text(error),
+        }
     }
 
     /// The text of a native input was committed (Enter, the send button, focus lost).
@@ -1521,6 +1654,30 @@ impl UiState {
                 let text = text.trim().to_owned();
                 if !text.is_empty() && self.settings.as_ref().is_some_and(|s| s.name != text) {
                     self.toggle_setting(&mut a, |s| s.name = text);
+                }
+            }
+            EditId::Rename => {
+                let Some(device_id) = self.renaming().map(|r| r.device_id.clone()) else { return a };
+                let name = text.trim().to_owned();
+                let refused = if name.is_empty() {
+                    Some(MsgKey::RenameEmpty)
+                } else if name.len() > MAX_DEVICE_NAME {
+                    Some(MsgKey::RenameTooLong)
+                } else if name.chars().any(char::is_control) {
+                    Some(MsgKey::RenameControlChars)
+                } else {
+                    None
+                };
+                a.changed = Changed::MAIN;
+                if let Some(key) = refused {
+                    let error = ApiError { code: ApiCode::Invalid, detail: Some(Msg::new(key)) };
+                    self.rename = Some(RenameDraft { device_id, error: Some(error) });
+                } else if self.device_by_id(&device_id).is_some_and(|d| d.name == name) {
+                    // Nothing to change: the field just closes.
+                    self.rename = None;
+                } else {
+                    self.rename = Some(RenameDraft { device_id: device_id.clone(), error: None });
+                    a.commands.push(Command::RenameDevice { device_id, name });
                 }
             }
             EditId::Address => {

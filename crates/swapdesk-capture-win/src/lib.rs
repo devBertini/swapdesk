@@ -21,6 +21,8 @@ mod enumerate;
 #[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
+mod hdr;
+#[cfg(windows)]
 mod screen;
 #[cfg(windows)]
 mod watcher;
@@ -33,6 +35,8 @@ pub use desktop::InputDesktop;
 pub use enumerate::{AdapterReport, OutputReport, adapter_map, displays, video_memory_in_use};
 #[cfg(windows)]
 pub use gpu::{CpuImage, DevicePool, GpuDevice, GpuFrame};
+#[cfg(windows)]
+pub use hdr::scrgb_to_srgb8;
 #[cfg(windows)]
 pub use screen::{CaptureOptions, CaptureStats, DxgiScreen, gpu_payload};
 #[cfg(windows)]

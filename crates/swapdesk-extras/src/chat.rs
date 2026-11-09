@@ -14,7 +14,7 @@ pub const MAX_MESSAGES: usize = 500;
 /// `ChatMessage.text` limit in bytes (PROTOCOL.md 5.3).
 pub const MAX_TEXT: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChatEntry {
     pub msg_id: u32,
     pub text: String,
@@ -23,6 +23,19 @@ pub struct ChatEntry {
     pub mine: bool,
     /// Mine: the peer read it. Theirs: this side's user read it.
     pub read: bool,
+}
+
+/// Chat text is never logged (CONTRACTS.md C2.3): `Debug` shows its size only.
+impl core::fmt::Debug for ChatEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChatEntry")
+            .field("msg_id", &self.msg_id)
+            .field("text", &swapdesk_proto::RedactedLen(self.text.len()))
+            .field("sent_at_ms", &self.sent_at_ms)
+            .field("mine", &self.mine)
+            .field("read", &self.read)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +203,17 @@ mod tests {
 
     fn incoming(id: u32) -> ChatMessage {
         ChatMessage { msg_id: id, text: format!("m{id}"), sent_at_ms: 1 }
+    }
+
+    #[test]
+    fn debug_of_a_chat_entry_shows_its_size_and_never_the_text() {
+        let entry = ChatEntry { msg_id: 4, text: "segredo-do-chat".into(), sent_at_ms: 9, mine: true, read: false };
+        let shown = format!("{entry:?}");
+        assert!(!shown.contains("segredo"), "chat text leaked: {shown}");
+        assert!(shown.contains("<redacted 15 bytes>") && shown.contains("msg_id: 4"), "{shown}");
+        let mut log = ChatLog::default();
+        log.push_outgoing("outro-segredo".into(), 10);
+        assert!(!format!("{:?}", log.entries()).contains("segredo"));
     }
 
     #[test]

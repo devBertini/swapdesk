@@ -66,6 +66,18 @@ fn main() {
         Ok(p) => p,
         Err(e) => return message_box(&format!("Swapdesk could not start the viewer: {e}")),
     };
+    pipeline.set_waker(waker.clone());
+    // C5.1: the per-user settings (ui.bin under %APPDATA%/Swapdesk) are read before the first paint. A development
+    // instance (`--instance`, `--service-pid`) keeps its own defaults and never touches the user's file.
+    if options.instance.is_none() && options.service_pid.is_none() {
+        swapdesk_ui::prefs::set_note_hook(|line| swapdesk_shell_win::trace_line(&format!("swapdesk: {line}")));
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let dir = std::path::Path::new(&appdata).join("Swapdesk");
+            state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
+            let p = state.user_prefs();
+            pipeline.set_user_prefs(p.keyboard_mode, p.swap_ctrl_cmd, p.release_key);
+        }
+    }
     let backend: Arc<dyn UiBackend> = match connect::connect(&options, waker.clone(), pipeline.clone()) {
         Ok(service) => {
             pipeline.set_out(service.clone());

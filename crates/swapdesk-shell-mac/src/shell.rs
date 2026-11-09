@@ -15,19 +15,20 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox, NSBoxType,
-    NSControl, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSScrollView, NSTextField, NSTitlePosition, NSView,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK,
+    NSSavePanel, NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSRange, NSTimer, ns_string,
+    NSObjectProtocol, NSPoint, NSRange, NSString, NSTimer, ns_string,
 };
 use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::{layout, palette};
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
-    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, UiBackend,
+    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, Theme, UiBackend,
     UiState, WindowKind,
 };
 
@@ -38,6 +39,9 @@ use crate::video::VideoSlot;
 use crate::viewer_window::ViewerWindow;
 use crate::views::*;
 
+/// Receives a line the shell wants in the trace log.
+pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// What the other lanes plug into the viewer window.
 #[derive(Default, Clone)]
 pub struct ViewerHooks {
@@ -47,6 +51,8 @@ pub struct ViewerHooks {
     pub input: Option<Arc<dyn ViewerInput>>,
     /// Draw the "Inverter" button in the toolbar (its slot is always laid out in the model).
     pub show_swap: bool,
+    /// Told what the shell decided on its own at launch (login-item launch, status item), for the app's trace log.
+    pub note: Option<LaunchNote>,
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -68,11 +74,6 @@ define_class!(
             with_shell(|s| s.should_close(sender)).unwrap_or(true)
         }
 
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _n: &NSNotification) {
-            with_shell(|s| s.main_closed());
-        }
-
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, n: &NSNotification) {
             with_shell(|s| s.resized(n));
@@ -84,8 +85,39 @@ define_class!(
         }
     }
 
+    // SAFETY: `NSApplicationDelegate` has no safety requirements; the signatures are the protocol's.
+    unsafe impl NSApplicationDelegate for Controller {
+        #[unsafe(method(applicationDidFinishLaunching:))]
+        fn application_did_finish_launching(&self, _n: &NSNotification) {
+            with_shell(|s| s.did_finish_launching());
+        }
+
+        // A click on the Dock icon (or `open` on the running app) shows the main window again (D32).
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn application_should_handle_reopen(&self, _app: &NSApplication, _has_visible: bool) -> bool {
+            with_shell(|s| s.show_main());
+            false
+        }
+
+        // Closing the last window never ends the app: it keeps hosting (D32).
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn application_should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
+            false
+        }
+    }
+
     impl Controller {
         // SAFETY (all): the selectors are the ones the shell registers as control actions, timers and observers.
+        #[unsafe(method(openMain:))]
+        fn open_main(&self, _sender: &AnyObject) {
+            with_shell(|s| s.show_main());
+        }
+
+        #[unsafe(method(quitApp:))]
+        fn quit_app(&self, _sender: &AnyObject) {
+            with_shell(|s| s.quit());
+        }
+
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
             with_shell(|s| s.on_action(sender));
@@ -111,6 +143,13 @@ define_class!(
             with_shell(|s| s.text_changed(n));
         }
 
+        // Esc while the rename field is open: AppKit sends `cancelOperation:` up the responder chain (the window
+        // forwards it to its delegate, this controller).
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, _sender: Option<&AnyObject>) {
+            with_shell(|s| s.cancel_rename());
+        }
+
         #[unsafe(method(themeChanged:))]
         fn theme_changed(&self, _n: &NSNotification) {
             with_shell(|s| s.system_theme_changed());
@@ -126,6 +165,9 @@ impl Controller {
     }
 }
 
+/// `NSVariableStatusItemLength`: the item is as wide as its content.
+const VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
+
 // ---------- the shell ----------
 
 struct MainWindow {
@@ -133,6 +175,9 @@ struct MainWindow {
     actions: RefCell<Vec<Action>>,
     fields: RefCell<Vec<(EditId, Retained<NSTextField>)>>,
     last: RefCell<Option<MainModel>>,
+    /// The content view is being replaced: AppKit ends the old field's editing (`textDidEndEditing`, an action) in
+    /// the middle of `setContentView`, and that action is the old view's, not the person's.
+    rebuilding: Cell<bool>,
 }
 
 pub struct Shell {
@@ -149,7 +194,10 @@ pub struct Shell {
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce: RefCell<Debouncer>,
     started: std::time::Instant,
-    quitting: Cell<bool>,
+    /// The theme whose `NSApp.appearance` is in force (the app starts with none: Sistema).
+    appearance: std::cell::Cell<Theme>,
+    /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
+    status_item: RefCell<Option<Retained<NSStatusItem>>>,
 }
 
 thread_local! {
@@ -185,7 +233,11 @@ pub fn run_with_host(
 ) {
     let mtm = MainThreadMarker::new().expect("the macOS shell runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    let _shell = start(mtm, state, backend, waker, startup, hooks);
+    // The main window waits for `applicationDidFinishLaunching:`, which knows whether the system launched the app as a
+    // login item (then the window stays hidden, D32).
+    let shell = start_with(mtm, state, backend, waker, startup, hooks, false);
+    app.setDelegate(Some(ProtocolObject::from_ref(&*shell.controller)));
+    shell.install_status_item();
     app.run();
     clear_shell();
 }
@@ -198,6 +250,19 @@ pub(crate) fn start(
     waker: Arc<Waker>,
     startup: Vec<Command>,
     hooks: ViewerHooks,
+) -> Rc<Shell> {
+    start_with(mtm, state, backend, waker, startup, hooks, true)
+}
+
+/// As [`start`]; `show_now` false leaves the main window closed until [`Shell::show_main`].
+fn start_with(
+    mtm: MainThreadMarker,
+    state: UiState,
+    backend: Arc<dyn UiBackend>,
+    waker: Arc<Waker>,
+    startup: Vec<Command>,
+    hooks: ViewerHooks,
+    show_now: bool,
 ) -> Rc<Shell> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -223,6 +288,7 @@ pub(crate) fn start(
             actions: RefCell::new(Vec::new()),
             fields: RefCell::new(Vec::new()),
             last: RefCell::new(None),
+            rebuilding: Cell::new(false),
         },
         viewer: RefCell::new(None),
         tick_timer: RefCell::new(None),
@@ -230,19 +296,40 @@ pub(crate) fn start(
         debounce_timer: RefCell::new(None),
         debounce: RefCell::new(Debouncer::new()),
         started: std::time::Instant::now(),
-        quitting: Cell::new(false),
+        appearance: std::cell::Cell::new(Theme::System),
+        status_item: RefCell::new(None),
     });
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
 
     // The window appears before any answer; the requests go out right after, all together.
-    shell.main.window.makeKeyAndOrderFront(None);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
+    if show_now {
+        shell.show_main();
+    }
     shell.send_commands(startup);
     shell.refresh(Changed::ALL);
     shell.drain_backend();
     shell
+}
+
+/// The main window is on screen (the self-test reads it).
+pub fn main_window_visible() -> Option<bool> {
+    with_shell(|s| s.main.window.isVisible())
+}
+
+/// What a click on the Dock icon does: the main window comes back (the self-test calls it).
+pub fn reopen_main_window() {
+    with_shell(|s| s.show_main());
+}
+
+/// The close button of the main window (the self-test calls it): the window goes, the app stays.
+pub fn close_main_window() {
+    with_shell(|s| s.main.window.performClose(None));
+}
+
+/// The menu bar item exists and is visible.
+pub fn status_item_present() -> bool {
+    with_shell(|s| s.status_item.borrow().as_ref().is_some_and(|i| i.isVisible())).unwrap_or(false)
 }
 
 fn clear_shell() {
@@ -365,7 +452,17 @@ impl Shell {
             // The Mac shell has no crash marker yet (D12 is Windows first): OpenLogs is never produced there.
             // The file panel's pickers (stage 44) are a Windows shell feature for now: the Mac panel is a later stage.
             Some(Effect::PickFiles) | Some(Effect::PickReceiveFolder) => {}
-            Some(Effect::SubmitEdit(_)) | Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
+            // "Salvar" of the rename field: the field's text goes through `submit_edit` like Enter does.
+            Some(Effect::SubmitEdit(e)) => {
+                let text =
+                    self.main.fields.borrow().iter().find(|(id, _)| *id == e).map(|(_, f)| f.stringValue().to_string());
+                if let Some(text) = text {
+                    let again = self.state.borrow_mut().submit_edit(e, text);
+                    self.send_commands(again.commands);
+                    self.refresh(again.changed);
+                }
+            }
+            Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
         }
         self.send_commands(act.commands);
         self.refresh(act.changed);
@@ -392,6 +489,9 @@ impl Shell {
     // ----- what AppKit tells the shell -----
 
     fn on_action(&self, sender: &AnyObject) {
+        if self.main.rebuilding.get() {
+            return;
+        }
         let Some(control) = sender.downcast_ref::<NSControl>() else { return };
         let tag = control.tag();
         let (idx, parity) = ((tag / 2) as usize, tag % 2);
@@ -406,6 +506,8 @@ impl Shell {
             sender.downcast_ref::<objc2_app_kit::NSPopUpButton>().map(|p| p.indexOfSelectedItem().max(0) as usize);
         match action {
             Action::Control(id) => self.activate(id),
+            // The rename field acts on Return only: ending the editing by a click (on "Cancelar") must not save.
+            Action::Edit(EditId::Rename) if !self.return_pressed() => {}
             Action::Edit(e) => {
                 let text =
                     sender.downcast_ref::<NSTextField>().map(|f| f.stringValue().to_string()).unwrap_or_default();
@@ -454,6 +556,20 @@ impl Shell {
         }
     }
 
+    /// The event being handled is the Return or Enter key.
+    fn return_pressed(&self) -> bool {
+        NSApplication::sharedApplication(self.mtm)
+            .currentEvent()
+            .is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 36 | 76))
+    }
+
+    /// Esc: closes the rename field without saving.
+    fn cancel_rename(&self) {
+        if self.state.borrow().renaming().is_some() {
+            self.activate(ControlId::RenameCancel);
+        }
+    }
+
     fn clear_field(&self, e: EditId) {
         if let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e) {
             f.setStringValue(&ns(""));
@@ -496,13 +612,73 @@ impl Shell {
         true
     }
 
-    fn main_closed(&self) {
-        // Only the main window's close ends the program; the viewer's own `close()` after a session also lands here.
-        if self.main.window.isVisible() || self.quitting.get() {
-            return;
+    /// The main window comes up and takes the focus: the Dock icon, the status item, a request that needs an answer.
+    fn show_main(&self) {
+        if self.main.window.isMiniaturized() {
+            self.main.window.deminiaturize(None);
         }
-        self.quitting.set(true);
+        self.main.window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(self.mtm).activateIgnoringOtherApps(true);
+    }
+
+    /// The only ways out are the app menu's Quit (Cmd+Q) and the status item's Quit; closing the window just hides it.
+    fn quit(&self) {
         NSApplication::sharedApplication(self.mtm).terminate(None);
+    }
+
+    fn note(&self, text: &str) {
+        if let Some(note) = &self.hooks.note {
+            note(text);
+        }
+    }
+
+    /// `applicationDidFinishLaunching:`: the launch Apple event is still the one being handled, so it can say whether
+    /// the system started the app as a login item. Then the window stays hidden and only the status item shows.
+    fn did_finish_launching(&self) {
+        let login = crate::launch::launched_as_login_item();
+        self.note(&format!("launched as login item: {login}"));
+        if !login {
+            self.show_main();
+        }
+    }
+
+    /// The menu bar item: a template symbol (a short text when the symbol is missing) and its two-entry menu.
+    fn install_status_item(&self) {
+        let (open, quit) = {
+            let st = self.state.borrow();
+            (st.t(MsgKey::StatusOpen), st.t(MsgKey::StatusQuit))
+        };
+        let item = NSStatusBar::systemStatusBar().statusItemWithLength(VARIABLE_STATUS_ITEM_LENGTH);
+        if let Some(button) = item.button(self.mtm) {
+            let symbol =
+                NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("display"), Some(&ns(&open)));
+            match symbol {
+                Some(image) => {
+                    image.setTemplate(true);
+                    button.setImage(Some(&image));
+                }
+                None => button.setTitle(ns_string!("SD")),
+            }
+        }
+        let menu = NSMenu::new(self.mtm);
+        for (title, action) in [(open, sel!(openMain:)), (quit, sel!(quitApp:))] {
+            // SAFETY: the actions are the controller's `openMain:` and `quitApp:`.
+            let entry = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(self.mtm),
+                    &ns(&title),
+                    Some(action),
+                    &ns(""),
+                )
+            };
+            // SAFETY: the target is the controller, which lives as long as the shell; `setTarget` keeps it unretained.
+            unsafe { entry.setTarget(Some(self.target())) };
+            menu.addItem(&entry);
+        }
+        item.setMenu(Some(&menu));
+        *self.status_item.borrow_mut() = Some(item);
+        self.note("status item installed");
     }
 
     fn resized(&self, n: &NSNotification) {
@@ -532,11 +708,30 @@ impl Shell {
         self.refresh(c);
     }
 
+    /// Gives `NSApp` the appearance the theme setting asks for (Aqua, DarkAqua, or none for Sistema), once per change:
+    /// the native controls and the title bars follow it. Back on Sistema the OS's own appearance is read again, since
+    /// while one was forced `effectiveAppearance` showed the forced one.
+    fn sync_appearance(&self) -> Changed {
+        let theme = self.state.borrow().theme();
+        if self.appearance.replace(theme) == theme {
+            return Changed::NONE;
+        }
+        let app = NSApplication::sharedApplication(self.mtm);
+        let appearance = appearance_name(theme).and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
+        app.setAppearance(appearance.as_deref());
+        if theme == Theme::System {
+            let dark = system_dark();
+            return self.state.borrow_mut().set_dark(dark).union(Changed::MAIN);
+        }
+        Changed::MAIN
+    }
+
     // ----- drawing -----
 
     /// Windows follow the state (a viewer exists while a session does); then what changed is rebuilt, and only when
     /// its model differs from the last one drawn.
     fn refresh(&self, changed: Changed) {
+        let changed = changed.union(self.sync_appearance());
         if changed.is_none() {
             self.sync_timers();
             return;
@@ -615,8 +810,7 @@ impl Shell {
             })
             .map(|(e, _)| *e);
 
-        let mut actions = self.main.actions.borrow_mut();
-        actions.clear();
+        let mut actions = Vec::new();
         let mut fields = Vec::new();
         let mut ctx = Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: 0, fields: &mut fields };
         let root = PaintedView::create(mtm, bounds, Some(pal.canvas));
@@ -626,14 +820,17 @@ impl Shell {
 
         match &model.layout {
             MainLayout::Browse { sidebar: sb, content } => {
-                let side = sidebar(&mut ctx, sb, h, &values);
+                let side = sidebar(&mut ctx, sb, h);
                 root.addSubview(&side);
                 let cw = w - f64::from(layout::SIDEBAR_W);
                 let mut views: Vec<Retained<NSView>> = Vec::new();
                 if let Some(s) = &model.strip {
                     views.push(strip(&mut ctx, s, 560.0));
                 }
-                let body = blocks_stack(&mut ctx, content, 560.0, &values);
+                // The home's cards use the width of the window (up to 920); every other page keeps its 560 column.
+                let wide = content.iter().any(|b| matches!(b, Block::Cards(_)));
+                let body_w = if wide { (cw - 64.0).clamp(560.0, 920.0) } else { 560.0 };
+                let body = blocks_stack(&mut ctx, content, body_w, &values);
                 views.push(view_of(&body));
                 let col = vstack(&ctx, &views, 16.0);
                 let inner = fit(&col);
@@ -681,10 +878,23 @@ impl Shell {
             }
         }
         win.setTitle(&ns(&model.title));
+        // No borrow of the shell's cells is held across `setContentView`: it calls back into `on_action`.
+        self.main.rebuilding.set(true);
         win.setContentView(Some(&view_of(&root)));
+        self.main.rebuilding.set(false);
+        *self.main.actions.borrow_mut() = actions;
         *self.main.fields.borrow_mut() = fields;
 
-        if let Some(e) = focused
+        // The rename field opens with the keyboard in it and its text selected.
+        let rename_opened = model.has_field(EditId::Rename)
+            && !self.main.last.borrow().as_ref().is_some_and(|m| m.has_field(EditId::Rename));
+        if rename_opened && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == EditId::Rename) {
+            win.makeFirstResponder(Some(f));
+            if let Some(ed) = f.currentEditor() {
+                let len = f.stringValue().length();
+                ed.setSelectedRange(NSRange::new(0, len));
+            }
+        } else if let Some(e) = focused
             && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e)
         {
             win.makeFirstResponder(Some(f));
@@ -703,12 +913,7 @@ impl Shell {
             st.incoming_session_open() || st.dialog(WindowKind::Main).is_some()
         };
         if asks {
-            if self.main.window.isMiniaturized() {
-                self.main.window.deminiaturize(None);
-            }
-            self.main.window.makeKeyAndOrderFront(None);
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(self.mtm).activateIgnoringOtherApps(true);
+            self.show_main();
         }
     }
 

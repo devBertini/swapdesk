@@ -40,6 +40,12 @@ pub struct Palette {
     pub canvas: Color,
     pub surface: Color,
     pub sunken: Color,
+    /// Button and segmented-control fill.
+    pub control: Color,
+    /// Empty slots and skeletons.
+    pub placeholder: Color,
+    /// A switch's track when off.
+    pub track: Color,
     pub ink: Color,
     pub soft: Color,
     pub line: Color,
@@ -56,6 +62,9 @@ pub const LIGHT: Palette = Palette {
     canvas: Color::rgb(0xEEF0F3),
     surface: Color::rgb(0xFFFFFF),
     sunken: Color::rgb(0xF6F7F9),
+    control: Color::rgb(0xE7EAEF),
+    placeholder: Color::rgb(0xE2E5EA),
+    track: Color::rgb(0x8C93A0),
     ink: Color::rgb(0x171A21),
     soft: Color::rgb(0x575E6B),
     line: Color::rgb(0xDFE2E8),
@@ -72,6 +81,9 @@ pub const DARK: Palette = Palette {
     canvas: Color::rgb(0x14161B),
     surface: Color::rgb(0x1C1F26),
     sunken: Color::rgb(0x181B21),
+    control: Color::rgb(0x2A2E37),
+    placeholder: Color::rgb(0x262A32),
+    track: Color::rgb(0x6B7281),
     ink: Color::rgb(0xE9EBF0),
     soft: Color::rgb(0xA0A7B4),
     line: Color::rgb(0x2D323C),
@@ -88,14 +100,17 @@ pub const fn palette(dark: bool) -> &'static Palette {
     if dark { &DARK } else { &LIGHT }
 }
 
-/// Colours that do not change with the theme (the viewer toolbar, the dark cards, the placeholder screen).
+/// Colours that do not change with the theme (the viewer toolbar, the dark cards, the placeholder screen). The toolbar
+/// colours are the `--hud-*` variables, the same in both theme blocks.
 pub mod fixed {
     use super::Color;
     pub const WHITE: Color = Color::rgb(0xFFFFFF);
-    pub const TOOLBAR: Color = Color::rgba(23, 26, 33, 94);
+    pub const TOOLBAR: Color = Color::rgb(0x1B1E26);
+    pub const TOOLBAR_RAISE: Color = Color::rgb(0x2A2F3A);
     pub const TOOLBAR_INK: Color = Color::rgb(0xE9EBF0);
-    pub const TOOLBAR_PRESSED: Color = Color::rgba(140, 155, 255, 22);
-    pub const TOOLBAR_SEP: Color = Color::rgba(255, 255, 255, 16);
+    pub const TOOLBAR_SOFT: Color = Color::rgb(0xA9B0BC);
+    pub const TOOLBAR_PRESSED: Color = Color::rgb(0x2C3366);
+    pub const TOOLBAR_SEP: Color = Color::rgb(0x3A404C);
     pub const TOOLBAR_LINK: Color = Color::rgb(0x8C9BFF);
     pub const TOOLBAR_DANGER: Color = Color::rgb(0xFF8A80);
     pub const REMOTE_SCREEN: Color = Color::rgb(0x46586A);
@@ -142,10 +157,10 @@ pub mod text {
     pub const SMALL_BOLD: TextStyle = TextStyle::new(12.0, 600);
     pub const CAPTION: TextStyle = TextStyle::new(13.0, 400);
     pub const GROUP: TextStyle = TextStyle::new(12.0, 600);
-    pub const H1: TextStyle = TextStyle::new(26.0, 600).line(1.2).tracking(-0.015);
+    pub const H1: TextStyle = TextStyle::new(28.0, 600).line(1.2).tracking(-0.015);
     pub const H1_DIALOG: TextStyle = TextStyle::new(22.0, 600).line(1.25).tracking(-0.01);
     pub const H1_BOARD: TextStyle = TextStyle::new(24.0, 600).line(1.45).tracking(-0.015);
-    pub const H2: TextStyle = TextStyle::new(15.0, 600);
+    pub const H2: TextStyle = TextStyle::new(17.0, 600).line(1.3);
     pub const H2_STATE: TextStyle = TextStyle::new(17.0, 600).line(1.3);
     pub const H2_CARD: TextStyle = TextStyle::new(18.0, 600).line(1.3);
     pub const LOGO: TextStyle = TextStyle::new(16.0, 700).tracking(-0.01);
@@ -164,11 +179,13 @@ pub mod layout {
     pub const DESIGN_H: f32 = 760.0;
     pub const MIN_W: f32 = 900.0;
     pub const MIN_H: f32 = 620.0;
-    pub const SIDEBAR_W: f32 = 272.0;
+    pub const SIDEBAR_W: f32 = 232.0;
     pub const BUTTON_H: f32 = 40.0;
+    /// `--r-control`, `--r-panel`, `--r-dialog`, `--r-inner`.
     pub const BUTTON_RADIUS: f32 = 8.0;
-    pub const PANEL_RADIUS: f32 = 12.0;
-    pub const DIALOG_RADIUS: f32 = 14.0;
+    pub const PANEL_RADIUS: f32 = 10.0;
+    pub const DIALOG_RADIUS: f32 = 12.0;
+    pub const INNER_RADIUS: f32 = 4.0;
     pub const DIALOG_W: f32 = 520.0;
     pub const SWITCH_W: f32 = 38.0;
     pub const SWITCH_H: f32 = 22.0;
@@ -211,6 +228,9 @@ mod tests {
             ("canvas", p.canvas),
             ("surface", p.surface),
             ("sunken", p.sunken),
+            ("control", p.control),
+            ("placeholder", p.placeholder),
+            ("track", p.track),
             ("ink", p.ink),
             ("soft", p.soft),
             ("line", p.line),
@@ -227,32 +247,82 @@ mod tests {
         }
     }
 
+    /// Every board with theme blocks (the two dark previews embed the others and carry none).
+    const BOARDS: [&str; 19] = [
+        include_str!("../../../docs/design/Ajustes.dc.html"),
+        include_str!("../../../docs/design/Arquivos.dc.html"),
+        include_str!("../../../docs/design/Atividade.dc.html"),
+        include_str!("../../../docs/design/Bandeja.dc.html"),
+        include_str!("../../../docs/design/Banner.dc.html"),
+        include_str!("../../../docs/design/Chat.dc.html"),
+        include_str!("../../../docs/design/Estados.dc.html"),
+        include_str!("../../../docs/design/EstadosDispositivo.dc.html"),
+        include_str!("../../../docs/design/EstadosPareamento.dc.html"),
+        include_str!("../../../docs/design/Inversao.dc.html"),
+        include_str!("../../../docs/design/Main.dc.html"),
+        include_str!("../../../docs/design/MainMac.dc.html"),
+        include_str!("../../../docs/design/Pareamento.dc.html"),
+        include_str!("../../../docs/design/PedidoEntrada.dc.html"),
+        include_str!("../../../docs/design/Permissoes.dc.html"),
+        include_str!("../../../docs/design/PrimeiraVez.dc.html"),
+        include_str!("../../../docs/design/Terminal.dc.html"),
+        include_str!("../../../docs/design/Visualizador.dc.html"),
+        include_str!("../../../docs/design/VisualizadorTelaCheia.dc.html"),
+    ];
+
+    fn px(block: &str, name: &str) -> f32 {
+        let key = format!("--{name}:");
+        let at = block.find(&key).unwrap_or_else(|| panic!("--{name} missing")) + key.len();
+        let end = at + block[at..].find("px").unwrap_or_else(|| panic!("--{name} is not in px"));
+        block[at..end].parse().unwrap()
+    }
+
     #[test]
     fn palettes_match_the_design_files() {
-        for file in [
-            include_str!("../../../docs/design/Main.dc.html"),
-            include_str!("../../../docs/design/Permissoes.dc.html"),
-            include_str!("../../../docs/design/Estados.dc.html"),
-            include_str!("../../../docs/design/Visualizador.dc.html"),
-        ] {
+        for file in BOARDS {
             check(&LIGHT, block(file, ".sd"));
             check(&DARK, block(file, ".sd.dark"));
+            for theme in [block(file, ".sd"), block(file, ".sd.dark")] {
+                for (name, color) in [
+                    ("hud", fixed::TOOLBAR),
+                    ("hud-raise", fixed::TOOLBAR_RAISE),
+                    ("hud-ink", fixed::TOOLBAR_INK),
+                    ("hud-soft", fixed::TOOLBAR_SOFT),
+                    ("hud-line", fixed::TOOLBAR_SEP),
+                    ("hud-on", fixed::TOOLBAR_PRESSED),
+                    ("hud-link", fixed::TOOLBAR_LINK),
+                    ("hud-danger", fixed::TOOLBAR_DANGER),
+                    ("term-ink", fixed::TERMINAL_INK),
+                ] {
+                    assert_eq!(color.hex(), var(theme, name), "--{name}");
+                }
+            }
+            let light = block(file, ".sd");
+            assert_eq!(fixed::TERMINAL_BG.hex(), var(light, "term"), "--term (light)");
+            for (name, value) in [
+                ("r-control", layout::BUTTON_RADIUS),
+                ("r-panel", layout::PANEL_RADIUS),
+                ("r-dialog", layout::DIALOG_RADIUS),
+                ("r-inner", layout::INNER_RADIUS),
+            ] {
+                assert_eq!(px(light, name), value, "--{name}");
+            }
         }
     }
 
     #[test]
     fn text_styles_match_the_design_css() {
         let main = include_str!("../../../docs/design/Main.dc.html");
-        assert!(main.contains("h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}"));
-        assert_eq!((text::H1.size, text::H1.weight, text::H1.line, text::H1.tracking), (26.0, 600, 1.2, -0.015));
-        assert!(main.contains("h2{margin:0;font-size:15px;font-weight:600}"));
-        assert_eq!((text::H2.size, text::H2.weight), (15.0, 600));
+        assert!(main.contains("h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}"));
+        assert_eq!((text::H1.size, text::H1.weight, text::H1.line, text::H1.tracking), (28.0, 600, 1.2, -0.015));
+        assert!(main.contains("h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}"));
+        assert_eq!((text::H2.size, text::H2.weight, text::H2.line), (17.0, 600, 1.3));
         assert!(main.contains("font-size:14px;line-height:1.45"));
         assert_eq!((text::BODY.size, text::BODY.line), (14.0, 1.45));
-        assert!(main.contains(".sd .btn{height:40px;padding:0 16px;border-radius:8px"));
-        assert_eq!((layout::BUTTON_H, layout::BUTTON_RADIUS), (40.0, 8.0));
-        assert!(main.contains("width: 272px"));
-        assert_eq!(layout::SIDEBAR_W, 272.0);
+        assert!(main.contains(".sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control)"));
+        assert_eq!(layout::BUTTON_H, 40.0);
+        // D35: the sidebar is 232 px (the boards still say 272 until they are updated).
+        assert_eq!(layout::SIDEBAR_W, 232.0);
         assert!(main.contains(".sd .switch{width:38px;height:22px;border-radius:11px"));
         assert!(main.contains("Instrument Sans"));
         let pair = include_str!("../../../docs/design/Pareamento.dc.html");
@@ -261,15 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_and_fixed_colours_match_the_design() {
+    fn fixed_colours_match_the_design() {
         let viewer = include_str!("../../../docs/design/Visualizador.dc.html");
-        assert!(viewer.contains("background:rgba(23,26,33,0.94)"));
-        assert_eq!(fixed::TOOLBAR, Color::rgba(23, 26, 33, 94));
-        assert!(viewer.contains("rgba(140,155,255,0.22)"));
         assert!(viewer.contains("#46586A"));
         assert_eq!(fixed::REMOTE_SCREEN.hex(), 0x46586A);
-        assert!(viewer.contains("#FF8A80"));
-        assert_eq!(fixed::TOOLBAR_DANGER.hex(), 0xFF8A80);
     }
 
     #[test]

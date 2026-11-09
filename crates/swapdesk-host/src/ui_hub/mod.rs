@@ -222,10 +222,12 @@ impl Hub {
         self.notify(Notify::DevicesChanged(list));
     }
 
-    /// A session went live in either role: apply "keep awake".
+    /// A session went live in either role: apply "keep awake", and the device list shows the peer on the network
+    /// (a device with a live session is reachable whatever DNS-SD says).
     pub fn session_began(&self) {
         let n = self.live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
         self.p.hooks.keep_awake(n > 0 && self.settings().keep_awake);
+        self.devices_changed();
     }
 
     /// A session ended: apply "keep awake".
@@ -334,9 +336,14 @@ impl UiHub {
         *lock(&self.hub.desktop) = desktop;
     }
 
-    /// The network changed: the presence re-reads the interfaces and the UIs get the new status and list.
+    /// The network changed: the session endpoint follows the approved addresses, the presence re-reads the
+    /// interfaces, and the UIs get the new status and list.
     pub fn network_changed(&self) {
+        if let Some(core) = self.hub.core() {
+            core.network_changed();
+        }
         self.hub.p.presence.refresh();
+        self.hub.refresh_pair_nets();
         let status = self.hub.network_status();
         self.hub.notify(Notify::NetworkChanged(status));
         self.hub.devices_changed();
@@ -365,11 +372,37 @@ impl UiHub {
     /// Serves one UI connection until it ends. The caller did the server handshake (`Handshake::server`, with
     /// `Hello.role` checked to be the UI) and the pipe checks of C2.1 and C2.3 (`info`). Blocks the calling thread:
     /// give each connection its own.
-    pub fn serve<R, W>(
+    pub fn serve<R, W>(&self, reader: FrameReader<R>, writer: FrameWriter<W>, info: ConnInfo) -> Result<(), IpcError>
+    where
+        R: std::io::Read,
+        W: std::io::Write + Send + 'static,
+    {
+        self.serve_with(reader, writer, info, None)
+    }
+
+    /// [`serve`](Self::serve) for a pipe the owner can cancel: when the UI stops reading its messages and the connection
+    /// is cut (see `queue.rs`), `on_cut` runs and must cancel the pipe's pending I/O. The blocked read then returns,
+    /// `serve` ends and the owner drops the pipe, so the UI sees its end instead of silence.
+    pub fn serve_cancellable<R, W>(
+        &self,
+        reader: FrameReader<R>,
+        writer: FrameWriter<W>,
+        info: ConnInfo,
+        on_cut: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), IpcError>
+    where
+        R: std::io::Read,
+        W: std::io::Write + Send + 'static,
+    {
+        self.serve_with(reader, writer, info, Some(on_cut))
+    }
+
+    fn serve_with<R, W>(
         &self,
         mut reader: FrameReader<R>,
         writer: FrameWriter<W>,
         info: ConnInfo,
+        on_cut: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Result<(), IpcError>
     where
         R: std::io::Read,
@@ -377,6 +410,9 @@ impl UiHub {
     {
         let hub = &self.hub;
         let queue = UiQueue::new();
+        if let Some(on_cut) = on_cut {
+            queue.set_on_cut(on_cut);
+        }
         let writer_thread = queue.spawn_writer(writer)?;
         let id = hub.next_conn.fetch_add(1, Ordering::Relaxed);
         let clip = {
@@ -402,6 +438,11 @@ impl UiHub {
         hub.send_pending(&conn);
         let end = loop {
             if hub.shutting.load(Ordering::SeqCst) {
+                break Ok(());
+            }
+            // The queue closed under us: the pipe broke, or the UI stopped reading and was cut (see `queue.rs`). The
+            // next request it sends finds the connection over.
+            if queue.is_closed() {
                 break Ok(());
             }
             match reader.read_message() {
@@ -432,9 +473,10 @@ impl UiHub {
         hub.log(
             Level::Info,
             format_args!(
-                "UI disconnected (session {}, {} realtime messages dropped)",
+                "UI disconnected (session {}, {} realtime messages dropped{})",
                 conn.info.session_id,
-                queue.dropped()
+                queue.dropped(),
+                if queue.cut() > 0 { ", cut: it stopped reading its messages" } else { "" }
             ),
         );
         end

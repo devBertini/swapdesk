@@ -92,7 +92,8 @@ pub enum UiOp {
     /// Send a chat message; the reply carries it as stored (id, time).
     ChatSend {
         session_id: u64,
-        text: String,
+        /// Chat text is never logged: `Text` prints its length only.
+        text: Text,
     },
     /// The chat panel shows everything the peer sent: the peer is told (`ChatRead`).
     ChatMarkRead {
@@ -120,6 +121,11 @@ pub enum UiOp {
     RunAction {
         session_id: u64,
         action: Action,
+    },
+    /// Give a paired device a local name (the alias this machine shows for it; the peer is not told). Reply `Done`.
+    RenameDevice {
+        device_id: String,
+        name: String,
     },
     /// Open a terminal on the host of viewer session `session_id` (F-TERM-01, F-TERM-02). The reply (op 32) carries
     /// the connection-wide `term_id` and how the open ended; it comes when the shell runs or was refused, which for
@@ -177,6 +183,7 @@ impl UiOp {
             Self::ListDisplays { .. } => 27,
             Self::SetClipboardSync { .. } => 28,
             Self::RunAction { .. } => 29,
+            Self::RenameDevice { .. } => 30,
             Self::TermOpen { .. } => 32,
             Self::TermResize { .. } => 33,
             Self::TermClose { .. } => 34,
@@ -244,7 +251,7 @@ impl UiOp {
             }
             Self::ChatSend { session_id, text } => {
                 w.put_u64(*session_id);
-                w.put_str(text, MAX_CHAT_TEXT)?;
+                w.put_str(&text.0, MAX_CHAT_TEXT)?;
             }
             Self::Wake { device_id, intent } => {
                 w.put_str(device_id, MAX_NAME)?;
@@ -257,6 +264,10 @@ impl UiOp {
             Self::RunAction { session_id, action } => {
                 w.put_u64(*session_id);
                 action.put(w, 0)?;
+            }
+            Self::RenameDevice { device_id, name } => {
+                w.put_str(device_id, MAX_NAME)?;
+                w.put_str(name, MAX_NAME)?;
             }
             Self::TermOpen { session_id, cols, rows, admin } => {
                 w.put_u64(*session_id);
@@ -300,12 +311,13 @@ impl UiOp {
             21 => Self::ActivityList { before_ms: <Option<u64>>::get(r, 0)?, limit: r.u32()? },
             22 => Self::RequestSwap { session_id: r.u64()? },
             23 => Self::AnswerSwap { request_id: r.u32()?, accept: r.bool()? },
-            24 => Self::ChatSend { session_id: r.u64()?, text: r.str(MAX_CHAT_TEXT)? },
+            24 => Self::ChatSend { session_id: r.u64()?, text: Text(r.str(MAX_CHAT_TEXT)?) },
             25 => Self::ChatMarkRead { session_id: r.u64()? },
             26 => Self::Wake { device_id: r.str(MAX_NAME)?, intent: Intent::get(r, 0)? },
             27 => Self::ListDisplays { session_id: r.u64()? },
             28 => Self::SetClipboardSync { session_id: r.u64()?, on: r.bool()? },
             29 => Self::RunAction { session_id: r.u64()?, action: Action::get(r, 0)? },
+            30 => Self::RenameDevice { device_id: r.str(MAX_NAME)?, name: r.str(MAX_NAME)? },
             32 => Self::TermOpen { session_id: r.u64()?, cols: r.u16()?, rows: r.u16()?, admin: r.bool()? },
             33 => Self::TermResize { term_id: r.u32()?, cols: r.u16()?, rows: r.u16()? },
             34 => Self::TermClose { term_id: r.u32()? },
@@ -323,7 +335,7 @@ fn unknown_op(op: u16) -> CodecError {
 /// carries no tag: [`ReplyBody::decode`] needs the op of the request with the same `req`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyBody {
-    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25).
+    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25, 28 to 30, 33, 34, 43 to 45).
     Done,
     ThisDevice(ThisDevice),
     Network(NetworkStatus),
@@ -406,7 +418,7 @@ impl ReplyBody {
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28 | 29 | 33 | 34 | 43..=45 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 43..=45 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;

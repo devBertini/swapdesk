@@ -13,9 +13,10 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect};
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags, NSImage, NSView};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::CALayer;
 
 use crate::input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
@@ -49,6 +50,33 @@ pub trait VideoSlot: Send + Sync {
 #[derive(Default)]
 pub struct VideoIvars {
     input: RefCell<Option<Arc<dyn ViewerInput>>>,
+    /// The pointer over the video: the host's shape while the viewer controls, else the system arrow (`None`).
+    cursor: RefCell<Option<Retained<NSCursor>>>,
+}
+
+/// What the pointer looks like over the video view.
+pub enum ViewCursor<'a> {
+    /// The system arrow (the viewer does not control: the remote arrow is drawn in the picture).
+    System,
+    /// The host's cursor shape: its size and hot spot in points, the hot spot from the top-left corner.
+    Image { image: &'a CGImage, size: (f64, f64), hot: (f64, f64) },
+}
+
+/// Sets the pointer of the video view behind `view` (the `VideoSurface::view`); any other view is left alone.
+pub fn set_view_cursor(view: &NSView, cursor: ViewCursor<'_>) {
+    if !view.isKindOfClass(VideoView::class()) {
+        return;
+    }
+    // SAFETY: the object is a `VideoView` (checked above), whose layout starts with its `NSView` superclass.
+    let video = unsafe { &*(view as *const NSView).cast::<VideoView>() };
+    let ns = match cursor {
+        ViewCursor::System => None,
+        ViewCursor::Image { image, size, hot } => {
+            let picture = NSImage::initWithCGImage_size(NSImage::alloc(), image, NSSize::new(size.0, size.1));
+            Some(NSCursor::initWithImage_hotSpot(NSCursor::alloc(), &picture, NSPoint::new(hot.0, hot.1)))
+        }
+    };
+    video.set_cursor(ns);
 }
 
 define_class!(
@@ -73,6 +101,13 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            if let Some(c) = self.ivars().cursor.borrow().as_ref() {
+                self.addCursorRect_cursor(self.bounds(), c);
+            }
         }
 
         #[unsafe(method(acceptsFirstMouse:))]
@@ -224,6 +259,20 @@ impl VideoView {
 
     fn input(&self) -> Option<Arc<dyn ViewerInput>> {
         self.ivars().input.borrow().clone()
+    }
+
+    fn set_cursor(&self, cursor: Option<Retained<NSCursor>>) {
+        let now = cursor.clone();
+        *self.ivars().cursor.borrow_mut() = cursor;
+        let Some(window) = self.window() else { return };
+        window.invalidateCursorRectsForView(self);
+        // Cursor rects apply on the next move or entry; a pointer already over the video takes the shape now.
+        let p = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+        let b = self.bounds();
+        if p.x >= b.origin.x && p.y >= b.origin.y && p.x < b.origin.x + b.size.width && p.y < b.origin.y + b.size.height
+        {
+            now.unwrap_or_else(NSCursor::arrowCursor).set();
+        }
     }
 
     /// True when the input lane took the key.

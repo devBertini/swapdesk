@@ -2,11 +2,13 @@
 # Builds Swapdesk.app (development identity) on the MacBook: the release binary of crates/swapdesk-app-mac, the bundle
 # (Info.plist, localized usage strings), and a code signature that stays the same across rebuilds (D25).
 #
-#   bash scripts/mac/build-app.sh [--no-build] [--adhoc] [--compare]
+#   bash scripts/mac/build-app.sh [--no-build] [--adhoc] [--compare] [--dev-harness]
 #
 #   --no-build  reuse target/release/swapdesk-app-mac instead of running cargo
 #   --adhoc     sign ad hoc (no certificate); the designated requirement is then the binary's cdhash, which changes on
 #               every build, so every rebuild would ask for the macOS permissions again
+#   --dev-harness  build with the dev-harness feature (Swapdesk --drive-host, the proof with no human at the Mac);
+#               never for a build that leaves this machine
 #   --compare   assemble and sign the bundle twice (the second with another CFBundleVersion, so the code directory
 #               differs as after a real rebuild) and fail unless the designated requirement is identical; also prints
 #               what an ad hoc signature would give, as the control
@@ -28,18 +30,19 @@
 # nslocalnetworkusagedescription, nsbonjourservices}, and TN3179 (local network privacy); see docs/RESEARCH.md.
 set -euo pipefail
 
-BUNDLE_ID="io.github.devbertini.swapdesk.dev"
+BUNDLE_ID="${SWAPDESK_BUNDLE_ID:-io.github.devbertini.swapdesk.dev}"  # packaging/macos/build-release.sh sets the release one
 CERT_NAME="Swapdesk Development"
 SIGN_DIR="${SWAPDESK_SIGN_DIR:-$HOME/.swapdesk-dev-signing}"
 KEYCHAIN="$SIGN_DIR/swapdesk-dev.keychain-db"
 PASSWORD_FILE="$SIGN_DIR/keychain-password"
 
-build=1; adhoc=0; compare=0
+build=1; adhoc=0; compare=0; features=()
 for a in "$@"; do
   case "$a" in
     --no-build) build=0 ;;
     --adhoc) adhoc=1 ;;
     --compare) compare=1 ;;
+    --dev-harness) features=(--features dev-harness) ;;  # development only: Swapdesk --drive-host
     *) echo "unknown argument: $a" >&2; exit 2 ;;
   esac
 done
@@ -56,7 +59,7 @@ app="$bundle_dir/Swapdesk.app"
 binary="$root/target/release/swapdesk-app-mac"
 
 if [ "$build" = 1 ]; then
-  cargo build --release -p swapdesk-app-mac
+  cargo build --release -p swapdesk-app-mac ${features[@]+"${features[@]}"}
 fi
 [ -x "$binary" ] || { echo "missing $binary (run without --no-build)" >&2; exit 1; }
 mkdir -p "$bundle_dir"
@@ -68,6 +71,7 @@ assemble() { # $1 = CFBundleVersion
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/en.lproj" "$app/Contents/Resources/pt-BR.lproj"
   cp "$binary" "$app/Contents/MacOS/Swapdesk"
+  cp "$root/THIRD-PARTY-LICENSES.md" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$app/Contents/Resources/"
   printf 'APPL????' > "$app/Contents/PkgInfo"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

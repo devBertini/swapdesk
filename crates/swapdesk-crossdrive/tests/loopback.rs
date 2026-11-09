@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use swapdesk_crossdrive::{DecoderFactory, HostConfig, Media, ViewerConfig, host_drive, viewer_drive};
+use swapdesk_crossdrive::{DecoderFactory, HostConfig, Media, Pump, ViewerConfig, host_drive, viewer_drive};
 use swapdesk_fakes::{
     FakeClock, FakeNetInterfaces, LogCapture, MemorySecretStore, MonotonicClock, Pacing, RecordingInputSink,
     SineSource, SyntheticScreen,
@@ -29,7 +29,7 @@ use swapdesk_platform::{
 use swapdesk_proto::{H264Profile, InputEvent, Os, VideoHeader};
 use swapdesk_trust::{Identity, MemoryAudit, SystemWallClock, TrustHandle, UserRef};
 use swapdesk_ui::service_backend::ServiceBackend;
-use swapdesk_ui::{Permission, Permissions, UiWaker};
+use swapdesk_ui::{Command, Decision, PairingState, Permission, Permissions, Reply, UiEvent, UiWaker};
 
 // ---------- in-memory duplex pipe ----------
 
@@ -255,6 +255,8 @@ impl Machine {
         let cfg = cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port));
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
+        // The UI of `ui()` runs in session 1, the console's: only the console's UI may connect.
+        hub.set_console_session(Some(1));
         Self { core, hub, trust, log: trace_view, helpers: Vec::new() }
     }
 
@@ -495,4 +497,118 @@ fn different_codes_end_the_pairing_without_a_device() {
     host.shutdown();
     viewer.shutdown();
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Pairs `viewer_ui` with `host_ui` by hand (the ceremony of the drivers, without their forget): the device ids as
+/// `(on the host, on the viewer)`.
+fn pair_by_hand(host_ui: &ServiceBackend, viewer_ui: &ServiceBackend, host_addr: &str) -> (String, String) {
+    const T: Duration = Duration::from_secs(30);
+    let (mut hp, mut vp) = (Pump::new(host_ui), Pump::new(viewer_ui));
+    let Reply::PairingId(host_pairing) = hp.ask(Command::PairOpen { device_id: None }, T).expect("host open") else {
+        panic!("host pairing id")
+    };
+    let Reply::Device(placeholder) =
+        vp.ask(Command::AddByAddress { ipv4: host_addr.into() }, T).expect("add by address")
+    else {
+        panic!("device")
+    };
+    let Reply::PairingId(viewer_pairing) = vp.ask(Command::PairOpen { device_id: None }, T).expect("viewer open")
+    else {
+        panic!("viewer pairing id")
+    };
+    vp.ask(Command::PairStart { pairing_id: viewer_pairing, device_id: placeholder.id }, T).expect("start");
+    let show = |p: &mut Pump<'_>, id: u32| {
+        p.wait("the code", T, |e| match e {
+            UiEvent::Pairing { pairing_id, state: PairingState::ShowCode { .. } } if *pairing_id == id => Some(()),
+            _ => None,
+        })
+        .expect("code shown");
+    };
+    show(&mut hp, host_pairing);
+    show(&mut vp, viewer_pairing);
+    hp.ask(Command::PairConfirm { pairing_id: host_pairing, matches: true }, T).expect("host confirm");
+    vp.ask(Command::PairConfirm { pairing_id: viewer_pairing, matches: true }, T).expect("viewer confirm");
+    let done = |p: &mut Pump<'_>, id: u32| {
+        p.wait("the pairing to finish", T, |e| match e {
+            UiEvent::Pairing { pairing_id, state: PairingState::Done { device_id } } if *pairing_id == id => {
+                Some(device_id.clone())
+            }
+            _ => None,
+        })
+        .expect("pairing done")
+    };
+    (done(&mut hp, host_pairing), done(&mut vp, viewer_pairing))
+}
+
+#[test]
+fn a_paired_device_is_driven_without_pairing_again_and_stays_paired() {
+    let session_port = free_port_pair();
+    let mut host = Machine::new("host-pc", Os::Windows, Some((session_port, session_port + 1)));
+    host.attach_helpers();
+    host.hub.set_console_session(Some(1));
+    let viewer = Machine::new("viewer-mac", Os::MacOs, None);
+    let media = Media::new(Box::new(|| -> Box<dyn VideoDecoder> { Box::new(LitDecoder) }) as DecoderFactory);
+    let (host_ui, host_serve) = ui(&host.hub, None);
+    let (viewer_ui, viewer_serve) = ui(&viewer.hub, Some(media.sink()));
+
+    let (_host_side, viewer_side) = pair_by_hand(&host_ui, &viewer_ui, &format!("127.0.0.1:{session_port}"));
+    assert_eq!(host.trust.read(|s| s.devices.len()), 1, "paired on the host");
+    assert_eq!(viewer.trust.read(|s| s.devices.len()), 1, "paired on the viewer");
+
+    // No orchestrator files exist: the paired mode needs none.
+    let mut cfg = ViewerConfig::new(
+        "unused",
+        PathBuf::from("no-such-peer-code"),
+        PathBuf::from("no-such-go"),
+        PathBuf::from("no-such-anchor"),
+    );
+    cfg.paired = Some(viewer_side);
+    cfg.hold = Duration::from_secs(2);
+    let lines = Mutex::new(Vec::<String>::new());
+    let grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+
+    let (report, result) = std::thread::scope(|scope| {
+        // The host's user: accepts the one request.
+        let accept = scope.spawn(|| {
+            let mut pump = Pump::new(&host_ui);
+            let request_id = pump
+                .wait("the request", Duration::from_secs(40), |e| match e {
+                    UiEvent::IncomingRequest(r) => Some(r.request_id),
+                    _ => None,
+                })
+                .expect("a request");
+            pump.ask(
+                Command::AnswerIncoming { request_id, decision: Decision::Accept { grants } },
+                Duration::from_secs(10),
+            )
+            .expect("answer");
+        });
+        let out = viewer_drive(&viewer_ui, &media, &cfg, &|l| {
+            lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(l.to_string())
+        });
+        accept.join().expect("accept task");
+        out
+    });
+    println!("viewer lines: {:#?}", lines.lock().unwrap());
+    println!("{}", report.counts_line());
+    assert_eq!(result, Ok(()), "viewer script");
+    assert!(report.session_active && report.ended_clean);
+    assert!(!report.forgotten, "a paired device is not forgotten");
+    assert!(report.frames_decoded >= 1 && report.audio_datagrams >= 1, "{report:?}");
+    assert_eq!(report.nonblack_pct, Some(100));
+    assert_eq!(report.pointer_moves, 8);
+    assert!(report.pointer_echo_samples >= 3, "{report:?}");
+    {
+        let l = lines.lock().unwrap();
+        assert!(l.iter().any(|x| x.starts_with("VIEWER_USING_PAIRED")));
+        assert!(!l.iter().any(|x| x == "VIEWER_PAIR_OPEN" || x == "VIEWER_FORGOTTEN" || x == "VIEWER_NEED_ANCHOR"));
+    }
+    assert_eq!(host.trust.read(|s| s.devices.len()), 1, "still paired on the host");
+    assert_eq!(viewer.trust.read(|s| s.devices.len()), 1, "still paired on the viewer");
+
+    drop((host_ui, viewer_ui));
+    let _ = (host_serve.join(), viewer_serve.join());
+    media.finish();
+    host.shutdown();
+    viewer.shutdown();
 }

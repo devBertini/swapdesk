@@ -150,6 +150,36 @@ pub fn access_units(data: &[u8]) -> Vec<Range<usize>> {
     units
 }
 
+/// Start code written before every NAL unit of the Annex B output.
+pub const START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+/// AVCC to Annex B for the encoder's output: `prefix` NAL units (SPS then PPS, without start code) come first, then
+/// every NAL unit of `avcc` (each behind a big-endian length field of `length_size` bytes, 1 to 4), all behind 4-byte
+/// start codes. `None` when the lengths do not fit the data (a truncated or corrupt sample) or `length_size` is bad.
+pub fn avcc_to_annexb(prefix: &[&[u8]], avcc: &[u8], length_size: usize) -> Option<Vec<u8>> {
+    if !(1..=4).contains(&length_size) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(avcc.len() + prefix.iter().map(|p| p.len() + 4).sum::<usize>() + 16);
+    for nal in prefix {
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(nal);
+    }
+    let mut i = 0;
+    while i < avcc.len() {
+        let field = avcc.get(i..i + length_size)?;
+        let len = field.iter().fold(0usize, |acc, b| (acc << 8) | usize::from(*b));
+        i += length_size;
+        let body = avcc.get(i..i.checked_add(len)?)?;
+        if len > 0 {
+            out.extend_from_slice(&START_CODE);
+            out.extend_from_slice(body);
+        }
+        i += len;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +286,39 @@ mod tests {
 
     fn has_parameter_sets(data: &[u8]) -> bool {
         scan(data).iter().any(|n| matches!(n.kind, NAL_SPS | NAL_PPS))
+    }
+
+    #[test]
+    fn avcc_to_annexb_converts_lengths_to_start_codes() {
+        let avcc = [0, 0, 0, 3, 0x65, 0x88, 0x84, 0, 0, 0, 2, 0x41, 0x9A];
+        let out = avcc_to_annexb(&[], &avcc, 4).expect("valid");
+        assert_eq!(out, [0, 0, 0, 1, 0x65, 0x88, 0x84, 0, 0, 0, 1, 0x41, 0x9A]);
+        // Two-byte length fields work too.
+        assert_eq!(avcc_to_annexb(&[], &[0, 2, 0x41, 0x9A], 2).expect("valid"), [0, 0, 0, 1, 0x41, 0x9A]);
+    }
+
+    #[test]
+    fn avcc_to_annexb_prefixes_the_parameter_sets_and_round_trips_through_the_decoder_side() {
+        let avcc = [0, 0, 0, 3, 0x65, 0x88, 0x84];
+        let out = avcc_to_annexb(&[&SPS, &PPS], &avcc, 4).expect("valid");
+        let kinds: Vec<u8> = scan(&out).iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, [NAL_SPS, NAL_PPS, NAL_IDR]);
+        let sets = parameter_sets(&out).expect("sets");
+        assert_eq!((sets.sps, sets.pps), (vec![SPS.to_vec()], vec![PPS.to_vec()]));
+        assert!(is_idr(&out));
+        // The decoder's own conversion gives the sample back.
+        assert_eq!(to_avcc(&out), avcc);
+    }
+
+    #[test]
+    fn avcc_to_annexb_rejects_truncated_or_corrupt_samples() {
+        assert!(avcc_to_annexb(&[], &[0, 0, 0, 9, 1, 2], 4).is_none());
+        assert!(avcc_to_annexb(&[], &[0, 0], 4).is_none());
+        assert!(avcc_to_annexb(&[], &[0, 0, 0, 1, 1], 0).is_none());
+        assert!(avcc_to_annexb(&[], &[0, 0, 0, 1, 1], 5).is_none());
+        assert_eq!(avcc_to_annexb(&[], &[], 4).expect("empty is fine"), Vec::<u8>::new());
+        // A zero-length NAL unit is skipped.
+        assert_eq!(avcc_to_annexb(&[], &[0, 0, 0, 0, 0, 0, 0, 1, 7], 4).expect("valid"), [0, 0, 0, 1, 7]);
     }
 
     #[test]

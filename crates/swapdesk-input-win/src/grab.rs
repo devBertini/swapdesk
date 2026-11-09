@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use swapdesk_keys::mode::{KeyInput, KeyRouter, KeyboardMode, Routed};
+use swapdesk_keys::shortcuts::{ReleaseKey, ShortcutMatcher, ViewerAction, ViewerOs};
 use swapdesk_keys::swap::swap_event;
 use swapdesk_keys::{PAGE_CONSUMER, PAGE_KEYBOARD, entries, modifier, win_to_hid};
 use swapdesk_proto::InputEvent;
@@ -46,10 +47,20 @@ impl LlKey {
 }
 
 /// What the viewer's layout says a key press types.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Translated {
     pub text: Option<String>,
     pub dead: bool,
+}
+
+/// A typed character is as private as the text: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for Translated {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Translated")
+            .field("text", &self.text.as_ref().map(|t| swapdesk_proto::RedactedLen(t.len())))
+            .field("dead", &self.dead)
+            .finish()
+    }
 }
 
 /// What the grabber does with events that `SendInput` injected (`LLKHF_INJECTED`).
@@ -73,11 +84,20 @@ pub struct GrabConfig {
     /// "Trocar Ctrl e Cmd no Mac": applied before sending (C4 rule 4).
     pub swap_ctrl_cmd: bool,
     pub injected: Injected,
+    /// The viewer's own shortcuts (D30) are recognised, with this chord releasing the keyboard; `None` leaves every
+    /// key to the host (the tests of the decisions below, the host's own grabber).
+    pub release: Option<ReleaseKey>,
 }
 
 impl Default for GrabConfig {
     fn default() -> Self {
-        Self { mode: KeyboardMode::Physical, layouts_match: true, swap_ctrl_cmd: false, injected: Injected::Ignore }
+        Self {
+            mode: KeyboardMode::Physical,
+            layouts_match: true,
+            swap_ctrl_cmd: false,
+            injected: Injected::Ignore,
+            release: None,
+        }
     }
 }
 
@@ -88,6 +108,9 @@ pub struct Verdict {
     pub events: Vec<InputEvent>,
     /// Keep the event from the viewer's own OS and window.
     pub swallow: bool,
+    /// One of the viewer's own shortcuts fired (D30). Its keys are kept from the host and, with the OS's own, from the
+    /// viewer's window; `ReleaseKeyboard` rides on the key-up of the chord, which still goes to the host.
+    pub shortcut: Option<ViewerAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +124,10 @@ pub struct GrabState {
     swallowed: HashSet<(u16, u16)>,
     /// Keys currently down (to tell an auto-repeat from a press for the lock toggles).
     down: HashSet<(u16, u16)>,
+    /// The viewer's shortcut keys (`None` when `config.release` is).
+    matcher: Option<ShortcutMatcher>,
+    /// Keys whose press was a shortcut: neither they nor their release reach the host.
+    consumed: HashSet<(u16, u16)>,
 }
 
 impl GrabState {
@@ -113,6 +140,8 @@ impl GrabState {
             locks: initial_locks & 0b111,
             swallowed: HashSet::new(),
             down: HashSet::new(),
+            matcher: config.release.map(|r| ShortcutMatcher::new(ViewerOs::Windows, r)),
+            consumed: HashSet::new(),
         }
     }
 
@@ -124,6 +153,11 @@ impl GrabState {
         self.config = config;
         self.router.set_mode(config.mode);
         self.router.set_layouts_match(config.layouts_match);
+        match (config.release, self.matcher.as_mut()) {
+            (Some(r), Some(m)) => m.set_release(r),
+            (Some(r), None) => self.matcher = Some(ShortcutMatcher::new(ViewerOs::Windows, r)),
+            (None, _) => self.matcher = None,
+        }
     }
 
     pub fn grab_system_keys(&self) -> bool {
@@ -152,6 +186,10 @@ impl GrabState {
         self.modifiers = 0;
         self.swallowed.clear();
         self.down.clear();
+        self.consumed.clear();
+        if let Some(m) = self.matcher.as_mut() {
+            m.reset();
+        }
         self.router.reset();
     }
 
@@ -218,6 +256,27 @@ impl GrabState {
             self.locks ^= bit;
         }
 
+        let mut shortcut = None;
+        let mut consumed = false;
+        if let Some(m) = self.matcher.as_mut() {
+            if down {
+                let r = m.on_key(usage, true, repeat, self.modifiers);
+                shortcut = r.action;
+                if r.consumed {
+                    consumed = true;
+                    self.consumed.insert(id);
+                }
+            } else if self.consumed.remove(&id) {
+                consumed = true;
+            } else {
+                shortcut = m.on_key(usage, false, false, self.modifiers).action;
+            }
+        }
+        if consumed {
+            // The shortcut is Swapdesk's: it neither reaches the host nor the viewer's own OS and window.
+            self.swallowed.remove(&id);
+            return Verdict { events: Vec::new(), swallow: true, shortcut };
+        }
         let t = if self.wants_text(&key) { translate(&key, self.modifiers) } else { Translated::default() };
         let input = KeyInput {
             usage_page: page,
@@ -235,7 +294,7 @@ impl GrabState {
             }
             Routed::Drop => Vec::new(),
         };
-        Verdict { events, swallow }
+        Verdict { events, swallow, shortcut }
     }
 }
 
@@ -289,6 +348,14 @@ pub fn usage_of(key: &LlKey) -> Option<(u16, u16)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn debug_of_a_translation_shows_the_size_of_the_typed_text_and_never_the_text() {
+        let shown = format!("{:?}", Translated { text: Some("senha-digitada".into()), dead: false });
+        assert!(!shown.contains("senha"), "typed text leaked: {shown}");
+        assert!(shown.contains("<redacted 14 bytes>") && shown.contains("dead: false"), "{shown}");
+        assert!(format!("{:?}", Translated::default()).contains("None"));
+    }
+
     fn k(vk: u32, scan: u32, ext: bool, up: bool) -> LlKey {
         LlKey { vk, scan, flags: (if ext { LLKHF_EXTENDED } else { 0 }) | (if up { LLKHF_UP } else { 0 }) }
     }
@@ -309,7 +376,10 @@ mod tests {
     fn plain_keys_become_key_records_with_tracked_modifiers() {
         let mut s = state();
         let v = s.on_key(k(0xA0, 0x2A, false, false), no_text);
-        assert_eq!(v, Verdict { events: vec![key_event(0xE1, true, modifier::LSHIFT, 0)], swallow: false });
+        assert_eq!(
+            v,
+            Verdict { events: vec![key_event(0xE1, true, modifier::LSHIFT, 0)], swallow: false, shortcut: None }
+        );
         let v = s.on_key(k(0x41, 0x1E, false, false), no_text);
         assert_eq!(v.events, vec![key_event(0x04, true, modifier::LSHIFT, 0)]);
         let v = s.on_key(k(0xA0, 0x2A, false, true), no_text);
@@ -529,5 +599,64 @@ mod tests {
         s.reset();
         assert_eq!(s.modifiers(), 0);
         assert!(!s.set_grab_system_keys(false));
+    }
+
+    fn with_shortcuts(release: ReleaseKey) -> GrabState {
+        GrabState::new(GrabConfig { release: Some(release), ..GrabConfig::default() }, 0)
+    }
+
+    #[test]
+    fn a_viewer_shortcut_is_kept_from_the_host_and_the_os_and_its_release_too() {
+        let mut s = with_shortcuts(ReleaseKey::CtrlAlt);
+        // Ctrl and Alt go to the host as ordinary keys.
+        assert_eq!(s.on_key(k(0xA2, 0x1D, false, false), no_text).events.len(), 1);
+        assert_eq!(s.on_key(k(0xA4, 0x38, false, false), no_text).events.len(), 1);
+        // Ctrl+Alt+B: the viewer's, with no record for the host and swallowed.
+        let down = s.on_key(k(0x42, 0x30, false, false), no_text);
+        assert_eq!(down, Verdict { events: vec![], swallow: true, shortcut: Some(ViewerAction::ToggleBar) });
+        // The auto-repeat does not act again; the release is swallowed and silent.
+        let rep = s.on_key(k(0x42, 0x30, false, false), no_text);
+        assert_eq!(rep, Verdict { events: vec![], swallow: true, shortcut: None });
+        let up = s.on_key(k(0x42, 0x30, false, true), no_text);
+        assert_eq!(up, Verdict { events: vec![], swallow: true, shortcut: None });
+    }
+
+    #[test]
+    fn the_shortcuts_hold_with_system_key_capture_on() {
+        let mut s = with_shortcuts(ReleaseKey::CtrlAlt);
+        s.set_grab_system_keys(true);
+        s.on_key(k(0xA2, 0x1D, false, false), no_text);
+        s.on_key(k(0xA4, 0x38, false, false), no_text);
+        assert_eq!(s.on_key(k(0x51, 0x10, false, false), no_text).shortcut, Some(ViewerAction::Disconnect));
+        let end = s.on_key(k(0x23, 0x4F, true, false), no_text);
+        assert_eq!(end.shortcut, Some(ViewerAction::CtrlAltDel));
+        assert!(end.events.is_empty());
+    }
+
+    #[test]
+    fn f11_is_full_screen_and_other_function_keys_go_to_the_host() {
+        let mut s = with_shortcuts(ReleaseKey::CtrlAlt);
+        let f11 = s.on_key(k(0x7A, 0x57, false, false), no_text);
+        assert_eq!(f11.shortcut, Some(ViewerAction::FullScreen));
+        assert!(f11.events.is_empty() && f11.swallow);
+        let f10 = s.on_key(k(0x79, 0x44, false, false), no_text);
+        assert_eq!((f10.shortcut, f10.events.len()), (None, 1));
+    }
+
+    #[test]
+    fn letting_go_of_ctrl_alt_releases_the_keyboard_and_the_key_up_still_goes_on() {
+        let mut s = with_shortcuts(ReleaseKey::CtrlAlt);
+        s.on_key(k(0xA2, 0x1D, false, false), no_text);
+        s.on_key(k(0xA4, 0x38, false, false), no_text);
+        let up = s.on_key(k(0xA4, 0x38, false, true), no_text);
+        assert_eq!(up.shortcut, Some(ViewerAction::ReleaseKeyboard));
+        assert_eq!(up.events.len(), 1, "the host still gets the Alt release");
+    }
+
+    #[test]
+    fn without_a_release_key_set_every_key_goes_to_the_host() {
+        let mut s = state();
+        let f11 = s.on_key(k(0x7A, 0x57, false, false), no_text);
+        assert_eq!((f11.shortcut, f11.events.len()), (None, 1));
     }
 }

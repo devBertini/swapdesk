@@ -151,7 +151,7 @@ mod tests {
             "session",
             format_args!("session opened, intent={:?}, grant={:?}", "Control", "Prompted"),
         );
-        sink.log(Level::Debug, "term", format_args!("terminal spawned {}x{} as {}", 120, 30, "claudio"));
+        sink.log(Level::Debug, "term", format_args!("terminal spawned {}x{} as {}", 120, 30, "alex"));
         sink.log(Level::Debug, "term", format_args!("terminal output {} bytes", 4096));
         sink.log(Level::Info, "files", format_args!("transfer {} of {} bytes done, sha256 ok", 1, 2_048));
         sink.log(Level::Info, "chat", format_args!("chat message received, {} bytes", 19));

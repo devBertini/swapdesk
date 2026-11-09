@@ -5,6 +5,7 @@
 
 use core::fmt;
 
+use crate::codec::{Redacted, RedactedLen};
 use crate::types::{ErrorCode, Os};
 
 /// ALPN of the pairing endpoint (section 1).
@@ -58,17 +59,32 @@ wire_struct! {
     PairResult { ok: bool, code: ErrorCode }
 }
 
+/// Length of a device key's `SubjectPublicKeyInfo` (RFC 8410 Ed25519 form). The preimages below concatenate
+/// `spki_I || spki_R` with no length prefix, which is unambiguous only while both have this exact length, so the
+/// inputs take fixed-size arrays and the compiler enforces it.
+pub const SPKI_LEN: usize = 44;
+
 /// What `commit` hashes (step 1): `COMMIT_LABEL || spki_I || nonce_I`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CommitmentInput<'a> {
-    pub spki_i: &'a [u8],
+    pub spki_i: &'a [u8; SPKI_LEN],
     pub nonce_i: &'a [u8; NONCE_LEN],
+}
+
+/// `nonce_I` stays secret until step 3: it never shows in `Debug`.
+impl fmt::Debug for CommitmentInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommitmentInput")
+            .field("spki_i", &RedactedLen(self.spki_i.len()))
+            .field("nonce_i", &Redacted)
+            .finish()
+    }
 }
 
 impl CommitmentInput<'_> {
     /// The bytes to hash with SHA-256.
     pub fn preimage(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(COMMIT_LABEL.len() + self.spki_i.len() + NONCE_LEN);
+        let mut out = Vec::with_capacity(COMMIT_LABEL.len() + SPKI_LEN + NONCE_LEN);
         out.extend_from_slice(COMMIT_LABEL);
         out.extend_from_slice(self.spki_i);
         out.extend_from_slice(self.nonce_i);
@@ -77,21 +93,33 @@ impl CommitmentInput<'_> {
 }
 
 /// What `s` hashes (step 4): `SAS_LABEL || ek || spki_I || spki_R || nonce_I || nonce_R`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SasInput<'a> {
     /// The TLS exporter output ([`EXPORTER_LABEL`], empty context, [`EXPORTER_LEN`] bytes).
     pub ek: &'a [u8; EXPORTER_LEN],
-    pub spki_i: &'a [u8],
-    pub spki_r: &'a [u8],
+    pub spki_i: &'a [u8; SPKI_LEN],
+    pub spki_r: &'a [u8; SPKI_LEN],
     pub nonce_i: &'a [u8; NONCE_LEN],
     pub nonce_r: &'a [u8; NONCE_LEN],
+}
+
+/// The exporter output and both nonces decide the code: none of them shows in `Debug`.
+impl fmt::Debug for SasInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SasInput")
+            .field("ek", &Redacted)
+            .field("spki_i", &RedactedLen(self.spki_i.len()))
+            .field("spki_r", &RedactedLen(self.spki_r.len()))
+            .field("nonce_i", &Redacted)
+            .field("nonce_r", &Redacted)
+            .finish()
+    }
 }
 
 impl SasInput<'_> {
     /// The bytes to hash with SHA-256.
     pub fn preimage(&self) -> Vec<u8> {
-        let mut out =
-            Vec::with_capacity(SAS_LABEL.len() + EXPORTER_LEN + self.spki_i.len() + self.spki_r.len() + 2 * NONCE_LEN);
+        let mut out = Vec::with_capacity(SAS_LABEL.len() + EXPORTER_LEN + 2 * SPKI_LEN + 2 * NONCE_LEN);
         out.extend_from_slice(SAS_LABEL);
         out.extend_from_slice(self.ek);
         out.extend_from_slice(self.spki_i);
@@ -103,8 +131,15 @@ impl SasInput<'_> {
 }
 
 /// The six digits both users compare: `u64::from_be_bytes(s[0..8]) mod 1_000_000`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Sas(u32);
+
+/// The code is never logged: it is what two users compare to be sure no one sits between them.
+impl fmt::Debug for Sas {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Sas(<redacted>)")
+    }
+}
 
 impl Sas {
     pub const MODULUS: u64 = 1_000_000;
@@ -135,24 +170,49 @@ mod tests {
 
     #[test]
     fn commitment_preimage_is_label_spki_nonce() {
-        let spki = [1u8, 2, 3];
+        let spki = [7u8; SPKI_LEN];
         let nonce = [9u8; NONCE_LEN];
         let p = CommitmentInput { spki_i: &spki, nonce_i: &nonce }.preimage();
         assert!(p.starts_with(b"swapdesk commit v1"));
-        assert_eq!(&p[18..21], &spki);
-        assert_eq!(&p[21..], &nonce);
+        assert_eq!(p.len(), COMMIT_LABEL.len() + SPKI_LEN + NONCE_LEN);
+        assert_eq!(&p[18..18 + SPKI_LEN], &spki);
+        assert_eq!(&p[18 + SPKI_LEN..], &nonce);
     }
 
     #[test]
     fn sas_preimage_orders_its_parts_as_step_4() {
         let (ek, ni, nr) = ([1u8; 32], [2u8; 32], [3u8; 32]);
-        let p = SasInput { ek: &ek, spki_i: b"II", spki_r: b"RRR", nonce_i: &ni, nonce_r: &nr }.preimage();
+        let (si, sr) = ([4u8; SPKI_LEN], [5u8; SPKI_LEN]);
+        let p = SasInput { ek: &ek, spki_i: &si, spki_r: &sr, nonce_i: &ni, nonce_r: &nr }.preimage();
         let mut want = b"swapdesk sas v1".to_vec();
         want.extend_from_slice(&ek);
-        want.extend_from_slice(b"IIRRR");
+        want.extend_from_slice(&si);
+        want.extend_from_slice(&sr);
         want.extend_from_slice(&ni);
         want.extend_from_slice(&nr);
         assert_eq!(p, want);
+    }
+
+    #[test]
+    fn debug_of_the_pairing_inputs_and_the_code_shows_no_secret() {
+        // Distinct marker bytes: each prints as its decimal value under a derived Debug, so a leak shows as "171".
+        let (ek, ni, nr) = ([171u8; 32], [172u8; 32], [173u8; 32]);
+        let (si, sr) = ([174u8; SPKI_LEN], [175u8; SPKI_LEN]);
+        let commit = format!("{:?}", CommitmentInput { spki_i: &si, nonce_i: &ni });
+        let sas_in = format!("{:?}", SasInput { ek: &ek, spki_i: &si, spki_r: &sr, nonce_i: &ni, nonce_r: &nr });
+        let mut digest = [0u8; 32];
+        digest[..8].copy_from_slice(&482_913u64.to_be_bytes());
+        let sas = format!("{:?}", Sas::from_digest(&digest));
+        for (shown, secrets) in [
+            (&commit, &["172", "174"][..]),
+            (&sas_in, &["171", "172", "173", "174", "175"][..]),
+            (&sas, &["482", "913"][..]),
+        ] {
+            for secret in secrets {
+                assert!(!shown.contains(secret), "{secret} leaked in {shown}");
+            }
+            assert!(shown.contains("redacted"), "{shown}");
+        }
     }
 
     #[test]

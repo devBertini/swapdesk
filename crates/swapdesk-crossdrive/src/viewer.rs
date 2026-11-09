@@ -216,6 +216,15 @@ pub struct ViewerConfig {
     /// Written by the orchestrator after `VIEWER_NEED_ANCHOR`: where the host's pointer is now, "x,y" in pointer units
     /// (0 to 65535 across the captured display), or `none` when it is not on that display.
     pub anchor_file: PathBuf,
+    /// An already paired device to drive: its id. Pairing, the `go` file, the anchor file and the final forget are all
+    /// skipped (the pairing outlives the run) and the session connects straight to that device, whose address the
+    /// service already knows. The pointer is anchored on the host's last reported cursor position (the middle of the
+    /// display when it reported none within a second). `None` is the full script that pairs and forgets.
+    pub paired: Option<String>,
+    /// Whether the pointer moves are sent at all.
+    pub send_input: bool,
+    /// The session stays open at least this long after it went active (media keeps being counted).
+    pub hold: Duration,
 }
 
 impl ViewerConfig {
@@ -230,6 +239,9 @@ impl ViewerConfig {
             anchor_timeout: Duration::from_secs(15),
             pointer_box_px: 50,
             anchor_file,
+            paired: None,
+            send_input: true,
+            hold: Duration::ZERO,
         }
     }
 }
@@ -253,6 +265,8 @@ pub struct ViewerReport {
     pub pointer_moves: u32,
     pub pointer_echo_samples: u32,
     pub pointer_max_deviation_px: i32,
+    /// The session reached the active state as the viewer.
+    pub session_active: bool,
     pub ended_clean: bool,
     pub forgotten: bool,
 }
@@ -360,26 +374,21 @@ fn script(
     held: &mut Held,
     report: &mut ViewerReport,
 ) -> Result<(), String> {
-    // 1. Find the host by address and pair (D12: both sides open pairing; the host's script did).
-    let Reply::Device(placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
-        return Err("AddByAddress did not reply a device".into());
+    // 1. Find the host by address and pair (D12: both sides open pairing; the host's script did). A device that is
+    // already paired is connected to as it is.
+    let host = if let Some(device) = &cfg.paired {
+        log(&format!("VIEWER_USING_PAIRED {device}"));
+        device.clone()
+    } else {
+        let host = pair_with_host(pump, cfg, log)?;
+        held.host = Some(host.clone());
+        log(&format!("VIEWER_PAIRED {host}"));
+        // 2. Wait for the host to have granted.
+        wait_file(&cfg.go, "the go from the orchestrator", cfg.pair_timeout)?;
+        host
     };
-    let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
-        return Err("PairOpen did not reply a pairing id".into());
-    };
-    log("VIEWER_PAIR_OPEN");
-    let host = match pair(pump, cfg, log, pairing_id, &placeholder.id) {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = pump.request(Command::PairCancel { pairing_id }, REPLY);
-            return Err(e);
-        }
-    };
-    held.host = Some(host.clone());
-    log(&format!("VIEWER_PAIRED {host}"));
 
-    // 2. Wait for the host to have granted, then open the session with control.
-    wait_file(&cfg.go, "the go from the orchestrator", cfg.pair_timeout)?;
+    // 2. Open the session with control.
     let shared = &media.shared;
     *lock(&shared.started) = Some(Instant::now());
     let Reply::SessionId(session_id) = pump.ask(
@@ -401,12 +410,49 @@ fn script(
             }
             _ => None,
         })?;
+    let active_at = Instant::now();
+    report.session_active = true;
     log(&format!("VIEWER_ACTIVE session={session_id} granted={:#06x}", granted.0));
     pump.ask(Command::SetAudio { session_id, on: true }, REPLY)?;
+    script_media(pump, backend, media, cfg, log, held, report, session_id, active_at)
+}
 
+/// Adds the host by address and runs the pairing ceremony; the device id it paired as.
+fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -> Result<String, String> {
+    let Reply::Device(placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
+        return Err("AddByAddress did not reply a device".into());
+    };
+    let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
+        return Err("PairOpen did not reply a pairing id".into());
+    };
+    log("VIEWER_PAIR_OPEN");
+    let host = match pair(pump, cfg, log, pairing_id, &placeholder.id) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = pump.request(Command::PairCancel { pairing_id }, REPLY);
+            return Err(e);
+        }
+    };
+    Ok(host)
+}
+
+/// The session's media and pointer, then its end. Runs once the session is active.
+#[allow(clippy::too_many_arguments)]
+fn script_media(
+    pump: &mut Pump<'_>,
+    backend: &ServiceBackend,
+    media: &Media,
+    cfg: &ViewerConfig,
+    log: &dyn Fn(&str),
+    held: &mut Held,
+    report: &mut ViewerReport,
+    session_id: u64,
+    active_at: Instant,
+) -> Result<(), String> {
+    let shared = &media.shared;
+    let mut last_ask = Instant::now() - Duration::from_secs(1);
     // 3. Video: wait for the first decoded picture, asking for a keyframe when the decoder lost its place.
     let end = Instant::now() + cfg.media_timeout;
-    let mut last_ask = Instant::now() - Duration::from_secs(1);
     while shared.frames_decoded.load(Ordering::Relaxed) == 0 && Instant::now() < end {
         request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
         std::thread::sleep(Duration::from_millis(30));
@@ -423,10 +469,11 @@ fn script(
     log(&format!("VIEWER_FIRST_FRAME decoded={} ", shared.frames_decoded.load(Ordering::Relaxed)));
 
     // 4. Pointer: a few small moves around where the host's pointer is now, at most one second of them.
-    let pointer = pointer_moves(backend, shared, session_id, cfg, log, report);
-    // 5. A moment more of media, and the audio.
+    let pointer = if cfg.send_input { pointer_moves(backend, shared, session_id, cfg, log, report) } else { Ok(()) };
+    // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.
+    let hold_end = active_at + cfg.hold;
     let audio_end = Instant::now() + Duration::from_millis(1500);
-    while shared.audio.load(Ordering::Relaxed) == 0 && Instant::now() < audio_end {
+    while Instant::now() < hold_end || (shared.audio.load(Ordering::Relaxed) == 0 && Instant::now() < audio_end) {
         request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -473,11 +520,20 @@ fn pointer_moves(
     // Where the host's pointer is comes from the orchestrator, which reads it from the OS on the host just now: the
     // cursor positions the host sends are only checked for movement (an idle pointer sends none, and their scale is
     // not trusted as an anchor). Without a reading on the display nothing is sent.
-    log("VIEWER_NEED_ANCHOR");
-    let text = wait_file(&cfg.anchor_file, "the pointer reading of the host", cfg.anchor_timeout)?;
-    let anchor = parse_units(&text).ok_or_else(|| {
-        format!("the host's pointer is not on the captured display ({text}): none of the pointer moves were sent")
-    })?;
+    let anchor = if cfg.paired.is_some() {
+        // No orchestrator: the host's last cursor position (its scale is only trusted to this extent), else the middle.
+        let end = Instant::now() + Duration::from_secs(1);
+        while lock(&s.cursor).is_empty() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        lock(&s.cursor).last().map_or((32768, 32768), |c| (c.x, c.y))
+    } else {
+        log("VIEWER_NEED_ANCHOR");
+        let text = wait_file(&cfg.anchor_file, "the pointer reading of the host", cfg.anchor_timeout)?;
+        parse_units(&text).ok_or_else(|| {
+            format!("the host's pointer is not on the captured display ({text}): none of the pointer moves were sent")
+        })?
+    };
     let dims = s.dims.load(Ordering::Relaxed);
     let (w, h) = (i64::from(dims >> 16), i64::from(dims & 0xFFFF));
     if w == 0 || h == 0 {
@@ -492,7 +548,7 @@ fn pointer_moves(
     let clamp = |v: i32, dim: i64| v.clamp(0, i32::try_from(dim - 1).unwrap_or(0));
     let started = Instant::now();
     log(&format!(
-        "POINTER sending {} small moves within a {} px box around ({ax},{ay}) px on a {w}x{h} display, over {} ms: input goes Mac to PC only",
+        "POINTER sending {} small moves within a {} px box around ({ax},{ay}) px on a {w}x{h} display, over {} ms: input goes viewer to host only",
         WALK.len(),
         cfg.pointer_box_px,
         MOVE_GAP.as_millis() * (WALK.len() as u128)

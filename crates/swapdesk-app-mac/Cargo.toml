@@ -32,6 +32,7 @@ path = "src/main.rs"
 swapdesk-app = { path = "../swapdesk-app" }
 swapdesk-audio = { path = "../swapdesk-audio" }
 swapdesk-core-mac = { path = "../swapdesk-core-mac" }
+swapdesk-files = { path = "../swapdesk-files" }
 swapdesk-host = { path = "../swapdesk-host" }
 swapdesk-input-mac = { path = "../swapdesk-input-mac" }
 swapdesk-ipc = { path = "../swapdesk-ipc" }
@@ -45,9 +46,17 @@ swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 swapdesk-ui = { path = "../swapdesk-ui" }
 tokio.workspace = true
+# Only with the `dev-harness` feature: the scripted host user of `--drive-host`.
+swapdesk-crossdrive = { path = "../swapdesk-crossdrive", optional = true }
+
+[features]
+# Development builds only (scripts/mac/build-app.sh --dev-harness): `Swapdesk --drive-host <dir>`, the cross-machine
+# proof with no human at the Mac. Never in a release build.
+dev-harness = ["dep:swapdesk-crossdrive"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 swapdesk-audio-mac = { path = "../swapdesk-audio-mac" }
+swapdesk-capture-mac = { path = "../swapdesk-capture-mac" }
 swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
 swapdesk-net-mac = { path = "../swapdesk-net-mac" }
 swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
@@ -56,7 +65,7 @@ objc2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread"]
+features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true

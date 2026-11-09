@@ -48,15 +48,17 @@ fn every_focusable_control_of_the_main_window_has_a_place_and_the_a11y_name() {
 }
 
 #[test]
-fn the_devices_screen_has_a_sidebar_with_the_address_field_and_the_notices_in_the_content() {
+fn the_devices_screen_has_a_narrow_sidebar_of_navigation_and_lists_and_the_notices_in_the_content() {
     let state = Scenario::Dispositivos.prepared_state();
     let m = main_of(&state);
     let MainLayout::Browse { sidebar, content } = &m.layout else { panic!("browse layout") };
-    assert_eq!(sidebar.address.label, "Adicionar por endereço");
-    assert_eq!(sidebar.address.placeholder, "192.168.0.21");
+    assert_eq!(sidebar.home.label, "Início");
+    assert!(!sidebar.home.selected, "a device page is open");
     assert!(sidebar.groups.iter().map(|g| g.rows.len()).sum::<usize>() >= 2);
     assert_eq!(sidebar.groups[0].title, "Pareados");
-    assert_eq!(sidebar.nav.len(), 2);
+    assert_eq!(sidebar.nav.len(), 1, "only Ajustes under the lists");
+    assert_eq!(sidebar.nav[0].label, "Ajustes");
+    assert!(find_field(content, EditId::Address).is_none(), "the address field lives on the home");
     assert!(!content.is_empty());
     assert!(sidebar.rows_selected_count() <= 1);
 
@@ -66,6 +68,58 @@ fn the_devices_screen_has_a_sidebar_with_the_address_field_and_the_notices_in_th
         content.iter().any(|b| matches!(b, Block::Button(x) if matches!(x.id, ControlId::Notice(_)))),
         "a notice card with its button"
     );
+}
+
+/// The text field `edit` among the blocks, inside cards too.
+fn find_field(blocks: &[Block], edit: EditId) -> Option<FieldModel> {
+    blocks.iter().find_map(|b| match b {
+        Block::Field(f) if f.edit == edit => Some(f.clone()),
+        Block::FieldAction { field, .. } if field.edit == edit => Some(field.clone()),
+        Block::Cards(cards) => cards.iter().find_map(|c| find_field(c, edit)),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_home_is_the_start_page_with_the_header_the_pill_and_two_cards() {
+    let state = Scenario::Inicio.prepared_state();
+    let m = main_of(&state);
+    let MainLayout::Browse { sidebar, content } = &m.layout else { panic!("browse layout") };
+    assert!(sidebar.home.selected);
+    assert_eq!(sidebar.app_name, "Swapdesk");
+    assert!(matches!(&content[0], Block::Heading { text, level: 1 } if text == "Notebook da sala"));
+    assert!(matches!(&content[1], Block::Text(t) if t == "Pronto para receber"));
+    assert!(
+        matches!(&content[2], Block::Pill { text, warn: false } if text == "Só na rede local: Wi-Fi Casa, 192.168.0.12")
+    );
+    let Some(Block::Cards(cards)) = content.last() else { panic!("cards last") };
+    assert_eq!(cards.len(), 2);
+    assert!(matches!(&cards[0][0], Block::Heading { text, .. } if text == "Parear"));
+    assert!(cards[0].iter().any(
+        |b| matches!(b, Block::Button(x) if x.id == ControlId::PairThisComputer && x.style == ButtonStyle::Primary)
+    ));
+    let field = find_field(content, EditId::Address).expect("address field in the pair card");
+    assert_eq!(field.label, "Adicionar por endereço");
+    assert_eq!(field.placeholder, "192.168.0.21");
+    assert_eq!(field.hint.as_deref(), Some("Se o outro computador não aparece em Na rede, digite o IPv4 dele."));
+    assert!(
+        cards[0].iter().any(|b| matches!(b, Block::FieldAction { action, .. } if action.id == ControlId::AddAddress))
+    );
+    assert!(
+        matches!(&cards[1][0], Block::HeadingAction { text, level: 2, action } if text == "Atividade recente" && action.id == ControlId::HomeActivityAll)
+    );
+    assert_eq!(cards[1].iter().filter(|b| matches!(b, Block::Entry { .. })).count(), 5);
+    assert!(
+        matches!(&cards[1][1], Block::Entry { who, what, .. } if who == "MacBook do escritório" && what.starts_with("Inverteu"))
+    );
+}
+
+#[test]
+fn the_pill_warns_on_a_public_network() {
+    let mut s = Scenario::EstadoRedePublica.prepared_state();
+    s.navigate(swapdesk_ui::Nav::Home);
+    let MainLayout::Browse { content, .. } = main_of(&s).layout else { panic!() };
+    assert!(content.iter().any(|b| matches!(b, Block::Pill { warn: true, .. })));
 }
 
 impl Sidebar {
@@ -104,6 +158,31 @@ fn modal_requests_are_cards() {
 }
 
 #[test]
+fn the_theme_setting_decides_the_palette_and_the_appearance_to_apply() {
+    use swapdesk_ui::{SelectId, Theme, UiEvent};
+    let mut s = Scenario::Ajustes.prepared_state();
+    assert_eq!(appearance_name(s.theme()), None, "Sistema clears the override");
+    assert!(!main_of(&s).dark);
+    s.choose(SelectId::Theme, 2);
+    assert_eq!(appearance_name(s.theme()), Some("NSAppearanceNameDarkAqua"));
+    assert!(main_of(&s).dark, "Escuro paints dark on a light OS");
+    s.apply(UiEvent::ThemeChanged { dark: true });
+    s.choose(SelectId::Theme, 1);
+    assert_eq!(appearance_name(s.theme()), Some("NSAppearanceNameAqua"));
+    assert!(!main_of(&s).dark, "Claro paints light on a dark OS");
+    s.choose(SelectId::Theme, 0);
+    assert_eq!(s.theme(), Theme::System);
+    assert!(main_of(&s).dark, "Sistema follows the OS again");
+    // The select is in Ajustes with the three choices.
+    let MainLayout::Browse { content, .. } = main_of(&s).layout else { panic!() };
+    let opts = content.iter().find_map(|b| match b {
+        Block::Select(m) if m.select == SelectId::Theme => Some(m.options.clone()),
+        _ => None,
+    });
+    assert_eq!(opts.map(|o| o.len()), Some(3));
+}
+
+#[test]
 fn language_and_theme_follow_the_state() {
     let light = main_of(&Scenario::Dispositivos.prepared_state());
     let dark = main_of(&Scenario::DispositivosEscuro.prepared_state());
@@ -111,9 +190,12 @@ fn language_and_theme_follow_the_state() {
     let mut s = Scenario::Dispositivos.prepared_state();
     assert_eq!(main_of(&s).title, "Swapdesk");
     s.set_language(Language::En);
-    let MainLayout::Browse { sidebar, .. } = main_of(&s).layout else { panic!() };
-    assert_eq!(sidebar.address.label, s.t(MsgKey::AddressLabel));
-    assert_eq!(sidebar.address.label, "Add by address");
+    s.navigate(swapdesk_ui::Nav::Home);
+    let MainLayout::Browse { sidebar, content } = main_of(&s).layout else { panic!() };
+    let field = find_field(&content, EditId::Address).expect("address field");
+    assert_eq!(field.label, s.t(MsgKey::AddressLabel));
+    assert_eq!(field.label, "Add by address");
+    assert_eq!(sidebar.home.label, "Home");
 }
 
 #[test]
@@ -169,17 +251,18 @@ fn the_connect_flow_states_show_on_the_main_window() {
 }
 
 #[test]
-fn the_viewer_toolbar_has_every_tool_and_the_swap_slot() {
+fn the_viewer_toolbar_has_every_tool_and_no_swap_toward_another_os() {
     let state = shell_state(Scenario::Visualizador);
     let m = viewer_model(&state).expect("viewer");
     let ids = m.control_ids();
+    // The mock machine is Windows and the scenario's peer a Mac: swap is not in the bar (not in 1.0).
+    assert!(!ids.contains(&ControlId::TbSwap));
     for id in [
         ControlId::TbScreen,
         ControlId::TbFit,
         ControlId::TbAudio,
         ControlId::TbGrab,
         ControlId::TbKeys,
-        ControlId::TbSwap,
         ControlId::TbDisconnect,
         ControlId::TbQuality,
         ControlId::TbViewOnly,
@@ -338,8 +421,68 @@ fn an_unchanged_state_gives_an_equal_model_so_the_window_is_not_rebuilt() {
 
 #[test]
 fn the_address_edit_is_a_field_with_no_value() {
-    let state = Scenario::Dispositivos.prepared_state();
-    let MainLayout::Browse { sidebar, .. } = main_of(&state).layout else { panic!() };
-    assert_eq!(sidebar.address.edit, EditId::Address);
-    assert!(sidebar.address.value.is_empty());
+    let state = Scenario::Inicio.prepared_state();
+    let MainLayout::Browse { content, .. } = main_of(&state).layout else { panic!() };
+    let field = find_field(&content, EditId::Address).expect("address field");
+    assert_eq!(field.edit, EditId::Address);
+    assert!(field.value.is_empty());
+}
+
+#[test]
+fn the_swap_tool_is_in_the_bar_only_toward_a_machine_of_this_os() {
+    use swapdesk_ui::Permission;
+    let mut state = shell_state(Scenario::Visualizador);
+    state.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: swapdesk_ui::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    let m = viewer_model(&state).expect("viewer");
+    let ids = m.control_ids();
+    let (swap, disconnect) = (
+        ids.iter().position(|i| *i == ControlId::TbSwap).expect("swap toward the same OS"),
+        ids.iter().position(|i| *i == ControlId::TbDisconnect).expect("disconnect"),
+    );
+    assert_eq!(swap + 1, disconnect, "swap sits right before disconnect");
+}
+
+#[test]
+fn renaming_puts_the_action_beside_the_name_and_save_beside_cancel() {
+    let mut state = Scenario::Dispositivos.prepared_state();
+    let content = |state: &UiState| match main_model(state).layout {
+        MainLayout::Browse { content, .. } => content,
+        MainLayout::Card { blocks } => blocks,
+    };
+    let blocks = content(&state);
+    assert!(
+        matches!(&blocks[0], Block::HeadingAction { text, action, .. } if text == "MacBook do escritório" && action.id == ControlId::RenameDevice),
+        "{:?}",
+        blocks[0]
+    );
+    assert!(!main_model(&state).has_field(EditId::Rename));
+
+    state.activate(ControlId::RenameDevice);
+    let model = main_model(&state);
+    assert!(model.has_field(EditId::Rename));
+    let blocks = content(&state);
+    let field = blocks.iter().find_map(|b| match b {
+        Block::Field(f) if f.edit == EditId::Rename => Some(f.clone()),
+        _ => None,
+    });
+    assert_eq!(field.expect("the rename field").value, "MacBook do escritório", "prefilled");
+    let row = blocks.iter().find_map(|b| match b {
+        Block::ButtonRow(v) => Some(v.iter().map(|x| x.id).collect::<Vec<_>>()),
+        _ => None,
+    });
+    assert_eq!(row, Some(vec![ControlId::RenameSave, ControlId::RenameCancel]));
+    assert!(blocks.iter().all(|b| !matches!(b, Block::HeadingAction { .. })), "the action gave way to the field");
+
+    state.submit_edit(EditId::Rename, "  ".into());
+    let texts: Vec<String> =
+        content(&state).iter().filter_map(|b| if let Block::Text(t) = b { Some(t.clone()) } else { None }).collect();
+    assert!(texts.contains(&state.t(MsgKey::RenameEmpty)), "{texts:?}");
 }

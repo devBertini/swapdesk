@@ -8,9 +8,7 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ResolvesClientCert, Resumption};
 use rustls::crypto::{CryptoProvider, ring as ring_provider};
-use rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer, UnixTime,
-};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, NoServerSessionStorage, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -56,11 +54,11 @@ pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(ring_provider::default_provider())
 }
 
-/// The key as rustls wants it for raw public keys: the "certificate" is the 44-byte SPKI.
-pub fn certified_key(identity: &Identity, provider: &CryptoProvider) -> Result<Arc<CertifiedKey>> {
-    let key = provider
-        .key_provider
-        .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.pkcs8().to_vec())))
+/// The key as rustls wants it for raw public keys: the "certificate" is the 44-byte SPKI. The PKCS#8 document is
+/// lent to rustls (`any_eddsa_type` takes a reference), so no copy of the private key is made per dial or per
+/// endpoint: the only copies are the identity's own, which is wiped when it drops.
+pub fn certified_key(identity: &Identity) -> Result<Arc<CertifiedKey>> {
+    let key = ring_provider::sign::any_eddsa_type(&PrivatePkcs8KeyDer::from(identity.pkcs8()))
         .map_err(|_| TrustError::Crypto("signing key"))?;
     Ok(Arc::new(CertifiedKey::new(vec![CertificateDer::from(identity.spki().to_vec())], key)))
 }
@@ -282,7 +280,7 @@ pub fn server_tls_config(
     kind: EndpointKind,
 ) -> Result<rustls::ServerConfig> {
     let provider = provider();
-    let key = certified_key(identity, &provider)?;
+    let key = certified_key(identity)?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TrustError::Tls(e.to_string()))?
@@ -302,7 +300,7 @@ pub fn client_tls_config(
     alpn: &[&[u8]],
 ) -> Result<rustls::ClientConfig> {
     let provider = provider();
-    let key = certified_key(identity, &provider)?;
+    let key = certified_key(identity)?;
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TrustError::Tls(e.to_string()))?

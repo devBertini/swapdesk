@@ -17,11 +17,22 @@
 //! counterpart is `swapdesk-input-win`'s `grab`); the AppKit-facing glue is [`input`]; the macOS calls are in
 //! `platform`.
 
+pub mod clip_logic;
+#[cfg(target_os = "macos")]
+mod clipboard;
 pub mod input;
 pub mod keymap;
 pub mod logic;
 #[cfg(target_os = "macos")]
 mod platform;
+#[cfg(target_os = "macos")]
+mod sink;
+pub mod sink_logic;
+
+#[cfg(target_os = "macos")]
+pub use clipboard::MacClipboard;
+#[cfg(target_os = "macos")]
+pub use sink::{MacInputSink, can_post};
 
 pub use input::{Access, GrabStatus, KeyboardState, MacInput, NoKeyboardState, PointerMap};
 pub use logic::{InputConfig, InputCore, Outcome, ScrollConfig};

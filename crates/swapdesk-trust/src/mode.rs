@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use swapdesk_platform::Clock;
+use tokio::sync::watch;
 
 use crate::ids::DeviceId;
 
@@ -32,11 +33,14 @@ pub type ModeSnapshot = ModeOptions;
 pub struct PairingMode {
     clock: Arc<dyn Clock>,
     open: Mutex<Option<Open>>,
+    /// Counts every `enter` and `close`, so the accept loop of the pairing endpoint sleeps until the mode changes
+    /// instead of looking at it on a timer.
+    changes: watch::Sender<u64>,
 }
 
 impl PairingMode {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self { clock, open: Mutex::new(None) }
+        Self { clock, open: Mutex::new(None), changes: watch::Sender::new(0) }
     }
 
     fn guard(&self) -> MutexGuard<'_, Option<Open>> {
@@ -47,11 +51,18 @@ impl PairingMode {
     pub fn enter(&self, options: ModeOptions) {
         let until = self.clock.now().0.saturating_add(PAIRING_MODE_MICROS);
         *self.guard() = Some(Open { until, expect: options.expect, replaces: options.replaces });
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// A receiver that sees every later `enter` and `close` (the first `changed()` resolves for the first of them).
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// The user closed the screen, or a pairing ended.
     pub fn close(&self) {
         *self.guard() = None;
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// The options while the mode is open; `None` once it ended or expired.
@@ -98,6 +109,23 @@ mod tests {
         clock.advance(Duration::from_secs(1));
         assert!(!mode.is_open());
         assert_eq!(mode.remaining_micros(), 0);
+    }
+
+    #[test]
+    fn a_subscriber_sees_every_enter_and_close() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let clock = FakeClock::new(MonoMicros(0));
+        let mode = PairingMode::new(Arc::new(clock));
+        let mut changes = mode.subscribe();
+        mode.enter(ModeOptions::default());
+        mode.close();
+        rt.block_on(async {
+            // Both changes happened before the wait: it resolves at once, it does not wait for a third.
+            tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(50), changes.changed()).await.is_err());
+            mode.enter(ModeOptions::default());
+            tokio::time::timeout(Duration::from_secs(1), changes.changed()).await.unwrap().unwrap();
+        });
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! Mapping: console connect/disconnect and logon/logoff -> `ConsoleChanged(state now)`; session lock -> `DesktopSwitched(Locked)`,
 //! unlock -> `DesktopSwitched(Default)` (a reading of C3: the secure desktop of UAC is not announced here);
 //! suspend -> `Suspending`; resume (automatic, critical or by user) -> `Resumed`, once per suspend; display change -> `DisplaysChanged`.
-//! `NetworkChanged` has no source in this module yet (the LAN guard's own poll owns it). After a service stop the
+//! `NetworkChanged` has no source in this module (the owner pushes it: `swapdesk-net-win`'s `NetworkWatcher`). After a service stop the
 //! watcher returns `ErrorKind::Closed` from `next_event`.
 
 use std::ptr::null_mut;
@@ -55,6 +55,8 @@ pub(crate) enum Raw {
     Suspending,
     Resumed,
     NetworkChanged,
+    /// Nothing happened: the owner asks the consumer to look at its own queues (`next_event` returns `Ok(None)`).
+    Wake,
     Stop,
 }
 
@@ -123,6 +125,12 @@ impl SessionEventSender {
     pub fn network_changed(&self) {
         self.push(Raw::NetworkChanged);
     }
+    /// Wakes the consumer without an event: its `next_event` returns `Ok(None)` at once. The owner's other sources (a
+    /// queue of its own, a helper that ended) call this so the consumer sleeps until something happens instead of
+    /// looking on a timer.
+    pub fn wake(&self) {
+        self.push(Raw::Wake);
+    }
     /// Ends the watcher: the pending and every later `next_event` returns `ErrorKind::Closed`.
     pub fn stop(&self) {
         self.push(Raw::Stop);
@@ -161,6 +169,7 @@ impl SessionWatcher for WinSessionWatcher {
             Ok(Raw::Suspending) => Ok(Some(SessionEvent::Suspending)),
             Ok(Raw::Resumed) => Ok(Some(SessionEvent::Resumed)),
             Ok(Raw::NetworkChanged) => Ok(Some(SessionEvent::NetworkChanged)),
+            Ok(Raw::Wake) => Ok(None),
             Ok(Raw::Stop) => {
                 self.stopped = true;
                 Err(closed("stopped"))

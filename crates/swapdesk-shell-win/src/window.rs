@@ -43,10 +43,13 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS_NAME: PCWSTR = w!("SwapdeskWindow");
 pub const TIMER_TICK: usize = 1;
 pub const TIMER_PLACEHOLDER: usize = 2;
+/// The host banner's minute boundary (re-armed after each firing, stopped when the banner closes).
+pub const TIMER_BANNER: usize = 4;
 /// One-shot: 150 ms after the last key typed in the address field (R-UI-4).
 const TIMER_ADDRESS: usize = 3;
 const EN_CHANGE: u16 = 0x0300;
 const EM_SETCUEBANNER: u32 = 0x1501;
+const EM_SETSEL: u32 = 0x00B1;
 const ES_AUTOHSCROLL_STYLE: u32 = 0x0080;
 
 /// The EDIT window procedure the inputs had before they were subclassed.
@@ -73,6 +76,8 @@ pub struct Window {
     adapter: RefCell<Option<accesskit_windows::Adapter>>,
     actions: Arc<Mutex<Vec<ActionRequest>>>,
     tracking: Cell<bool>,
+    /// The host's cursor shape as a Win32 cursor, shown over the video while the viewer controls.
+    remote_cursor: crate::cursor::CursorCache,
     scroll_max: Cell<f32>,
     list_area: Cell<Option<Rect>>,
     video: Cell<Option<Rect>>,
@@ -86,6 +91,10 @@ pub struct Window {
     pending_effect: RefCell<Option<Effect>>,
     /// The text of the address field while it waits for 150 ms of quiet (R-UI-4).
     address_wait: RefCell<Debouncer>,
+    /// Full screen (D30): what leaving puts back; `None` while the window has its frame.
+    fullscreen: RefCell<Option<crate::fullscreen::Saved>>,
+    /// The high half of a surrogate pair typed through the IME, waiting for its low half.
+    high_surrogate: Cell<Option<u16>>,
 }
 
 struct Bridge {
@@ -148,6 +157,7 @@ impl Window {
             adapter: RefCell::new(None),
             actions: Arc::new(Mutex::new(Vec::new())),
             tracking: Cell::new(false),
+            remote_cursor: crate::cursor::CursorCache::default(),
             scroll_max: Cell::new(0.0),
             list_area: Cell::new(None),
             video: Cell::new(None),
@@ -157,6 +167,8 @@ impl Window {
             edit_brush: Cell::new(None),
             pending_effect: RefCell::new(None),
             address_wait: RefCell::new(Debouncer::new()),
+            fullscreen: RefCell::new(None),
+            high_surrogate: Cell::new(None),
         });
         let title = a11y::window_title(&shared.state.borrow(), kind);
         let (style, ex) = match kind {
@@ -187,6 +199,13 @@ impl Window {
         match created {
             Ok(h) => {
                 window.hwnd.set(h);
+                if kind == WindowKind::Banner {
+                    // The banner is for the person at this machine: kept out of the screen capture, so the viewer
+                    // never sees its own "controla este computador" bar (Windows 10 2004 and later; older systems
+                    // fail the call and keep showing it, which is harmless).
+                    // SAFETY: our own window, just created.
+                    let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
+                }
                 window.place_and_show();
                 Ok(window)
             }
@@ -379,6 +398,51 @@ impl Window {
             if horizontal { MouseKind::Wheel { dx: delta, dy: 0 } } else { MouseKind::Wheel { dx: 0, dy: delta } };
         let hit = self.hit_test(p.x, p.y);
         self.forward_mouse(kind, p.x, p.y, hit)
+    }
+
+    /// Full screen follows the state (D30): the viewer window covers the chosen monitor with no frame, or has its frame
+    /// back. A change of the chosen monitor while already full screen applies the next time.
+    pub fn sync_fullscreen(&self, on: bool, monitor: Option<u8>) {
+        if self.kind != WindowKind::Viewer {
+            return;
+        }
+        let mut saved = self.fullscreen.borrow_mut();
+        match (on, saved.as_ref()) {
+            (true, None) => {
+                if let Some(target) = crate::fullscreen::target_rect(self.hwnd(), monitor) {
+                    *saved = Some(crate::fullscreen::enter(self.hwnd(), target));
+                }
+            }
+            (false, Some(s)) => {
+                crate::fullscreen::leave(self.hwnd(), s);
+                *saved = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Text the IME composed: the key-downs of an IME arrive as `VK_PROCESSKEY` and carry nothing, the result comes as
+    /// `WM_CHAR`s that nothing else reads in the viewer. They go to the pipeline as a text-only [`KeyMsg`]
+    /// (`vk == 0`), which sends a text record. `Some` when the unit was taken.
+    fn forward_text(&self, unit: u16) -> Option<LRESULT> {
+        let host = self.host()?;
+        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() {
+            return None;
+        }
+        let pair = match (self.high_surrogate.take(), unit) {
+            (Some(high), low) if (0xDC00..0xE000).contains(&low) => vec![high, low],
+            (_, high) if (0xD800..0xDC00).contains(&high) => {
+                self.high_surrogate.set(Some(high));
+                return Some(LRESULT(0));
+            }
+            (_, u) => vec![u],
+        };
+        let text = String::from_utf16(&pair).ok().filter(|t| !t.is_empty() && !t.chars().any(char::is_control));
+        if let Some(text) = text {
+            let key = KeyMsg { vk: 0, scan: 0, extended: false, down: true, text: Some(text), dead: false, locks: 0 };
+            host.key(&key);
+        }
+        Some(LRESULT(0))
     }
 
     /// Offers a key message to the pipeline. `Some` when it takes the key away from the UI.
@@ -645,9 +709,11 @@ impl Window {
                 ((slot.rect.x * s).round() as i32, (slot.rect.y * s).round() as i32, (slot.rect.w * s).round() as i32);
             let y = y + ((slot.rect.h * s).round() as i32 - line) / 2;
             let existing = handles.iter().find(|h| h.id == slot.id).map(|h| h.hwnd);
+            let mut created_now = false;
             let hwnd = match existing {
                 Some(h) => h,
                 None => {
+                    created_now = true;
                     // SAFETY: a child EDIT of our window; it is destroyed with it.
                     let created = unsafe {
                         let instance = GetModuleHandleW(None).ok();
@@ -688,6 +754,8 @@ impl Window {
                 }
             };
             let handle = handles.iter_mut().find(|h| h.id == slot.id).expect("the handle was just found or pushed");
+            // The rename field opens prefilled, with its text selected and the keyboard in it.
+            let opening = slot.id == EditId::Rename && (created_now || !handle.visible);
             // SAFETY: our child windows.
             unsafe {
                 if handle.font != font.0 as isize {
@@ -699,7 +767,17 @@ impl Window {
                     handle.rect = (x, y, w, line);
                     handle.visible = true;
                 }
-                if GetFocus() != hwnd && !slot.value.is_empty() && edit_text(hwnd) != slot.value {
+                if opening {
+                    let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
+                    let _ = SetFocus(Some(hwnd));
+                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                }
+                // The rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
+                if slot.id != EditId::Rename
+                    && GetFocus() != hwnd
+                    && !slot.value.is_empty()
+                    && edit_text(hwnd) != slot.value
+                {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                 }
             }
@@ -757,13 +835,19 @@ impl Window {
                 if id == EditId::Chat {
                     self.clear_edit(id);
                 }
-                // SAFETY: our own window takes the focus back.
-                unsafe {
-                    let _ = SetFocus(Some(self.hwnd()));
+                // The rename field keeps the focus: a refused name is corrected in place.
+                if id != EditId::Rename {
+                    // SAFETY: our own window takes the focus back.
+                    unsafe {
+                        let _ = SetFocus(Some(self.hwnd()));
+                    }
                 }
             }
             2 => self.move_focus(unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0),
             3 => {
+                if id == EditId::Rename {
+                    self.shared.activate(ControlId::RenameCancel, self);
+                }
                 if id == EditId::Name
                     && let Some(n) = self.shared.state.borrow().settings().map(|s| s.name.clone())
                 {
@@ -872,6 +956,12 @@ impl Window {
         }
         if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
             && let Some(r) = self.forward_key(msg, wparam, lparam)
+        {
+            return Some(r);
+        }
+        if msg == WM_CHAR
+            && self.kind == WindowKind::Viewer
+            && let Some(r) = self.forward_text(wparam.0 as u16)
         {
             return Some(r);
         }
@@ -1018,7 +1108,7 @@ impl Window {
                 let hover = self.ix.borrow().hover;
                 if hover.is_none()
                     && let Some(host) = self.host()
-                    && host.hides_pointer()
+                    && let Some(shape) = host.pointer_shape()
                     && let Some(a) = self.video_px()
                 {
                     let mut p = windows::Win32::Foundation::POINT::default();
@@ -1027,9 +1117,14 @@ impl Window {
                         let _ = GetCursorPos(&mut p);
                         let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
                     }
-                    if p.x >= a.x && p.y >= a.y && p.x < a.x + a.width as i32 && p.y < a.y + a.height as i32 {
-                        // SAFETY: hides the pointer over the video; the remote cursor is drawn there.
-                        unsafe { SetCursor(None) };
+                    if p.x >= a.x
+                        && p.y >= a.y
+                        && p.x < a.x + a.width as i32
+                        && p.y < a.y + a.height as i32
+                        && let Some(c) = self.remote_cursor.get(&shape)
+                    {
+                        // SAFETY: a cursor the window's cache owns; it lives until the cache replaces it.
+                        unsafe { SetCursor(Some(c)) };
                         return Some(LRESULT(1));
                     }
                 }
@@ -1227,6 +1322,7 @@ impl Window {
                 match wparam.0 {
                     TIMER_TICK => self.shared.tick(),
                     TIMER_PLACEHOLDER => self.shared.arm_placeholders(),
+                    TIMER_BANNER => self.shared.banner_tick(),
                     TIMER_ADDRESS => {
                         // SAFETY: our own window's timer.
                         unsafe {
@@ -1307,6 +1403,7 @@ fn edit_code(id: EditId) -> usize {
         EditId::Name => 1,
         EditId::Chat => 2,
         EditId::Address => 3,
+        EditId::Rename => 4,
     }
 }
 
@@ -1315,6 +1412,7 @@ fn edit_from_code(code: usize) -> Option<EditId> {
         1 => Some(EditId::Name),
         2 => Some(EditId::Chat),
         3 => Some(EditId::Address),
+        4 => Some(EditId::Rename),
         _ => None,
     }
 }

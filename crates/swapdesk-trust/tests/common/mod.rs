@@ -212,7 +212,7 @@ impl Node {
                     return e;
                 }
                 let code = match &entries[audited_before].event {
-                    AuditEvent::PairFailed(code) => *code,
+                    AuditEvent::PairFailed(code) | AuditEvent::PairRefused(code) => *code,
                     AuditEvent::PairingLocked => ErrorCode::PairingLocked,
                     _ => ErrorCode::NoError,
                 };

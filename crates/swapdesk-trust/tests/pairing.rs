@@ -193,6 +193,35 @@ fn a_crash_between_the_nonce_and_the_result_counts_as_a_provisional_failure() {
 }
 
 #[test]
+fn the_accept_loop_wakes_on_the_mode_closing_not_on_a_timer() {
+    run(async {
+        // Closing the mode with nothing in flight ends the service at once: it sleeps on the mode, not on a 100 ms look.
+        let node = Node::new("b", TestUi::answering(true));
+        node.open_pairing_mode();
+        let server = start_responder(&node);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let closed = std::time::Instant::now();
+        node.mode.close();
+        tokio::time::timeout(Duration::from_secs(5), server.task).await.expect("the service ended").unwrap();
+        let took = closed.elapsed();
+        assert!(took < Duration::from_millis(60), "the service took {took:?} to notice the mode closing");
+
+        // Entering the mode again with the service gone changes nothing; a new service sees the mode that is open.
+        let other = Node::new("c", TestUi::answering(true));
+        other.open_pairing_mode();
+        let server = start_responder(&other);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!server.task.is_finished(), "an open mode keeps the service up");
+        // Re-entering restarts the time and wakes the loop, which finds the mode still open and goes back to sleep.
+        other.open_pairing_mode();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!server.task.is_finished());
+        other.mode.close();
+        tokio::time::timeout(Duration::from_secs(2), server.task).await.expect("ended").unwrap();
+    });
+}
+
+#[test]
 fn unsolicited_pairing_is_refused() {
     run(async {
         // 1. This machine is not in pairing mode: its pairing endpoint does not exist. Nothing answers.
@@ -783,7 +812,18 @@ fn the_cap_on_concurrent_handshakes_holds() {
         let b = Node::new("b", TestUi::holding());
         a.open_pairing_mode();
         b.open_pairing_mode();
-        let server = start_responder_with(&b, ServeOptions { max_in_flight: 2, filter: None });
+        // The hook where a per-address turn is spent runs only for attempts that got a place under the cap.
+        let admitted_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: swapdesk_trust::AdmittedHook = {
+            let n = std::sync::Arc::clone(&admitted_count);
+            std::sync::Arc::new(move |_: &quinn::Incoming| {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let server = start_responder_with(
+            &b,
+            ServeOptions { max_in_flight: 2, admitted: Some(hook), ..ServeOptions::default() },
+        );
         let initiator = start_held_ceremony(&a, &b, &server).await;
         assert_eq!(server.service.in_flight(), 1);
 
@@ -801,6 +841,11 @@ fn the_cap_on_concurrent_handshakes_holds() {
             "a connection over the cap was handshaken"
         );
         assert_eq!(server.service.in_flight(), 2);
+        assert_eq!(
+            admitted_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "an attempt turned away by the cap was reported as admitted (its turn would be spent)"
+        );
 
         // Room again once the second goes away: a new connection is handshaken (and told BUSY by the ceremony).
         second.conn.close(0u32.into(), b"");
@@ -847,5 +892,153 @@ fn the_initiator_honours_the_device_its_mode_names() {
         let server = start_responder(&b);
         let options = InitiateOptions { expect: Some(b.identity.device_id()), replaces: None };
         assert!(connect_and_initiate(&client_endpoint(), &a.ctx, server.addr, options).await.is_ok());
+    });
+}
+
+// ---------- stage 66: per-address limits (B9) and the initiator's choice (B12) ----------
+
+/// A pairing handshake attempted from a fresh client endpoint (one more source port, the same source address).
+async fn try_handshake(addr: std::net::SocketAddr, within: Duration) -> Result<quinn::Connection, &'static str> {
+    let identity = Identity::generate(0).unwrap();
+    let connecting = client_endpoint()
+        .connect_with(pairing_client_config(&identity).unwrap(), addr, swapdesk_trust::tls::SERVER_NAME)
+        .unwrap();
+    match tokio::time::timeout(within, connecting).await {
+        Ok(Ok(conn)) => Ok(conn),
+        Ok(Err(_)) => Err("refused"),
+        Err(_) => Err("no answer"),
+    }
+}
+
+#[test]
+fn a_second_pairing_attempt_from_one_address_inside_thirty_seconds_is_ignored_without_an_audit_entry() {
+    use std::sync::{Arc, Mutex};
+    use swapdesk_trust::{Decision, IncomingFilter, PairingRate, ServeOptions};
+    run(async {
+        let b = Node::new("b", TestUi::answering(true));
+        b.open_pairing_mode();
+        let rate = Arc::new(PairingRate::new());
+        let judged = Arc::new(Mutex::new(Vec::new()));
+        let filter: IncomingFilter = {
+            let (rate, judged) = (Arc::clone(&rate), Arc::clone(&judged));
+            Arc::new(move |incoming: &quinn::Incoming| {
+                let validated = incoming.remote_address_validated();
+                let decision = rate.judge(incoming);
+                judged.lock().unwrap().push((validated, decision));
+                decision
+            })
+        };
+        let admitted: swapdesk_trust::AdmittedHook = {
+            let rate = Arc::clone(&rate);
+            Arc::new(move |incoming: &quinn::Incoming| rate.note(incoming))
+        };
+        let server = start_responder_with(
+            &b,
+            ServeOptions { filter: Some(filter), admitted: Some(admitted), ..ServeOptions::default() },
+        );
+
+        // The first attempt: the source is retried to prove its address (no turn spent), then handshakes.
+        let first = try_handshake(server.addr, Duration::from_secs(5)).await.expect("the first attempt is served");
+        assert_eq!(*judged.lock().unwrap(), [(false, Decision::Retry), (true, Decision::Accept)]);
+
+        // A second attempt from the same address (another port) inside 30 s: retried, then ignored: nothing answers.
+        let second = try_handshake(server.addr, Duration::from_millis(1500)).await;
+        assert_eq!(second.err(), Some("no answer"), "the second attempt was answered");
+        // (The client retransmits its Initial while it waits, so the ignored decision may repeat.)
+        let mut decisions = judged.lock().unwrap().clone();
+        decisions.dedup();
+        assert_eq!(
+            decisions,
+            [(false, Decision::Retry), (true, Decision::Accept), (false, Decision::Retry), (true, Decision::Ignore)]
+        );
+        assert_eq!(server.service.in_flight(), 1, "only the first attempt holds a place");
+        assert!(b.audit.entries().is_empty(), "an ignored attempt wrote an audit entry: {:?}", b.audit.entries());
+        drop(first);
+    });
+}
+
+#[test]
+fn every_connection_is_retried_first_and_the_fifth_validated_one_from_an_address_is_ignored() {
+    use std::sync::{Arc, Mutex};
+    use swapdesk_trust::{Admission, MAX_PER_ADDRESS, SessionLimits, open_pairing_endpoint, turn_away};
+    run(async {
+        let b = Node::new("b", TestUi::answering(true));
+        let endpoint = open_pairing_endpoint(loopback_socket(), &b.identity).unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let limits = SessionLimits::new();
+        let seen = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        // The accept loop of the session endpoint in miniature: the limit first, then the handshake; an admitted
+        // connection keeps its place for as long as the test holds it.
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let server = {
+            let (limits, seen, held) = (limits.clone(), Arc::clone(&seen), Arc::clone(&held));
+            tokio::spawn(async move {
+                while let Some(incoming) = endpoint.accept().await {
+                    match limits.judge(&incoming) {
+                        Admission::Admit(slot) => {
+                            seen.lock().unwrap().push("admit");
+                            if let Ok(connecting) = incoming.accept()
+                                && let Ok(conn) = connecting.await
+                            {
+                                held.lock().unwrap().push((conn, slot));
+                            }
+                        }
+                        Admission::Retry => {
+                            seen.lock().unwrap().push("retry");
+                            turn_away(incoming, true);
+                        }
+                        Admission::Ignore => {
+                            seen.lock().unwrap().push("ignore");
+                            turn_away(incoming, false);
+                        }
+                    }
+                }
+            })
+        };
+
+        let local = std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST);
+        let mut clients = Vec::new();
+        for n in 0..MAX_PER_ADDRESS {
+            clients.push(
+                try_handshake(addr, Duration::from_secs(5)).await.unwrap_or_else(|e| panic!("connection {n}: {e}")),
+            );
+        }
+        assert_eq!(limits.live_for(local), MAX_PER_ADDRESS);
+
+        // The fifth: the unvalidated Initial is retried, the validated one is ignored, and no handshake finishes.
+        let fifth = try_handshake(addr, Duration::from_millis(1500)).await;
+        assert_eq!(fifth.err(), Some("no answer"), "the fifth connection was answered");
+        // Every connection was retried to prove its address first; only the four validated ones were admitted, and
+        // the fifth, validated, was ignored. (The client retransmits its Initial while it waits, so a decision may
+        // repeat.)
+        let log = seen.lock().unwrap().clone();
+        let count = |what: &str| log.iter().filter(|s| **s == what).count();
+        assert_eq!(count("admit"), MAX_PER_ADDRESS, "{log:?}");
+        assert!(count("retry") > MAX_PER_ADDRESS, "every attempt, the fifth too, was retried first: {log:?}");
+        assert_eq!(log.last(), Some(&"ignore"), "{log:?}");
+        assert_eq!(limits.live_for(local), MAX_PER_ADDRESS);
+
+        // A connection that ends gives its place back: the next one is served.
+        let (conn, slot) = held.lock().unwrap().pop().expect("a held connection");
+        conn.close(0u32.into(), b"");
+        drop(slot);
+        drop(conn);
+        try_handshake(addr, Duration::from_secs(5)).await.expect("a place was freed");
+        server.abort();
+    });
+}
+
+#[test]
+fn an_initiator_whose_chosen_device_is_not_the_one_that_answers_counts_no_failure() {
+    run(async {
+        let a = Node::new("a", TestUi::answering(true));
+        let b = Node::new("b", TestUi::answering(true));
+        // The user picked a device (`[9; 16]`); a machine announcing `pair=1` with another key answers. The initiator
+        // ends the attempt at the key check, before the responder commits to a nonce: nothing counts against it.
+        let (ra, _) = pair_once(&a, &b, InitiateOptions { expect: Some([9; 16]), replaces: None }).await;
+        assert!(matches!(ra, Err(TrustError::Protocol(ErrorCode::NotPermitted))), "{ra:?}");
+        let disk = a.disk();
+        assert!(disk.lockout.failures.is_empty() && disk.lockout.provisional.is_none(), "{:?}", disk.lockout);
+        assert!(b.disk().lockout.failures.is_empty(), "the responder never reached step 2 either");
     });
 }

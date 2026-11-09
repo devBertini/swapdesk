@@ -29,7 +29,7 @@ fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
     NOW_MS - (15 * HOUR + 30 * MIN) + hour * HOUR + minute * MIN - back_days * DAY
 }
 
-pub const MAC: &str = "mac-claudio";
+pub const MAC: &str = "mac-alex";
 pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
 
@@ -122,6 +122,7 @@ fn settings() -> Settings {
         show_stats: false,
         keyboard_mode: KeyboardMode::Auto,
         swap_ctrl_cmd: true,
+        theme: Theme::System,
     }
 }
 
@@ -170,6 +171,9 @@ pub enum Step {
 /// One named state of the interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
+    /// "Início" (D35): the home screen.
+    Inicio,
+    InicioEscuro,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -206,7 +210,9 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 30] = [
+    pub const ALL: [Scenario; 32] = [
+        Scenario::Inicio,
+        Scenario::InicioEscuro,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -242,6 +248,8 @@ impl Scenario {
     /// The name `--mock` takes.
     pub const fn name(self) -> &'static str {
         match self {
+            Scenario::Inicio => "inicio",
+            Scenario::InicioEscuro => "inicio-escuro",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -282,6 +290,8 @@ impl Scenario {
     /// The design board this state comes from, or what the design lacks.
     pub const fn board(self) -> &'static str {
         match self {
+            Scenario::Inicio => "new: Início, the home screen (D35)",
+            Scenario::InicioEscuro => "new: Início escuro (D35)",
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
             Scenario::Permissoes => "3. Permissões por direção",
@@ -340,9 +350,13 @@ impl Scenario {
     }
 
     fn viewer_session(since_ago_min: u64) -> UiEvent {
+        Self::viewer_session_to(MAC, since_ago_min)
+    }
+
+    fn viewer_session_to(device: &str, since_ago_min: u64) -> UiEvent {
         UiEvent::Session {
             session_id: 1,
-            device_id: MAC.into(),
+            device_id: device.into(),
             state: SessionState::Active {
                 since_ms: NOW_MS - since_ago_min * MIN,
                 role: Role::Viewer,
@@ -357,10 +371,10 @@ impl Scenario {
         }
     }
 
-    fn host_session() -> UiEvent {
+    fn host_session_to(device: &str) -> UiEvent {
         UiEvent::Session {
             session_id: 2,
-            device_id: MAC.into(),
+            device_id: device.into(),
             state: SessionState::Active {
                 since_ms: NOW_MS - 12 * MIN,
                 role: Role::Host,
@@ -374,6 +388,8 @@ impl Scenario {
         use Step::*;
         let mac = || Select(MAC);
         match self {
+            Scenario::Inicio => vec![],
+            Scenario::InicioEscuro => vec![Event(UiEvent::ThemeChanged { dark: true })],
             Scenario::Dispositivos => vec![mac()],
             Scenario::DispositivosEscuro => vec![mac(), Event(UiEvent::ThemeChanged { dark: true })],
             Scenario::Permissoes => vec![mac(), Tab(DeviceTab::Permissions)],
@@ -471,7 +487,7 @@ impl Scenario {
                 mac(),
                 Event(Self::viewer_session(15)),
                 Activate(ControlId::TbTerminal),
-                Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "claudio".into() } }),
+                Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } }),
             ],
             Scenario::Arquivos => vec![
                 mac(),
@@ -552,13 +568,17 @@ impl Scenario {
                     },
                 }),
             ],
-            Scenario::Banner => vec![Event(Self::host_session())],
-            Scenario::Inverter => vec![mac(), Event(Self::viewer_session(12)), Activate(ControlId::TbSwap)],
+            // The banner offers "Inverter" only toward a machine of this OS (Windows here): the Desktop.
+            Scenario::Banner => vec![Event(Self::host_session_to(DESKTOP))],
+            // Swap is offered only toward a machine of this OS (this mock machine is Windows): the Desktop.
+            Scenario::Inverter => {
+                vec![Select(DESKTOP), Event(Self::viewer_session_to(DESKTOP, 12)), Activate(ControlId::TbSwap)]
+            }
             Scenario::InverterPedido => vec![
-                Event(Self::host_session()),
+                Event(Self::host_session_to(DESKTOP)),
                 Event(UiEvent::Swap {
                     session_id: 2,
-                    event: SwapEvent::Asked { request_id: 11, by: "MacBook do escritório".into(), remaining_s: 14 },
+                    event: SwapEvent::Asked { request_id: 11, by: "Desktop do escritório".into(), remaining_s: 14 },
                 }),
             ],
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
@@ -835,6 +855,20 @@ impl World {
                 self.devices.retain(|d| d.id != device_id);
                 Ok(Reply::Done)
             }
+            Command::RenameDevice { device_id, name } => {
+                let name = name.trim();
+                if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+                    return Err(ApiError::new(ApiCode::Invalid));
+                }
+                let d = self.device(&device_id)?;
+                if !d.paired {
+                    return Err(ApiError::new(ApiCode::NotFound));
+                }
+                d.name = name.to_owned();
+                let devices = self.devices.clone();
+                sh.later(ms(50), UiEvent::DevicesChanged(devices));
+                Ok(Reply::Done)
+            }
             Command::Elevate { action } => {
                 if let ElevatedAction::SetGrants { device_id, grants } = &action
                     && let Ok(d) = self.device(device_id)
@@ -899,7 +933,7 @@ impl World {
                 Ok(Reply::RequestId(9))
             }
             Command::TermOpen { .. } => {
-                sh.later(ms(100), UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "claudio".into() } });
+                sh.later(ms(100), UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } });
                 Ok(Reply::TermId(1))
             }
             Command::FilesList { .. } => {
@@ -967,6 +1001,8 @@ mod tests {
     fn every_scenario_drives_the_state_to_its_screen() {
         use WindowKind::*;
         let expect: &[(Scenario, Screen, &[WindowKind])] = &[
+            (Scenario::Inicio, Screen::Home, &[Main]),
+            (Scenario::InicioEscuro, Screen::Home, &[Main]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),
@@ -989,12 +1025,12 @@ mod tests {
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
             (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
-            (Scenario::Banner, Screen::Devices, &[Main, Banner]),
+            (Scenario::Banner, Screen::Home, &[Main, Banner]),
             (Scenario::Inverter, Screen::Devices, &[Main, Viewer]),
-            (Scenario::InverterPedido, Screen::Devices, &[Main, Banner]),
+            (Scenario::InverterPedido, Screen::Home, &[Main, Banner]),
             (Scenario::EstadoFechouInesperado, Screen::Devices, &[Main]),
-            (Scenario::EstadoNenhumComputador, Screen::Devices, &[Main]),
-            (Scenario::Carregando, Screen::Devices, &[Main]),
+            (Scenario::EstadoNenhumComputador, Screen::Home, &[Main]),
+            (Scenario::Carregando, Screen::Home, &[Main]),
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
         ];
@@ -1092,7 +1128,9 @@ mod tests {
         assert!(s.placeholder(DataKind::Devices) && s.placeholder(DataKind::Activity));
         let sequential: u128 = commands.iter().map(|c| latency(c).as_millis()).sum();
         let took = run(&mut s, &b, commands, Duration::from_secs(3));
-        assert!(took.as_millis() < sequential * 3 / 4, "took {took:?}, one after the other would take {sequential} ms");
+        // A sleep never ends early, so answering one after the other can never take less than the sum: finishing
+        // under it proves the requests overlapped, however slow the machine (a CI runner overshoots every sleep).
+        assert!(took.as_millis() < sequential, "took {took:?}, one after the other would take {sequential} ms");
         for k in [DataKind::ThisDevice, DataKind::Network, DataKind::Devices, DataKind::Settings, DataKind::Activity] {
             assert_eq!(s.fetch(k), crate::state::Fetch::Ready, "{k:?}");
         }
@@ -1142,16 +1180,16 @@ mod tests {
 
         // The cache: Atividade and Ajustes are asked once, then kept fresh by events.
         let mut s = Scenario::Dispositivos.prepared_state();
-        let a = s.activate(ControlId::NavActivity);
+        let a = s.activate(ControlId::HomeActivityAll);
         assert!(a.commands.is_empty(), "the activity log is already cached");
         let a = s.activate(ControlId::NavSettings);
         assert!(a.commands.is_empty(), "the settings are already cached");
         let mut fresh = UiState::default();
-        let a = fresh.activate(ControlId::NavActivity);
+        let a = fresh.activate(ControlId::HomeActivityAll);
         assert_eq!(a.commands.len(), 1, "first open asks once");
         let a = fresh.activate(ControlId::NavSettings);
         assert_eq!(a.commands, vec![Command::GetSettings]);
-        let again = fresh.activate(ControlId::NavActivity);
+        let again = fresh.activate(ControlId::HomeActivityAll);
         assert!(again.commands.is_empty(), "a second visit does not ask again while the first is in flight");
         // An event refreshes the cache without a request.
         let mut devices = devices();

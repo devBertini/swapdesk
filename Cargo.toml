@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0-preview"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -47,6 +47,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-core-media = { version = "0.3.2", default-features = false }
 objc2-core-video = { version = "0.3.2", default-features = false }
 objc2-video-toolbox = { version = "0.3.2", default-features = false }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false }
 objc2-av-foundation = { version = "0.3.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false }
 objc2-core-audio = { version = "0.3.2", default-features = false }

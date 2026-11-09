@@ -14,6 +14,7 @@
 
 pub mod helper;
 mod helper_pty;
+pub mod netcache;
 pub mod outbox;
 pub mod proxy;
 pub mod rpc;

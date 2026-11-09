@@ -15,6 +15,6 @@ mod renderer;
 mod sys;
 
 #[cfg(target_os = "macos")]
-pub use renderer::{Counters, MacRenderer, RendererOptions};
+pub use renderer::{Counters, MacRenderer, RendererOptions, cursor_image};
 #[cfg(target_os = "macos")]
 pub use sys::now;

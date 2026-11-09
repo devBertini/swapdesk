@@ -3,8 +3,8 @@
 //! none while the screen stays still, and the frames after the second burst go through `encode` again.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Mutex, mpsc::Receiver};
 use std::time::{Duration, Instant};
 
 use swapdesk_ipc::{Message, VideoBackend};
@@ -128,7 +128,7 @@ impl VideoEncoder for CountingEncoder {
 
 /// Runs the capture loop for `run_for` over `schedule`; returns the video frames sent as (keyframe, bytes) and the faults.
 fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, usize)>, Vec<String>, Counts) {
-    let (outbox, rx): (Outbox, Receiver<Message>) = Outbox::new(256);
+    let (outbox, rx) = Outbox::new(256);
     let counts = Counts::default();
     let encoder_counts = counts.clone();
     let sched = Mutex::new(Some(schedule));

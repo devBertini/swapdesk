@@ -34,6 +34,8 @@ use crate::testpipe::{PipeWriter, duplex_blocking};
 mod clip_actions;
 mod extras;
 mod files;
+mod presence;
+mod security;
 mod terminal;
 
 /// `UiRequest.op` of `Connect`.
@@ -74,7 +76,7 @@ impl SystemHooks for TestHooks {
 }
 
 fn user(sid: &str) -> UserRef {
-    UserRef { id: sid.into(), name: "claudio".into() }
+    UserRef { id: sid.into(), name: "alex".into() }
 }
 
 fn info(admin: bool) -> ConnInfo {
@@ -93,6 +95,8 @@ struct Machine {
     hooks: Arc<TestHooks>,
     helpers: Vec<(RecordingInputSink, JoinHandle<()>)>,
     log: LogCapture,
+    /// The interface list the hub and the core read (a test changes it to play a network change).
+    nets: Arc<FakeNetInterfaces>,
 }
 
 impl Machine {
@@ -120,6 +124,7 @@ impl Machine {
         let trace = LogCapture::new();
         let log = trace.clone();
         let interfaces = Arc::new(interfaces);
+        let nets = Arc::clone(&interfaces);
         let clock = Arc::new(MonotonicClock::new());
         let hub = UiHub::new(HubParams {
             os: Os::Windows,
@@ -153,7 +158,10 @@ impl Machine {
         let cfg = if dev { cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port)) } else { cfg };
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
-        Self { core, hub, identity, trust, secrets, audit, presence, hooks, helpers: Vec::new(), log }
+        // The UIs of `info()` run in session 1, the console's: what a connection may do (pair, grant, connect, swap)
+        // is the console's alone. A test about another session connects with its own `ConnInfo`.
+        hub.set_console_session(Some(1));
+        Self { core, hub, identity, trust, secrets, audit, presence, hooks, helpers: Vec::new(), log, nets }
     }
 
     fn id(&self) -> DeviceId {
@@ -615,6 +623,25 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
     assert_eq!(m.trust.read(|s| s.devices[0].unattended_granted_by.clone()), None);
     assert!(m.audit.entries().iter().filter(|e| matches!(e.event, AuditEvent::GrantsChanged { .. })).count() >= 3);
 
+    // Rename: only the local name of the record changes, the list is pushed, and bad names are refused.
+    let rename = |device_id: &str, name: &str| UiOp::RenameDevice { device_id: device_id.into(), name: name.into() };
+    assert!(plain.call(rename(&id, "  Sala de estar  ")).is_ok());
+    assert_eq!(m.trust.read(|s| s.devices[0].name.clone()), "Sala de estar", "trimmed and stored");
+    assert_eq!(m.trust.read(|s| s.devices[0].grants_here.bits()), PermissionSet::FILES.bits(), "grants untouched");
+    let pushed = plain.notify("the renamed list", |n| match n {
+        Notify::DevicesChanged(l) if l[0].name == "Sala de estar" => Some(l.clone()),
+        _ => None,
+    });
+    assert_eq!(pushed[0].name, "Sala de estar");
+    // (A name over 64 bytes never gets here: the wire codec refuses it, see swapdesk-ipc `tests/rename.rs`.)
+    for bad in ["", "   ", "a\nb", "tab\there"] {
+        assert_eq!(plain.call(rename(&id, bad)).unwrap_err(), ApiCode::Invalid, "{bad:?}");
+    }
+    assert!(plain.call(rename(&id, &"x".repeat(64))).is_ok());
+    assert_eq!(m.trust.read(|s| s.devices[0].name.len()), 64);
+    assert_eq!(plain.call(rename("zz", "Nome")).unwrap_err(), ApiCode::Invalid);
+    assert_eq!(plain.call(rename(&"0".repeat(32), "Nome")).unwrap_err(), ApiCode::NotFound);
+
     // Forget: the key and grants go.
     assert!(plain.call(UiOp::ForgetDevice { device_id: id.clone() }).is_ok());
     assert!(m.trust.read(|s| s.devices.is_empty()));
@@ -977,6 +1004,68 @@ fn a_message_that_is_not_for_a_ui_ends_the_connection() {
     m.finish();
 }
 
+/// A pipe writer that blocks while its gate is shut, as a pipe whose reader (the UI) stopped reading.
+struct ShutGate {
+    inner: PipeWriter,
+    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl std::io::Write for ShutGate {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (m, cv) = &*self.open;
+        let _open = cv.wait_while(lock(m), |open| !*open).unwrap();
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_ui_that_stops_reading_is_cut_and_the_owner_is_told_so_it_can_close_the_pipe() {
+    let m = Machine::new("sala");
+    let (client_end, server_end) = duplex_blocking();
+    let gate = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+    let (cut_tx, cut_rx) = channel();
+    let hub = m.hub.clone();
+    let server_gate = Arc::clone(&gate);
+    let serve = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(server_end.reader);
+        let mut writer = FrameWriter::new(ShutGate { inner: server_end.writer, open: server_gate });
+        Handshake::server(&mut reader, &mut writer, 7)?;
+        hub.serve_cancellable(
+            reader,
+            writer,
+            info(false),
+            Arc::new(move || {
+                let _ = cut_tx.send(());
+            }),
+        )
+    });
+    let (mut reader, mut writer) = (FrameReader::new(client_end.reader), FrameWriter::new(client_end.writer));
+    Handshake::client(&mut reader, &mut writer, IpcRole::Ui, 1).unwrap();
+    wait_for("the connection", || (m.hub.connections() == 1).then_some(()));
+    // The UI stops reading: the pipe's writer stalls, and the service goes on telling the UI things.
+    *lock(&gate.0) = false;
+    for i in 0..3000u32 {
+        m.hub.hub.notify(Notify::ChatRead { session_id: 1, up_to: i });
+    }
+    cut_rx.recv_timeout(Duration::from_secs(5)).expect("the owner is told the connection was cut");
+    // What the owner does with it (cancelling the pipe's I/O): the stalled write returns and the read ends.
+    {
+        let (open, cv) = &*gate;
+        *lock(open) = true;
+        cv.notify_all();
+    }
+    drop(writer);
+    let ended = serve.join().unwrap();
+    assert!(ended.is_ok(), "{ended:?}");
+    assert_eq!(m.hub.connections(), 0);
+    drop(reader);
+    m.finish();
+}
+
 /// Two free UDP ports in a row on 127.0.0.1 (session, pairing), as a typed address implies (PROTOCOL.md 1). They
 /// come from below Windows' dynamic range (49152 and up), which hands out ephemeral ports in sequence and would give
 /// the second one to the next socket bound to port 0.
@@ -1020,4 +1109,46 @@ fn a_device_paired_through_a_typed_address_is_dialled_at_that_address() {
     drop((ua, ub));
     a.finish();
     b.finish();
+}
+
+#[test]
+fn a_just_paired_device_gets_a_valid_preset_that_the_accept_takes() {
+    // Nothing stored yet (just paired): the preset is what the viewer asked for, without UNATTENDED and
+    // ADMIN_TERMINAL. Masking with those sets once dropped VIEW too, and "Aceitar" then answered Invalid.
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::EMPTY);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees(&host, false);
+    host.hub.set_console_session(Some(1));
+    let mut host_ui = host.client(info(false));
+    let mut viewer_ui = viewer.client(info(false));
+
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let incoming = host_ui.notify("IncomingRequest", |n| match n {
+        Notify::IncomingRequest(r) => Some(r.clone()),
+        _ => None,
+    });
+    let preset = PermissionSet::from_bits(incoming.preset).expect("the preset is a valid set");
+    assert!(preset.contains(PermissionSet::CONTROL), "control asked for: {:#06x}", incoming.preset);
+    assert!(!preset.contains(PermissionSet::UNATTENDED) && !preset.contains(PermissionSet::ADMIN_TERMINAL));
+    assert!(
+        host_ui
+            .call(UiOp::AnswerIncoming {
+                request_id: incoming.request_id,
+                decision: Decision::Accept,
+                grants: incoming.preset
+            })
+            .is_ok(),
+        "the preset as it came is accepted"
+    );
+    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
+        panic!()
+    };
+    assert!(viewer_ui.call(UiOp::Disconnect { session_id }).is_ok());
+    drop((host_ui, viewer_ui));
+    host.finish();
+    viewer.finish();
 }

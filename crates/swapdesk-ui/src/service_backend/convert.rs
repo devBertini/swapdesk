@@ -48,6 +48,7 @@ pair_enum!(os_perm_to_wire, os_perm_from_wire, a::OsPermission, w::OsPermission;
 pair_enum!(direction_to_wire, direction_from_wire, a::Direction, w::Direction; Incoming, Outgoing);
 pair_enum!(role_to_wire, role_from_wire, a::Role, w::Role; Viewer, Host);
 pair_enum!(language_to_wire, language_from_wire, a::Language, w::Language; PtBr, En);
+pair_enum!(theme_to_wire, theme_from_wire, a::Theme, w::Theme; System, Light, Dark);
 pair_enum!(keyboard_to_wire, keyboard_from_wire, a::KeyboardMode, w::KeyboardMode; Auto, Physical, Text);
 pair_enum!(keys_to_wire, keys_from_wire, a::SpecialKeys, w::SpecialKeys; CtrlAltDel, AltTab, WinOrCmd, AltF4OrCmdQ, PrintScreen);
 pair_enum!(swap_why_to_wire, swap_why_from_wire, a::SwapWhy, w::SwapWhy; Declined, TimedOut, NobodyPresent, NotPermitted, Busy);
@@ -311,6 +312,7 @@ pub fn settings_to_wire(v: &a::Settings) -> w::Settings {
         show_stats: v.show_stats,
         keyboard_mode: keyboard_to_wire(v.keyboard_mode),
         swap_ctrl_cmd: v.swap_ctrl_cmd,
+        theme: theme_to_wire(v.theme),
     }
 }
 
@@ -326,6 +328,7 @@ pub fn settings_from_wire(v: w::Settings) -> a::Settings {
         show_stats: v.show_stats,
         keyboard_mode: keyboard_from_wire(v.keyboard_mode),
         swap_ctrl_cmd: v.swap_ctrl_cmd,
+        theme: theme_from_wire(v.theme),
     }
 }
 
@@ -519,6 +522,7 @@ pub fn route(c: &a::Command) -> Route {
         C::PairCancel { pairing_id } => O::PairCancel { pairing_id: *pairing_id },
         C::SetGrants { device_id, grants } => O::SetGrants { device_id: device_id.clone(), grants: grants.0 },
         C::ForgetDevice { device_id } => O::ForgetDevice { device_id: device_id.clone() },
+        C::RenameDevice { device_id, name } => O::RenameDevice { device_id: device_id.clone(), name: name.clone() },
         C::Connect { device_id, intent, unattended } => {
             O::Connect { device_id: device_id.clone(), intent: intent_to_wire(*intent), unattended: *unattended }
         }
@@ -546,7 +550,7 @@ pub fn route(c: &a::Command) -> Route {
         C::ActivityList { before_ms, limit } => O::ActivityList { before_ms: *before_ms, limit: *limit },
         C::RequestSwap { session_id } => O::RequestSwap { session_id: *session_id },
         C::AnswerSwap { request_id, accept } => O::AnswerSwap { request_id: *request_id, accept: *accept },
-        C::ChatSend { session_id, text } => O::ChatSend { session_id: *session_id, text: text.clone() },
+        C::ChatSend { session_id, text } => O::ChatSend { session_id: *session_id, text: w::Text(text.clone()) },
         // The service marks everything the peer sent as read: `up_to` is only for the UI's own state.
         C::ChatMarkRead { session_id, .. } => O::ChatMarkRead { session_id: *session_id },
         // The UI has no choice of intent for "Acordar": it wakes the device to control it, like "Controlar".
@@ -565,7 +569,9 @@ pub fn route(c: &a::Command) -> Route {
             Some(op) => op,
             None => return Route::Unsupported,
         },
-        C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } => return Route::LocalDone,
+        C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } | C::SetReleaseKey { .. } => {
+            return Route::LocalDone;
+        }
         C::Elevate { .. }
         | C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
@@ -614,6 +620,7 @@ mod tests {
             show_stats: true,
             keyboard_mode: a::KeyboardMode::Text,
             swap_ctrl_cmd: true,
+            theme: a::Theme::Dark,
         }
     }
 
@@ -763,7 +770,7 @@ mod tests {
         );
         assert_eq!(
             route(&C::ChatSend { session_id: 4, text: "oi".into() }),
-            Route::Op(w::UiOp::ChatSend { session_id: 4, text: "oi".into() })
+            Route::Op(w::UiOp::ChatSend { session_id: 4, text: w::Text("oi".into()) })
         );
         assert_eq!(
             route(&C::ChatMarkRead { session_id: 4, up_to: 9 }),

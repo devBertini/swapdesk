@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Bandeja e barra de menus</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
+.sd,.sd *{box-sizing:border-box}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
+.sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
+.sd .soft{color:var(--soft)}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
+.sd .btn.icon{width:40px;padding:0}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
+.sd .row:first-child{border-top:0}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
+.sd [role=menu] hr{border:0;height:1px;background:var(--line);margin:6px 4px}
+.sd [role=menu] .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--ink);text-align:left}
+a{color:#3346D3}
+</style>
+</helmet>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; overflow: hidden"><div style="display: flex; flex-direction: column; gap: 6px"><h1>Bandeja e barra de menus</h1><p class="soft">Com a janela fechada, o Swapdesk continua presente: o ícone mostra o estado e o menu tem o essencial.</p></div><div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px"><figure style="display: flex; flex-direction: column; gap: 10px"><div style="position: relative; height: 560px; border-radius: 8px; overflow: hidden; background: #3A5566"><div role="menu" aria-label="Swapdesk" style="position: absolute; right: 70px; bottom: 58px; border-radius: 8px; display: flex; flex-direction: column; padding: 6px; background: var(--surface); color: var(--ink); box-shadow: 0 14px 40px rgba(0,0,0,0.3); width: 300px"><div style="display: flex; align-items: center; gap: 10px; padding: 10px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span><span style="display: block; font-weight: 600">Notebook da sala</span><span class="cap" style="display: flex; align-items: center; gap: 6px"><span class="dot" style="background: var(--ok)"></span>Pronto para receber, Wi-Fi Casa</span></span></div><hr><button class="mi" role="menuitem"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="13.5" r="3"></circle><path d="M8.75 11.25L16 4M13.5 6.5l2 2"></path></svg><span>Parear este computador</span></button><button class="mi" role="menuitem"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.5 5v10M12.5 5v10"></path></svg><span>Pausar recepção</span></button><hr><button class="mi" role="menuitem" style="font-weight: 600"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg><span>Abrir o Swapdesk</span></button></div><div style="position: absolute; left: 0; right: 0; bottom: 0; height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: rgba(23,26,33,0.92); color: #E9EBF0"><span style="flex: 1"></span><span style="width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.14)"></span><span style="flex: 1"></span><span aria-label="Swapdesk, pronto para receber" role="img" style="width: 32px; height: 32px; border-radius: 6px; background: rgba(255,255,255,0.18); display: flex; align-items: center; justify-content: center"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#E9EBF0" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg></span><span class="num" style="display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; font-size: 12px"><span>15:20</span><span>08/11/2026</span></span></div></div><figcaption class="cap">Windows: menu do ícone na bandeja, pronto para receber.</figcaption></figure><figure style="display: flex; flex-direction: column; gap: 10px"><div style="position: relative; height: 560px; border-radius: 8px; overflow: hidden; background: #46586A"><div style="height: 24px; padding: 0 14px; display: flex; align-items: center; gap: 16px; background: rgba(246,247,249,0.9); color: #171A21; font-size: 12px"><span style="font-weight: 700">Finder</span><span>Arquivo</span><span>Editar</span><span style="flex: 1"></span><span role="img" aria-label="Swapdesk, recepção pausada" style="display: flex; padding: 0 4px; border-radius: 4px; background: rgba(23,26,33,0.12)"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#171A21" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg></span><span>sáb. 15:20</span></div><div role="menu" aria-label="Swapdesk" style="position: absolute; right: 96px; top: 28px; border-radius: 10px; display: flex; flex-direction: column; padding: 6px; background: var(--surface); color: var(--ink); box-shadow: 0 14px 40px rgba(0,0,0,0.3); width: 300px"><div style="display: flex; align-items: center; gap: 10px; padding: 10px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span><span style="display: block; font-weight: 600">MacBook do escritório</span><span class="cap" style="display: flex; align-items: center; gap: 6px"><span class="dot" style="background: var(--track)"></span>Recepção pausada: ninguém consegue conectar</span></span></div><hr><button class="mi" role="menuitem"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.75v6.5M5.6 5.4a6.25 6.25 0 1 0 8.8 0"></path></svg><span>Retomar recepção</span></button><button class="mi" role="menuitem"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="13.5" r="3"></circle><path d="M8.75 11.25L16 4M13.5 6.5l2 2"></path></svg><span>Parear este computador</span></button><hr><button class="mi" role="menuitem" style="font-weight: 600"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg><span>Abrir o Swapdesk</span></button></div></div><figcaption class="cap">macOS: menu na barra de menus, com a recepção pausada.</figcaption></figure></div></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'claro') === 'escuro';
+    return { themeClass: dark ? 'sd dark' : 'sd' };
+  }
+}
+</script>
+</body>
+</html>

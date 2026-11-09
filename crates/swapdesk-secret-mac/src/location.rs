@@ -19,6 +19,11 @@ pub enum KeychainLocation {
     /// folder and owner change with it, see [`FolderOwner`]); tests use a throwaway keychain, which also works where the
     /// login keychain cannot be reached (an SSH session has no GUI session to unlock it).
     File(PathBuf),
+    /// No keychain: each secret is a file of its own (mode 0600) in the `secrets` subfolder (0700) of the C5 folder,
+    /// readable by this user's processes only. A legacy item still in the login keychain is read once and copied
+    /// there (one keychain prompt at most, ever). D31: the login keychain ties an item's "Always Allow" to the exact
+    /// binary of a self-signed app, so every rebuild or update asked again and blocked the app at start.
+    Files,
 }
 
 /// Who must own the C5 folder.
@@ -44,11 +49,12 @@ pub struct SecretLocation {
 }
 
 impl SecretLocation {
-    /// The stage 23 location of the logged-in user: login keychain, service "Swapdesk", and
-    /// `~/Library/Application Support/Swapdesk`. `home` is the user's home folder.
+    /// The location of the logged-in user's app: secrets as files in `~/Library/Application Support/Swapdesk/secrets`
+    /// ([`KeychainLocation::Files`], D31), service "Swapdesk" for the legacy login-keychain items it migrates.
+    /// `home` is the user's home folder.
     pub fn login(home: &Path) -> Self {
         Self {
-            keychain: KeychainLocation::Login,
+            keychain: KeychainLocation::Files,
             service: SERVICE_NAME.to_string(),
             folder: home.join("Library").join("Application Support").join(FOLDER_NAME),
             folder_owner: FolderOwner::CurrentUser,
@@ -94,7 +100,7 @@ mod tests {
     #[test]
     fn the_login_location_is_the_users_application_support_folder() {
         let l = SecretLocation::login(Path::new("/Users/someone"));
-        assert_eq!(l.keychain, KeychainLocation::Login);
+        assert_eq!(l.keychain, KeychainLocation::Files);
         assert_eq!(l.service, "Swapdesk");
         assert_eq!(l.folder, Path::new("/Users/someone/Library/Application Support/Swapdesk"));
         assert_eq!(l.folder_owner, FolderOwner::CurrentUser);
@@ -104,7 +110,7 @@ mod tests {
     fn with_replaces_the_service_and_the_folder_only() {
         let l = SecretLocation::login(Path::new("/h")).with("swapdesk-test-1", "/tmp/x");
         assert_eq!((l.service.as_str(), l.folder.as_path()), ("swapdesk-test-1", Path::new("/tmp/x")));
-        assert_eq!(l.keychain, KeychainLocation::Login);
+        assert_eq!(l.keychain, KeychainLocation::Files);
     }
 
     #[test]

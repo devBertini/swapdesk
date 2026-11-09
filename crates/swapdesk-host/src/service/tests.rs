@@ -535,19 +535,20 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     let events = host.core.take_events().expect("events once");
     assert!(host.core.take_events().is_none());
 
-    // A helper that does its handshake and vanishes.
+    // A helper that does its handshake and vanishes. The caller verified its PID (1234); the helper wrote 77 in its
+    // `Hello`, and only the verified one is used.
     let (core_end, helper_end): (End, End) = duplex_blocking();
     let vanishing = std::thread::spawn(move || {
         let mut reader = FrameReader::new(helper_end.reader);
         let mut writer = FrameWriter::new(helper_end.writer);
         Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 77).expect("client handshake");
     });
-    host.core.attach_helper(IpcRole::HelperUser, core_end.reader, core_end.writer).expect("attach");
+    host.core.attach_helper_pid(IpcRole::HelperUser, 1234, core_end.reader, core_end.writer).expect("attach");
     vanishing.join().expect("helper thread");
     let attached = events.recv_timeout(WAIT).expect("attached event");
-    assert_eq!(attached, CoreEvent::HelperAttached { kind: HelperKind::User, pid: 77 });
+    assert_eq!(attached, CoreEvent::HelperAttached { kind: HelperKind::User, pid: 1234 });
     let gone = events.recv_timeout(WAIT).expect("gone event");
-    assert_eq!(gone, CoreEvent::HelperGone { kind: HelperKind::User, pid: 77, error: None });
+    assert_eq!(gone, CoreEvent::HelperGone { kind: HelperKind::User, pid: 1234, error: None });
     wait_for("the slot to empty", || host.core.helper(HelperKind::User).is_none().then_some(()));
 
     // The supervisor's relaunch: a new helper takes the slot.
@@ -555,6 +556,42 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     assert!(host.core.helper(HelperKind::User).is_some());
     host.core.shutdown();
     again.join();
+}
+
+#[test]
+fn the_pid_of_a_helper_is_the_verified_one_and_never_the_hellos() {
+    let host = Machine::new("host-pc", true, false);
+    let events = host.core.take_events().expect("events once");
+    // The supervisor verified the pipe client's PID (31337) while the helper claims 1 in its `Hello`.
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let liar = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperSystem, 1).expect("client handshake");
+        // Stay connected until the core hangs up.
+        let _ = reader.read_message();
+    });
+    let kind =
+        host.core.attach_helper_pid(IpcRole::HelperSystem, 31337, core_end.reader, core_end.writer).expect("attach");
+    assert_eq!(host.core.helper(kind).expect("attached").pid(), 31337, "the link keeps the verified PID");
+    assert_eq!(
+        events.recv_timeout(WAIT).expect("attached event"),
+        CoreEvent::HelperAttached { kind: HelperKind::System, pid: 31337 }
+    );
+
+    // An in-process helper (the Mac app's, the tests') is this process.
+    let (core_end2, helper_end2): (End, End) = duplex_blocking();
+    let inproc = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end2.reader);
+        let mut writer = FrameWriter::new(helper_end2.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 9).expect("client handshake");
+        let _ = reader.read_message();
+    });
+    let kind = host.core.attach_helper(IpcRole::HelperUser, core_end2.reader, core_end2.writer).expect("attach");
+    assert_eq!(host.core.helper(kind).expect("attached").pid(), std::process::id());
+    host.core.shutdown();
+    liar.join().expect("helper thread");
+    inproc.join().expect("helper thread");
 }
 
 #[test]
@@ -613,8 +650,121 @@ fn the_guard_keeps_refusing_loopback_unless_the_development_option_is_on() {
 }
 
 #[test]
+fn a_peer_at_a_blocked_address_is_dropped_before_the_handshake_and_costs_no_prompt() {
+    // B is paired with A and dials from loopback (the development option); A has that address in `blocked`.
+    let a = Machine::new("a", true, false);
+    let b = Machine::new("b", true, false);
+    Machine::pair(&a, &b, ALL);
+    a.trust.update(|s| s.blocked.push([127, 0, 0, 1])).expect("host store");
+    let r = b.core.connect(a.addr(), a.device(), Intent::Control);
+    assert!(r.is_err(), "the blocked peer got a session");
+    assert!(a.core.host().sessions().is_empty());
+    assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked peer");
+    wait_for("the ignored connection in A's trace", || {
+        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
+    });
+}
+
+#[test]
 fn a_core_refuses_to_dial_its_own_endpoint() {
     let a = Machine::new("a", true, false);
     let r = a.core.connect(a.addr(), a.device(), Intent::View);
     assert!(matches!(r, Err(ConnectError::Refused(swapdesk_lan::guard::Refusal::OwnAddress))), "{:?}", r.err());
+}
+
+/// The keys a recording sink holds down at the end of its log (a `ReleaseAll` lets go of all).
+fn keys_down(sink: &RecordingInputSink) -> Vec<u16> {
+    let mut down: Vec<u16> = Vec::new();
+    for r in sink.records() {
+        match r.what {
+            InputRecord::Event(InputEvent::Key { usage, down: true, .. }) => {
+                if !down.contains(&usage) {
+                    down.push(usage);
+                }
+            }
+            InputRecord::Event(InputEvent::Key { usage, down: false, .. }) => down.retain(|u| *u != usage),
+            InputRecord::ReleaseAll => down.clear(),
+            _ => {}
+        }
+    }
+    down
+}
+
+/// D9 (stage 64): a full input queue is its own error, and the dropped batch (here the key-up) is made good by a
+/// `ReleaseAll` behind the queue, so no key stays down at the host.
+#[test]
+fn a_full_input_queue_is_a_distinct_error_and_every_key_ends_up_released() {
+    let rig = Rig::new();
+    let (handle, mut seen) = rig.connect();
+    seen.video();
+    let key = |usage: u16, down: bool| InputEvent::Key { usage_page: 0x07, usage, down, modifiers: 0, locks: 0 };
+    let mut dropped_key_up = false;
+    for attempt in 0..200u16 {
+        let usage = 0x04 + attempt % 20;
+        let _ = handle.send_input(vec![key(usage, true)]);
+        let mut full = false;
+        for n in 0..200_000u32 {
+            match handle.send_input(vec![InputEvent::Pointer { display: 0, x: (n % 60_000) as u16, y: 1 }]) {
+                Ok(()) => {}
+                Err(ApplyError::Full) => {
+                    full = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert!(full, "the writer never fell behind a tight loop of 200000 batches");
+        if handle.send_input(vec![key(usage, false)]) == Err(ApplyError::Full) {
+            dropped_key_up = true;
+            break;
+        }
+    }
+    assert!(dropped_key_up, "no key-up was ever dropped: the test did not exercise the overflow");
+
+    // The host's sink settles: the last thing it saw is a ReleaseAll and nothing is down.
+    let mut seen_len = 0;
+    let mut quiet_since = Instant::now();
+    wait_for("the input to settle on a ReleaseAll", || {
+        let records = rig.user.sink.records();
+        if records.len() != seen_len {
+            seen_len = records.len();
+            quiet_since = Instant::now();
+        }
+        (quiet_since.elapsed() > Duration::from_millis(400)
+            && records.last().is_some_and(|r| r.what == InputRecord::ReleaseAll))
+        .then_some(())
+    });
+    assert!(keys_down(&rig.user.sink).is_empty(), "keys still down at the host: {:?}", keys_down(&rig.user.sink));
+    rig.finish();
+}
+
+/// C11 (stage 64): a UI that does not read gets a bounded amount of video, not a queue of 256 frames of up to 8 MiB;
+/// the frames dropped are followed by a keyframe, which the viewer asks the host for.
+#[test]
+fn a_ui_that_does_not_read_holds_bounded_video_and_gets_a_keyframe_after_the_gap() {
+    let rig = Rig::new();
+    let (_handle, mut seen) = rig.connect();
+    seen.video();
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(seen.msgs.video_bytes() <= 6 * 1024 * 1024, "{} bytes of video queued", seen.msgs.video_bytes());
+    let mut queued = Vec::new();
+    while let Some(item) = seen.msgs.try_recv() {
+        if let ViewerOut::Message(Ipc::ViewerVideo { header, .. }) = item {
+            queued.push(header.frame_id);
+        }
+    }
+    assert!(!queued.is_empty() && queued.len() <= 34, "{} frames were queued", queued.len());
+    let last = *queued.last().expect("some video");
+    let key_id = seen.next("a keyframe after the gap", |o| match o {
+        ViewerOut::Message(Ipc::ViewerVideo { header, .. }) if header.keyframe && header.frame_id > last + 1 => {
+            Some(header.frame_id)
+        }
+        _ => None,
+    });
+    assert!(key_id > last + 1, "frames {last}..{key_id} were dropped, then a keyframe");
+    assert!(
+        rig.system.count(|m| matches!(m, Ipc::ForceKeyframe { .. })) >= 1,
+        "the host's helper was asked for the keyframe"
+    );
+    rig.finish();
 }

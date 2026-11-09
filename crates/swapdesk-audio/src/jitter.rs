@@ -46,10 +46,20 @@ impl Default for JitterConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct QueuedPacket {
     pub header: AudioHeader,
     pub payload: Vec<u8>,
+}
+
+/// The payload is the host's system audio: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for QueuedPacket {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("QueuedPacket")
+            .field("header", &self.header)
+            .field("payload", &swapdesk_proto::RedactedLen(self.payload.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +293,13 @@ mod tests {
 
     fn hdr(seq: u32) -> AudioHeader {
         AudioHeader { discontinuity: false, muted: false, frame_ms: 10, seq, capture_us: u64::from(seq) * FRAME_US }
+    }
+
+    #[test]
+    fn debug_of_a_queued_packet_shows_its_size_and_never_the_audio() {
+        let shown = format!("{:?}", QueuedPacket { header: hdr(1), payload: vec![233; 40] });
+        assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "audio bytes leaked: {shown}");
+        assert!(shown.contains("<redacted 40 bytes>"), "{shown}");
     }
 
     fn feed(b: &mut JitterBuffer, now: u64, seq: u32) {

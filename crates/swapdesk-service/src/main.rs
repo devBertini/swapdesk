@@ -93,18 +93,29 @@ fn run(o: options::Options) -> ExitCode {
         }
     };
     {
-        let (stop, dir) = (stop.clone(), dir.clone());
-        std::thread::spawn(move || {
-            let file = dir.join("stop");
-            loop {
-                if file.exists() {
-                    let _ = std::fs::remove_file(&file);
-                    stop.set();
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(300));
+        // The folder is watched, not looked at on a timer: the thread sleeps in the kernel until a file appears.
+        let (stop, events, dir) = (stop.clone(), events.clone(), dir.clone());
+        match swapdesk_sys_win::DirWatch::new(&dir) {
+            Ok(watch) => {
+                std::thread::spawn(move || {
+                    let file = dir.join("stop");
+                    loop {
+                        // Look first: the file may be there already, and a change between the look and the wait is not
+                        // lost (the watch is armed from `new` on).
+                        if file.exists() {
+                            let _ = std::fs::remove_file(&file);
+                            stop.set();
+                            events.stop();
+                            return;
+                        }
+                        if watch.wait().is_err() {
+                            return;
+                        }
+                    }
+                });
             }
-        });
+            Err(e) => eprintln!("swapdesk-service: the stop file is not watched ({e}); type `stop` instead"),
+        }
     }
     {
         let (stop, events) = (stop.clone(), events.clone());

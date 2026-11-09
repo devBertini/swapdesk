@@ -1,6 +1,6 @@
 # Swapdesk on Windows: development install
 
-Scripts that put Swapdesk on this PC the way the final installer will (stage 39, "Production service run"): per machine under `%ProgramFiles%`, the Windows service `SwapdeskService` as LocalSystem, firewall rules, the Start menu shortcut. They exist to run the production path (SCM service, SYSTEM token in the console session, install-folder check) that `--console` cannot exercise. The real installer is stage 31.
+Scripts that put Swapdesk on this PC the production way: per machine under `%ProgramFiles%`, the Windows service `SwapdeskService` as LocalSystem, firewall rules, the Start menu shortcut. They exist to run the production path (SCM service, SYSTEM token in the console session, install-folder check) that `--console` cannot exercise. A packaged installer with an installed-apps entry is planned.
 
 Read the scripts before running them: each is one file with the changes listed in its header, and `-DryRun` prints every action without doing any.
 
@@ -61,7 +61,7 @@ Not touched: the identity, trust store, settings and logs in `%ProgramData%\Swap
 
 ### Smart App Control
 
-On a PC with Smart App Control on (`VerifiedAndReputablePolicyState` 1 under `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`; this PC has it on), unsigned programs are blocked: the service may fail to start (error 1260 or 4551) or `Swapdesk.exe` may not open. The script warns when it sees the state. This is open question D22 (stage 31): until a signed build exists, the only ways round it are turning Smart App Control off (it cannot be turned back on without a Windows reset) or the delete-and-rebuild recipe for os error 4551 (CONTRACTS, stage 18 readings), which clears a freshly built test binary but is not a promise for an installed copy.
+On a PC with Smart App Control on (`VerifiedAndReputablePolicyState` 1 under `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`; this PC has it on), unsigned programs are blocked: the service may fail to start (error 1260 or 4551) or `Swapdesk.exe` may not open. The script warns when it sees the state. Decision D22 (no paid certificate): until a signed build exists, the only way round it is turning Smart App Control off (recent Windows updates let it be turned back on later without reinstalling Windows), or building from source on a PC where it is off.
 
 ## Uninstall
 
@@ -72,7 +72,7 @@ packaging\windows\uninstall.cmd -KeepData  keeps %ProgramData%\Swapdesk (identit
 
 One UAC click, same as install; `-DryRun` shows the plan. In order it stops and deletes the service, removes the firewall rules, the shortcut, the saved policy (restores `SoftwareSASGeneration` to the saved value, or removes it when it was absent, but only when the install recorded the `SasSetValue` marker, i.e. it was run with `-EnableSas`; if someone changed it since, it is left and reported) and the key `HKLM\SOFTWARE\Swapdesk`, writes one Application event (id 1001) and removes the Event Log source `Swapdesk` (`Remove-EventLog`), deletes the installed files and then the install folder, and unless `-KeepData` the C5 data files and their folder. Only names the contracts list are deleted (CONTRACTS C5.2: `identity.bin`, `trust.bin`, `settings.bin`, `audit-sessions.log`, `audit-network.log`, `trace.log`, with `.1`, `.tmp` and `.damaged-*` copies), and a folder is removed only when it is empty afterwards; `-Force` deletes both folders whole. A folder that is a link (reparse point) is never entered. The data files are deleted, never opened.
 
-It ends by checking: `Get-Service`, `sc.exe query` (1060 = does not exist), the firewall group, the two folders, the shortcut, the registry key, the Event Log source and the processes. Anything left is listed under `NOT CLEAN` and the exit code is 1. Exit code 0 means nothing is left. Keep the zip or the repository folder: `uninstall.cmd` is not copied into Program Files, and there is no Apps and Features entry (stage 31).
+It ends by checking: `Get-Service`, `sc.exe query` (1060 = does not exist), the firewall group, the two folders, the shortcut, the registry key, the Event Log source and the processes. Anything left is listed under `NOT CLEAN` and the exit code is 1. Exit code 0 means nothing is left. Keep the zip or the repository folder: `uninstall.cmd` is not copied into Program Files, and there is no Apps and Features entry.
 
 Not removed: `%ProgramData%\Swapdesk.untrusted-*` folders (the service sets an untrusted folder of that name aside; look at one before deleting it by hand), the per-user HKCU Run entry, `%LOCALAPPDATA%\Swapdesk-dev`.
 

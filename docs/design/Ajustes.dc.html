@@ -8,115 +8,100 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
 <style>
 body{margin:0}
-.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
-.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
 .sd,.sd *{box-sizing:border-box}
 .sd button,.sd input,.sd select{font:inherit;color:inherit}
 .sd button{cursor:pointer}
-.sd h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
-.sd h2{margin:0;font-size:15px;font-weight:600}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
 .sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
 .sd .soft{color:var(--soft)}
-.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
-.sd .btn.quiet{background:transparent;border-color:transparent}
-.sd .btn.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line);font-weight:600}
-.sd .btn:focus-visible,.sd .dev:focus-visible,.sd .switch:focus-visible{outline:2px solid var(--link);outline-offset:2px}
-.sd .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px}
-.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
-.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--line);display:flex;flex-shrink:0}
-.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
-.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
-.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
-.sd .dev{width:100%;display:flex;align-items:center;gap:12px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left}
-.sd .dev .nm{display:block;font-weight:600}
-.sd .dev .st{display:block;font-size:12px;color:var(--soft)}
-.sd .row{display:flex;align-items:center;gap:16px;min-height:52px;padding:0 18px;border-top:1px solid var(--line)}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
+.sd .btn.icon{width:40px;padding:0}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
 .sd .row:first-child{border-top:0}
-.sd .row .lb{flex:1}
-.sd .row .hint{display:block;font-size:12px;color:var(--soft)}
-.sd .field{height:36px;width:220px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
-.sd .group{display:flex;flex-direction:column;gap:10px}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
 a{color:#3346D3}
 </style>
 </helmet>
-<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; overflow: hidden; border-radius: 12px; border: 1px solid var(--line)">
-  <nav aria-label="Dispositivos" style="width: 272px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; padding: 18px 12px; background: var(--sunken); border-right: 1px solid var(--line)">
-    <div style="display: flex; align-items: center; gap: 10px; padding: 0 10px">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="8" height="12" rx="2"></rect><rect x="13.5" y="6" width="8" height="12" rx="2"></rect><path d="M10.5 12h3"></path></svg>
-      <span style="font-size: 16px; font-weight: 700; letter-spacing: -0.01em">Swapdesk</span>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Este computador</h2>
-      <div class="dev" style="cursor: default"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">Notebook da sala</span><span class="st">Pronto para receber</span></span></div>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Pareados</h2>
-      <button class="dev"><span class="dot" style="background: var(--ok)"></span><span><span class="nm">MacBook do escritório</span><span class="st">Online, macOS 15</span></span></button>
-      <button class="dev"><span class="dot" style="background: var(--line)"></span><span><span class="nm">Desktop do escritório</span><span class="st">Dormindo, Windows 11</span></span></button>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 4px">
-      <h2 class="gh">Na rede</h2>
-      <button class="dev"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span><span><span class="nm">MacBook Air</span><span class="st">Não pareado</span></span></button>
-    </div>
-    <div style="flex: 1"></div>
-    <div style="display: flex; flex-direction: column; gap: 2px">
-      <button class="btn quiet" style="justify-content: flex-start">Atividade</button>
-      <button class="btn sel" aria-current="page" style="justify-content: flex-start">Ajustes</button>
-    </div>
-    <p class="soft" style="padding: 0 10px; font-size: 12px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p>
-  </nav>
-
-  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 28px; padding: 32px 40px; background: var(--canvas)">
-    <h1>Ajustes</h1>
-    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start">
-      <div style="display: flex; flex-direction: column; gap: 24px">
-        <section class="group" aria-labelledby="g1">
-          <h2 id="g1">Este computador</h2>
-          <div class="panel">
-            <div class="row"><label for="nome" class="lb">Nome</label><input id="nome" class="field" value="Notebook da sala" style="width: 190px"></div>
-            <div class="row"><label for="lang" class="lb">Idioma</label><select id="lang" class="field" style="width: 190px"><option>Português (Brasil)</option><option>English</option></select></div>
-            <div class="row"><span class="lb">Abrir ao ligar o computador</span><button class="switch" aria-label="Abrir ao ligar o computador" aria-pressed="true"><span></span></button></div>
-          </div>
-        </section>
-        <section class="group" aria-labelledby="g2">
-          <h2 id="g2">Sem ninguém na frente</h2>
-          <div class="panel">
-            <div class="row"><span class="lb">Serviço do Swapdesk<span class="hint">Permite entrar na tela de login e no bloqueio</span></span><span style="color: var(--ok); font-weight: 600">Ativo</span></div>
-            <div class="row"><span class="lb">Bloquear ao terminar a sessão</span><button class="switch" aria-label="Bloquear ao terminar a sessão" aria-pressed="true"><span></span></button></div>
-            <div class="row"><span class="lb">Não suspender durante a sessão</span><button class="switch" aria-label="Não suspender durante a sessão" aria-pressed="true"><span></span></button></div>
-          </div>
-        </section>
-      </div>
-      <div style="display: flex; flex-direction: column; gap: 24px">
-        <section class="group" aria-labelledby="g3">
-          <h2 id="g3">Imagem</h2>
-          <div class="panel">
-            <div class="row"><label for="q" class="lb">Qualidade</label><select id="q" class="field" style="width: 170px"><option>Automática</option><option>Texto nítido</option><option>Movimento fluido</option></select></div>
-            <div class="row"><span class="lb">Mostrar latência e quadros</span><button class="switch" aria-label="Mostrar latência e quadros" aria-pressed="false"><span></span></button></div>
-          </div>
-        </section>
-        <section class="group" aria-labelledby="g4">
-          <h2 id="g4">Teclado</h2>
-          <div class="panel">
-            <div class="row"><label for="kb" class="lb">Enviar teclas<span class="hint">Automático troca para texto quando os teclados são diferentes</span></label><select id="kb" class="field" style="width: 150px"><option>Automático</option><option>Teclas físicas</option><option>Texto</option></select></div>
-            <div class="row"><span class="lb">Trocar Ctrl e Cmd no Mac</span><button class="switch" aria-label="Trocar Ctrl e Cmd no Mac" aria-pressed="true"><span></span></button></div>
-          </div>
-        </section>
-        <section class="group" aria-labelledby="g5">
-          <h2 id="g5">Rede</h2>
-          <div class="panel">
-            <div class="row"><span class="lb">Wi-Fi, 192.168.0.12<span class="hint">WSL, Docker e VPN ficam de fora</span></span></div>
-          </div>
-        </section>
-      </div>
-    </div>
-  </main>
-</div>
+<div class="{{themeClass}}" style="width: 1200px; height: 1000px; display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; border: 1px solid var(--line); background: var(--canvas)"><div class="titlebar"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="5" width="6.5" height="10" rx="1.5"></rect><rect x="11.75" y="5" width="6.5" height="10" rx="1.5"></rect><path d="M8.25 10h3.5"></path></svg><span>Swapdesk</span><span style="flex: 1"></span><button class="cbtn" aria-label="Minimizar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M0 5h10"></path></svg></button><button class="cbtn" aria-label="Maximizar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><rect x=".5" y=".5" width="9" height="9" rx="1"></rect></svg></button><button class="cbtn" aria-label="Fechar"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"></path></svg></button></div><div style="flex: 1; min-height: 0; display: flex"><nav aria-label="Computadores" class="side"><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Este computador</h2><div class="dev" style="cursor: default"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span><span class="nm">Notebook da sala</span><span class="st"><span class="dot" style="background: var(--ok)"></span>Pronto para receber</span></span></div></div><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Pareados</h2><button class="dev"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span><span class="nm">MacBook do escritório</span><span class="st"><span class="dot" style="background: var(--ok)"></span>Online, macOS 27</span></span></button><button class="dev"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span><span class="nm">Desktop do escritório</span><span class="st"><span class="dot" style="background: var(--track)"></span>Dormindo, Windows 11</span></span></button></div><div style="display: flex; flex-direction: column; gap: 4px"><h2 class="gh">Na rede</h2><button class="dev"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span><span class="nm">MacBook Air</span><span class="st"><span class="dot" style="background: transparent; box-shadow: inset 0 0 0 1.5px var(--soft)"></span>Não pareado</span></span></button></div><div style="flex: 1"></div><div style="display: flex; flex-direction: column; gap: 2px"><button class="btn quiet" style="justify-content: flex-start">Atividade</button><button class="btn sel" aria-current="page" style="justify-content: flex-start; background: var(--control)">Ajustes</button></div><p class="cap" style="padding: 0 10px">Só na rede local: Wi-Fi Casa, 192.168.0.12</p></nav><main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 24px; padding: 28px 40px"><h1>Ajustes</h1><div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start"><div style="display: flex; flex-direction: column; gap: 24px"><section class="group" aria-labelledby="g1" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g1">Este computador</h2><div class="list"><div class="row"><label for="nome" class="lb">Nome</label><input id="nome" class="field" value="Notebook da sala" style="width: 190px"></div><div class="row"><label for="lang" class="lb">Idioma</label><select id="lang" class="field" style="width: 190px"><option>Português (Brasil)</option><option>English</option></select></div><div class="row"><label for="tema" class="lb">Tema<span class="hint">Sistema acompanha o claro ou escuro do Windows</span></label><select id="tema" class="field" style="width: 150px"><option>Sistema</option><option>Claro</option><option>Escuro</option></select></div><div class="row"><span class="lb">Abrir ao ligar o computador</span><button class="switch" aria-label="Abrir ao ligar o computador" aria-pressed="true"><span></span></button></div><div class="row"><span class="lb">Iniciar minimizado na bandeja</span><button class="switch" aria-label="Iniciar minimizado na bandeja" aria-pressed="true"><span></span></button></div></div></section><section class="group" aria-labelledby="g2" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g2">Sem ninguém na frente</h2><div class="list"><div class="row"><span class="lb">Serviço do Swapdesk<span class="hint">Permite entrar na tela de login e no bloqueio</span></span><span style="display: inline-flex; align-items: center; gap: 6px; font-weight: 600"><span class="dot" style="background: var(--ok)"></span>Ativo</span></div><div class="row"><span class="lb">Bloquear ao terminar a sessão</span><button class="switch" aria-label="Bloquear ao terminar a sessão" aria-pressed="true"><span></span></button></div><div class="row"><span class="lb">Não suspender durante a sessão</span><button class="switch" aria-label="Não suspender durante a sessão" aria-pressed="true"><span></span></button></div></div></section><section class="group" aria-labelledby="g3" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g3">Pedidos de conexão</h2><div class="list"><div class="row"><span class="lb">Tocar um som quando alguém pedir para conectar</span><button class="switch" aria-label="Tocar um som quando alguém pedir para conectar" aria-pressed="true"><span></span></button></div></div></section><section class="group" aria-labelledby="g4" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g4">Arquivos recebidos</h2><div class="list"><div class="row"><span class="lb">Salvar em<span class="hint" style="color: var(--ink); font-weight: 600">Downloads\Swapdesk</span></span><button class="btn">Trocar pasta</button></div></div></section></div><div style="display: flex; flex-direction: column; gap: 24px"><section class="group" aria-labelledby="g5" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g5">Imagem</h2><div class="list"><div class="row"><label for="q" class="lb">Qualidade</label><select id="q" class="field" style="width: 170px"><option>Automática</option><option>Texto nítido</option><option>Movimento fluido</option></select></div><div class="row"><span class="lb">Mostrar latência e quadros</span><button class="switch" aria-label="Mostrar latência e quadros" aria-pressed="false"><span></span></button></div></div></section><section class="group" aria-labelledby="g6" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g6">Teclado</h2><div class="list"><div class="row"><label for="kb" class="lb">Enviar teclas<span class="hint">Automático troca para texto quando os teclados são diferentes</span></label><select id="kb" class="field" style="width: 150px"><option>Automático</option><option>Teclas físicas</option><option>Texto</option></select></div><div class="row"><span class="lb">Trocar Ctrl e Cmd no Mac</span><button class="switch" aria-label="Trocar Ctrl e Cmd no Mac" aria-pressed="true"><span></span></button></div><div class="row"><label for="rel" class="lb">Tecla para soltar o teclado<span class="hint">Devolve o teclado a este computador quando Capturar atalhos do sistema está ligado</span></label><select id="rel" class="field" style="width: 150px"><option>Ctrl + Alt</option><option>Ctrl direito</option><option>Ctrl + Alt + Shift</option></select></div></div></section><section class="group" aria-labelledby="g7" style="display: flex; flex-direction: column; gap: 10px"><h2 id="g7">Atalhos do visualizador</h2><div class="list"><div class="row"><span class="lb">Soltar o teclado</span><span class="keys"><kbd>Ctrl</kbd> + <kbd>Alt</kbd></span></div><div class="row"><span class="lb">Mostrar a barra da sessão</span><span class="keys"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>B</kbd></span></div><div class="row"><span class="lb">Tela cheia</span><span class="keys"><kbd>F11</kbd></span></div><div class="row"><span class="lb">Enviar Ctrl+Alt+Del</span><span class="keys"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>End</kbd></span></div><div class="row"><span class="lb">Desconectar</span><span class="keys"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Q</kbd></span></div></div><p class="cap">Valem mesmo com Capturar atalhos do sistema ligado. No Mac: Control + Option no lugar de Ctrl + Alt, e Control + Command + F para tela cheia.</p></section></div></div></main></div></div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":1000}}'>
 class Component extends DCLogic {
   renderVals() {
     const dark = (this.props.theme ?? 'claro') === 'escuro';

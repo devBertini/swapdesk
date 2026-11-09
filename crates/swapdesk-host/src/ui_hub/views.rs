@@ -2,16 +2,18 @@
 //! from the trust store, the presence, the interface list and the audit log; and the audit sink that raises the
 //! "unknown device" alert.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::Weak;
 
 use swapdesk_ipc::{
     ApiCode, AuditView, DeviceStatus, DeviceView, Direction as ViewDirection, KeyboardMode, Language, Msg,
-    NetCategoryView, NetworkStatus, Notice, Notify, Ready, SessionSummary, Settings, Text, ThisDevice,
+    NetCategoryView, NetworkStatus, Notice, Notify, Ready, SessionSummary, Settings, Text, Theme, ThisDevice,
 };
 use swapdesk_lan::guard::approved_addrs;
 use swapdesk_platform::{NetCategory, NetInterface};
 use swapdesk_proto::{Desktop, ErrorCode, GrantMode, Os, PermissionSet, Preset};
+use swapdesk_session::SessionCtx;
 use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, PairedDevice, device_id_hex};
 use swapdesk_ui::strings::MsgKey;
 
@@ -20,6 +22,53 @@ use super::{Hub, lock};
 
 /// How many audit entries the device list reads for "last session".
 const LAST_SESSION_SCAN: usize = 2000;
+
+/// A paired device with a live session (either role): where the connection goes, and the session's round trip.
+struct LiveLink {
+    device: DeviceId,
+    addr: Option<Ipv4Addr>,
+    rtt_ms: u32,
+}
+
+/// What one device list is built from besides the trust store (see `Hub::reach`).
+struct Reach {
+    presence: Vec<PresencePeer>,
+    live: Vec<LiveLink>,
+    /// Typed addresses that belong to a paired device: listed as that device, not on their own.
+    typed: Vec<(DeviceId, Ipv4Addr)>,
+    /// Typed addresses that are no known device's: listed as entries of their own.
+    unmatched: Vec<Manual>,
+}
+
+/// The device a typed address belongs to, by an identity bound to that address (see `Hub::reach`), or `None`.
+fn typed_owner(
+    m: &Manual,
+    paired: &[PairedDevice],
+    presence: &[PresencePeer],
+    live: &[LiveLink],
+    learned: &HashMap<DeviceId, SocketAddrV4>,
+) -> Option<DeviceId> {
+    let at = SocketAddrV4::new(m.addr, m.session_port);
+    presence
+        .iter()
+        .find(|p| p.addrs.contains(&m.addr) && p.session_port == m.session_port)
+        .map(|p| p.device_id)
+        .or_else(|| learned.iter().find(|(_, a)| **a == at).map(|(id, _)| *id))
+        .or_else(|| live.iter().find(|l| l.addr == Some(m.addr)).map(|l| l.device))
+        .or_else(|| {
+            // The address the pairing or a session stored, unless DNS-SD places that device somewhere else now.
+            if m.session_port != crate::service::DEFAULT_SESSION_PORT {
+                return None;
+            }
+            paired
+                .iter()
+                .find(|d| {
+                    d.last_addrs.contains(&m.addr.octets()) && !presence.iter().any(|p| p.device_id == d.device_id)
+                })
+                .map(|d| d.device_id)
+        })
+}
+
 /// The id prefix of a device that is only an address the user typed.
 pub(crate) const MANUAL_PREFIX: &str = "addr:";
 
@@ -91,6 +140,7 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         AuditEvent::Paired => (msg(MsgKey::AuditPaired, &[]), false),
         AuditEvent::UnknownDeviceRejected => (msg(MsgKey::AuditUnknownPair, &[]), true),
         AuditEvent::PairFailed(ErrorCode::SasRejected | ErrorCode::Timeout | ErrorCode::CommitMismatch)
+        | AuditEvent::PairRefused(ErrorCode::Timeout)
         | AuditEvent::PairingLocked => (msg(MsgKey::AuditUnknownPair, &[]), unknown),
         AuditEvent::SessionStarted { desktop: Desktop::LoginWindow, mode: GrantMode::Unattended, .. } => {
             (msg(MsgKey::AuditUnattendedLogin, &[]), false)
@@ -161,6 +211,7 @@ impl Hub {
             show_stats: false,
             keyboard_mode: KeyboardMode::Auto,
             swap_ctrl_cmd: false,
+            theme: Theme::System,
         }
     }
 
@@ -189,16 +240,71 @@ impl Hub {
         None
     }
 
-    fn paired_view(&self, d: &PairedDevice, presence: &[PresencePeer], recent: &[AuditEntry]) -> DeviceView {
-        let here = presence.iter().find(|p| p.device_id == d.device_id);
-        let status = match here {
-            Some(p) => match p.addrs.first() {
-                // The round trip is measured by the session's own pings; discovery has none, so it reads 0 here.
-                Some(addr) => DeviceStatus::Online { address: addr.to_string(), rtt_ms: 0 },
-                None => DeviceStatus::Offline,
-            },
-            None if !d.wol_macs.is_empty() => DeviceStatus::Asleep,
-            None => DeviceStatus::Offline,
+    /// The paired devices with a live session to or from this machine, each with where its connection goes and the
+    /// session's own round trip. Such a device is reachable by definition, whatever DNS-SD says: its record can be
+    /// late, lost, or held back by the peer (a Mac that never noticed its address changed).
+    fn live_links(&self) -> Vec<LiveLink> {
+        let mut ctxs: Vec<SessionCtx> = Vec::new();
+        if let Some(core) = self.core() {
+            let host = core.host();
+            ctxs.extend(host.sessions().iter().filter_map(|s| host.session(s.session_id)));
+        }
+        for c in self.conns() {
+            ctxs.extend(lock(&c.viewers).values().map(|v| v.handle.ctx()));
+        }
+        ctxs.iter()
+            .filter(|c| c.is_active())
+            .filter_map(|c| {
+                Some(LiveLink {
+                    device: c.device()?,
+                    addr: c.connection().and_then(|q| match q.remote_address().ip() {
+                        IpAddr::V4(v4) => Some(v4),
+                        IpAddr::V6(v6) => v6.to_ipv4_mapped(),
+                    }),
+                    rtt_ms: c.rtt().map_or(0, |d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX)),
+                })
+            })
+            .collect()
+    }
+
+    /// What says, for one device list, which paired device is on the network: DNS-SD, the live sessions, and the
+    /// typed addresses. Every match is by device id, and an address counts only through an identity bound to it by
+    /// an authenticated step: the fingerprint DNS-SD announced there, the pairing that ran through it, the session
+    /// connected there, or the address the pairing or a session recorded in the trust store. Names never match (a
+    /// device can be renamed on either side).
+    fn reach(&self, paired: &[PairedDevice]) -> Reach {
+        let presence = self.p.presence.peers();
+        let live = self.live_links();
+        let learned = lock(&self.learned).clone();
+        let mut typed = Vec::new();
+        let mut unmatched = Vec::new();
+        for m in lock(&self.manual).iter() {
+            match typed_owner(m, paired, &presence, &live, &learned) {
+                Some(id) => {
+                    if paired.iter().any(|d| d.device_id == id) {
+                        typed.push((id, m.addr));
+                    }
+                }
+                None => unmatched.push(m.clone()),
+            }
+        }
+        Reach { presence, live, typed, unmatched }
+    }
+
+    fn paired_view(&self, d: &PairedDevice, reach: &Reach, recent: &[AuditEntry]) -> DeviceView {
+        let seen = reach.presence.iter().find(|p| p.device_id == d.device_id).and_then(|p| p.addrs.first());
+        let typed = reach.typed.iter().find(|(id, _)| *id == d.device_id).map(|(_, a)| a);
+        let status = match (reach.live.iter().find(|l| l.device == d.device_id), seen.or(typed)) {
+            // A live session is the best proof of reach, and its address is the one that works now.
+            (Some(l), other) => {
+                let addr = l.addr.or(other.copied()).or_else(|| d.last_addrs.first().map(|a| Ipv4Addr::from(*a)));
+                DeviceStatus::Online { address: addr.map(|a| a.to_string()).unwrap_or_default(), rtt_ms: l.rtt_ms }
+            }
+            // Seen by DNS-SD, or typed by the user at an address that is this device's: one entry, on the network.
+            // The round trip is measured by the session's own pings; there is none here, so it reads 0.
+            (None, Some(addr)) => DeviceStatus::Online { address: addr.to_string(), rtt_ms: 0 },
+            (None, None) if !d.wol_macs.is_empty() => DeviceStatus::Asleep,
+            (None, None) => DeviceStatus::Offline,
         };
         DeviceView {
             id: device_id_hex(&d.device_id),
@@ -215,16 +321,14 @@ impl Hub {
     }
 
     /// The device list: paired devices (by name), then the unpaired ones seen on the network, then the typed
-    /// addresses.
+    /// addresses that are no known device's. A paired device is listed once, whatever else knows of it.
     pub fn device_views(&self) -> Vec<DeviceView> {
-        let presence = self.p.presence.peers();
         let recent = self.p.audit.recent(LAST_SESSION_SCAN);
         let mut paired: Vec<PairedDevice> = self.p.trust.read(|s| s.devices.clone());
         paired.sort_by(|a, b| a.name.cmp(&b.name).then(a.device_id.cmp(&b.device_id)));
-        let mut out: Vec<DeviceView> = paired.iter().map(|d| self.paired_view(d, &presence, &recent)).collect();
-        let pairing_open = self.mode.is_open();
-        let _ = pairing_open;
-        for p in presence.iter().filter(|p| !paired.iter().any(|d| d.device_id == p.device_id)) {
+        let reach = self.reach(&paired);
+        let mut out: Vec<DeviceView> = paired.iter().map(|d| self.paired_view(d, &reach, &recent)).collect();
+        for p in reach.presence.iter().filter(|p| !paired.iter().any(|d| d.device_id == p.device_id)) {
             out.push(DeviceView {
                 id: device_id_hex(&p.device_id),
                 name: p.name.clone(),
@@ -238,23 +342,27 @@ impl Hub {
                 wakeable: false,
             });
         }
-        for m in lock(&self.manual).iter() {
-            // A typed address that turned out to be a known device is already in the list under its own id.
-            if presence.iter().any(|p| p.addrs.contains(&m.addr) && p.session_port == m.session_port) {
-                continue;
-            }
-            // So is one paired through it: its address was learned at the end of the pairing.
-            let typed = SocketAddrV4::new(m.addr, m.session_port);
-            if lock(&self.learned).values().any(|a| *a == typed) {
-                continue;
-            }
-            out.push(self.manual_view(m));
-        }
+        out.extend(reach.unmatched.iter().map(Self::typed_entry));
         out.truncate(swapdesk_ipc::MAX_DEVICES);
         out
     }
 
+    /// The view of a typed address: the paired device it belongs to (see `Hub::reach`), else an entry of its own.
     pub fn manual_view(&self, m: &Manual) -> DeviceView {
+        let paired: Vec<PairedDevice> = self.p.trust.read(|s| s.devices.clone());
+        let mut reach = self.reach(&paired);
+        let owner = typed_owner(m, &paired, &reach.presence, &reach.live, &lock(&self.learned).clone());
+        match owner.and_then(|id| paired.iter().find(|d| d.device_id == id)) {
+            Some(d) => {
+                reach.typed.insert(0, (d.device_id, m.addr));
+                self.paired_view(d, &reach, &self.p.audit.recent(LAST_SESSION_SCAN))
+            }
+            None => Self::typed_entry(m),
+        }
+    }
+
+    /// A typed address that is no known device's.
+    fn typed_entry(m: &Manual) -> DeviceView {
         DeviceView {
             id: m.id(),
             name: m.addr.to_string(),
@@ -273,10 +381,9 @@ impl Hub {
 
     /// One paired device as a view (for an incoming request), or a bare view when it is gone.
     pub fn device_view_of(&self, id: &DeviceId, fallback_name: &str, os: Os) -> DeviceView {
-        let presence = self.p.presence.peers();
         let recent = self.p.audit.recent(LAST_SESSION_SCAN);
         match self.p.trust.read(|s| s.find_by_id(id).cloned()) {
-            Some(d) => self.paired_view(&d, &presence, &recent),
+            Some(d) => self.paired_view(&d, &self.reach(std::slice::from_ref(&d)), &recent),
             None => DeviceView {
                 id: device_id_hex(id),
                 name: fallback_name.into(),

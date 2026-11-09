@@ -8,53 +8,98 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
 <style>
 body{margin:0}
-.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
-.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
 .sd,.sd *{box-sizing:border-box}
 .sd button,.sd input,.sd select{font:inherit;color:inherit}
 .sd button{cursor:pointer}
-.sd h1{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
+.sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
 .sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
 .sd .soft{color:var(--soft)}
-.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
-.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
-.sd .btn.quiet{background:transparent;border-color:transparent}
-.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
+.sd .btn.icon{width:40px;padding:0}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
+.sd .row:first-child{border-top:0}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
 .sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
 .sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
 a{color:#3346D3}
 </style>
 </helmet>
-<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; align-items: center; justify-content: center; border-radius: 12px; overflow: hidden; background: var(--remote)">
-  <div role="dialog" aria-labelledby="req" style="width: 520px; padding: 32px; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 80px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 24px">
-    <div style="display: flex; align-items: center; gap: 14px" aria-hidden="true">
-      <svg width="44" height="44" viewBox="0 0 64 64" fill="none" stroke="var(--link)" stroke-width="3" stroke-linejoin="round"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
-      <span style="flex: 1; display: flex; align-items: center"><span style="flex: 1; height: 3px; border-radius: 2px; background: var(--link)"></span><svg width="12" height="14" viewBox="0 0 16 18"><path d="M0 0l16 9-16 9z" fill="var(--link)"></path></svg></span>
-      <svg width="44" height="44" viewBox="0 0 64 64" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linejoin="round"><rect x="10" y="14" width="44" height="28" rx="3"></rect><path d="M4 48h56"></path></svg>
-    </div>
-    <div style="display: flex; flex-direction: column; gap: 8px">
-      <h1 id="req">MacBook do escritório quer controlar este computador</h1>
-      <p class="soft">Pareado desde 05/11. Recusa automática em 18 s.</p>
-    </div>
-    <fieldset style="margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px">
-      <legend style="margin-bottom: 8px; font-weight: 600">Permitir nesta sessão</legend>
-      <label class="chk"><input type="checkbox" checked>Controlar</label>
-      <label class="chk"><input type="checkbox" checked>Ouvir o áudio</label>
-      <label class="chk"><input type="checkbox" checked>Arquivos</label>
-      <label class="chk"><input type="checkbox" checked>Área de transferência</label>
-      <label class="chk"><input type="checkbox">Terminal</label>
-    </fieldset>
-    <label class="chk" style="padding-top: 16px; border-top: 1px solid var(--line)"><input type="checkbox">Deixar entrar sem perguntar da próxima vez</label>
-    <div style="display: flex; gap: 10px">
-      <button class="btn quiet" style="margin-right: auto; padding-left: 0">Recusar</button>
-      <button class="btn">Só deixar ver</button>
-      <button class="btn primary">Aceitar</button>
-    </div>
-  </div>
-</div>
+<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--remote)"><div role="alertdialog" aria-labelledby="req" aria-describedby="req-d" style="width: 540px; padding: 32px; border-radius: 12px; background: var(--surface); box-shadow: 0 30px 80px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 22px"><div style="display: flex; align-items: center; gap: 10px" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="9.5" rx="1.25"></rect><path d="M1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z"></path></svg><span class="wire" style="max-width: 120px"><span></span><svg width="12" height="14" viewBox="0 0 16 18" aria-hidden="true"><path d="M0 0l16 9-16 9z" fill="var(--link)"></path></svg></span><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--ink)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="2.75" width="13" height="9.5" rx=".75"></rect><rect x="5.5" y="4.75" width="9" height="5.5"></rect><path d="M3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9"></path></svg><span class="cap" style="margin-left: 6px">MacBook do escritório para este computador</span></div><div style="display: flex; flex-direction: column; gap: 8px"><h1 id="req" class="dt">MacBook do escritório quer controlar este computador</h1><p id="req-d" class="soft num">Pareado desde 05/11. Recusa automática em 18 s.</p></div><fieldset style="margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px"><legend style="margin-bottom: 8px; font-weight: 600">Permitir nesta sessão</legend><label class="chk"><input type="checkbox" checked>Controlar</label><label class="chk"><input type="checkbox" checked>Ouvir o áudio</label><label class="chk"><input type="checkbox" checked>Arquivos</label><label class="chk"><input type="checkbox" checked>Área de transferência</label><label class="chk"><input type="checkbox">Terminal</label></fieldset><p class="soft sm">Para não perguntar mais, ajuste em <a href="Permissoes.dc.html">Permissões de MacBook do escritório</a>. Pede um administrador deste computador.</p><div style="display: flex; gap: 10px; justify-content: flex-end"><button class="btn primary">Aceitar</button><button class="btn">Só deixar ver</button><button class="btn">Recusar</button></div></div></div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
 class Component extends DCLogic {

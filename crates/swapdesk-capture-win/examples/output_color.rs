@@ -1,0 +1,234 @@
+//! Prints the colour state of every display output (`IDXGIOutput6::GetDesc1`: colour space, bits per colour, luminance)
+//! and the format the desktop duplication hands out for it. Read-only.
+//!
+//! Run: `cargo run -p swapdesk-capture-win --example output_color`.
+
+#[cfg(windows)]
+fn main() {
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+    };
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutput6};
+    use windows::core::Interface;
+    // SAFETY: plain DXGI and D3D11 queries; every out pointer is valid for its call.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().expect("factory");
+        let mut a = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(a) {
+            let desc = adapter.GetDesc1().expect("adapter desc");
+            let name = String::from_utf16_lossy(&desc.Description).trim_end_matches('\0').to_string();
+            let mut o = 0;
+            while let Ok(output) = adapter.EnumOutputs(o) {
+                let o6: IDXGIOutput6 = output.cast().expect("IDXGIOutput6");
+                let d = o6.GetDesc1().expect("desc1");
+                let dev = String::from_utf16_lossy(&d.DeviceName).trim_end_matches('\0').to_string();
+                println!(
+                    "{name} / {dev}: colour space {} (12 = sRGB G22 P709, 14 = HDR10 G2084 P2020), {} bits per colour, luminance {:.1} to {:.1} nits, full frame {:.1}",
+                    d.ColorSpace.0, d.BitsPerColor, d.MinLuminance, d.MaxLuminance, d.MaxFullFrameLuminance
+                );
+                let mut device = None;
+                let created = D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    windows::Win32::Foundation::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                );
+                if created.is_ok()
+                    && let Some(device) = device
+                {
+                    let o1: IDXGIOutput1 = output.cast().expect("IDXGIOutput1");
+                    match o1.DuplicateOutput(&device) {
+                        Ok(dup) => {
+                            let dd = dup.GetDesc();
+                            println!(
+                                "  duplication: {}x{} format {} (87 = B8G8R8A8_UNORM, 10 = R16G16B16A16_FLOAT)",
+                                dd.ModeDesc.Width, dd.ModeDesc.Height, dd.ModeDesc.Format.0
+                            );
+                        }
+                        Err(e) => println!("  duplication: {e}"),
+                    }
+                }
+                o += 1;
+            }
+            a += 1;
+        }
+    }
+    display_config();
+    compare_with_gdi();
+}
+
+/// Advanced Color state and SDR white level of every active display path (`DisplayConfigGetDeviceInfo`).
+#[cfg(windows)]
+fn display_config() {
+    use windows::Win32::Devices::Display::{
+        DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+        GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    };
+    // SAFETY: sized buffers for QueryDisplayConfig, then one request packet per query with its header filled.
+    unsafe {
+        let (mut np, mut nm) = (0u32, 0u32);
+        let _ = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm);
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+        let _ =
+            QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), None);
+        for p in &paths[..np as usize] {
+            let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                    size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                    adapterId: p.sourceInfo.adapterId,
+                    id: p.sourceInfo.id,
+                },
+                ..Default::default()
+            };
+            DisplayConfigGetDeviceInfo(&mut src.header);
+            let name = String::from_utf16_lossy(&src.viewGdiDeviceName).trim_end_matches('\0').to_string();
+            let mut white = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                    size: size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>() as u32,
+                    adapterId: p.targetInfo.adapterId,
+                    id: p.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            let rw = DisplayConfigGetDeviceInfo(&mut white.header);
+            let mut ac = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                    size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                    adapterId: p.targetInfo.adapterId,
+                    id: p.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            let ra = DisplayConfigGetDeviceInfo(&mut ac.header);
+            let bits = ac.Anonymous.value;
+            println!(
+                "{name}: SDR white level {} ({:.0} nits, status {rw}); advanced colour bits {bits:#b} (1 supported, 2 enabled, 4 wide colour enforced, 8 force disabled), encoding {}, {} bits per channel (status {ra})",
+                white.SDRWhiteLevel,
+                f64::from(white.SDRWhiteLevel) / 1000.0 * 80.0,
+                ac.colorEncoding.0,
+                ac.bitsPerColorChannel
+            );
+        }
+    }
+}
+
+/// The primary display through the duplication (as the host captures it) against the same pixels through GDI (what
+/// applications draw, 8-bit sRGB): per-channel means and, for grey pixels, the duplication's value per GDI value.
+/// Only statistics are printed.
+#[cfg(windows)]
+fn compare_with_gdi() {
+    use std::time::Duration;
+    use swapdesk_capture_win::{CaptureOptions, DevicePool, DxgiScreen};
+    use swapdesk_platform::{CaptureConfig, Pixels, ScreenSource};
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject,
+    };
+    use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+
+    // SAFETY: process-wide DPI awareness, set before any window or DC.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let mut screen = DxgiScreen::with_options(DevicePool::new(), CaptureOptions { cpu_readback: true });
+    let displays = screen.displays().expect("displays");
+    let d = displays.iter().find(|d| d.primary).expect("primary").clone();
+    screen.open(d.id, CaptureConfig { max_fps: 60 }).expect("open");
+    let frame = loop {
+        if let Some(f) = screen.next_frame(Duration::from_millis(500)).expect("frame") {
+            break f;
+        }
+    };
+    let Pixels::Cpu { stride, data: dda } = frame.pixels else { panic!("cpu readback") };
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    let mut gdi = vec![0u8; (w * h * 4) as usize];
+    // SAFETY: a screen DC, a compatible bitmap of the display's size and a DIB read into a buffer of that size.
+    unsafe {
+        let screen_dc = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen_dc));
+        let bmp = CreateCompatibleBitmap(screen_dc, w, h);
+        let old = SelectObject(mem, bmp.into());
+        BitBlt(mem, 0, 0, w, h, Some(screen_dc), d.bounds.x, d.bounds.y, SRCCOPY).expect("BitBlt");
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        GetDIBits(mem, bmp, 0, h as u32, Some(gdi.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+        SelectObject(mem, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen_dc);
+    }
+    let mut sum = [[0u64; 3]; 2];
+    let mut grey: Vec<(u64, u64)> = vec![(0, 0); 256];
+    let mut sat = (0u64, [0u64; 2]);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let a = &dda[y * stride as usize + x * 4..][..3];
+            let b = &gdi[(y * w as usize + x) * 4..][..3];
+            for c in 0..3 {
+                sum[0][c] += u64::from(a[c]);
+                sum[1][c] += u64::from(b[c]);
+            }
+            if b[0] == b[1] && b[1] == b[2] {
+                let g = &mut grey[b[0] as usize];
+                g.0 += 1;
+                g.1 += u64::from(a[0]) + u64::from(a[1]) + u64::from(a[2]);
+            }
+            // Chroma: max - min of a colourful GDI pixel against the same pixel of the duplication.
+            let spread = |p: &[u8]| i32::from(*p.iter().max().unwrap()) - i32::from(*p.iter().min().unwrap());
+            if spread(b) > 60 {
+                sat.0 += 1;
+                sat.1[0] += spread(a) as u64;
+                sat.1[1] += spread(b) as u64;
+            }
+        }
+    }
+    let n = (w * h) as f64;
+    println!(
+        "means B,G,R: duplication {:.1} {:.1} {:.1}, GDI {:.1} {:.1} {:.1}",
+        sum[0][0] as f64 / n,
+        sum[0][1] as f64 / n,
+        sum[0][2] as f64 / n,
+        sum[1][0] as f64 / n,
+        sum[1][1] as f64 / n,
+        sum[1][2] as f64 / n
+    );
+    if sat.0 > 0 {
+        println!(
+            "colourful pixels: {} (GDI max-min > 60): mean spread duplication {:.1}, GDI {:.1}",
+            sat.0,
+            sat.1[0] as f64 / sat.0 as f64,
+            sat.1[1] as f64 / sat.0 as f64
+        );
+    }
+    let mut line = String::new();
+    for (v, (count, total)) in grey.iter().enumerate() {
+        if *count >= 200 {
+            line.push_str(&format!(" {v}->{:.1}", *total as f64 / (*count * 3) as f64));
+        }
+    }
+    println!("grey pixels, GDI value -> duplication mean:{line}");
+}
+
+#[cfg(not(windows))]
+fn main() {}

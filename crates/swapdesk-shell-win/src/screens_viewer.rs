@@ -18,29 +18,41 @@ pub fn paint_viewer(f: &mut Frame) {
     let peer = f.st.device_by_id(&session.device_id).map(|d| d.name.clone()).unwrap_or_default();
     let bw = p.hairline();
 
-    // Top bar: 40 px, padding 0 16, gap 10.
-    p.fill_rect(Rect::new(0.0, 0.0, f.w, layout::VIEWER_BAR_H), pal.surface);
-    p.fill_rect(Rect::new(0.0, layout::VIEWER_BAR_H - bw, f.w, bw), pal.line);
-    let cy = layout::VIEWER_BAR_H / 2.0;
-    p.fill_circle((16.0 + 4.0, cy), 4.0, pal.ok);
-    let name = p.label(&peer, text::NAME);
-    p.draw(&name, 16.0 + 8.0 + 10.0, (layout::VIEWER_BAR_H - name.h) / 2.0, pal.ink);
-    let status = p.label(&f.st.viewer_status_text(&session), text::BODY);
-    p.draw(&status, 16.0 + 8.0 + 10.0 + name.w + 10.0, (layout::VIEWER_BAR_H - status.h) / 2.0, pal.soft);
-    if let (Some(set), Some(stats)) = (f.st.settings(), session.stats)
-        && set.show_stats
-    {
-        let s = f.st.tm(&Msg::new(MsgKey::ViewerStats).with(stats.latency_ms.to_string()).with(stats.fps.to_string()));
-        let l = p.label(&s, text::CAPTION);
-        p.draw(&l, f.w - 16.0 - l.w, (layout::VIEWER_BAR_H - l.h) / 2.0, pal.soft);
+    // Full screen (D30): no top bar, the picture fills the window.
+    let fullscreen = f.st.fullscreen();
+    let bar_h = if fullscreen { 0.0 } else { layout::VIEWER_BAR_H };
+    if !fullscreen {
+        // Top bar: 40 px, padding 0 16, gap 10.
+        p.fill_rect(Rect::new(0.0, 0.0, f.w, layout::VIEWER_BAR_H), pal.surface);
+        p.fill_rect(Rect::new(0.0, layout::VIEWER_BAR_H - bw, f.w, bw), pal.line);
+        let cy = layout::VIEWER_BAR_H / 2.0;
+        p.fill_circle((16.0 + 4.0, cy), 4.0, pal.ok);
+        let name = p.label(&peer, text::NAME);
+        p.draw(&name, 16.0 + 8.0 + 10.0, (layout::VIEWER_BAR_H - name.h) / 2.0, pal.ink);
+        let status = p.label(&f.st.viewer_status_text(&session), text::BODY);
+        p.draw(&status, 16.0 + 8.0 + 10.0 + name.w + 10.0, (layout::VIEWER_BAR_H - status.h) / 2.0, pal.soft);
+        if let (Some(set), Some(stats)) = (f.st.settings(), session.stats)
+            && set.show_stats
+        {
+            let s =
+                f.st.tm(&Msg::new(MsgKey::ViewerStats).with(stats.latency_ms.to_string()).with(stats.fps.to_string()));
+            let l = p.label(&s, text::CAPTION);
+            p.draw(&l, f.w - 16.0 - l.w, (layout::VIEWER_BAR_H - l.h) / 2.0, pal.soft);
+        }
     }
 
     // The body: the video column and, when open, the drawer (448 px, border-left).
-    let body = Rect::new(0.0, layout::VIEWER_BAR_H, f.w, f.h - layout::VIEWER_BAR_H);
+    let body = Rect::new(0.0, bar_h, f.w, f.h - bar_h);
     let drawer = f.st.drawer();
     let video_col = Rect::new(0.0, body.y, if drawer.is_some() { body.w - layout::DRAWER_W } else { body.w }, body.h);
     p.fill_rect(video_col, pal.remote);
-    let pad = if drawer.is_some() { 20.0 } else { 48.0 };
+    let pad = if fullscreen {
+        0.0
+    } else if drawer.is_some() {
+        20.0
+    } else {
+        48.0
+    };
     let video = fit_16_10(video_col.inset(pad));
     p.fill_rrect(video, 4.0, fixed::REMOTE_SCREEN);
     f.out.video = Some(video);
@@ -55,7 +67,9 @@ pub fn paint_viewer(f: &mut Frame) {
         if matches!(f.st.swap().map(|s| &s.phase), Some(SwapPhase::Declined(_))) {
             swap_declined_card(f, video, &peer);
         }
-        toolbar(f, video_col, &session.device_id);
+        if f.st.session_bar_visible() {
+            toolbar(f, video_col, &session.device_id);
+        }
     }
     if let Some(tab) = drawer {
         drawer_panel(f, Rect::new(body.w - layout::DRAWER_W, body.y, layout::DRAWER_W, body.h), tab, &peer);
@@ -128,16 +142,21 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
     let mut chat = tool(ControlId::TbChat, icons::CHAT);
     chat.pressed = f.st.drawer() == Some(DrawerTab::Chat);
     tools.extend([term, files, chat]);
-    tools.push(Tool {
-        id: ControlId::TbSwap,
-        icon: Some(icons::SWAP.to_owned()),
-        label: Some(f.t(MsgKey::TbSwap)),
-        pressed: false,
-        color: white,
-        weight_bold: false,
-        chevron: false,
-        sep_before: true,
-    });
+    // Swap between Windows and macOS is not in 1.0: "Inverter" is laid out only toward a machine of this OS, and
+    // "Desconectar" then takes its separator, so the bar has no gap.
+    let swap_offered = f.st.viewer_session().is_none_or(|v| f.st.swap_offered(v));
+    if swap_offered {
+        tools.push(Tool {
+            id: ControlId::TbSwap,
+            icon: Some(icons::SWAP.to_owned()),
+            label: Some(f.t(MsgKey::TbSwap)),
+            pressed: false,
+            color: white,
+            weight_bold: false,
+            chevron: false,
+            sep_before: true,
+        });
+    }
     tools.push(Tool {
         id: ControlId::TbDisconnect,
         icon: None,
@@ -146,7 +165,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
         color: fixed::TOOLBAR_DANGER,
         weight_bold: true,
         chevron: false,
-        sep_before: false,
+        sep_before: !swap_offered,
     });
 
     // Measure: button = padding 10 + content + 10, min 40; content = icon 18 / label / chevron 14, gap 8.
@@ -222,6 +241,35 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
             unread_badge(f, (r.right() - 8.0, r.y + 6.0));
         }
         x += w;
+    }
+    // The tooltip of the bar (D30): the shortcut list, under the bar while a button of it is hovered.
+    if tools.iter().any(|t| f.hovered(t.id)) {
+        shortcuts_tooltip(f, col, bar);
+    }
+}
+
+/// The shortcut list as a dark card under the session bar: the title, one line for each shortcut and the note that
+/// they hold with the system-shortcut capture on.
+fn shortcuts_tooltip(f: &Frame, col: Rect, bar: Rect) {
+    let p = f.p;
+    let lines = f.st.shortcuts_tooltip();
+    let mut rows = lines.lines();
+    let title = rows.next().unwrap_or_default();
+    let rest: Vec<&str> = rows.collect();
+    let w = 340.0f32.min(col.w - 24.0);
+    let inner = w - 32.0;
+    let t = p.label_in(title, text::SMALL_BOLD, inner, Align::Start);
+    let labels: Vec<_> = rest.iter().map(|l| p.label_in(l, text::SMALL, inner, Align::Start)).collect();
+    let h = 12.0 + t.h + 6.0 + labels.iter().map(|l| l.h + 2.0).sum::<f32>() + 10.0;
+    let r = Rect::new(p.snap(col.x + (col.w - w) / 2.0), bar.bottom() + 8.0, w, h);
+    p.shadow(r, 10.0, 8.0, 24.0, Color::rgba(0, 0, 0, 35));
+    p.fill_rrect(r, 10.0, fixed::TOOLBAR);
+    let (x, mut y) = (r.x + 16.0, r.y + 12.0);
+    p.draw(&t, x, y, fixed::TOOLBAR_INK);
+    y += t.h + 6.0;
+    for l in &labels {
+        p.draw(l, x, y, fixed::CARD_DARK_SOFT);
+        y += l.h + 2.0;
     }
 }
 
@@ -570,16 +618,20 @@ pub fn paint_banner(f: &mut Frame) {
     let dw = p.label(&disc, text::BTN_PRIMARY).w + 28.0 + 2.0 * p.hairline();
     x -= dw;
     f.button(ControlId::BannerDisconnect, Rect::new(x, cy - btn_h / 2.0, dw, btn_h), Kind::DangerSolid, &disc, false);
-    let swap = f.t(MsgKey::TbSwap);
-    let sw = p.label(&swap, text::BTN).w + 28.0 + 2.0 * p.hairline() + 16.0 + 8.0;
-    x -= 14.0 + sw;
-    let sr = Rect::new(x, cy - btn_h / 2.0, sw, btn_h);
-    p.bordered(sr, 8.0, pal.line, pal.surface);
-    f.tint(ControlId::BannerSwap, sr, 8.0, pal.ink, 0.06, 0.11);
-    p.svg(icons::SWAP, sr.x + 14.0 + p.hairline(), sr.y + 10.0, 16.0, 2.0, pal.link);
-    let sl = p.label(&swap, text::BTN);
-    p.draw(&sl, sr.x + 14.0 + p.hairline() + 16.0 + 8.0, sr.y + (btn_h - sl.h) / 2.0, pal.ink);
-    f.register(ControlId::BannerSwap, sr, 8.0);
+    // Swap between Windows and macOS is not in 1.0: the button exists only toward a machine of this OS, and the
+    // chat button then sits next to "Desconectar" with the usual gap.
+    if f.st.swap_offered(&h) {
+        let swap = f.t(MsgKey::TbSwap);
+        let sw = p.label(&swap, text::BTN).w + 28.0 + 2.0 * p.hairline() + 16.0 + 8.0;
+        x -= 14.0 + sw;
+        let sr = Rect::new(x, cy - btn_h / 2.0, sw, btn_h);
+        p.bordered(sr, 8.0, pal.line, pal.surface);
+        f.tint(ControlId::BannerSwap, sr, 8.0, pal.ink, 0.06, 0.11);
+        p.svg(icons::SWAP, sr.x + 14.0 + p.hairline(), sr.y + 10.0, 16.0, 2.0, pal.link);
+        let sl = p.label(&swap, text::BTN);
+        p.draw(&sl, sr.x + 14.0 + p.hairline() + 16.0 + 8.0, sr.y + (btn_h - sl.h) / 2.0, pal.ink);
+        f.register(ControlId::BannerSwap, sr, 8.0);
+    }
     x -= 14.0 + 36.0;
     let cr = Rect::new(x, cy - btn_h / 2.0, 36.0, btn_h);
     p.bordered(cr, 8.0, pal.line, pal.surface);

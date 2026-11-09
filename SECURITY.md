@@ -25,7 +25,7 @@ A confirmed problem is fixed on the default branch first and published as a GitH
 
 ## Supported versions
 
-Swapdesk has only preview releases. Only the latest preview and the latest commit on the default branch get fixes.
+Only the latest release and the latest commit on the default branch get fixes.
 
 ## Scope
 

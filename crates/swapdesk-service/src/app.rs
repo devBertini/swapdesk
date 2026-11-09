@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use swapdesk_capture_win::QpcClock;
+use swapdesk_host::netcache::CachedInterfaces;
 use swapdesk_host::service::TerminalEnv;
 use swapdesk_host::service::{
     CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceCore, ServiceDeps,
@@ -17,7 +18,7 @@ use swapdesk_host::ui_hub::store::{FileAuditLog, load_settings};
 use swapdesk_host::ui_hub::{DevOptions, DnsSdPresence, HubParams, NoPresence, Presence, SystemHooks, UiHub};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
-use swapdesk_net_win::WindowsNetInterfaces;
+use swapdesk_net_win::{NetworkWatcher, WindowsNetInterfaces};
 use swapdesk_platform::{Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink};
 use swapdesk_proto::{Os, PermissionSet};
 use swapdesk_secret_win::{FolderSpec, WinSecretStore};
@@ -28,16 +29,21 @@ use swapdesk_sys_win::{
 };
 use swapdesk_trust::{Identity, SystemWallClock, TrustHandle, WallClock};
 
-use crate::helpers::{Launch, Supervisor};
+use crate::helpers::{HowToStart, Launch, Supervisor};
 use crate::options::Options;
 use crate::ui_pipe::{Mode, UiPipes};
 
 /// The service's name with the SCM.
 pub const SERVICE_NAME: &str = "SwapdeskService";
-/// How often the interface list is read for a change (the watcher has no network source yet).
-const NETWORK_POLL: Duration = Duration::from_secs(5);
-/// How long one look at the session watcher lasts: also the pace of the helper supervision.
-const TICK: Duration = Duration::from_millis(250);
+/// How often the interface list is read to catch what the OS gives no notice of: the network category (Public or
+/// Private) and the firewall state. A change of adapter or address is announced by the OS (`NetworkWatcher`) and does not
+/// wait for this.
+const NETWORK_RECONCILE: Duration = Duration::from_secs(30);
+/// The same when the OS notices could not be registered: the old pace, so a network change is still found.
+const NETWORK_FALLBACK_POLL: Duration = Duration::from_secs(5);
+/// A coarse look at the helpers and the stop request when nothing else has woken the loop: a helper that died has already
+/// closed its pipe and woken it, so this only guards against a notice that never came.
+const WATCHDOG: Duration = Duration::from_secs(30);
 
 /// The dev folder of an instance: `%LOCALAPPDATA%\Swapdesk-dev\<instance>`.
 pub fn dev_dir(opts: &Options) -> Result<PathBuf, String> {
@@ -212,7 +218,7 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
 }
 
 fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String> {
-    let ServiceContext { mut watcher, events: _events, stop } = ctx;
+    let ServiceContext { mut watcher, events: ctx_events, stop } = ctx;
     let Env { store, dir, trace } = env;
     let wall = SystemWallClock;
     trace.log(
@@ -235,8 +241,12 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     }
     let audit =
         Arc::new(FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?);
-    let interfaces: Arc<dyn NetInterfaces> =
+    // The interface list is read at most once a second and again at once when the network changes: the LAN guard asks
+    // for it on every incoming connection, pairing and presence on every event.
+    let inner: Arc<dyn NetInterfaces> =
         if opts.dev_loopback { Arc::new(LoopbackOnly) } else { Arc::new(WindowsNetInterfaces) };
+    let cached = Arc::new(CachedInterfaces::new(inner));
+    let interfaces: Arc<dyn NetInterfaces> = cached.clone();
     let presence: Arc<dyn Presence> = if opts.dev_loopback {
         Arc::new(NoPresence)
     } else {
@@ -298,7 +308,12 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let term_env = WinTerminalEnv::new(opts.console, session);
     core.set_terminal_env(term_env.clone());
     hub.set_console_session(session);
-    let events = core.take_events().ok_or("the core's events were taken")?;
+    let core_events = core.take_events().ok_or("the core's events were taken")?;
+    // The loop below sleeps until something wakes it: the core says so after each event it queues.
+    core.set_event_waker({
+        let events = ctx_events.clone();
+        Arc::new(move || events.wake())
+    });
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mode = if opts.console { Mode::Dev } else { Mode::Production };
@@ -319,18 +334,43 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut supervisor = Supervisor::new(
         Arc::clone(&core),
         Arc::clone(&trace),
-        launch,
-        opts.suffix(),
-        exe,
-        session,
-        console.user.is_some(),
+        HowToStart { launch, suffix: opts.suffix(), exe },
+        (session, console.user.is_some()),
+        {
+            let events = ctx_events.clone();
+            Arc::new(move || events.wake())
+        },
     );
     trace.log(Level::Info, "service", format_args!("running; console session {session:?}"));
 
+    // The OS tells when an adapter or an address changes; the watcher turns a burst of notices into one event. Not in
+    // `--dev-loopback`, which has no network.
+    let net_watcher = if opts.dev_loopback {
+        None
+    } else {
+        let events = ctx_events.clone();
+        match NetworkWatcher::start(move || events.network_changed()) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                trace.log(
+                    Level::Warn,
+                    "service",
+                    format_args!("network notices are unavailable ({e}): polling instead"),
+                );
+                None
+            }
+        }
+    };
+    let reconcile = if net_watcher.is_some() || opts.dev_loopback { NETWORK_RECONCILE } else { NETWORK_FALLBACK_POLL };
     let mut last_net = interfaces.list().ok();
-    let mut next_net = Instant::now() + NETWORK_POLL;
+    let mut next_net = Instant::now() + reconcile;
+    let mut next_watchdog = Instant::now() + WATCHDOG;
     while !stop.is_set() {
-        match watcher.next_event(TICK) {
+        // Sleep until the earliest of: a restart that is due, the next network look, the watchdog. A session event, a
+        // core event, a finished helper start or the network watcher wakes the loop sooner.
+        let deadline = [supervisor.next_wake(), Some(next_net), Some(next_watchdog)].into_iter().flatten().min();
+        let timeout = deadline.map_or(WATCHDOG, |d| d.saturating_duration_since(Instant::now()));
+        match watcher.next_event(timeout) {
             Ok(Some(SessionEvent::ConsoleChanged(state))) => {
                 hub.set_console_session(state.session_id);
                 term_env.set_session(state.session_id);
@@ -343,9 +383,17 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 hub.set_desktop(d);
                 core.host().set_desktop(d);
             }
-            Ok(Some(SessionEvent::NetworkChanged)) => hub.network_changed(),
+            Ok(Some(SessionEvent::NetworkChanged)) => {
+                cached.invalidate();
+                last_net = interfaces.list().ok();
+                next_net = Instant::now() + reconcile;
+                hub.network_changed();
+            }
             Ok(Some(SessionEvent::Resumed)) => {
                 trace.log(Level::Info, "service", format_args!("resumed from sleep"));
+                cached.invalidate();
+                last_net = interfaces.list().ok();
+                next_net = Instant::now() + reconcile;
                 hub.network_changed();
             }
             Ok(Some(SessionEvent::Suspending)) => trace.log(Level::Info, "service", format_args!("suspending")),
@@ -356,7 +404,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             // The watcher closed: the service is stopping.
             Err(_) => break,
         }
-        while let Ok(ev) = events.try_recv() {
+        while let Ok(ev) = core_events.try_recv() {
             match ev {
                 CoreEvent::HelperGone { pid, .. } => supervisor.helper_gone(pid),
                 CoreEvent::SasRequested { .. } => sas(&core, &*trace),
@@ -364,15 +412,22 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             }
         }
         supervisor.tick();
-        if Instant::now() >= next_net {
-            next_net = Instant::now() + NETWORK_POLL;
-            let now = interfaces.list().ok();
-            if now != last_net {
-                last_net = now;
+        let now = Instant::now();
+        if now >= next_net {
+            next_net = now + reconcile;
+            // What the OS gives no notice of (category, firewall) shows only in a fresh read.
+            cached.invalidate();
+            let fresh = interfaces.list().ok();
+            if fresh != last_net {
+                last_net = fresh;
                 hub.network_changed();
             }
         }
+        if now >= next_watchdog {
+            next_watchdog = now + WATCHDOG;
+        }
     }
+    drop(net_watcher);
 
     trace.log(Level::Info, "service", format_args!("stopping"));
     hub.shutdown();

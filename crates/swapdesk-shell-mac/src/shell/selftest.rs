@@ -125,9 +125,41 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
+/// A rebuild while the person types in the address field (the device list changed): AppKit ends the old field's
+/// editing inside `setContentView` and sends its action; the shell must neither panic on its own borrows nor act on
+/// it, and the typed text and the focus survive.
+fn rebuild_while_typing_in_the_address_field(mtm: MainThreadMarker) -> Result<(), String> {
+    for sc in Scenario::ALL {
+        let shell = open(mtm, sc, ViewerHooks::default());
+        let field = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
+        let Some(field) = field else {
+            close(&shell);
+            continue;
+        };
+        shell.main.window.makeKeyAndOrderFront(None);
+        field.setStringValue(&ns("192.168.1."));
+        shell.main.window.makeFirstResponder(Some(&field));
+        ensure!(field.currentEditor().is_some(), "{sc:?}: the address field did not take the focus");
+        *shell.main.last.borrow_mut() = None;
+        shell.rebuild_main();
+        let after = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
+        let after = after.ok_or_else(|| format!("{sc:?}: no address field after the rebuild"))?;
+        ensure!(
+            after.stringValue().to_string() == "192.168.1.",
+            "{sc:?}: the typed text was lost: {:?}",
+            after.stringValue().to_string()
+        );
+        ensure!(after.currentEditor().is_some(), "{sc:?}: the focus was lost");
+        close(&shell);
+        return Ok(());
+    }
+    Err("no scenario shows the address field".into())
+}
+
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
     scenarios_build_with_accessible_names(mtm)?;
+    rebuild_while_typing_in_the_address_field(mtm)?;
     render_slot_lifecycle(mtm)
 }

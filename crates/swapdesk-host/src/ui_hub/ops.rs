@@ -10,7 +10,9 @@ use swapdesk_ipc::{
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
-use swapdesk_proto::{DisplayList, ErrorCode, InputEvent, Intent, Os, PermissionSet, Special, VideoSettings};
+use swapdesk_proto::{
+    DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special, VideoSettings,
+};
 use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
 use tokio::time::Instant;
 
@@ -47,6 +49,8 @@ fn apply_code(e: ApplyError) -> ApiCode {
     match e {
         ApplyError::NoSuchSession | ApplyError::Closed => ApiCode::NotFound,
         ApplyError::NotPermitted => ApiCode::NotPermitted,
+        // The queue is full: the batch was dropped and the session releases every key behind it.
+        ApplyError::Full => ApiCode::Busy,
         ApplyError::NotAViewerRequest => ApiCode::Invalid,
     }
 }
@@ -116,7 +120,7 @@ impl Hub {
         // The ops that answer when their work is done (or at once, with the work going on) reply themselves.
         match op {
             UiOp::RequestSwap { session_id } => self.request_swap(conn, req, session_id),
-            UiOp::ChatSend { session_id, text } => self.chat_send(conn, req, session_id, text),
+            UiOp::ChatSend { session_id, text } => self.chat_send(conn, req, session_id, text.0),
             UiOp::ChatMarkRead { session_id } => self.chat_read(conn, req, session_id),
             UiOp::Wake { device_id, intent } => self.wake(conn, req, &device_id, intent),
             UiOp::RunAction { session_id, action } => self.run_action(conn, req, session_id, action),
@@ -131,6 +135,9 @@ impl Hub {
 
     fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
         if let UiOp::Connect { device_id, intent, unattended } = op {
+            if let Err(code) = self.require_console(conn, "a connect from a UI that is not the console's") {
+                return reply(conn, req, Err(code));
+            }
             // Entry without a prompt needs an administrator connection (D10); the host decides the rest.
             if unattended && !conn.info.admin {
                 return reply(conn, req, Err(ApiCode::NeedsAdmin));
@@ -152,18 +159,42 @@ impl Hub {
         self.console_conns().iter().any(|c| c.id == conn.id)
     }
 
+    /// The ops that change who may reach this machine, or make it reach out (pairing, grants, forgetting a device,
+    /// `Connect`, a swap that would make it the host) belong to the person at the console: a UI of another session
+    /// (a user parked by fast user switching) gets `NotPermitted`.
+    pub(super) fn require_console(&self, conn: &Conn, what: &str) -> Result<(), ApiCode> {
+        if self.is_console(conn) { Ok(()) } else { Err(self.api_error(ApiCode::NotPermitted, what)) }
+    }
+
     fn op(self: &Arc<Self>, conn: &Arc<Conn>, op: UiOp) -> OpResult {
+        // Before any argument is looked at, so a refused UI learns nothing about the device list.
+        if matches!(
+            op,
+            UiOp::PairOpen { .. }
+                | UiOp::PairStart { .. }
+                | UiOp::PairConfirm { .. }
+                | UiOp::PairCancel { .. }
+                | UiOp::SetGrants { .. }
+                | UiOp::ForgetDevice { .. }
+                | UiOp::RenameDevice { .. }
+        ) {
+            self.require_console(
+                conn,
+                "a pairing, grants, rename or forget request from a UI that is not the console's",
+            )?;
+        }
         match op {
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
             UiOp::AddByAddress { ipv4 } => self.add_by_address(&ipv4).map(ReplyBody::Device),
-            UiOp::PairOpen { device_id } => self.pair_open(device_id).map(ReplyBody::PairingId),
-            UiOp::PairStart { pairing_id, device_id } => done(self.pair_start(pairing_id, &device_id)),
-            UiOp::PairConfirm { pairing_id, matches } => done(self.pair_confirm(pairing_id, matches)),
-            UiOp::PairCancel { pairing_id } => done(self.pair_cancel(pairing_id)),
+            UiOp::PairOpen { device_id } => self.pair_open(conn, device_id).map(ReplyBody::PairingId),
+            UiOp::PairStart { pairing_id, device_id } => done(self.pair_start(conn, pairing_id, &device_id)),
+            UiOp::PairConfirm { pairing_id, matches } => done(self.pair_confirm(conn, pairing_id, matches)),
+            UiOp::PairCancel { pairing_id } => done(self.pair_cancel(conn, pairing_id)),
             UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
             UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
+            UiOp::RenameDevice { device_id, name } => done(self.rename_device(&device_id, &name)),
             UiOp::Connect { .. } => Err(ApiCode::Internal),
             UiOp::Disconnect { session_id } => done(self.disconnect(conn, session_id)),
             UiOp::AnswerIncoming { request_id, decision, grants } => {
@@ -267,16 +298,21 @@ impl Hub {
     }
 
     /// `SetGrants`: `grants` validated, `UNATTENDED` and `ADMIN_TERMINAL` only added from an administrator
-    /// connection (C2.3, D7); taking them away is open to any (it narrows).
+    /// connection (C2.3, D7), and so is any bit added while the device has `UNATTENDED` (it would widen entry without
+    /// a prompt); taking bits away is open to any console connection (it narrows).
     fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
         let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let old = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.grants_here)).ok_or(ApiCode::NotFound)?;
         let admin_only = PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL;
-        if new.bits() & !old.bits() & admin_only != 0 && !conn.info.admin {
+        let added = new.bits() & !old.bits();
+        // Adding UNATTENDED or ADMIN_TERMINAL, or adding anything to a device that holds (or is given) UNATTENDED:
+        // the added bits are then entry without a prompt.
+        let unattended_involved = (old.bits() | new.bits()) & PermissionSet::BIT_UNATTENDED != 0;
+        if (added & admin_only != 0 || (unattended_involved && added != 0)) && !conn.info.admin {
             return Err(self.api_error(
                 ApiCode::NeedsAdmin,
-                "granting UNATTENDED or ADMIN_TERMINAL from a connection that is not elevated",
+                "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
             ));
         }
         let user = conn.info.user.clone();
@@ -333,6 +369,36 @@ impl Hub {
             }
         }
         lock(&self.learned).remove(&id);
+        self.devices_changed();
+        Ok(())
+    }
+
+    /// The local alias of a paired device: only `PairedDevice.name` of the trust record changes (the peer is not told
+    /// and nothing else of the record moves). The name is trimmed; it must not be empty, longer than the 64 bytes the
+    /// record stores (which also bounds it at 64 characters), or hold a control character.
+    fn rename_device(&self, device_id: &str, name: &str) -> Result<(), ApiCode> {
+        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        let name = name.trim();
+        if name.is_empty() || name.len() > swapdesk_ipc::MAX_NAME || name.chars().any(char::is_control) {
+            return Err(ApiCode::Invalid);
+        }
+        let renamed = self
+            .p
+            .trust
+            .update(|s| match s.devices.iter_mut().find(|d| d.device_id == id) {
+                Some(d) => {
+                    d.name = name.to_owned();
+                    true
+                }
+                None => false,
+            })
+            .map_err(|e| {
+                self.log(Level::Warn, format_args!("the trust store was not written: {e}"));
+                ApiCode::Internal
+            })?;
+        if !renamed {
+            return Err(ApiCode::NotFound);
+        }
         self.devices_changed();
         Ok(())
     }
@@ -464,6 +530,7 @@ impl Hub {
         let mut next_tick = Instant::now() + Duration::from_secs(1);
         let mut began = false;
         let mut reconnecting = false;
+        let (mut skipping_video, mut last_good) = (false, 0u32);
         let mut end_code = ErrorCode::NoError;
         loop {
             let item = match tokio::time::timeout_at(next_tick, messages.recv()).await {
@@ -485,11 +552,29 @@ impl Hub {
             };
             match item {
                 ViewerOut::Message(m) => match &m {
-                    Ipc::ViewerVideo { payload, .. } => {
-                        frames = frames.saturating_add(1);
-                        bytes = bytes.saturating_add(payload.0.len() as u64);
-                        if !conn.queue.video(m).await {
-                            break;
+                    Ipc::ViewerVideo { header, payload, .. } => {
+                        let (key, display, id) =
+                            (header.keyframe || header.discontinuity, header.display_id, header.frame_id);
+                        let len = payload.0.len() as u64;
+                        // The UI's pipe is behind: video is dropped, not waited for (a wait would hold back the audio
+                        // and the terminal behind it), up to the next keyframe, which is asked for.
+                        if skipping_video && !key {
+                            let _ = handle.request_keyframe(KeyframeRequest { display, last_good_frame: last_good });
+                            continue;
+                        }
+                        match conn.queue.try_video(m) {
+                            None => {
+                                skipping_video = false;
+                                last_good = id;
+                                frames = frames.saturating_add(1);
+                                bytes = bytes.saturating_add(len);
+                            }
+                            Some(_) if conn.queue.is_closed() => break,
+                            Some(_) => {
+                                skipping_video = true;
+                                let _ =
+                                    handle.request_keyframe(KeyframeRequest { display, last_good_frame: last_good });
+                            }
                         }
                     }
                     // Realtime: a UI that falls behind loses audio and cursor moves.

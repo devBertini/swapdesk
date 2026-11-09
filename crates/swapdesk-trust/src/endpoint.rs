@@ -2,14 +2,18 @@
 //! (PROTOCOL.md 1 and 3). Socket options (TTL 1, the LAN guard, address checks) belong to `swapdesk-lan`; these
 //! functions take the socket the caller made.
 
+use std::future::Future;
 use std::net::{SocketAddr, UdpSocket};
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use quinn::{Endpoint, EndpointConfig, Incoming, ServerConfig};
 use swapdesk_platform::Level;
 use swapdesk_proto::ErrorCode;
+use tokio::sync::Notify;
 
 use crate::error::{Result, TrustError};
 use crate::gate::{gate_session_client, gate_session_server};
@@ -114,6 +118,10 @@ pub enum Decision {
 /// and nothing else has happened yet.
 pub type IncomingFilter = Arc<dyn Fn(&Incoming) -> Decision + Send + Sync>;
 
+/// Called with an `Incoming` the service has admitted past every check, its in-flight cap included, before the
+/// handshake runs: where a per-address turn is recorded (a turn dropped by the cap is not spent).
+pub type AdmittedHook = Arc<dyn Fn(&Incoming) + Send + Sync>;
+
 /// The load limit of PROTOCOL.md 1: at most 16 handshakes in flight per machine.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 
@@ -124,11 +132,13 @@ pub struct ServeOptions {
     pub max_in_flight: usize,
     /// Runs on every `Incoming` before anything else of this service looks at it. `None` accepts all.
     pub filter: Option<IncomingFilter>,
+    /// Runs on every `Incoming` that passed the filter and got a place under `max_in_flight`.
+    pub admitted: Option<AdmittedHook>,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None }
+        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None, admitted: None }
     }
 }
 
@@ -138,6 +148,8 @@ pub struct PairingService {
     ctx: Arc<PairingContext>,
     options: ServeOptions,
     in_flight: AtomicUsize,
+    /// Fired when a connection ends, so the accept loop looks again at whether it may stop.
+    settled: Notify,
 }
 
 /// One connection's place under the cap, given back when it is dropped.
@@ -146,10 +158,10 @@ struct InFlight(Arc<PairingService>);
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        // A permit is stored when the loop is not waiting yet: the wake-up is never lost.
+        self.0.settled.notify_one();
     }
 }
-
-const ACCEPT_POLL: Duration = Duration::from_millis(100);
 
 impl PairingService {
     pub fn new(ctx: Arc<PairingContext>) -> Arc<Self> {
@@ -157,7 +169,7 @@ impl PairingService {
     }
 
     pub fn with_options(ctx: Arc<PairingContext>, options: ServeOptions) -> Arc<Self> {
-        Arc::new(Self { ctx, options, in_flight: AtomicUsize::new(0) })
+        Arc::new(Self { ctx, options, in_flight: AtomicUsize::new(0), settled: Notify::new() })
     }
 
     /// Connections being served right now.
@@ -174,16 +186,48 @@ impl PairingService {
     /// Serves `endpoint` until pairing mode ends and nothing is being served. Every `Incoming` is judged before a
     /// handshake is spent on it: with the mode closed it is ignored (nothing answers an unsolicited pairing, so
     /// nothing says anyone listens), then the filter decides, then the cap on concurrent handshakes.
+    ///
+    /// The loop sleeps on four things and on nothing else: an incoming connection, the mode being entered or closed
+    /// (`PairingMode::subscribe`), a served connection ending, and the instant the mode's two minutes run out.
     pub async fn serve(self: Arc<Self>, endpoint: Endpoint) {
+        // Subscribed before the first look at the mode, so a change in between is never missed.
+        let mut changes = self.ctx.mode.subscribe();
         loop {
             let open = self.ctx.mode.is_open();
             if !open && self.in_flight() == 0 {
                 break;
             }
-            match tokio::time::timeout(ACCEPT_POLL, endpoint.accept()).await {
-                Err(_) => {}
-                Ok(None) => return,
-                Ok(Some(incoming)) => self.dispatch(incoming),
+            let expiry = open.then(|| Duration::from_micros(self.ctx.mode.remaining_micros()));
+            // What ended the wait: `Some(Some(incoming))` a connection, `Some(None)` the endpoint closed, `None` a reason
+            // to look at the state again (the mode entered or closed, a connection ended, the mode's time ran out).
+            let woke: Option<Option<Incoming>> = {
+                let mut accept = pin!(endpoint.accept());
+                let mut changed = pin!(changes.changed());
+                let mut settled = pin!(self.settled.notified());
+                let mut expired = pin!(async {
+                    match expiry {
+                        Some(left) => tokio::time::sleep(left).await,
+                        None => std::future::pending().await,
+                    }
+                });
+                std::future::poll_fn(|cx| {
+                    if let Poll::Ready(v) = accept.as_mut().poll(cx) {
+                        return Poll::Ready(Some(v));
+                    }
+                    if changed.as_mut().poll(cx).is_ready()
+                        || settled.as_mut().poll(cx).is_ready()
+                        || expired.as_mut().poll(cx).is_ready()
+                    {
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending
+                })
+                .await
+            };
+            match woke {
+                Some(None) => return,
+                Some(Some(incoming)) => self.dispatch(incoming),
+                None => {}
             }
         }
         endpoint.close(quinn::VarInt::from_u32(u32::from(ErrorCode::NoError.tag())), b"pairing mode ended");
@@ -205,6 +249,9 @@ impl PairingService {
             }
         }
         let Some(place) = self.reserve() else { return incoming.ignore() };
+        if let Some(admitted) = &self.options.admitted {
+            admitted(&incoming);
+        }
         let me = Arc::clone(self);
         tokio::spawn(async move {
             me.handle(incoming).await;

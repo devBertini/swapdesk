@@ -13,11 +13,14 @@ pub mod a11y;
 pub mod api;
 pub mod debounce;
 pub mod format;
+pub mod home;
 pub mod inflight;
 pub mod interact;
 pub mod list;
 pub mod mock;
+pub mod prefs;
 pub mod service_backend;
+pub mod shortcuts;
 pub mod state;
 pub mod strings;
 pub mod tokens;
@@ -28,12 +31,15 @@ mod a11y_tests;
 #[cfg(test)]
 mod notice_tests;
 #[cfg(test)]
+mod shortcut_tests;
+#[cfg(test)]
 mod state_tests;
 
 pub use api::*;
 pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRole};
+pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
     Activation, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId, Effect, Fetch,
-    Nav, NoticeKind, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
+    Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
 };
 pub use strings::MsgKey;

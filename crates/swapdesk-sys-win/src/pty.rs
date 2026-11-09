@@ -210,7 +210,7 @@ fn token_session_id(token: HANDLE) -> Result<u32> {
     Ok(unsafe { *info.as_ptr().cast::<u32>() })
 }
 
-/// The user name ("claudio", "SYSTEM") of a token's user.
+/// The user name ("alex", "SYSTEM") of a token's user.
 fn account_of(token: HANDLE) -> Result<String> {
     let info = token_info(token, TokenUser)?;
     // SAFETY: the buffer holds a TOKEN_USER written by the call above, 8-byte aligned.

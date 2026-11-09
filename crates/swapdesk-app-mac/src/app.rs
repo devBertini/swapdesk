@@ -160,10 +160,23 @@ pub fn run(args: &[String]) -> Result<(), String> {
             )
         }
     };
-    let level = if options.use_scratch() { Level::Debug } else { Level::Info };
+    // Development: `SWAPDESK_DEBUG=1` (e.g. `open --env SWAPDESK_DEBUG=1 Swapdesk.app`) logs at debug level too.
+    let debug = options.use_scratch() || std::env::var_os("SWAPDESK_DEBUG").is_some();
+    let level = if debug { Level::Debug } else { Level::Info };
     let trace: Arc<dyn TraceSink> =
         Arc::new(FileTrace::open(store.dir(), "trace.log", level, DEFAULT_CAP).map_err(|e| format!("trace log: {e}"))?);
     let clock: Arc<dyn Clock> = Arc::new(Monotonic(Instant::now()));
+
+    // C5.1: the per-user settings (ui.bin under ~/Library/Application Support/Swapdesk) are read before the first
+    // paint. A scratch run (self-test, host drive) never touches the user's file.
+    let prefs_trace = Arc::clone(&trace);
+    if !options.use_scratch()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        swapdesk_ui::prefs::set_note_hook(move |line| prefs_trace.log(Level::Info, "app", format_args!("{line}")));
+        let dir = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
+    }
 
     let viewer =
         MacViewer::new(ViewerOptions::default()).map_err(|e| format!("the viewer pipeline did not start: {e}"))?;
@@ -174,30 +187,60 @@ pub fn run(args: &[String]) -> Result<(), String> {
         secrets,
         store.dir().to_path_buf(),
         Arc::new(MacNetInterfaces),
-        clock,
+        Arc::clone(&clock),
         Arc::clone(&trace),
     );
     // A scratch run is a development instance: the system picks the ports (a Mac that runs its own Swapdesk keeps
-    // 47820/47821), and the self-test does not announce itself on the network.
-    if options.use_scratch() {
+    // 47820/47821), and the self-test does not announce itself on the network. The host drive keeps the real ports:
+    // the viewer adds this Mac by its address, which means port 47820.
+    if options.use_scratch() && options.drive_host.is_none() {
         params.ports = Some((0, 0));
     }
     params.discovery = options.selftest.is_none();
+    // The network's changes come from SystemConfiguration's dynamic store, once per burst, without a timer.
+    params.network_notices = Some(Box::new(|changed| {
+        swapdesk_net_mac::NetworkWatcher::start(changed)
+            .map(|w| Box::new(w) as Box<dyn Send>)
+            .map_err(|e| format!("network notices: {e}"))
+    }));
+    // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
+    if options.selftest.is_none() {
+        params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
+    }
     let sink: Arc<dyn ViewerSink> = viewer.clone();
     let service = InProcessService::start(params, waker.clone(), Some(sink))
         .map_err(|e| format!("the service did not start: {e}"))?;
     let backend = service.backend();
     viewer.set_out(backend.clone());
+    let user = state.user_prefs();
+    viewer.set_user_prefs(user.keyboard_mode, user.swap_ctrl_cmd);
+    if options.selftest.is_none() {
+        crate::host::ask_for_grants(&*trace);
+    }
     let addrs = service.local_addrs().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
     trace.log(Level::Info, "app", format_args!("Swapdesk.app started (scratch: {})", options.use_scratch()));
 
+    // D32: the app hosts from inside its own process, so it must come back after a login. A normal run only.
+    if options.registers_login_item() {
+        let (level, line) = crate::login_item::register();
+        trace.log(level, "app", format_args!("{line}"));
+    }
+    let note_trace = Arc::clone(&trace);
     let hooks = ViewerHooks {
         video: Some(Arc::new(MacVideoSlot::new(&viewer))),
         input: Some(Arc::new(viewer.input())),
         show_swap: true,
+        note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
     };
-    let observing: Arc<dyn UiBackend> = Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer)));
-    let startup = state.startup_commands();
+    // The host drive owns the backend's events: the window gets a backend that says nothing.
+    let observing: Arc<dyn UiBackend> = match &options.drive_host {
+        Some(dir) => {
+            crate::drive::start(dir, Arc::clone(&backend), Arc::clone(&trace))?;
+            Arc::new(crate::drive::Silent)
+        }
+        None => Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer))),
+    };
+    let startup = if options.drive_host.is_some() { Vec::new() } else { state.startup_commands() };
 
     if let Some(file) = options.selftest.clone() {
         crate::selftest::schedule(file, Duration::from_secs(2), addrs, Arc::clone(&viewer));

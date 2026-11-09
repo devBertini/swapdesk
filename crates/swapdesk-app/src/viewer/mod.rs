@@ -22,6 +22,11 @@
 //! `SetGrab`, `SetKeyboardMode`, `SetAudio`, `SetViewOnly` and `SetSettings` are seen as they are sent, and
 //! `DevicesChanged` tells the host's OS (for the keyboard layout rule and the Ctrl/Cmd swap, see [`keys`]). A new
 //! session resets the per-session switches (fit on, grab on, audio on, view-only off).
+//!
+//! The viewer's own shortcuts (D30) are recognised on both keyboard paths (`keys`); the pipeline queues them and wakes
+//! the UI thread, whose drain asks [`ViewerHost::take_shortcuts`]: "release the keyboard" is the pipeline's own (the
+//! window's keys and the hook stop until the next click on the picture or the next focus), the others go to the shell
+//! for the state to run. `SetReleaseKey` (a UI-local command) sets which chord releases the keyboard.
 
 pub mod decode;
 pub mod keys;
@@ -31,7 +36,7 @@ pub mod pointer;
 pub use crate::shared::out::{INPUT_QUEUE, ViewerOut};
 pub use crate::shared::{audio, cursor, feedback, mailbox};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -41,15 +46,18 @@ use std::time::{Duration, Instant};
 use swapdesk_input_win::WinGrabber;
 use swapdesk_platform::{CursorShape, InputGrabber, NativeSurface, Rect, ScaleMode};
 use swapdesk_proto::{CursorPosition, InputEvent, VideoHeader};
-use swapdesk_shell_win::{KeyMsg, MouseMsg, ViewerHost};
+use swapdesk_shell_win::{KeyMsg, MouseKind, MouseMsg, ViewerHost};
 use swapdesk_ui::service_backend::ViewerSink;
-use swapdesk_ui::{Command, DeviceView, Os, Permission, Reply, Role, Scale, SessionState, Ticket, UiBackend, UiEvent};
+use swapdesk_ui::{
+    Command, DeviceView, Os, Permission, Reply, Role, Scale, SessionState, Ticket, UiBackend, UiEvent, UiWaker,
+    ViewerAction,
+};
 
 use crate::shared::out::input_loop;
 use audio::AudioPlayer;
 use decode::Shared;
 pub use decode::{PresentEvent, PresentObserver};
-use keys::{KeyConfig, WindowKeys};
+use keys::{KeyConfig, WindowKeys, action_of};
 use mailbox::{Cmd, Frame, Mailbox};
 use pointer::PointerRouter;
 
@@ -97,6 +105,25 @@ struct Ui {
     pointer: PointerRouter,
     window_keys: WindowKeys,
     grabber: Option<WinGrabber>,
+    /// "Release the keyboard" fired: the keys go to this PC until a click on the picture or the next focus.
+    released: bool,
+}
+
+/// The viewer shortcuts the keyboard paths recognised and the UI thread has not taken yet, and who to wake for them.
+/// Its own lock, never the `ui` one: the hook thread pushes while the UI thread may hold `ui` and wait on the hook.
+#[derive(Default)]
+struct Shortcuts {
+    queue: Mutex<VecDeque<ViewerAction>>,
+    waker: Mutex<Option<Arc<dyn UiWaker>>>,
+}
+
+impl Shortcuts {
+    fn push(&self, action: ViewerAction) {
+        lock(&self.queue).push_back(action);
+        if let Some(w) = lock(&self.waker).as_ref() {
+            w.wake();
+        }
+    }
 }
 
 pub struct ViewerPipeline {
@@ -110,6 +137,7 @@ pub struct ViewerPipeline {
     input_session: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     ui: Mutex<Ui>,
+    shortcuts: Arc<Shortcuts>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -159,7 +187,9 @@ impl ViewerPipeline {
                 pointer: PointerRouter::new(),
                 window_keys: WindowKeys::new(KeyConfig::default()),
                 grabber: None,
+                released: false,
             }),
+            shortcuts: Arc::new(Shortcuts::default()),
             threads: Mutex::new(vec![decode, input]),
         }))
     }
@@ -167,6 +197,25 @@ impl ViewerPipeline {
     /// Where feedback and input go; set once the backend exists (the backend needs this pipeline as its sink first).
     pub fn set_out(&self, out: Arc<dyn ViewerOut>) {
         *lock(&self.out) = Some(out);
+    }
+
+    /// The per-user keyboard settings read from `ui.bin` at start (C5.1), before any session.
+    pub fn set_user_prefs(
+        &self,
+        mode: swapdesk_ui::KeyboardMode,
+        swap_ctrl_cmd: bool,
+        release: swapdesk_ui::ReleaseKey,
+    ) {
+        let mut ui = lock(&self.ui);
+        ui.keys.mode = mode;
+        ui.keys.swap_ctrl_cmd = swap_ctrl_cmd;
+        ui.keys.release = release;
+        self.apply_key_config(&mut ui);
+    }
+
+    /// Who to wake when a viewer shortcut was recognised on the hook thread (the shell's waker).
+    pub fn set_waker(&self, waker: Arc<dyn UiWaker>) {
+        *lock(&self.shortcuts.waker) = Some(waker);
     }
 
     pub fn stats(&self) -> PipelineStats {
@@ -222,6 +271,9 @@ impl ViewerPipeline {
     fn refresh_input(&self, ui: &mut Ui) {
         let allowed = Self::can_input(ui);
         let id = ui.session.as_ref().map_or(0, |s| s.id);
+        if self.shared.local_pointer.swap(allowed, Ordering::SeqCst) != allowed {
+            self.mailbox.push_cmd(Cmd::CursorMode);
+        }
         if !allowed {
             // Whatever the host still holds is let go while the session id is still the right one.
             let mut released = ui.pointer.release_all();
@@ -233,10 +285,12 @@ impl ViewerPipeline {
     }
 
     fn update_grabber(&self, ui: &mut Ui) {
-        let want = ui.focused && ui.grab_on && Self::can_input(ui);
+        let want = ui.focused && ui.grab_on && Self::can_input(ui) && !ui.released;
         match (want, ui.grabber.is_some()) {
             (true, false) => {
                 let mut g = WinGrabber::new(ui.keys.grab_config());
+                let shortcuts = Arc::clone(&self.shortcuts);
+                g.set_shortcut_handler(Arc::new(move |a| shortcuts.push(action_of(a))));
                 let _ = g.set_grab_system_keys(true);
                 if g.start(self.input_tx.clone()).is_ok() {
                     ui.window_keys.reset();
@@ -271,6 +325,7 @@ impl ViewerPipeline {
                 if old_id != Some(id) {
                     // A new session starts with the switches the UI starts it with.
                     ui.grab_on = true;
+                    ui.released = false;
                     ui.view_only = false;
                     ui.scale = ScaleMode::Fit;
                     self.audio_on.store(true, Ordering::Relaxed);
@@ -299,6 +354,10 @@ impl ViewerPipeline {
             Command::SetGrab { on, .. } => {
                 ui.grab_on = *on;
                 self.update_grabber(&mut ui);
+            }
+            Command::SetReleaseKey { key } => {
+                ui.keys.release = *key;
+                self.apply_key_config(&mut ui);
             }
             Command::SetKeyboardMode { mode, .. } => {
                 ui.keys.mode = *mode;
@@ -341,11 +400,8 @@ impl ViewerPipeline {
                 }
             }
             UiEvent::DevicesChanged(list) => self.learn_devices(&mut ui, list),
-            UiEvent::SettingsChanged(s) | UiEvent::Reply { result: Ok(Reply::Settings(s)), .. } => {
-                ui.keys.mode = s.keyboard_mode;
-                ui.keys.swap_ctrl_cmd = s.swap_ctrl_cmd;
-                self.apply_key_config(&mut ui);
-            }
+            // The keyboard mode and the Ctrl/Cmd swap are per user (C5.1): the service's copy is a default, so they come
+            // from `set_user_prefs` at start and from the UI's own `SetSettings`, never from these events.
             UiEvent::Reply { result: Ok(Reply::Devices(list)), .. } => self.learn_devices(&mut ui, list),
             UiEvent::Reply { result: Ok(Reply::Device(d)), .. } => self.learn_devices(&mut ui, std::slice::from_ref(d)),
             _ => {}
@@ -433,7 +489,9 @@ impl ViewerHost for ViewerPipeline {
     fn focus(&self, focused: bool) {
         let mut ui = lock(&self.ui);
         ui.focused = focused;
-        if !focused {
+        if focused {
+            ui.released = false; // coming back to the window captures the keyboard again
+        } else {
             // The host lets go of every key and button the viewer still held.
             let mut released = ui.pointer.release_all();
             released.extend(ui.window_keys.reset());
@@ -447,6 +505,11 @@ impl ViewerHost for ViewerPipeline {
         if !Self::can_input(&ui) {
             return false;
         }
+        if ui.released && matches!(msg.kind, MouseKind::Button { down: true, .. }) && msg.inside {
+            // A click on the picture takes the keyboard back.
+            ui.released = false;
+            self.update_grabber(&mut ui);
+        }
         let map = *lock(&self.shared.map);
         let events = ui.pointer.mouse(&msg, map.as_ref());
         drop(ui);
@@ -455,25 +518,61 @@ impl ViewerHost for ViewerPipeline {
     }
 
     fn captures_keyboard(&self) -> bool {
-        Self::can_input(&lock(&self.ui))
+        let ui = lock(&self.ui);
+        Self::can_input(&ui) && !ui.released
     }
 
     fn key(&self, msg: &KeyMsg) -> bool {
         let mut ui = lock(&self.ui);
-        if !Self::can_input(&ui) {
+        if !Self::can_input(&ui) || ui.released {
             return false;
         }
-        if ui.grabber.is_some() {
-            return true; // the system-wide hook sees this key; the window's copy is dropped
+        if msg.vk == 0 {
+            // The text an IME composed (its key-downs came as `VK_PROCESSKEY` and were dropped): a text record. The
+            // hook never sees it, so this is the same with the system-wide capture on or off.
+            let text = WindowKeys::text(msg);
+            drop(ui);
+            self.send_events(text.into_iter().collect());
+            return true;
         }
-        let events = ui.window_keys.on_key(msg);
+        if ui.grabber.is_some() {
+            return true; // the system-wide hook sees this key (and the shortcuts); the window's copy is dropped
+        }
+        let (events, shortcut) = ui.window_keys.process(msg);
         drop(ui);
         self.send_events(events);
+        if let Some(action) = shortcut {
+            self.shortcuts.push(action);
+        }
         true
     }
 
-    fn hides_pointer(&self) -> bool {
-        Self::can_input(&lock(&self.ui)) && self.shared.cursor_drawn.load(Ordering::SeqCst)
+    fn take_shortcuts(&self) -> Vec<ViewerAction> {
+        let taken: Vec<ViewerAction> = lock(&self.shortcuts.queue).drain(..).collect();
+        let mut out = Vec::new();
+        for action in taken {
+            if action == ViewerAction::ReleaseKeyboard {
+                let mut ui = lock(&self.ui);
+                if Self::can_input(&ui) && !ui.released {
+                    ui.released = true;
+                    // The host lets go of every key; the window's keys and the hook stop until the next click or focus.
+                    let mut released = ui.window_keys.reset();
+                    released.extend(ui.pointer.release_all());
+                    self.send_events(released);
+                    self.update_grabber(&mut ui);
+                }
+            } else {
+                out.push(action);
+            }
+        }
+        out
+    }
+
+    fn pointer_shape(&self) -> Option<Arc<swapdesk_platform::CursorShape>> {
+        if !Self::can_input(&lock(&self.ui)) {
+            return None;
+        }
+        self.shared.pointer_shape.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 

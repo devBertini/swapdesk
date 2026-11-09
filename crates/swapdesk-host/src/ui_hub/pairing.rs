@@ -14,18 +14,18 @@ use quinn::Endpoint;
 use swapdesk_ipc::{ApiCode, Notify, PairingState, Text};
 use swapdesk_lan::guard::{check_incoming, find_on_link};
 use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
-use swapdesk_platform::Level;
+use swapdesk_platform::{Level, NetInterface};
 use swapdesk_proto::Sas;
 use swapdesk_trust::{
-    Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingService, PeerInfo,
-    ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex, endpoint_from_socket,
-    open_pairing_endpoint,
+    Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
+    PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex,
+    endpoint_from_socket, open_pairing_endpoint,
 };
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use super::views::{MANUAL_PREFIX, api_of, parse_device_id};
-use super::{Hub, lock};
+use super::{Conn, Hub, lock};
 
 /// How often a busy port is tried again when the endpoints of the last pairing are still closing.
 const BIND_TRIES: u32 = 10;
@@ -34,6 +34,8 @@ const BIND_TRIES: u32 = 10;
 struct Inner {
     /// The pairing screen's id; `None` when no pairing is open.
     id: Option<u32>,
+    /// The connection that opened the screen: it alone gets the pairing states and may start, confirm or cancel.
+    owner: Option<u64>,
     peer_name: Option<String>,
     /// The comparison waits for the user's verdict here.
     confirm: Option<oneshot::Sender<bool>>,
@@ -49,6 +51,12 @@ pub(crate) struct PairState {
     inner: Mutex<Inner>,
     /// Serve tasks of the pairing endpoints still running.
     serving: Arc<AtomicUsize>,
+    /// One connection attempt per source address per 30 s (PROTOCOL.md 3), across every opening of the mode.
+    rate: Arc<PairingRate>,
+    /// The interface list the endpoints' filter judges incoming connections by: read when the endpoints open and again
+    /// at every network change, so the filter (which runs on a runtime task for every incoming connection, however
+    /// many a peer sends) never enumerates adapters itself.
+    nets: Arc<Mutex<Vec<NetInterface>>>,
 }
 
 /// The screen side of a ceremony: what the trust crate shows becomes a `Pairing` notification.
@@ -59,33 +67,36 @@ pub(crate) struct HubPairUi {
 impl PairUi for HubPairUi {
     fn peer_announced(&self, peer: &PeerInfo) {
         let Some(hub) = self.hub.upgrade() else { return };
-        let id = {
+        let (id, owner) = {
             let mut s = lock(&hub.pairing.inner);
             s.peer_name = Some(peer.name.clone());
-            s.id
+            (s.id, s.owner)
         };
         if let Some(id) = id {
-            hub.notify(Notify::Pairing { pairing_id: id, state: PairingState::Waiting });
+            hub.notify_pairing(owner, Notify::Pairing { pairing_id: id, state: PairingState::Waiting });
         }
     }
 
     fn show_code(&self, sas: Sas) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         let Some(hub) = self.hub.upgrade() else { return rx };
-        let (id, peer_name) = {
+        let (id, owner, peer_name) = {
             let mut s = lock(&hub.pairing.inner);
             if s.cancelled || s.id.is_none() {
                 // The screen is gone: the sender drops, which is "São diferentes".
                 return rx;
             }
             s.confirm = Some(tx);
-            (s.id, s.peer_name.clone().unwrap_or_default())
+            (s.id, s.owner, s.peer_name.clone().unwrap_or_default())
         };
         if let Some(id) = id {
-            hub.notify(Notify::Pairing {
-                pairing_id: id,
-                state: PairingState::ShowCode { code: Text(sas.to_string()), peer_name },
-            });
+            hub.notify_pairing(
+                owner,
+                Notify::Pairing {
+                    pairing_id: id,
+                    state: PairingState::ShowCode { code: Text(sas.to_string()), peer_name },
+                },
+            );
         }
         rx
     }
@@ -115,6 +126,25 @@ fn pair_error_code(e: &TrustError) -> ApiCode {
 }
 
 impl Hub {
+    /// A pairing state goes to the connection that opened the screen while it is connected and still the console's;
+    /// otherwise to the console's connections. Never to every UI: the code on the screen is for the person at the
+    /// machine.
+    fn notify_pairing(&self, owner: Option<u64>, n: Notify) {
+        let owned = owner.and_then(|o| self.console_conns().into_iter().find(|c| c.id == o));
+        match owned {
+            Some(c) => {
+                c.queue.control(swapdesk_ipc::Message::UiNotify(n));
+            }
+            None => self.notify_console(n),
+        }
+    }
+
+    /// Whether `conn` opened the pairing screen `pairing_id` (the screen is open and is its).
+    fn owns_pairing(&self, conn: &Conn, pairing_id: u32) -> bool {
+        let s = lock(&self.pairing.inner);
+        s.id == Some(pairing_id) && s.owner == Some(conn.id)
+    }
+
     fn pairing_context(self: &Arc<Self>) -> Arc<PairingContext> {
         let s = self.settings();
         Arc::new(PairingContext {
@@ -140,6 +170,7 @@ impl Hub {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         let port = self.settings().pair_port;
         let list = self.p.interfaces.list().unwrap_or_default();
+        *lock(&self.pairing.nets) = list.clone();
         let mut sockets = Vec::new();
         for (addr, socket) in bind_quic_all_approved(&list, port) {
             match socket {
@@ -176,7 +207,11 @@ impl Hub {
         let _enter = rt.enter();
         let service = PairingService::with_options(
             Arc::clone(ctx),
-            ServeOptions { filter: Some(self.pairing_filter()), ..ServeOptions::default() },
+            ServeOptions {
+                filter: Some(self.pairing_filter()),
+                admitted: Some(self.pairing_admitted()),
+                ..ServeOptions::default()
+            },
         );
         let mut endpoints = Vec::new();
         for socket in sockets {
@@ -196,25 +231,43 @@ impl Hub {
         Ok(endpoints)
     }
 
-    /// The LAN guard on the pairing endpoint (PROTOCOL.md 1: on-link, not loopback, not this machine).
+    /// The filter of the pairing endpoint: the LAN guard (PROTOCOL.md 1: on-link, not loopback, not this machine),
+    /// then one connection attempt per source address per 30 s (PROTOCOL.md 3). A source that is not validated yet
+    /// gets `retry()` and costs its turn nothing; a second attempt inside the interval is ignored before any
+    /// handshake and without an audit entry.
     fn pairing_filter(&self) -> swapdesk_trust::IncomingFilter {
-        let (nets, allow_loopback) = (Arc::clone(&self.p.interfaces), self.allow_loopback());
+        let (nets, allow_loopback) = (Arc::clone(&self.pairing.nets), self.allow_loopback());
+        let rate = Arc::clone(&self.pairing.rate);
+        let trust = Arc::clone(&self.p.trust);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
+            // A blocked address gets no answer, before any other look.
+            if trust.read(|s| s.is_blocked(remote)) {
+                return Decision::Ignore;
+            }
             let local = incoming.local_ip();
-            if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
-                return Decision::Accept;
+            let on_link = if allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
+                true
+            } else if let Some(local) = local {
+                check_incoming(&lock(&nets), local, remote).is_ok()
+            } else {
+                false
+            };
+            if !on_link {
+                return Decision::Refuse;
             }
-            let (Ok(list), Some(local)) = (nets.list(), local) else { return Decision::Refuse };
-            match check_incoming(&list, local, remote) {
-                Ok(_) => Decision::Accept,
-                Err(_) => Decision::Refuse,
-            }
+            rate.judge(incoming)
         })
     }
 
+    /// Where a source address's 30 s turn is spent: only for an attempt the pairing service admitted past its cap.
+    fn pairing_admitted(&self) -> swapdesk_trust::AdmittedHook {
+        let rate = Arc::clone(&self.pairing.rate);
+        Arc::new(move |incoming| rate.note(incoming))
+    }
+
     /// `PairOpen`: pairing mode for 2 minutes (D12), the endpoints, the `pair=1` announcement, the screen's id.
-    pub fn pair_open(self: &Arc<Self>, device_id: Option<String>) -> Result<u32, ApiCode> {
+    pub fn pair_open(self: &Arc<Self>, conn: &Conn, device_id: Option<String>) -> Result<u32, ApiCode> {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if self.p.trust.pairing_in_progress() {
             return Err(ApiCode::Busy);
@@ -231,6 +284,13 @@ impl Hub {
         let ctx = self.pairing_context();
         let id = {
             let mut s = lock(&self.pairing.inner);
+            // One screen at a time: another connection's open screen is not taken over while that connection lives.
+            if s.id.is_some()
+                && s.owner != Some(conn.id)
+                && s.owner.is_some_and(|o| self.conns().iter().any(|c| c.id == o))
+            {
+                return Err(ApiCode::Busy);
+            }
             self.mode.enter(ModeOptions { expect, replaces: None });
             if self.pairing.serving.load(Ordering::SeqCst) == 0 {
                 match self.open_pair_endpoints(&ctx) {
@@ -242,6 +302,7 @@ impl Hub {
                 }
             }
             let id = *s.id.get_or_insert_with(|| self.fresh_id());
+            s.owner = Some(conn.id);
             s.cancelled = false;
             s.peer_name = None;
             id
@@ -249,8 +310,20 @@ impl Hub {
         self.p.presence.set_pairing(true);
         let me = Arc::clone(self);
         rt.spawn(async move { me.watch_pairing_mode(id).await });
-        self.notify(Notify::Pairing { pairing_id: id, state: PairingState::Open { remaining_s: self.remaining_s() } });
+        self.notify_pairing(
+            Some(conn.id),
+            Notify::Pairing { pairing_id: id, state: PairingState::Open { remaining_s: self.remaining_s() } },
+        );
         Ok(id)
+    }
+
+    /// The network changed: the filter of the open pairing endpoints judges by the new list from now on.
+    pub(crate) fn refresh_pair_nets(&self) {
+        if self.pairing.serving.load(Ordering::SeqCst) > 0
+            && let Ok(list) = self.p.interfaces.list()
+        {
+            *lock(&self.pairing.nets) = list;
+        }
     }
 
     fn remaining_s(&self) -> u16 {
@@ -285,7 +358,7 @@ impl Hub {
     }
 
     fn end_pairing_of(self: &Arc<Self>, id: u32, state: PairingState) {
-        {
+        let owner = {
             let mut s = lock(&self.pairing.inner);
             if s.id != Some(id) {
                 return;
@@ -295,17 +368,21 @@ impl Hub {
             s.task = None;
             s.peer_name = None;
             s.endpoints.clear();
-        }
+            s.owner.take()
+        };
         self.mode.close();
         self.p.presence.set_pairing(false);
-        self.notify(Notify::Pairing { pairing_id: id, state });
+        self.notify_pairing(owner, Notify::Pairing { pairing_id: id, state });
     }
 
     /// `PairStart`: this machine's user picked `device_id`; run the initiator against it.
-    pub fn pair_start(self: &Arc<Self>, pairing_id: u32, device_id: &str) -> Result<(), ApiCode> {
+    pub fn pair_start(self: &Arc<Self>, conn: &Conn, pairing_id: u32, device_id: &str) -> Result<(), ApiCode> {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if lock(&self.pairing.inner).id != Some(pairing_id) {
             return Err(ApiCode::Invalid);
+        }
+        if !self.owns_pairing(conn, pairing_id) {
+            return Err(self.api_error(ApiCode::NotPermitted, "start of a pairing another UI opened"));
         }
         if lock(&self.pairing.inner).task.is_some() {
             return Err(ApiCode::Busy);
@@ -352,7 +429,7 @@ impl Hub {
             }
         });
         lock(&self.pairing.inner).task = Some(task.abort_handle());
-        self.notify(Notify::Pairing { pairing_id, state: PairingState::Waiting });
+        self.notify_pairing(Some(conn.id), Notify::Pairing { pairing_id, state: PairingState::Waiting });
         Ok(())
     }
 
@@ -369,11 +446,16 @@ impl Hub {
     }
 
     /// `PairConfirm`: the user's verdict on the code.
-    pub fn pair_confirm(&self, pairing_id: u32, matches: bool) -> Result<(), ApiCode> {
+    pub fn pair_confirm(&self, conn: &Conn, pairing_id: u32, matches: bool) -> Result<(), ApiCode> {
         let tx = {
             let mut s = lock(&self.pairing.inner);
             if s.id != Some(pairing_id) {
                 return Err(ApiCode::NotFound);
+            }
+            // The verdict on the code is the opener's alone: a code shown to one UI cannot be confirmed by another.
+            if s.owner != Some(conn.id) {
+                drop(s);
+                return Err(self.api_error(ApiCode::NotPermitted, "confirmation of a pairing another UI opened"));
             }
             s.confirm.take()
         };
@@ -381,9 +463,12 @@ impl Hub {
     }
 
     /// `PairCancel`: the screen closed. A ceremony past the nonce counts as a failed attempt (F-PAIR-02).
-    pub fn pair_cancel(self: &Arc<Self>, pairing_id: u32) -> Result<(), ApiCode> {
+    pub fn pair_cancel(self: &Arc<Self>, conn: &Conn, pairing_id: u32) -> Result<(), ApiCode> {
         if lock(&self.pairing.inner).id != Some(pairing_id) {
             return Err(ApiCode::NotFound);
+        }
+        if !self.owns_pairing(conn, pairing_id) {
+            return Err(self.api_error(ApiCode::NotPermitted, "cancel of a pairing another UI opened"));
         }
         self.cancel_pairing();
         Ok(())
@@ -394,6 +479,7 @@ impl Hub {
         let (task, endpoints) = {
             let mut s = lock(&self.pairing.inner);
             let had = s.id.take().is_some();
+            s.owner = None;
             s.cancelled = had;
             s.confirm = None;
             s.peer_name = None;
