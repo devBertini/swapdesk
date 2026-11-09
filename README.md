@@ -1,16 +1,24 @@
 # Swapdesk
 
-A remote desktop that works only on your local network, for Windows and macOS, in every direction: Windows to Windows, Windows to Mac, Mac to Windows and Mac to Mac. Written in Rust with a native interface on each OS. Licensed MIT OR Apache-2.0.
+A remote desktop that works only on your local network, for Windows and macOS, built for every direction: Windows to Windows, Windows to Mac, Mac to Windows and Mac to Mac. Written in Rust with a native interface on each OS. Licensed MIT OR Apache-2.0.
 
-> **Status: version 1.0.0.** A Windows PC and a Mac control each other across a real LAN: screen, system audio, mouse and keyboard, after pairing by a compared code. Between two Windows PCs everything below runs, including terminal, files, clipboard, swap, chat, Wake-on-LAN and reconnect, proven with two instances on one PC. What is not in 1.0 is listed in [Not in 1.0 yet](#not-in-10-yet); the evidence for each feature is in [Status](#status).
+> **Status: version 1.0.0.** A Windows PC and a Mac control each other across a real LAN after pairing by a compared code: screen, system audio and mouse in both directions, and the keyboard from the Mac to the PC. Between two Windows PCs everything below runs, including terminal, files, clipboard, swap, chat, Wake-on-LAN and reconnect, proven with two instances on one PC. What is not in 1.0 is listed in [Not in 1.0 yet](#not-in-10-yet); the evidence for each feature is in [Status](#status).
 
 ## What it is and why
 
 AnyDesk and TeamViewer reach your machines through a cloud. Swapdesk is for the case where both machines are yours and on the same LAN, and nothing should leave it.
 
-The goal for version 1 (from [docs/SPEC.md](docs/SPEC.md)): screen, system audio, mouse, keyboard, terminal, files, clipboard, chat, Wake-on-LAN and unattended access between two machines. Either machine can host or control. "Request swap" inverts the roles when the other side accepts.
+The goal for version 1 (from [docs/SPEC.md](docs/SPEC.md)): screen, system audio, mouse, keyboard, terminal, files, clipboard, chat, Wake-on-LAN and unattended access between two machines. Either machine can host or control. "Inverter" ("Swap") inverts the roles when the other side accepts.
 
 Swapdesk has no relay, no cloud, no NAT traversal and no account. Anything beyond the LAN is explicitly out of scope, not just unbuilt.
+
+## Download
+
+Get the zip for your system from the [latest release](https://github.com/devBertini/swapdesk/releases/latest): Windows 10 or 11 (x64) or macOS 14 or later (Apple silicon). Each zip has a `.sha256` file next to it, and the release workflow publishes a build provenance attestation for it, so with the [GitHub CLI](https://cli.github.com/) you can check that the zip was built from this repository:
+
+```sh
+gh attestation verify Swapdesk-windows-x64-1.0.0.zip -R devBertini/swapdesk
+```
 
 ## Install on Windows
 
@@ -22,7 +30,7 @@ Requirements: Windows 10 or 11 (x64) on a local network set as **Private** (the 
 
 `uninstall.cmd` in the same folder removes everything and checks that nothing is left. `install.cmd -DryRun` and `uninstall.cmd -DryRun` print every action without doing any.
 
-The binaries are not code-signed (decision D22: no paid certificate). Windows SmartScreen may warn about an unknown publisher, and **Smart App Control blocks unsigned programs**: on a PC where it is on, Swapdesk does not start until it is turned off (Windows Security > App & browser control > Smart App Control; Windows cannot turn it back on without a reset).
+The binaries are not code-signed (decision D22: no paid certificate). Windows SmartScreen may warn about an unknown publisher, and **Smart App Control blocks unsigned programs**: on a PC where it is on, Swapdesk does not start until it is turned off (Windows Security > App & browser control > Smart App Control). Recent Windows updates let you turn it back on there without reinstalling Windows.
 
 ## Install on macOS
 
@@ -33,6 +41,8 @@ Requirements: macOS 14 or later on Apple silicon.
 3. Allow what it asks for: **Local Network** (to find and reach the other computer) and, for this Mac to be controlled, **Screen & System Audio Recording** and **Accessibility**. To control another computer from the Mac, also **Input Monitoring**.
 
 Swapdesk adds itself to Login Items and stays in the menu bar when its window is closed, so the Mac can be reached while you are logged in. macOS ties the permissions to the exact build of an ad hoc signed app: after an update, remove Swapdesk from each list in Privacy & Security and allow it again.
+
+To uninstall on macOS: choose "Quit Swapdesk" in its menu bar item, remove Swapdesk from System Settings > General > Login Items and from each list in Privacy & Security, move the app from Applications to the Trash, and delete `~/Library/Application Support/Swapdesk` (the device key, the paired devices and the trace log).
 
 ## First connection
 
@@ -94,7 +104,7 @@ This is enforced in code, not left to configuration ([docs/SPEC.md](docs/SPEC.md
 
 Full detail is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
-- **Pairing by comparing a 6-digit code.** Both users open "Parear" within 2 minutes. Both screens show the same code, derived from a commitment exchange and both keys (ZRTP-style, RFC 6189 argument). A key is pinned only after both users confirm the codes match. Three failed attempts in 15 minutes lock pairing for 15 minutes.
+- **Pairing by comparing a 6-digit code.** Both users open "Parear este computador" ("Pair this computer") within 2 minutes. Both screens show the same code, derived from a commitment exchange and both keys (ZRTP-style, RFC 6189 argument). A key is pinned only after both users confirm the codes match. Three failed attempts in 15 minutes lock pairing for 15 minutes, and each further lockout within 24 hours doubles that, up to 24 hours.
 - **Pinned keys.** Each machine has one Ed25519 device key. Sessions use TLS 1.3 with mutual authentication and only pinned keys. No session tickets and no 0-RTT are accepted, and the key is checked again after every handshake.
 - **Permissions per device and direction.** `VIEW`, `CONTROL`, `AUDIO`, `TERMINAL`, `ADMIN_TERMINAL`, `FILES`, `CLIPBOARD`, `UNATTENDED`. A newly paired device has none, so every session prompts the host's user until more is granted.
 - **Admin-only unattended access.** Granting `UNATTENDED` or `ADMIN_TERMINAL` needs a local administrator (UAC elevation on Windows, an authorization right on macOS), checked by the privileged service, never by the interface.
@@ -130,7 +140,7 @@ Requirements:
 - Rust stable, as pinned by [rust-toolchain.toml](rust-toolchain.toml) (channel `stable`, with `rustfmt` and `clippy`). The workspace sets `rust-version = "1.99"` and edition 2024 in [Cargo.toml](Cargo.toml).
 - Visual Studio 2022 Build Tools and the Windows SDK.
 - [cargo-nextest](https://nexte.st/): `cargo install cargo-nextest`.
-- The `opus` crate builds libopus. The project plan notes that CMake is involved and that a long build path can break it on Windows, so use a short `CARGO_TARGET_DIR` if a build fails on path length.
+- The `opus` crate builds libopus with CMake, and a long build path can break that build on Windows: if a build fails on path length, use a short `CARGO_TARGET_DIR`.
 
 ```sh
 cargo nextest run --workspace          # the unit tests
