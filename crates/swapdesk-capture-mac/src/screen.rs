@@ -382,14 +382,15 @@ mod mac {
     use block2::RcBlock;
     use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
     use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::AnyObject;
     use objc2::runtime::ProtocolObject;
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
     use objc2_app_kit::NSCursor;
-    use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CGPoint, CGRect, CGSize};
+    use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CFType, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGColorSpace, CGContext, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsBuiltin,
         CGDisplayMode, CGDisplayRotation, CGEvent, CGGetActiveDisplayList, CGImageAlphaInfo, CGMainDisplayID,
-        CGPreflightScreenCaptureAccess,
+        CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation,
     };
     use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
     use objc2_core_video::{
@@ -546,13 +547,32 @@ mod mac {
         // SAFETY: as above.
         let rects = unsafe { dict.value((SCStreamFrameInfoDirtyRects as *const NSString).cast::<c_void>()) };
         if !rects.is_null() {
-            // SAFETY: the dirty rects value is an NSArray of NSValue(CGRect).
-            let list: &NSArray<NSValue> = unsafe { &*rects.cast::<NSArray<NSValue>>() };
+            // The dirty rects value is an array of CGRect dictionary representations (SCStreamFrameInfoDirtyRects;
+            // CGRectMakeWithDictionaryRepresentation reads one). Each element's type is checked before it is read:
+            // sending `rectValue` to one of those dictionaries aborted the process on the first complete frame.
+            // SAFETY: the value is a live CFArray (toll-free bridged NSArray) owned by the sample buffer.
+            let list: &CFArray = unsafe { &*rects.cast::<CFArray>() };
             for i in 0..list.count() {
-                let v = list.objectAtIndex(i);
-                // SAFETY: each element is an NSValue holding a CGRect.
-                let r: NSRect = unsafe { v.rectValue() };
-                out.dirty.push([r.origin.x, r.origin.y, r.size.width, r.size.height]);
+                // SAFETY: `i` is in range; the element lives as long as the array.
+                let item = unsafe { list.value_at_index(i) };
+                if item.is_null() {
+                    continue;
+                }
+                // SAFETY: every element of a CFArray is a CF object.
+                let cf: &CFType = unsafe { &*item.cast::<CFType>() };
+                let rect = if let Some(dict) = cf.downcast_ref::<CFDictionary>() {
+                    let mut r = CGRect::default();
+                    // SAFETY: `dict` is a CFDictionary and `r` a valid out pointer.
+                    unsafe { CGRectMakeWithDictionaryRepresentation(Some(dict), &mut r) }.then_some(r)
+                } else {
+                    // SAFETY: every CF object is also an Objective-C object (toll-free bridging).
+                    let obj: &AnyObject = unsafe { &*item.cast::<AnyObject>() };
+                    // SAFETY: an NSValue that holds a CGRect (the type is checked by the downcast).
+                    obj.downcast_ref::<NSValue>().map(|v| unsafe { v.rectValue() })
+                };
+                if let Some(r) = rect {
+                    out.dirty.push([r.origin.x, r.origin.y, r.size.width, r.size.height]);
+                }
             }
         }
         out
