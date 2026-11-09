@@ -24,5 +24,8 @@ swapdesk-keys = { path = "../swapdesk-keys" }
 swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-core-foundation = { workspace = true, features = ["std", "CFBase", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString"] }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSData", "NSDictionary", "NSString"] }
+objc2-app-kit = { workspace = true, features = ["std", "NSBitmapImageRep", "NSEvent", "NSImageRep", "NSPasteboard"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFBase", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFCGTypes"] }
 objc2-core-graphics = { workspace = true, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation"] }

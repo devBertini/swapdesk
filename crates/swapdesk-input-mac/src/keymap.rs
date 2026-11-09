@@ -63,6 +63,12 @@ pub fn hid_of_kvk(kvk: u16, kb: KbKind) -> Option<(u16, u16)> {
     mac_to_hid(kvk, kb)
 }
 
+/// The `kVK_*` code of a HID usage for the host's keyboard kind (the reverse of [`hid_of_kvk`], what the sink posts),
+/// or `None` when the table has no Mac key for it (media keys, for one: they are system-defined events).
+pub fn kvk_of_hid(page: u16, usage: u16, kb: KbKind) -> Option<u16> {
+    hid_to_mac(page, usage, kb)
+}
+
 /// The shortcuts macOS acts on before an application sees the key (Cmd+Tab, Cmd+Space, Mission Control and Spaces
 /// shortcuts, force quit, screenshots, lock screen). `flags` is the modifier state of the key event.
 ///
@@ -146,6 +152,21 @@ mod tests {
         // And the ISO key next to left Shift reports 0x32 there.
         assert_eq!(hid_of_kvk(0x32, KbKind::Iso), Some((7, 0x64)));
         assert_eq!(hid_of_kvk(0xFF, KbKind::Ansi), None);
+    }
+
+    #[test]
+    fn the_reverse_direction_inverts_the_c4_tables() {
+        assert_eq!(kvk_of_hid(7, 0x04, KbKind::Ansi), Some(0x00));
+        assert_eq!(kvk_of_hid(7, 0x35, KbKind::Iso), Some(0x0A));
+        assert_eq!(kvk_of_hid(7, 0x35, KbKind::Ansi), Some(0x32));
+        assert_eq!(kvk_of_hid(7, 0xFFFF, KbKind::Ansi), None);
+        for kb in KbKind::ALL {
+            for kvk in 0u16..0x80 {
+                if let Some((page, usage)) = hid_of_kvk(kvk, kb) {
+                    assert_eq!(kvk_of_hid(page, usage, kb), Some(kvk), "kvk {kvk:#x} on {kb:?}");
+                }
+            }
+        }
     }
 
     #[test]
