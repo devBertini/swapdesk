@@ -88,6 +88,10 @@ jobs:
                   title = f"{binary} {name}".replace(":", "%3A").replace(",", "%2C")
                   print(f"::error title={esc(title)}::{esc(chr(10).join(out[-40:])[-3800:])}")
                   shown += 1
+              # The panics of the full run itself (a test may pass alone and fail beside the others).
+              panics = [chr(10).join(lines[i:i + 3]) for i, l in enumerate(lines) if "panicked at" in l][:8]
+              if panics:
+                  print(f"::error title=panics in the full run::{esc((chr(10) * 2).join(panics)[-3800:])}")
               keep = [l for l in lines if l.strip() and re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
               print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 
@@ -155,6 +159,10 @@ jobs:
                   title = f"{binary} {name}".replace(":", "%3A").replace(",", "%2C")
                   print(f"::error title={esc(title)}::{esc(chr(10).join(out[-40:])[-3800:])}")
                   shown += 1
+              # The panics of the full run itself (a test may pass alone and fail beside the others).
+              panics = [chr(10).join(lines[i:i + 3]) for i, l in enumerate(lines) if "panicked at" in l][:8]
+              if panics:
+                  print(f"::error title=panics in the full run::{esc((chr(10) * 2).join(panics)[-3800:])}")
               keep = [l for l in lines if l.strip() and re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
               print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 

@@ -409,16 +409,22 @@ fn files_inherit_the_protected_dacl_of_the_folder() {
     let s = open(&t);
     s.store("trust.bin", b"x").unwrap();
     let read = read_security(&s.dir().join("trust.bin")).unwrap();
-    // Inherited from the folder: the same three principals, flagged as inherited, no one else.
-    assert_eq!(read.dacl_sddl.matches("(A;").count(), 3, "{}", read.dacl_sddl);
+    // Inherited from the folder: the same three principals, flagged as inherited, no one else. SDDL names some
+    // accounts by an alias (SY, BA, and LA for the built-in Administrator a CI runner runs as), so every SID is
+    // compared in its full form.
+    let got: Vec<String> = read
+        .dacl_sddl
+        .split('(')
+        .skip(1)
+        .map(|ace| {
+            assert!(ace.starts_with("A;ID;FA;;;"), "not an inherited full-control ACE: {}", read.dacl_sddl);
+            normalize_sid(ace.trim_end_matches(')').rsplit(';').next().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(got.len(), 3, "{}", read.dacl_sddl);
     for sid in test_spec().full_control {
         let sid = normalize_sid(&sid).unwrap();
-        let alias = match sid.as_str() {
-            "S-1-5-18" => "SY".to_string(),
-            "S-1-5-32-544" => "BA".to_string(),
-            other => other.to_string(),
-        };
-        assert!(read.dacl_sddl.contains(&alias), "{alias} missing from {}", read.dacl_sddl);
+        assert!(got.contains(&sid), "{sid} missing from {}", read.dacl_sddl);
     }
 }
 
