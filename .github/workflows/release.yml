@@ -45,3 +45,30 @@ jobs:
           $args += @('${{ steps.zip.outputs.path }}', '${{ steps.zip.outputs.path }}.sha256')
           & gh @args
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed: $LASTEXITCODE" }
+
+  macos:
+    needs: windows
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and pack
+        run: bash packaging/macos/build-release.sh
+      - name: Find the zip
+        id: zip
+        run: |
+          zip="$(ls target/package/Swapdesk-macos-arm64-*.zip | head -1)"
+          [ -f "$zip" ] || { echo "no release zip"; exit 1; }
+          echo "path=$PWD/$zip" >> "$GITHUB_OUTPUT"
+      - name: Provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.zip.outputs.path }}
+      - name: Add to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "${{ steps.zip.outputs.path }}" "${{ steps.zip.outputs.path }}.sha256"

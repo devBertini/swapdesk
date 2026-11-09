@@ -30,7 +30,7 @@
 # nslocalnetworkusagedescription, nsbonjourservices}, and TN3179 (local network privacy); see docs/RESEARCH.md.
 set -euo pipefail
 
-BUNDLE_ID="io.github.devbertini.swapdesk.dev"
+BUNDLE_ID="${SWAPDESK_BUNDLE_ID:-io.github.devbertini.swapdesk.dev}"  # packaging/macos/build-release.sh sets the release one
 CERT_NAME="Swapdesk Development"
 SIGN_DIR="${SWAPDESK_SIGN_DIR:-$HOME/.swapdesk-dev-signing}"
 KEYCHAIN="$SIGN_DIR/swapdesk-dev.keychain-db"
@@ -71,6 +71,7 @@ assemble() { # $1 = CFBundleVersion
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/en.lproj" "$app/Contents/Resources/pt-BR.lproj"
   cp "$binary" "$app/Contents/MacOS/Swapdesk"
+  cp "$root/THIRD-PARTY-LICENSES.md" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$app/Contents/Resources/"
   printf 'APPL????' > "$app/Contents/PkgInfo"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
