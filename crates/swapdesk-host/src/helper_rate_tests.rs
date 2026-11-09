@@ -121,12 +121,23 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
             source.open(DisplayId(0), CaptureConfig { max_fps: 60 }).unwrap();
             capture_loop(&env, p, &ctl, &ids, &mut source)
         });
-        std::thread::sleep(Duration::from_millis(300));
+        // Counted, not timed: a slow machine (a CI runner) gets the same number of frames on each side.
+        let mut got = Vec::new();
+        let frames_in = |got: &Vec<Message>| got.iter().filter(|m| matches!(m, Message::VideoFrame { .. })).count();
+        let wait_for = |got: &mut Vec<Message>, n: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while frames_in(got) < n && Instant::now() < deadline {
+                got.extend(rx.recv_timeout(Duration::from_millis(50)));
+            }
+        };
+        wait_for(&mut got, 10);
         *ctl.rate.lock().unwrap() = Some((21_000, 60));
-        std::thread::sleep(Duration::from_millis(300));
+        wait_for(&mut got, 20);
         let still_running = !h.is_finished();
         ctl.stop.store(true, Ordering::Release);
-        (still_running, h.join().unwrap())
+        let joined = h.join().unwrap();
+        got.extend(rx.try_iter());
+        (still_running, joined, got)
     });
     assert!(result.0, "the capture loop ended on the refused rate change");
     result.1.expect("the loop ends cleanly when stopped");
@@ -134,7 +145,7 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
     assert_eq!(*enc.configured.lock().unwrap(), vec![(20_000, 60), (21_000, 60)], "configured again at the new rate");
 
     let (mut frames, mut notes, mut faults) = (Vec::new(), Vec::new(), Vec::new());
-    for m in rx.try_iter() {
+    for m in result.2 {
         match m {
             Message::VideoFrame { header, .. } => frames.push(header),
             Message::HelperNote { what } => notes.push(what.0),
