@@ -71,7 +71,7 @@ Each feature is in one of three states, written conservatively:
 | Screen (capture, H.264, transport, decode, render) | Between machines | Between machines (3420x2214, first frame in 0.6 s) | One PC |
 | System audio | Between machines | Between machines | One PC |
 | Mouse | Between machines | Between machines | One PC |
-| Keyboard | Between machines (typing into Notepad) | Built and unit-tested on the Mac, not yet run between machines | One PC |
+| Keyboard | Between machines (typing into Notepad) | Between machines (typing into TextEdit, Cmd+S) | One PC |
 | Add by address and the LAN guard | Between machines | Between machines | One PC |
 | Discovery on the LAN (DNS-SD) | Between machines | Between machines | One PC |
 | Swap, chat, Wake-on-LAN, reconnect | Not in 1.0 | Not in 1.0 | One PC |

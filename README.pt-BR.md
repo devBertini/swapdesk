@@ -71,7 +71,7 @@ Cada recurso está num de três estados, descritos de forma conservadora:
 | Tela (captura, H.264, transporte, decodificação, exibição) | Entre máquinas | Entre máquinas (3420x2214, primeiro quadro em 0,6 s) | Um PC |
 | Áudio do sistema | Entre máquinas | Entre máquinas | Um PC |
 | Mouse | Entre máquinas | Entre máquinas | Um PC |
-| Teclado | Entre máquinas (digitando no Bloco de Notas) | Construído e com testes unitários no Mac, ainda não rodado entre máquinas | Um PC |
+| Teclado | Entre máquinas (digitando no Bloco de Notas) | Entre máquinas (digitando no Editor de Texto, Cmd+S) | Um PC |
 | Adicionar por endereço e a proteção de rede local | Entre máquinas | Entre máquinas | Um PC |
 | Descoberta na rede local (DNS-SD) | Entre máquinas | Entre máquinas | Um PC |
 | Inversão, chat, Wake-on-LAN, reconexão | Fora da 1.0 | Fora da 1.0 | Um PC |

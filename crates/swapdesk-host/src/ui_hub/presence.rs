@@ -98,7 +98,7 @@ impl DnsSdPresence {
                                         session_port: p.port,
                                         pair_port: p.port.wrapping_add(1),
                                     };
-                                    map.insert(peer.device_id, peer.clone()).as_ref() != Some(&peer)
+                                    found(&mut map, peer)
                                 }
                                 DiscoveryEvent::Lost { fingerprint } => map.remove(&fingerprint).is_some(),
                             }
@@ -112,6 +112,21 @@ impl DnsSdPresence {
         };
         Ok(Self { discovery, peers, listener, stop, worker: Some(worker) })
     }
+}
+
+/// A peer announced itself: it replaces its own old record and any other device's record at one of its addresses and
+/// its port. On a LAN an IPv4 address is one machine at a time, so an older record there is a machine that is gone
+/// (Swapdesk reinstalled with a new key, or another computer that took the address) and must not stand for that
+/// address: "Adicionar por endereço" would pick it and pairing would fail against the real key. `true` when the set
+/// changed.
+pub(crate) fn found(map: &mut HashMap<DeviceId, PresencePeer>, peer: PresencePeer) -> bool {
+    let before = map.len();
+    map.retain(|id, q| {
+        id == &peer.device_id || q.session_port != peer.session_port || !q.addrs.iter().any(|a| peer.addrs.contains(a))
+    });
+    let replaced = map.len() != before;
+    let new = map.insert(peer.device_id, peer.clone()).as_ref() != Some(&peer);
+    replaced || new
 }
 
 impl Presence for DnsSdPresence {
@@ -180,5 +195,38 @@ impl Presence for FakePresence {
     fn refresh(&self) {}
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.listener) = Some(f);
+    }
+}
+
+#[cfg(test)]
+mod found_tests {
+    use super::*;
+
+    fn peer(id: u8, ip: [u8; 4], port: u16) -> PresencePeer {
+        PresencePeer {
+            device_id: [id; 16],
+            name: format!("p{id}"),
+            os: swapdesk_proto::Os::MacOs,
+            pairing_open: false,
+            addrs: vec![Ipv4Addr::from(ip)],
+            session_port: port,
+            pair_port: port + 1,
+        }
+    }
+
+    #[test]
+    fn a_new_key_at_an_address_replaces_the_old_record_there() {
+        let mut map = HashMap::new();
+        assert!(found(&mut map, peer(1, [192, 168, 1, 3], 47820)));
+        assert!(found(&mut map, peer(9, [192, 168, 1, 7], 47820)));
+        assert!(!found(&mut map, peer(1, [192, 168, 1, 3], 47820)), "the same record again changes nothing");
+        // Swapdesk reinstalled on 192.168.1.3: a new key there.
+        assert!(found(&mut map, peer(2, [192, 168, 1, 3], 47820)));
+        let mut ids: Vec<u8> = map.keys().map(|d| d[0]).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2, 9], "the old record at that address is gone, the other machine stays");
+        // A second instance on another port of the same machine is another endpoint: both stay.
+        assert!(found(&mut map, peer(3, [192, 168, 1, 3], 50000)));
+        assert_eq!(map.len(), 3);
     }
 }

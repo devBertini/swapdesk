@@ -225,7 +225,17 @@ pub struct ViewerConfig {
     pub send_input: bool,
     /// The session stays open at least this long after it went active (media keeps being counted).
     pub hold: Duration,
+    /// Keyboard proof: after the pointer moves, wait for this file (the orchestrator writes it once a text editor has
+    /// the focus on the host), then type [`TYPED_WORD`] with physical keys and save with Cmd+S (Ctrl+S toward Windows
+    /// is the host's own matter: this proof is toward the Mac). `None`: no keys.
+    pub type_after: Option<PathBuf>,
+    /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
+    /// `pair_with_fresh_host`). `None`: the host is found by its address.
+    pub host_up: Option<PathBuf>,
 }
+
+/// What the keyboard proof types, as HID usages of the US layout's letter keys (page 7).
+pub const TYPED_WORD: &str = "swapdesk";
 
 impl ViewerConfig {
     pub fn new(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor_file: PathBuf) -> Self {
@@ -242,6 +252,8 @@ impl ViewerConfig {
             paired: None,
             send_input: true,
             hold: Duration::ZERO,
+            type_after: None,
+            host_up: None,
         }
     }
 }
@@ -419,9 +431,34 @@ fn script(
 
 /// Adds the host by address and runs the pairing ceremony; the device id it paired as.
 fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -> Result<String, String> {
-    let Reply::Device(placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
+    if let Some(up) = &cfg.host_up {
+        return pair_with_fresh_host(pump, cfg, log, up);
+    }
+    let Reply::Device(mut placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
         return Err("AddByAddress did not reply a device".into());
     };
+    // The address can still name the machine's own app, already paired here and announced before the scripted host
+    // replaced it (its record outlives it). The scripted host has a fresh identity: it is the one device on the
+    // network that is not paired and runs the same OS. Wait a moment for its announcement.
+    if placeholder.paired {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(Reply::Devices(list)) = pump.ask(Command::ListDevices, REPLY) {
+                let fresh: Vec<_> = list.iter().filter(|d| !d.paired && d.os == placeholder.os).collect();
+                if let [one] = fresh.as_slice() {
+                    log(&format!("VIEWER_ADDRESS_NAMED_A_PAIRED_DEVICE using the unpaired {}", one.id));
+                    placeholder = (*one).clone();
+                    break;
+                }
+            }
+            if Instant::now() > end {
+                return Err(
+                    "the address names a paired device and no single unpaired one of its OS is on the network".into()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
     let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
         return Err("PairOpen did not reply a pairing id".into());
     };
@@ -434,6 +471,44 @@ fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -
         }
     };
     Ok(host)
+}
+
+/// The scripted host gets a new key on every run, and a record of an earlier run can still sit at its address on this
+/// PC (a service before 1.1 keeps it). So: note the devices known now, let the orchestrator start the host (it writes
+/// `up`), then pair with the one unpaired device that appears after that.
+fn pair_with_fresh_host(
+    pump: &mut Pump<'_>,
+    cfg: &ViewerConfig,
+    log: &dyn Fn(&str),
+    up: &std::path::Path,
+) -> Result<String, String> {
+    let Reply::Devices(before) = pump.ask(Command::ListDevices, REPLY)? else {
+        return Err("ListDevices did not reply the devices".into());
+    };
+    let known: BTreeSet<String> = before.into_iter().map(|d| d.id).collect();
+    log(&format!("VIEWER_SNAPSHOT_TAKEN {} devices known", known.len()));
+    wait_file(up, "the host started by the orchestrator", cfg.pair_timeout)?;
+    let end = Instant::now() + Duration::from_secs(30);
+    let host = loop {
+        if let Ok(Reply::Devices(list)) = pump.ask(Command::ListDevices, REPLY) {
+            let fresh: Vec<_> = list.into_iter().filter(|d| !d.paired && !known.contains(&d.id)).collect();
+            if let [one] = fresh.as_slice() {
+                break one.id.clone();
+            }
+        }
+        if Instant::now() > end {
+            return Err("no single new unpaired device appeared after the host started".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    log(&format!("VIEWER_FRESH_HOST {host}"));
+    let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
+        return Err("PairOpen did not reply a pairing id".into());
+    };
+    log("VIEWER_PAIR_OPEN");
+    pair(pump, cfg, log, pairing_id, &host).inspect_err(|_| {
+        let _ = pump.request(Command::PairCancel { pairing_id }, REPLY);
+    })
 }
 
 /// The session's media and pointer, then its end. Runs once the session is active.
@@ -470,6 +545,10 @@ fn script_media(
 
     // 4. Pointer: a few small moves around where the host's pointer is now, at most one second of them.
     let pointer = if cfg.send_input { pointer_moves(backend, shared, session_id, cfg, log, report) } else { Ok(()) };
+    let pointer = pointer.and_then(|()| match &cfg.type_after {
+        Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, log),
+        None => Ok(()),
+    });
     // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.
     let hold_end = active_at + cfg.hold;
     let audio_end = Instant::now() + Duration::from_millis(1500);
@@ -647,4 +726,56 @@ fn pair(
         }
         _ => None,
     })?
+}
+
+/// The HID usage (page 7) of a lower-case letter: `a` is 4, `z` is 29.
+fn letter_usage(c: char) -> Option<u16> {
+    c.is_ascii_lowercase().then(|| 4 + (c as u16 - u16::from(b'a')))
+}
+
+/// The keyboard proof: waits for `ready`, types [`TYPED_WORD`] key by key, then Cmd+S.
+fn type_word(
+    backend: &ServiceBackend,
+    session_id: u64,
+    ready: &std::path::Path,
+    timeout: Duration,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    const GAP: Duration = Duration::from_millis(40);
+    const LEFT_GUI: u16 = 0xE3;
+    const GUI_BIT: u8 = 0x08;
+    const S: u16 = 22;
+    log("VIEWER_NEED_TYPE");
+    wait_file(ready, "a text editor focused on the host", timeout)?;
+    let key =
+        |usage: u16, down: bool, modifiers: u8| InputEvent::Key { usage_page: 7, usage, down, modifiers, locks: 0 };
+    for c in TYPED_WORD.chars() {
+        let usage = letter_usage(c).ok_or_else(|| format!("{c:?} is not a letter key"))?;
+        backend.viewer_input(session_id, vec![key(usage, true, 0)]);
+        std::thread::sleep(GAP);
+        backend.viewer_input(session_id, vec![key(usage, false, 0)]);
+        std::thread::sleep(GAP);
+    }
+    for (usage, down, modifiers) in
+        [(LEFT_GUI, true, GUI_BIT), (S, true, GUI_BIT), (S, false, GUI_BIT), (LEFT_GUI, false, 0)]
+    {
+        backend.viewer_input(session_id, vec![key(usage, down, modifiers)]);
+        std::thread::sleep(GAP);
+    }
+    log(&format!("TYPED {} letter keys, then Cmd+S", TYPED_WORD.len()));
+    Ok(())
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    #[test]
+    fn the_typed_word_is_letter_keys_of_page_7() {
+        assert_eq!(letter_usage('a'), Some(4));
+        assert_eq!(letter_usage('z'), Some(29));
+        assert_eq!(letter_usage('S'), None);
+        let usages: Vec<u16> = TYPED_WORD.chars().filter_map(letter_usage).collect();
+        assert_eq!(usages, vec![22, 26, 4, 19, 7, 8, 22, 14], "s w a p d e s k");
+    }
 }
