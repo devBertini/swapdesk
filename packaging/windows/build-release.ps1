@@ -9,7 +9,7 @@
     cargo build --profile release-service -p swapdesk-service                  (D15: panic = unwind)
 
   Then it stages, in <target>\package\Swapdesk\:
-    Swapdesk.exe, swapdesk-service.exe, swapdesk-helper.exe, the two licence files, and the install and uninstall
+    Swapdesk.exe, swapdesk-service.exe, swapdesk-helper.exe, the two licence files, THIRD-PARTY-LICENSES.md, and the install and uninstall
     scripts with this README, so the zip is self-contained. Nothing else is needed at run time: the font is
     embedded in the exe (include_bytes!) and the manifest is linked in by crates\swapdesk-app\build.rs.
   It also writes SHA256SUMS into the folder (lowercase hex, two spaces, file name, one line per other file, LF line
@@ -84,6 +84,7 @@ $files = @(
     @{ From = (Join-Path $Target 'release\swapdesk-helper.exe');               Name = 'swapdesk-helper.exe' },
     @{ From = (Join-Path $Root 'LICENSE-MIT');                                 Name = 'LICENSE-MIT' },
     @{ From = (Join-Path $Root 'LICENSE-APACHE');                              Name = 'LICENSE-APACHE' },
+    @{ From = (Join-Path $Root 'THIRD-PARTY-LICENSES.md');                     Name = 'THIRD-PARTY-LICENSES.md' },
     @{ From = (Join-Path $PSScriptRoot 'install.ps1');                         Name = 'install.ps1' },
     @{ From = (Join-Path $PSScriptRoot 'install.cmd');                         Name = 'install.cmd' },
     @{ From = (Join-Path $PSScriptRoot 'uninstall.ps1');                       Name = 'uninstall.ps1' },
