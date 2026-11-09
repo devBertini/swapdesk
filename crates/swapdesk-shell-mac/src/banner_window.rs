@@ -104,11 +104,23 @@ impl BannerWindow {
         }
         let tag = ctx.tag(Action::Control(ControlId::BannerDisconnect));
         let disconnect = button_with(&mut ctx, &model.disconnect, None, ButtonStyle::Danger, false, tag);
-        // Solid red, as the Windows banner's "Desconectar".
-        disconnect.setBezelColor(Some(&color(pal.danger)));
-        disconnect.setContentTintColor(None);
+        // Solid red with a white label, as the Windows banner's "Desconectar". Drawn by its own layer: AppKit greys a
+        // bezel colour in a window that is not key, and this panel never is.
+        disconnect.setBordered(false);
+        disconnect.setContentTintColor(Some(&NSColor::whiteColor()));
         disconnect.setKeyEquivalent(&ns(""));
-        buttons.push(view_of(&disconnect));
+        let label = disconnect.fittingSize();
+        let (bw, bh) = ((label.width + 28.0).ceil(), 36.0);
+        let solid = PaintedView::create(mtm, frame(0.0, 0.0, bw, bh), Some(pal.danger));
+        solid.setWantsLayer(true);
+        if let Some(layer) = solid.layer() {
+            layer.setCornerRadius(8.0);
+        }
+        disconnect.setFrame(frame(0.0, 0.0, bw, bh));
+        solid.addSubview(&disconnect);
+        solid.widthAnchor().constraintEqualToConstant(bw).setActive(true);
+        solid.heightAnchor().constraintEqualToConstant(bh).setActive(true);
+        buttons.push(view_of(&solid));
         let gap = view_of(&NSView::new(mtm));
         gap.widthAnchor().constraintGreaterThanOrEqualToConstant(24.0).setActive(true);
         items.push(gap);
