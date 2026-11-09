@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use swapdesk_platform::{Level, TraceSink};
+use swapdesk_platform::TraceSink;
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Command, Ticket, UiBackend, UiEvent};
 
@@ -39,6 +39,7 @@ pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>
     use std::time::Duration;
 
     use swapdesk_crossdrive::{HostConfig, host_drive};
+    use swapdesk_platform::Level;
     use swapdesk_ui::{Permission, Permissions};
 
     std::fs::create_dir_all(dir).map_err(|e| format!("drive folder {}: {e}", dir.display()))?;
