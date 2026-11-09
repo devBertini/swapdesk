@@ -1,40 +1,245 @@
 {
   "v": 3,
-  "createdOnFiles": {"v": 1, "at": "2026-11-07T15:00:00Z"},
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-07T15:00:00Z"
+  },
   "title": "Swapdesk design",
-  "launch": {"view": "canvas"},
+  "launch": {
+    "view": "canvas"
+  },
   "pages": [],
   "boards": {
-    "Main.dc.html": {"x": 0, "y": 0, "w": 1200, "h": 760, "title": "1. Dispositivos"},
-    "Pareamento.dc.html": {"x": 1280, "y": 0, "w": 1200, "h": 760, "title": "2. Pareamento"},
-    "Permissoes.dc.html": {"x": 2560, "y": 0, "w": 1200, "h": 760, "title": "3. Permissões por direção"},
-    "PedidoEntrada.dc.html": {"x": 0, "y": 1140, "w": 1200, "h": 760, "title": "4. Pedido de conexão (anfitrião)"},
-    "Visualizador.dc.html": {"x": 1280, "y": 1140, "w": 1200, "h": 760, "title": "5. Visualizador"},
-    "Banner.dc.html": {"x": 2560, "y": 1140, "w": 1200, "h": 760, "title": "6. Sendo controlado (anfitrião)"},
-    "Inversao.dc.html": {"x": 0, "y": 2280, "w": 1200, "h": 760, "title": "7. Inverter controle"},
-    "Terminal.dc.html": {"x": 1280, "y": 2280, "w": 1200, "h": 760, "title": "8. Terminal e ações rápidas"},
-    "Arquivos.dc.html": {"x": 2560, "y": 2280, "w": 1200, "h": 760, "title": "9. Arquivos"},
-    "Chat.dc.html": {"x": 3840, "y": 2280, "w": 1200, "h": 760, "title": "10. Chat e copiar e colar"},
-    "Estados.dc.html": {"x": 0, "y": 3420, "w": 1200, "h": 760, "title": "11. Erros e estados"},
-    "Ajustes.dc.html": {"x": 1280, "y": 3420, "w": 1200, "h": 760, "title": "12. Ajustes"},
-    "Atividade.dc.html": {"x": 2560, "y": 3420, "w": 1200, "h": 760, "title": "13. Atividade"},
-    "MainEscuro.dc.html": {"x": 0, "y": 4560, "w": 1200, "h": 760, "title": "14. Dispositivos, escuro"},
-    "VisualizadorEscuro.dc.html": {"x": 1280, "y": 4560, "w": 1200, "h": 760, "title": "15. Visualizador, escuro"}
+    "PrimeiraVez.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1200,
+      "h": 760,
+      "title": "1. Primeira vez"
+    },
+    "Main.dc.html": {
+      "x": 1280,
+      "y": 0,
+      "w": 1200,
+      "h": 760,
+      "title": "2. Computadores, Windows"
+    },
+    "MainMac.dc.html": {
+      "x": 2560,
+      "y": 0,
+      "w": 1200,
+      "h": 760,
+      "title": "3. Computadores, macOS"
+    },
+    "EstadosDispositivo.dc.html": {
+      "x": 3840,
+      "y": 0,
+      "w": 1200,
+      "h": 1000,
+      "title": "4. Estados do computador"
+    },
+    "Pareamento.dc.html": {
+      "x": 0,
+      "y": 1380,
+      "w": 1200,
+      "h": 760,
+      "title": "5. Pareamento"
+    },
+    "EstadosPareamento.dc.html": {
+      "x": 1280,
+      "y": 1380,
+      "w": 1200,
+      "h": 760,
+      "title": "6. Estados do pareamento"
+    },
+    "Permissoes.dc.html": {
+      "x": 2560,
+      "y": 1380,
+      "w": 1200,
+      "h": 880,
+      "title": "7. Permissões por direção"
+    },
+    "PedidoEntrada.dc.html": {
+      "x": 0,
+      "y": 2640,
+      "w": 1200,
+      "h": 760,
+      "title": "8. Pedido de conexão (anfitrião)"
+    },
+    "Visualizador.dc.html": {
+      "x": 1280,
+      "y": 2640,
+      "w": 1200,
+      "h": 760,
+      "title": "9. Visualizador"
+    },
+    "VisualizadorTelaCheia.dc.html": {
+      "x": 2560,
+      "y": 2640,
+      "w": 1200,
+      "h": 1680,
+      "title": "10. Tela cheia"
+    },
+    "Banner.dc.html": {
+      "x": 3840,
+      "y": 2640,
+      "w": 1200,
+      "h": 760,
+      "title": "11. Sendo controlado (anfitrião)"
+    },
+    "Inversao.dc.html": {
+      "x": 0,
+      "y": 4700,
+      "w": 1200,
+      "h": 760,
+      "title": "12. Inverter controle"
+    },
+    "Terminal.dc.html": {
+      "x": 1280,
+      "y": 4700,
+      "w": 1200,
+      "h": 760,
+      "title": "13. Terminal e ações rápidas"
+    },
+    "Arquivos.dc.html": {
+      "x": 2560,
+      "y": 4700,
+      "w": 1200,
+      "h": 760,
+      "title": "14. Arquivos"
+    },
+    "Chat.dc.html": {
+      "x": 3840,
+      "y": 4700,
+      "w": 1200,
+      "h": 760,
+      "title": "15. Chat"
+    },
+    "Estados.dc.html": {
+      "x": 0,
+      "y": 5840,
+      "w": 1200,
+      "h": 1200,
+      "title": "16. Erros e estados"
+    },
+    "Ajustes.dc.html": {
+      "x": 1280,
+      "y": 5840,
+      "w": 1200,
+      "h": 1000,
+      "title": "17. Ajustes"
+    },
+    "Atividade.dc.html": {
+      "x": 2560,
+      "y": 5840,
+      "w": 1200,
+      "h": 760,
+      "title": "18. Atividade"
+    },
+    "Bandeja.dc.html": {
+      "x": 3840,
+      "y": 5840,
+      "w": 1200,
+      "h": 760,
+      "title": "19. Bandeja e barra de menus"
+    },
+    "MainEscuro.dc.html": {
+      "x": 0,
+      "y": 7420,
+      "w": 1200,
+      "h": 760,
+      "title": "20. Computadores, escuro"
+    },
+    "VisualizadorEscuro.dc.html": {
+      "x": 1280,
+      "y": 7420,
+      "w": 1200,
+      "h": 760,
+      "title": "21. Visualizador, escuro"
+    }
   },
   "order": [
-    "Main.dc.html", "Pareamento.dc.html", "Permissoes.dc.html",
-    "PedidoEntrada.dc.html", "Visualizador.dc.html", "Banner.dc.html",
-    "Inversao.dc.html", "Terminal.dc.html", "Arquivos.dc.html", "Chat.dc.html",
-    "Estados.dc.html", "Ajustes.dc.html", "Atividade.dc.html",
-    "MainEscuro.dc.html", "VisualizadorEscuro.dc.html"
+    "Main.dc.html",
+    "PrimeiraVez.dc.html",
+    "MainMac.dc.html",
+    "EstadosDispositivo.dc.html",
+    "Pareamento.dc.html",
+    "EstadosPareamento.dc.html",
+    "Permissoes.dc.html",
+    "PedidoEntrada.dc.html",
+    "Visualizador.dc.html",
+    "VisualizadorTelaCheia.dc.html",
+    "Banner.dc.html",
+    "Inversao.dc.html",
+    "Terminal.dc.html",
+    "Arquivos.dc.html",
+    "Chat.dc.html",
+    "Estados.dc.html",
+    "Ajustes.dc.html",
+    "Atividade.dc.html",
+    "Bandeja.dc.html",
+    "MainEscuro.dc.html",
+    "VisualizadorEscuro.dc.html"
   ],
   "notes": {
-    "t1": {"x": 0, "y": -260, "text": "Encontrar e parear", "kind": "title1", "maxW": 3760},
-    "t2": {"x": 0, "y": 880, "text": "Sessão", "kind": "title1", "maxW": 3760},
-    "t3": {"x": 0, "y": 2020, "text": "Inverter e ferramentas", "kind": "title1", "maxW": 5040},
-    "t4": {"x": 0, "y": 3160, "text": "Estados e ajustes", "kind": "title1", "maxW": 3760},
-    "t5": {"x": 0, "y": 4300, "text": "Modo escuro", "kind": "title1", "maxW": 2480},
-    "n1": {"x": 3840, "y": 0, "w": 420, "text": "Swapdesk: acesso remoto só na rede local, Windows e Mac nos dois sentidos.\n\nVersão 2 do design. Uma estrutura só: barra lateral com os computadores e o detalhe à direita; o visualizador ocupa a janela com uma barra flutuante de ícones. O elemento marcante é a faixa do par: os dois computadores ligados por um fio, com a seta de quem controla quem, que vira ao inverter. Azul-sinal só para conexão e ações, verde só para online, vermelho só para desconectar e esquecer. Instrument Sans em tudo, mono só no terminal.\n\nTodas as telas têm o ajuste Tema (claro/escuro) em Tweaks. Textos em pt-BR; o app também terá inglês.", "fill": "teal", "size": "m"}
+    "t1": {
+      "x": 0,
+      "y": -260,
+      "text": "Primeira vez e computadores",
+      "kind": "title1",
+      "maxW": 5040
+    },
+    "t2": {
+      "x": 0,
+      "y": 1120,
+      "text": "Parear e permitir",
+      "kind": "title1",
+      "maxW": 3760
+    },
+    "t3": {
+      "x": 0,
+      "y": 2380,
+      "text": "Sessão",
+      "kind": "title1",
+      "maxW": 5040
+    },
+    "t4": {
+      "x": 0,
+      "y": 4440,
+      "text": "Inverter e ferramentas",
+      "kind": "title1",
+      "maxW": 5040
+    },
+    "t5": {
+      "x": 0,
+      "y": 5580,
+      "text": "Estados, ajustes e bandeja",
+      "kind": "title1",
+      "maxW": 5040
+    },
+    "n1": {
+      "x": 5120,
+      "y": 0,
+      "w": 460,
+      "fill": "teal",
+      "size": "m",
+      "text": "Swapdesk: acesso remoto só na rede local, Windows e Mac nos dois sentidos.\n\nVersão 3 do design. Mudou:\n- Barra do visualizador recolhida numa aba de 6 px, em cima ou embaixo; tela cheia com escolha do monitor; atalhos na dica da barra e em Ajustes; 60 fps.\n- Pedido de conexão sem \"deixar entrar sem perguntar\": isso fica em Permissões, com administrador.\n- Permissões com o texto do sistema de cada lado e o passo de administrador nos dois switches de admin.\n- Ajustes: tecla de soltar o teclado, pasta de recebidos, tema, bandeja, som do pedido; sem o painel Rede.\n- Arquivos sem a caixa tracejada, com conflito e falha de verificação; copiar e colar só na gaveta; terminal em painel próprio; banner com o que está liberado.\n- Novos: Primeira vez, Estados do computador, Estados do pareamento, Bandeja, Tela cheia, Mac.\n- Sistema: um conjunto de ícones (traço 1,75 em grade 20), MacBook e notebook Windows com silhuetas diferentes, o fio do par também na linha do computador, na barra e no banner; tipo 12/13/14/17/22/28 e 64 no código; raios 12/10/8/4; borda só em listas e campos; sombra só em diálogos, menus e barras.\n\nTema claro/escuro em Tweaks; Arquivos tem também Arrastando."
+    },
+    "t6": {
+      "x": 0,
+      "y": 7160,
+      "text": "Modo escuro",
+      "kind": "title1",
+      "maxW": 2480
+    },
+    "n2": {
+      "x": 5660,
+      "y": 0,
+      "w": 460,
+      "fill": "blue",
+      "size": "m",
+      "text": "Chrome por sistema (boards 2 e 3)\n\nIgual nos dois: a estrutura (barra lateral e detalhe; visualizador com a barra recolhível), cores, escala de tipo, raios do conteúdo, ícones, a faixa do par e os textos.\n\nSegue cada sistema: a moldura (Windows: minimizar, maximizar e fechar à direita, título na barra; Mac: semáforos à esquerda dentro da barra lateral, sem barra de título), o canto da janela, a ordem dos botões nos diálogos (Windows: ação principal primeiro; Mac: principal na ponta direita), Ctrl ou Cmd nos atalhos, Ajustes também no menu Swapdesk > Ajustes (Cmd+,) no Mac, bandeja no Windows e barra de menus no Mac, o pedido de administrador (UAC ou senha do Mac), a fonte do terminal (Cascadia Mono ou SF Mono) e o tema, que acompanha o do sistema.\n\nOs outros boards do Windows mostram a mesma moldura; o Mac segue o board 3."
+    }
   },
   "designSystems": []
 }

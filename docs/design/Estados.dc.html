@@ -8,73 +8,100 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&amp;display=swap">
 <style>
 body{margin:0}
-.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
-.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12}
+.sd{--canvas:#EEF0F3;--surface:#FFFFFF;--sunken:#F6F7F9;--control:#E7EAEF;--placeholder:#E2E5EA;--track:#8C93A0;--ink:#171A21;--soft:#575E6B;--line:#DFE2E8;--link:#3346D3;--link-ink:#FFFFFF;--link-tint:#E8EBFC;--ok:#1C7C54;--danger:#BF3328;--danger-tint:#FBE9E7;--remote:#2A2F3A;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#15181E;--term-ink:#D6DAE0;--r-dialog:12px;--r-panel:10px;--r-control:8px;--r-inner:4px;--mono-win:'Cascadia Mono','Cascadia Code',Consolas,ui-monospace,monospace;--mono-mac:'SF Mono',ui-monospace,Menlo,monospace;--mono:var(--mono-win);font-family:'Instrument Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--canvas);-webkit-font-smoothing:antialiased}
+.sd.dark{--canvas:#14161B;--surface:#1C1F26;--sunken:#181B21;--control:#2A2E37;--placeholder:#262A32;--track:#6B7281;--ink:#E9EBF0;--soft:#A0A7B4;--line:#2D323C;--link:#8C9BFF;--link-ink:#10142E;--link-tint:#272D55;--ok:#4FC28E;--danger:#FF7A6E;--danger-tint:#3A1F1D;--remote:#0C0E12;--hud:#1B1E26;--hud-raise:#2A2F3A;--hud-ink:#E9EBF0;--hud-soft:#A9B0BC;--hud-line:#3A404C;--hud-on:#2C3366;--hud-link:#8C9BFF;--hud-danger:#FF8A80;--term:#101318;--term-ink:#D6DAE0}
+.sd.mac{--mono:var(--mono-mac)}
 .sd,.sd *{box-sizing:border-box}
-.sd button{font:inherit;cursor:pointer}
-.sd h1{margin:0;font-size:24px;font-weight:600;letter-spacing:-0.015em}
+.sd button,.sd input,.sd select{font:inherit;color:inherit}
+.sd button{cursor:pointer}
+.sd h1{margin:0;font-size:28px;font-weight:600;letter-spacing:-0.015em;line-height:1.2}
 .sd h2{margin:0;font-size:17px;font-weight:600;line-height:1.3}
+.sd h3{margin:0;font-size:14px;font-weight:600}
+.sd .dt{margin:0;font-size:22px;font-weight:600;letter-spacing:-0.01em;line-height:1.25}
 .sd p{margin:0}
+.sd ul,.sd ol{margin:0;padding:0;list-style:none}
+.sd figure{margin:0}
 .sd .soft{color:var(--soft)}
-.sd .btn{height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
-.sd .btn.primary{background:var(--link);border-color:var(--link);color:var(--link-ink);font-weight:600}
-.sd .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
-.sd .msg{display:flex;flex-direction:column;gap:10px;padding:20px 22px;border-radius:12px;background:var(--surface);border:1px solid var(--line)}
-.sd .ico{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center}
-.sd .msg .btn{align-self:flex-start;margin-top:auto}
+.sd .cap{font-size:12px;color:var(--soft)}
+.sd .sm{font-size:13px}
+.sd .num{font-variant-numeric:tabular-nums}
+.sd .ic{display:block;flex-shrink:0}
+.sd .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sd a{color:var(--link);font-weight:600;text-decoration:none}
+.sd a:hover{text-decoration:underline}
+.sd :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.sd .btn{height:40px;padding:0 16px;border-radius:var(--r-control);border:0;background:var(--control);color:var(--ink);font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.sd .btn.primary{background:var(--link);color:var(--link-ink);font-weight:600}
+.sd .btn.danger{background:var(--danger-tint);color:var(--danger);font-weight:600}
+.sd .btn.quiet{background:transparent}
+.sd .btn.icon{width:40px;padding:0}
+.sd .btn[disabled]{opacity:0.55;cursor:default}
+.sd .panel{background:var(--surface);border-radius:var(--r-panel)}
+.sd .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);overflow:hidden}
+.sd .row{display:flex;align-items:center;gap:16px;min-height:48px;padding:7px 18px;border-top:1px solid var(--line)}
+.sd .row:first-child{border-top:0}
+.sd .row .lb{flex:1;min-width:0}
+.sd .hint{display:block;font-size:12px;color:var(--soft)}
+.sd .field{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--surface)}
+.sd .switch{width:38px;height:22px;border-radius:11px;border:0;padding:3px;background:var(--track);display:flex;flex-shrink:0}
+.sd .switch[aria-pressed="true"]{background:var(--link);justify-content:flex-end}
+.sd .switch[aria-busy="true"]{background:var(--link-tint);justify-content:center}
+.sd .switch span{width:16px;height:16px;border-radius:50%;background:#FFFFFF}
+.sd.dark .switch[aria-pressed="true"] span{background:var(--link-ink)}
+.sd .switch[aria-busy="true"] span{background:var(--link)}
+.sd .chk{display:flex;align-items:center;gap:10px;min-height:32px}
+.sd .chk input{width:18px;height:18px;margin:0;accent-color:var(--link)}
+.sd .tile{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sd .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.sd .skel{display:block;background:var(--placeholder);border-radius:var(--r-inner)}
+.sd kbd{font-family:inherit;font-size:12px;font-weight:600;line-height:1;padding:4px 6px;border-radius:var(--r-inner);background:var(--control);color:var(--ink);white-space:nowrap}
+.sd .keys{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--soft)}
+.sd .side{width:272px;flex-shrink:0;display:flex;flex-direction:column;gap:20px;padding:16px 12px;background:var(--sunken)}
+.sd .gh{margin:0;padding:0 10px;font-size:12px;font-weight:600;color:var(--soft)}
+.sd .dev{width:100%;display:flex;align-items:center;gap:12px;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-control);background:transparent;text-align:left;color:var(--ink)}
+.sd .dev.sel{background:var(--control)}
+.sd .dev .nm{display:block;font-weight:600}
+.sd .dev .st{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--soft)}
+.sd .tabs{display:flex;gap:4px}
+.sd .tab{height:40px;padding:0 12px;border:0;background:transparent;color:var(--soft);font-weight:500;border-bottom:2px solid transparent}
+.sd .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.sd .wire{flex:1;display:flex;align-items:center}
+.sd .wire>span{flex:1;height:3px;border-radius:2px;background:var(--link)}
+.sd .mp{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.sd .mw{display:inline-flex;align-items:center;width:22px}
+.sd .mw>span{flex:1;height:2px;border-radius:1px;background:currentColor}
+.sd .sw{display:inline-flex;align-items:center;flex-shrink:0;color:var(--link)}
+.sd .sw .ln{width:10px;height:2px;background:currentColor}
+.sd .titlebar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding-left:12px;background:var(--sunken);font-size:12px}
+.sd .cbtn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--ink);display:flex;align-items:center;justify-content:center}
+.sd .lights{display:flex;gap:8px}
+.sd .lights button{width:12px;height:12px;border-radius:50%;border:0;padding:0}
+.sd .tb{display:flex;align-items:center;gap:2px;padding:6px;background:var(--hud);color:var(--hud-ink);box-shadow:0 10px 30px rgba(0,0,0,0.35)}
+.sd .tb button{height:40px;min-width:40px;padding:0 10px;border:0;border-radius:var(--r-control);background:transparent;color:var(--hud-ink);display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500}
+.sd .tb button[aria-pressed="true"],.sd .tb button[aria-expanded="true"]{background:var(--hud-on);color:#FFFFFF}
+.sd .tb :focus-visible,.sd .menu :focus-visible{outline:2px solid var(--hud-link);outline-offset:1px}
+.sd .tb .sep{width:1px;height:24px;background:var(--hud-line);margin:0 6px}
+.sd .edge{display:block;width:96px;height:6px;padding:0;border:0;background:var(--hud)}
+.sd .menu{display:flex;flex-direction:column;padding:6px;border-radius:var(--r-panel);background:var(--hud-raise);color:var(--hud-ink);box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .menu .mi{width:100%;display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border:0;border-radius:var(--r-inner);background:transparent;color:var(--hud-ink);text-align:left}
+.sd .menu .mi .ok{width:20px;display:flex;justify-content:center;flex-shrink:0}
+.sd .menu .mh{padding:8px 10px 4px;font-size:12px;color:var(--hud-soft)}
+.sd .menu hr{border:0;height:1px;background:var(--hud-line);margin:6px 4px}
+.sd .tb kbd,.sd .menu kbd,.sd .tip kbd{background:var(--hud-line);color:var(--hud-ink)}
+.sd .tip{display:flex;flex-direction:column;gap:8px;width:300px;padding:12px 14px;border-radius:var(--r-control);background:var(--hud-raise);color:var(--hud-ink);font-size:13px;box-shadow:0 14px 40px rgba(0,0,0,0.4)}
+.sd .hs{color:var(--hud-soft)}
+.sd .drawer{width:400px;flex-shrink:0;display:flex;flex-direction:column;background:var(--surface)}
+.sd .bar{height:6px;border-radius:3px;background:var(--control);overflow:hidden}
+.sd .bar span{display:block;height:6px;background:var(--link)}
 a{color:#3346D3}
 </style>
 </helmet>
-<div class="{{themeClass}}" style="width: 1200px; height: 760px; display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; border-radius: 12px; overflow: hidden">
-  <div style="display: flex; flex-direction: column; gap: 6px">
-    <h1>Quando algo impede a conexão</h1>
-    <p class="soft">Cada aviso diz o que aconteceu e o que fazer. Aparece no lugar do conteúdo, nunca em cima.</p>
-  </div>
-  <div style="flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 20px">
-    <section class="msg" aria-labelledby="e1">
-      <span class="ico" style="background: var(--danger-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0M12 19.5h.01"></path></svg></span>
-      <h2 id="e1">O Windows marcou esta rede como Pública</h2>
-      <p class="soft">Em rede pública ninguém consegue se conectar a este computador. Marque o Wi-Fi Casa como rede Privada.</p>
-      <button class="btn primary">Abrir configurações de rede</button>
-    </section>
-    <section class="msg" aria-labelledby="e2">
-      <span class="ico" style="background: var(--danger-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg></span>
-      <h2 id="e2">O serviço do Swapdesk espera aprovação no Mac</h2>
-      <p class="soft">Sem ele o Mac não aparece na rede. Ligue o Swapdesk em Ajustes do Sistema, Geral, Itens de Início.</p>
-      <button class="btn primary">Abrir Ajustes do Sistema</button>
-    </section>
-    <section class="msg" aria-labelledby="e3">
-      <span class="ico" style="background: var(--link-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"></path></svg></span>
-      <h2 id="e3">Faltam 2 permissões no Mac</h2>
-      <p class="soft">Acessibilidade, para mexer o mouse e o teclado. Monitoramento de Entrada, para enviar atalhos como Cmd+Tab.</p>
-      <button class="btn primary">Conceder permissões</button>
-    </section>
-    <section class="msg" aria-labelledby="e4" style="background: var(--remote); border-color: var(--remote); color: #E9EBF0">
-      <span class="ico" style="border: 3px solid #8C9BFF; border-top-color: transparent" aria-hidden="true"></span>
-      <h2 id="e4">Reconectando ao MacBook</h2>
-      <p style="color: #A0A7B4">O Wi-Fi caiu. A tela volta sozinha quando a rede voltar. Tentativa 2.</p>
-      <button class="btn" style="background: transparent; border-color: #4A5160; color: #E9EBF0">Desconectar</button>
-    </section>
-    <section class="msg" aria-labelledby="e5">
-      <span class="ico" style="background: var(--link-tint)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="2" stroke-linecap="round"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"></path></svg></span>
-      <h2 id="e5">Acordando o Desktop do escritório</h2>
-      <p class="soft">O sinal foi enviado. A conexão abre assim que ele aparecer na rede, em até 1 minuto.</p>
-      <div style="height: 6px; border-radius: 3px; background: var(--line); overflow: hidden"><div style="width: 40%; height: 6px; background: var(--link)"></div></div>
-      <button class="btn">Cancelar</button>
-    </section>
-    <section class="msg" aria-labelledby="e6">
-      <span class="ico" style="background: var(--sunken); border: 1px solid var(--line)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--soft)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h11l-3-3M17 17H6l3 3"></path></svg></span>
-      <h2 id="e6">O MacBook não aceitou inverter</h2>
-      <p class="soft">Ninguém respondeu em 20 segundos. Você continua controlando o MacBook.</p>
-      <button class="btn">Fechar</button>
-    </section>
-  </div>
-</div>
+<div class="{{themeClass}}" style="width: 1200px; height: 1200px; display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; overflow: hidden"><div style="display: flex; flex-direction: column; gap: 6px"><h1>Quando algo impede a conexão</h1><p class="soft">Cada aviso diz o que aconteceu e o que fazer. Aparece no lugar do conteúdo, nunca em cima.</p></div><div style="flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 20px"><section class="panel" aria-labelledby="e1"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--danger-tint)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--danger)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7.5a11 11 0 0 1 15 0M5 10.25a7.25 7.25 0 0 1 10 0M7.5 13a3.5 3.5 0 0 1 5 0M10 15.75h.01"></path></svg></span><h2 id="e1">O Windows marcou esta rede como Pública</h2><p class="soft">Em rede pública, ninguém consegue se conectar a este computador. Marque o Wi-Fi Casa como rede Privada.</p><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn primary">Abrir configurações de rede</button></div></div></section><section class="panel" aria-labelledby="e2"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--danger-tint)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--danger)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="9" width="11" height="8" rx="1.5"></rect><path d="M7 9V6.5a3 3 0 0 1 6 0V9"></path></svg></span><h2 id="e2">O serviço do Swapdesk espera aprovação no Mac</h2><p class="soft">Sem ele, o Mac não aparece na rede. Ligue o Swapdesk em Ajustes do Sistema &gt; Geral &gt; Itens de Início.</p><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn primary">Abrir Ajustes do Sistema</button></div></div></section><section class="panel" aria-labelledby="e3"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--link-tint)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5l6 2.25v4.75c0 4-2.75 6.5-6 7.5-3.25-1-6-3.5-6-7.5V4.75z"></path></svg></span><h2 id="e3">Faltam 2 permissões no Mac</h2><p class="soft">Acessibilidade, para mexer o mouse e o teclado. Monitoramento de Entrada, para enviar atalhos como Cmd+Tab.</p><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn primary">Conceder permissões</button></div></div></section><section class="panel" aria-labelledby="e7" style="grid-column: span 2"><div style="display: flex; gap: 28px; padding: 22px 24px; height: 100%"><div style="flex: 1; display: flex; flex-direction: column; gap: 10px"><span class="tile" style="background: var(--link-tint)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.75" cy="8.75" r="5.25"></circle><path d="M12.75 12.75L17 17"></path></svg></span><h2 id="e7">Nenhum computador encontrado</h2><p class="sm" style="font-weight: 600">Confira no outro computador:</p><ul class="soft sm" style="display: flex; flex-direction: column; gap: 6px"><li style="display: flex; gap: 8px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8"></path></svg><span>o Swapdesk está aberto;</span></li><li style="display: flex; gap: 8px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8"></path></svg><span>ele está na mesma rede Wi-Fi ou cabo que este.</span></li></ul><p class="sm" style="font-weight: 600">Se continuar sem aparecer:</p><ul class="soft sm" style="display: flex; flex-direction: column; gap: 6px"><li style="display: flex; gap: 8px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8"></path></svg><span>o roteador pode estar isolando os aparelhos (rede de convidados ou isolamento de clientes);</span></li><li style="display: flex; gap: 8px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8"></path></svg><span>uma VPN pode estar ligada;</span></li><li style="display: flex; gap: 8px"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8"></path></svg><span>ou os dois estão em redes diferentes.</span></li></ul></div><form style="width: 300px; flex-shrink: 0; align-self: flex-end; display: flex; flex-direction: column; gap: 8px"><label for="addr" style="font-weight: 600">Endereço do outro computador</label><input id="addr" class="field num" inputmode="decimal" placeholder="192.168.0.21" aria-describedby="addr-h"><p id="addr-h" class="cap">Só endereços desta rede, como 192.168.0.x.</p><button class="btn primary" type="submit" style="align-self: flex-start">Adicionar por endereço</button></form></div></section><section class="panel" aria-labelledby="e8"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--control)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10.5" rx="1.5"></rect><path d="M7 17h6M10 14v3M3 2.5l14 14"></path></svg></span><h2 id="e8">Desktop do escritório está sem monitor ligado</h2><p class="soft">Sem monitor, o Windows de lá não gera imagem para enviar. Ligue um monitor ou um adaptador HDMI que simula um. Terminal e arquivos continuam funcionando.</p><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"></rect><path d="M6 8l2.5 2.5L6 13M10.5 13H14"></path></svg>Abrir o terminal</button><button class="btn">Tentar de novo</button></div></div></section><section class="panel" aria-labelledby="e4" style="background: var(--hud); color: var(--hud-ink)"><div role="status" style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--hud-raise)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--hud-link)" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M10 2.75a7.25 7.25 0 1 1-7.25 7.25"></path></svg></span><h2 id="e4">Reconectando ao MacBook do escritório</h2><p class="hs">O Wi-Fi caiu. A tela volta sozinha quando a rede voltar. Tentativa 2.</p><div style="flex: 1"></div><div><button class="btn" style="background: var(--hud-raise); color: var(--hud-ink)">Desconectar</button></div></div></section><section class="panel" aria-labelledby="e5"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--link-tint)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--link)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.75v6.5M5.6 5.4a6.25 6.25 0 1 0 8.8 0"></path></svg></span><h2 id="e5">Acordando o Desktop do escritório</h2><p class="soft">O sinal foi enviado. A conexão abre assim que ele aparecer na rede, em até 1 minuto.</p><div class="bar" role="progressbar" aria-label="Acordando" aria-valuenow="40" aria-valuemin="0" aria-valuemax="100"><span style="width: 40%"></span></div><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn">Cancelar</button></div></div></section><section class="panel" aria-labelledby="e6"><div style="display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; height: 100%"><span class="tile" style="background: var(--control)" aria-hidden="true"><svg class="ic" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="var(--soft)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 7h11l-2.75-2.75M15.5 13h-11l2.75 2.75"></path></svg></span><h2 id="e6">MacBook do escritório não aceitou inverter</h2><p class="soft">Ninguém respondeu em 20 segundos. Você continua controlando o Mac.</p><div style="flex: 1"></div><div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn">Fechar</button></div></div></section></div></div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":760}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["claro","escuro"],"default":"claro"},"$preview":{"width":1200,"height":1200}}'>
 class Component extends DCLogic {
   renderVals() {
     const dark = (this.props.theme ?? 'claro') === 'escuro';
