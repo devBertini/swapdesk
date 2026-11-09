@@ -61,7 +61,7 @@ Not touched: the identity, trust store, settings and logs in `%ProgramData%\Swap
 
 ### Smart App Control
 
-On a PC with Smart App Control on (`VerifiedAndReputablePolicyState` 1 under `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`; this PC has it on), unsigned programs are blocked: the service may fail to start (error 1260 or 4551) or `Swapdesk.exe` may not open. The script warns when it sees the state. Decision D22 (no paid certificate): until a signed build exists, the only way round it is turning Smart App Control off (Windows cannot turn it back on without a reset), or building from source on a PC where it is off.
+On a PC with Smart App Control on (`VerifiedAndReputablePolicyState` 1 under `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`; this PC has it on), unsigned programs are blocked: the service may fail to start (error 1260 or 4551) or `Swapdesk.exe` may not open. The script warns when it sees the state. Decision D22 (no paid certificate): until a signed build exists, the only way round it is turning Smart App Control off (recent Windows updates let it be turned back on later without reinstalling Windows), or building from source on a PC where it is off.
 
 ## Uninstall
 

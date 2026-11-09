@@ -45,7 +45,7 @@ Windows Smart App Control (and App Control for Business) can block unsigned exec
 
 ## Build on macOS
 
-The macOS crates (`*-mac`) are built and tested on a Mac with Xcode and Rust:
+The macOS crates (`*-mac`) are built and tested on a Mac with Xcode, Rust, cargo-nextest and CMake (for libopus):
 
 ```sh
 cargo nextest run -p swapdesk-shell-mac -p swapdesk-app-mac -p swapdesk-capture-mac -p swapdesk-codec-mac
@@ -77,7 +77,7 @@ cargo nextest run --run-ignored only -E 'test(/interactive/)'
 
 or per crate.
 
-**Windows blocking a test binary (os error 4551).** Windows App Control or Smart App Control can block a freshly built unsigned binary. Deleting that executable and rebuilding clears it (recipe from [docs/CONTRACTS.md](docs/CONTRACTS.md)). If it keeps happening, the cause is the policy on your machine and not the code.
+**Windows blocking a test binary (os error 4551).** Smart App Control (or an App Control for Business policy) blocks freshly built unsigned binaries, and it has no per-folder exception. Deleting the blocked executable and rebuilding clears it only now and then; on a development PC, turn Smart App Control off (Windows Security > App & browser control > Smart App Control). The cause is the policy on your machine, not the code.
 
 **Measurements** use the synthetic sources of the test fakes (contract C7), never a capture that films its own viewer.
 
