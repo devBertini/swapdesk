@@ -24,6 +24,7 @@ use swapdesk_trust::{
 };
 use swapdesk_ui::MsgKey;
 
+use super::extras::ENTRY_ID_BIT;
 use super::presence::{FakePresence, PresencePeer};
 use super::store::{MachineSettings, SETTINGS_NAME, load_settings};
 use super::{ConnInfo, DevOptions, HubParams, SystemHooks, UiHub};
@@ -33,6 +34,7 @@ use crate::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use crate::testpipe::{PipeWriter, duplex_blocking};
 
 mod clip_actions;
+mod connect;
 mod elevation;
 mod extras;
 mod files;
@@ -352,12 +354,17 @@ impl Client {
     }
 
     /// The first message `f` picks, from what was set aside or what arrives within `WAIT`; the others stay.
-    fn take<T>(&mut self, what: &str, mut f: impl FnMut(&Ipc) -> Option<T>) -> T {
+    fn take<T>(&mut self, what: &str, f: impl FnMut(&Ipc) -> Option<T>) -> T {
+        self.take_within(WAIT, what, f)
+    }
+
+    /// [`Client::take`] with a wait of `limit`.
+    fn take_within<T>(&mut self, limit: Duration, what: &str, mut f: impl FnMut(&Ipc) -> Option<T>) -> T {
         if let Some(i) = self.backlog.iter().position(|m| f(m).is_some()) {
             let m = self.backlog.remove(i);
             return f(&m).expect("picked");
         }
-        let end = Instant::now() + WAIT;
+        let end = Instant::now() + limit;
         loop {
             let left = end.saturating_duration_since(Instant::now());
             match self.inbox.recv_timeout(left) {
@@ -381,6 +388,30 @@ impl Client {
             Some(code) => Err(code),
             None => Ok(ReplyBody::decode(op, &body).expect("the body decodes")),
         }
+    }
+
+    /// The reply to a `Connect` (the id of its entry, which comes at once).
+    fn entry_of(&mut self, req: u32) -> u64 {
+        let ReplyBody::SessionId(entry) = self.reply(req, CONNECT_OP).expect("the connect is taken up") else {
+            panic!("not an entry id")
+        };
+        assert_ne!(entry & ENTRY_ID_BIT, 0, "an entry id has the entry bit: {entry:#x}");
+        entry
+    }
+
+    /// The session a `Connect` opened: the id of the first `Active` this UI hears of, after the entry's reply. The
+    /// notification stays in the backlog for a test that looks at it too.
+    fn connected(&mut self, req: u32) -> u64 {
+        let entry = self.entry_of(req);
+        let (id, msg) = self.take("the session's Active", |m| match m {
+            Ipc::UiNotify(Notify::Session { session_id, state: SessionState::Active { .. }, .. }) => {
+                Some((*session_id, m.clone()))
+            }
+            _ => None,
+        });
+        assert_ne!(id, entry, "the session has its own id, not the entry's");
+        self.backlog.insert(0, msg);
+        id
     }
 
     fn call(&mut self, op: UiOp) -> Result<ReplyBody, ApiCode> {
@@ -893,9 +924,7 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
             .is_ok()
     );
 
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     assert_ne!(session_id, 0);
 
     // Both UIs see it active: the viewer as Viewer, the host's banner as Host.
@@ -1024,17 +1053,27 @@ fn with_no_ui_at_the_host_a_request_is_declined_at_once() {
     let mut viewer_ui = viewer.client(info(false));
 
     let started = Instant::now();
-    let err =
-        viewer_ui.call(UiOp::Connect { device_id: host.hex(), intent: Intent::View, unattended: false }).unwrap_err();
-    assert!(
-        matches!(err, ApiCode::NotPermitted | ApiCode::Refused),
-        "{err:?}: viewer {:?} host {:?}",
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::View, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let why = viewer_ui.notify("the end of the entry", |n| match n {
+        Notify::Session { session_id, state: SessionState::NotOpened { why }, .. } if *session_id == entry => {
+            Some(*why)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        why,
+        swapdesk_ipc::ConnectWhy::NobodyPresent,
+        "viewer {:?} host {:?}",
         viewer.log.lines(),
         host.log.lines()
     );
     assert!(started.elapsed() < Duration::from_secs(5), "declined without waiting for the 20 s");
     assert!(
-        viewer_ui.nothing_within(Duration::from_millis(100), |m| matches!(m, Ipc::UiNotify(Notify::Session { .. }))),
+        viewer_ui.nothing_within(Duration::from_millis(100), |m| matches!(
+            m,
+            Ipc::UiNotify(Notify::Session { state: SessionState::Active { .. }, .. })
+        )),
         "no session was announced"
     );
 
@@ -1205,9 +1244,7 @@ fn a_just_paired_device_gets_a_valid_preset_that_the_accept_takes() {
             .is_ok(),
         "the preset as it came is accepted"
     );
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     assert!(viewer_ui.call(UiOp::Disconnect { session_id }).is_ok());
     drop((host_ui, viewer_ui));
     host.finish();

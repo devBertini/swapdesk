@@ -280,6 +280,32 @@ fn a_request_that_the_viewer_withdraws_closes_the_card() {
 }
 
 #[test]
+fn a_viewer_dropped_while_prompted_says_bye_and_the_host_prompt_ends_cancelled() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::VIEW);
+        let (host_io, viewer_io) = swapdesk_session::memory_pair();
+        let (host, id) = (mem.host.clone(), who.id);
+        let task = tokio::spawn(async move { host.serve_io(host_io, None, id).await });
+        // The open waits for the user at the host; its caller gives up after 5 s and drops it.
+        let open = ViewerSession::open_io(viewer_io, None, Some([9; 16]), viewer_config(PermissionSet::CONTROL));
+        let waited = tokio::time::timeout(Duration::from_secs(5), open).await;
+        assert!(waited.is_err(), "the host was still asking");
+        assert_eq!(ui.prompt_count(), 1);
+        // The drop said `Bye { NO_ERROR }`: the host ends as for a viewer that left, long before its 20 s.
+        let t0 = Instant::now();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::PeerBye, ErrorCode::NoError));
+        assert!(t0.elapsed() < Duration::from_secs(1), "ended at once, not at the prompt's deadline");
+        assert_eq!(lock(&ui.closed).iter().map(|c| c.1).collect::<Vec<_>>(), vec![PromptEnd::Cancelled]);
+        // Answering late changes nothing.
+        ui.answer_held(P(PermissionSet::CONTROL));
+    });
+}
+
+#[test]
 fn a_second_session_while_one_is_live_is_refused_busy_without_a_prompt() {
     run_paused(async {
         let ui = TestUi::accepting(PermissionSet::CONTROL);

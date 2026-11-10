@@ -117,9 +117,7 @@ impl Pair {
                 })
                 .is_ok()
         );
-        let ReplyBody::SessionId(session) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-            panic!()
-        };
+        let session = viewer_ui.connected(req);
         active_as(&mut viewer_ui, Role::Viewer, &[]);
         active_as(&mut host_ui, Role::Host, &[]);
         Self { host, viewer, host_ui, viewer_ui, session, home, src, recv, tokens, relay }

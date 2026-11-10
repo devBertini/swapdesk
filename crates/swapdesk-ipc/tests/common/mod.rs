@@ -328,6 +328,7 @@ pub fn notify() -> BoxedStrategy<Notify> {
         any::<u32>().prop_map(|attempt| SessionState::Reconnecting { attempt }),
         any::<u16>().prop_map(|remaining_s| SessionState::Waking { remaining_s }),
         proptest::option::of(api_code()).prop_map(|reason| SessionState::Ended { reason }),
+        pick(ConnectWhy::ALL).prop_map(|why| SessionState::NotOpened { why }),
     ];
     let kind = prop_oneof![
         pick(Intent::ALL).prop_map(|intent| RequestKind::Session { intent }),

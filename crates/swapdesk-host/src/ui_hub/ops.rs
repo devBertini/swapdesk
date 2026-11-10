@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use swapdesk_ipc::{
-    ApiCode, Bytes, DisplayView, ElevAction, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK, SessionState,
-    SettingsUpdate, SpecialKeys, UiOp,
+    ApiCode, Bytes, ConnectWhy, DisplayView, ElevAction, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK,
+    SessionState, SettingsUpdate, SpecialKeys, UiOp,
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
@@ -16,11 +16,12 @@ use swapdesk_proto::{
 use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
 use tokio::time::Instant;
 
+use super::extras::{ENTRY_ID_BIT, Entry};
 use super::store::{store_settings, valid_name};
-use super::views::{Manual, api_of, parse_device_id};
+use super::views::{Manual, parse_device_id};
 use super::{Conn, Hub, Viewer, lock};
 use crate::service::{
-    ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut,
+    ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut, WaitHook,
 };
 
 /// Typed addresses kept at once; the oldest goes first.
@@ -60,16 +61,24 @@ fn apply_code(e: ApplyError) -> ApiCode {
     }
 }
 
-fn connect_code(e: &ConnectError) -> ApiCode {
+/// What the interface is told when a connect did not open: who refused, or what did not answer.
+fn connect_why(e: &ConnectError) -> ConnectWhy {
     use swapdesk_session::OpenError;
     match e {
-        ConnectError::Refused(_) => ApiCode::Refused,
-        ConnectError::NotIpv4 => ApiCode::Invalid,
-        ConnectError::UnknownDevice => ApiCode::NotFound,
-        ConnectError::Socket(_) => ApiCode::Internal,
-        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => api_of(*c),
-        ConnectError::Open(OpenError::Protocol(_)) => ApiCode::Internal,
-        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ApiCode::Timeout,
+        // The LAN guard turned the address away: nothing to reach.
+        ConnectError::Refused(_) => ConnectWhy::Unreachable,
+        ConnectError::NotIpv4 | ConnectError::UnknownDevice | ConnectError::Socket(_) => ConnectWhy::Failed,
+        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => match c {
+            ErrorCode::Declined => ConnectWhy::Declined,
+            ErrorCode::Timeout => ConnectWhy::TimedOut,
+            ErrorCode::NobodyPresent => ConnectWhy::NobodyPresent,
+            ErrorCode::Busy => ConnectWhy::Busy,
+            ErrorCode::UnknownDevice | ErrorCode::Forgotten => ConnectWhy::Forgotten,
+            ErrorCode::UnsupportedVersion => ConnectWhy::Failed,
+            _ => ConnectWhy::NotPermitted,
+        },
+        ConnectError::Open(OpenError::Protocol(_)) => ConnectWhy::Failed,
+        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ConnectWhy::Unreachable,
     }
 }
 
@@ -147,14 +156,8 @@ impl Hub {
             if unattended && !conn.info.admin {
                 return reply(conn, req, Err(ApiCode::NeedsAdmin));
             }
-            let (me, conn) = (Arc::clone(self), Arc::clone(conn));
-            // The call waits for the host's user (up to 20 s): not on the reader thread, not on the runtime.
-            if let Err(e) = std::thread::Builder::new().name("ui-hub-connect".into()).spawn(move || {
-                let r = me.connect(&conn, &device_id, intent, unattended);
-                reply(&conn, req, r);
-            }) {
-                self.log(Level::Warn, format_args!("cannot start a connect thread: {e}"));
-            }
+            // Answers with the entry at once; the attempt (up to the host's 20 s) goes on as a task.
+            self.connect(conn, req, &device_id, intent, unattended);
             return;
         }
         reply(conn, req, self.op(conn, op));
@@ -428,8 +431,8 @@ impl Hub {
 
     /// `Disconnect`: a viewer session of this connection, or (console UI only) a session of this machine as host.
     fn disconnect(&self, conn: &Conn, session_id: u64) -> Result<(), ApiCode> {
-        // The waking entry of "Acordar" is not a session: cancelling it stops the attempt.
-        if self.cancel_wake(conn, session_id) {
+        // An entry (a waking or connecting card) is not a session: cancelling it stops the attempt.
+        if self.cancel_entry(conn, session_id) {
             return Ok(());
         }
         if let Some(v) = lock(&conn.viewers).get(&session_id) {
@@ -490,36 +493,100 @@ impl Hub {
         v.handle.send_input(events).map_err(apply_code)
     }
 
-    /// `Connect`: opens a viewer session and starts relaying it. Blocks until the host decided.
+    /// `Connect`: answers with the id of an entry at once, then runs the attempt as a task. The entry reports
+    /// `Connecting` and `Prompted` while the host decides; it ends with the session's first `Active` (then the entry's
+    /// `Ended`) or with `NotOpened` and why. Only what is wrong with the request itself is a reply's error.
     pub(super) fn connect(
         self: &Arc<Self>,
         conn: &Arc<Conn>,
+        req: u32,
         device_id: &str,
         intent: Intent,
         unattended: bool,
-    ) -> OpResult {
-        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+    ) {
+        let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
         if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
-            return Err(ApiCode::NotFound);
+            return reply(conn, req, Err(ApiCode::NotFound));
         }
-        let addr = self.address_of(&id).ok_or(ApiCode::NotFound)?;
-        let core = self.core().ok_or(ApiCode::ServiceDown)?;
-        let rt = self.rt().ok_or(ApiCode::ServiceDown)?.clone();
+        if self.core().is_none() {
+            return reply(conn, req, Err(ApiCode::ServiceDown));
+        }
+        let Some(rt) = self.rt() else { return reply(conn, req, Err(ApiCode::ServiceDown)) };
+        let entry_id = ENTRY_ID_BIT | u64::from(self.fresh_id());
+        reply(conn, req, Ok(ReplyBody::SessionId(entry_id)));
+        let (me, c) = (Arc::clone(self), Arc::clone(conn));
+        // The entry is registered under the lock the task ends with, so a fast end cannot leave a stale one.
+        let mut entries = lock(&self.entries);
+        let task = rt.spawn(async move { me.run_connect(c, entry_id, id, intent, unattended).await });
+        entries.insert(entry_id, Entry { abort: task.abort_handle(), conn: conn.id, device_hex: device_id_hex(&id) });
+    }
+
+    /// One connect attempt under the entry `entry_id` (a connect's own, or the one of a wake): the session goes to its
+    /// relay, which ends the entry after the session's first `Active`; or the entry ends here with why it did not open.
+    pub(super) async fn run_connect(
+        self: Arc<Self>,
+        conn: Arc<Conn>,
+        entry_id: u64,
+        id: DeviceId,
+        intent: Intent,
+        unattended: bool,
+    ) {
+        let Err(why) = self.open_viewer(&conn, entry_id, id, intent, unattended).await else { return };
+        // A cancel took the entry first: its end was told.
+        if lock(&self.entries).remove(&entry_id).is_some() {
+            conn.queue.control(Ipc::UiNotify(Notify::Session {
+                session_id: entry_id,
+                device_id: device_id_hex(&id),
+                state: SessionState::NotOpened { why },
+            }));
+        }
+    }
+
+    /// Opens the viewer session of an entry and starts relaying it.
+    async fn open_viewer(
+        self: &Arc<Self>,
+        conn: &Arc<Conn>,
+        entry_id: u64,
+        id: DeviceId,
+        intent: Intent,
+        unattended: bool,
+    ) -> Result<(), ConnectWhy> {
+        let device_hex = device_id_hex(&id);
+        let addr = self.address_of(&id).ok_or(ConnectWhy::Unreachable)?;
+        let core = self.core().ok_or(ConnectWhy::Failed)?;
+        let rt = self.rt().ok_or(ConnectWhy::Failed)?.clone();
         // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
         // at the host), and an administrator connection also asks for the administrator terminal (D10).
         let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };
         if conn.info.admin {
             extra = extra.union(PermissionSet::ADMIN_TERMINAL);
         }
-        let (handle, messages) =
-            core.connect_asking(SocketAddr::V4(addr), id, intent, unattended, extra).map_err(|e| {
-                self.log(Level::Info, format_args!("connect to {}: {e}", device_id_hex(&id)));
-                connect_code(&e)
+        // What the attempt reports while the host decides. A state that comes after the entry ended (a cancel, the host's
+        // last message in flight) is not sent: the interface has forgotten the entry.
+        let waiting: WaitHook = {
+            let (hub, queue, hex) = (Arc::downgrade(self), conn.queue.clone(), device_hex.clone());
+            Arc::new(move |state| {
+                if hub.upgrade().is_some_and(|h| lock(&h.entries).contains_key(&entry_id)) {
+                    queue.control(Ipc::UiNotify(Notify::Session {
+                        session_id: entry_id,
+                        device_id: hex.clone(),
+                        state,
+                    }));
+                }
+            })
+        };
+        let (handle, messages) = core
+            .connect_asking_async(SocketAddr::V4(addr), id, intent, unattended, extra, Some(waiting))
+            .await
+            .map_err(|e| {
+                self.log(Level::Info, format_args!("connect to {device_hex}: {e}"));
+                connect_why(&e)
             })?;
+        drop(core);
         if conn.queue.is_closed() {
             // The UI went away while the host was deciding: nobody is left to decode this session.
             handle.disconnect();
-            return Err(ApiCode::ServiceDown);
+            return Err(ConnectWhy::Failed);
         }
         let session_id = handle.session_id();
         let mode = if unattended { swapdesk_proto::GrantMode::Unattended } else { swapdesk_proto::GrantMode::Prompted };
@@ -527,11 +594,15 @@ impl Hub {
         lock(&conn.viewers)
             .insert(session_id, Viewer { handle: handle.clone(), device: id, view_only: false, displays: Vec::new() });
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
-        rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode).await });
-        Ok(ReplyBody::SessionId(session_id))
+        rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode, Some(entry_id)).await });
+        Ok(())
     }
 
     /// Relays one viewer session to its UI: media out, states and displays as notifications, a `Stats` each second.
+    /// `entry` is the connect entry that asked for the session: after the session's first `Active` reached the UI, the
+    /// entry ends with a normal `Ended`, so the viewer exists in the interface before the card goes. An entry that was
+    /// cancelled meanwhile ends the session instead of showing it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn pump_viewer(
         self: Arc<Self>,
         conn: Arc<Conn>,
@@ -540,8 +611,10 @@ impl Hub {
         handle: ViewerHandle,
         mut messages: ViewerMessages,
         mode: swapdesk_proto::GrantMode,
+        mut entry: Option<u64>,
     ) {
         let device_hex = device_id_hex(&device);
+        let mut cancelled = false;
         let started = self.p.wall.unix_ms();
         let (mut frames, mut bytes) = (0u32, 0u64);
         let mut next_tick = Instant::now() + Duration::from_secs(1);
@@ -619,11 +692,21 @@ impl Hub {
                     }
                 }
                 ViewerOut::State(change) => {
-                    // Before the host grants there is no session id to show; the reply to `Connect` is the news.
-                    if change.session_id == 0 {
-                        continue;
-                    }
                     let ended = matches!(change.state, SessionState::Ended { .. });
+                    // The first `Active` ends the connect entry, after the session itself was told to the UI (below).
+                    // An entry the UI cancelled (it is gone from the map) wanted no session: this one ends unseen.
+                    let mut ends_entry = None;
+                    if matches!(change.state, SessionState::Active { .. })
+                        && let Some(e) = entry.take()
+                    {
+                        if lock(&self.entries).remove(&e).is_some() {
+                            ends_entry = Some(e);
+                        } else {
+                            cancelled = true;
+                            handle.disconnect();
+                            break;
+                        }
+                    }
                     match change.state {
                         SessionState::Reconnecting { .. } => reconnecting = true,
                         // The connection is back: what was in flight is offered again and continues (F-FILE-01).
@@ -654,6 +737,13 @@ impl Hub {
                         device_id: device_hex.clone(),
                         state: change.state,
                     }));
+                    if let Some(e) = ends_entry {
+                        conn.queue.control(Ipc::UiNotify(Notify::Session {
+                            session_id: e,
+                            device_id: device_hex.clone(),
+                            state: SessionState::Ended { reason: None },
+                        }));
+                    }
                     if ended {
                         end_code = change.end.map_or(ErrorCode::NoError, |e| e.code);
                         break;
@@ -662,13 +752,21 @@ impl Hub {
             }
         }
         self.files_session_ended(session_id);
-        if lock(&conn.viewers).remove(&session_id).is_some() && !began {
+        if lock(&conn.viewers).remove(&session_id).is_some() && !began && !cancelled {
             // Ended without ever going active (the connection broke at once).
             conn.queue.control(Ipc::UiNotify(Notify::Session {
                 session_id,
                 device_id: device_hex.clone(),
                 state: SessionState::Ended { reason: Some(ApiCode::Timeout) },
             }));
+            // Its entry, if it still waits, ends with it.
+            if let Some(e) = entry.filter(|e| lock(&self.entries).remove(e).is_some()) {
+                conn.queue.control(Ipc::UiNotify(Notify::Session {
+                    session_id: e,
+                    device_id: device_hex.clone(),
+                    state: SessionState::NotOpened { why: ConnectWhy::Unreachable },
+                }));
+            }
         }
         if began {
             let now = self.p.wall.unix_ms();

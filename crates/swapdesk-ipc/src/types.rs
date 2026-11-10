@@ -358,6 +358,21 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// Why a connect entry ended without opening a session (`SessionState::NotOpened`). It travels on the UI's pipe
+    /// only: the other machine is told nothing of it.
+    ConnectWhy {
+        Declined = 0,
+        TimedOut = 1,
+        NobodyPresent = 2,
+        Busy = 3,
+        Forgotten = 4,
+        NotPermitted = 5,
+        Unreachable = 6,
+        Failed = 7,
+    }
+}
+
 /// State of a session as the UI shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -382,6 +397,11 @@ pub enum SessionState {
     /// `reason: None` is a normal end (either side disconnected); `Some` names what ended it.
     Ended {
         reason: Option<ApiCode>,
+    },
+    /// The last state of a connect entry whose session never opened, with the reason. A real session never goes
+    /// through it.
+    NotOpened {
+        why: ConnectWhy,
     },
 }
 
@@ -417,6 +437,10 @@ impl Wire for SessionState {
                 w.put_u8(6);
                 reason.put(w, 0)?;
             }
+            Self::NotOpened { why } => {
+                w.put_u8(7);
+                why.put(w, 0)?;
+            }
         }
         Ok(())
     }
@@ -430,6 +454,7 @@ impl Wire for SessionState {
             4 => Ok(Self::Reconnecting { attempt: r.u32()? }),
             5 => Ok(Self::Waking { remaining_s: r.u16()? }),
             6 => Ok(Self::Ended { reason: Option::<ApiCode>::get(r, 0)? }),
+            7 => Ok(Self::NotOpened { why: ConnectWhy::get(r, 0)? }),
             t => Err(unknown_tag("SessionState", t)),
         }
     }

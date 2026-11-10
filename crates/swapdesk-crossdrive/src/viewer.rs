@@ -422,25 +422,31 @@ fn script(
     // 2. Open the session with control.
     let shared = &media.shared;
     *lock(&shared.started) = Some(Instant::now());
-    let Reply::SessionId(session_id) = pump.ask(
+    // The reply is the id of the connect's entry; the session has its own id, the one of its first `Active`. Until it
+    // exists, ending the held id cancels the entry.
+    let Reply::SessionId(entry) = pump.ask(
         Command::Connect { device_id: host.clone(), intent: Intent::Control, unattended: false },
         cfg.connect_timeout,
     )?
     else {
-        return Err("Connect did not reply a session id".into());
+        return Err("Connect did not reply an entry id".into());
     };
+    held.session = Some(entry);
+    let (session_id, granted) = pump.wait("the session to go active", cfg.connect_timeout, |e| match e {
+        UiEvent::Session { session_id: s, state: SessionState::Active { role: Role::Viewer, granted, .. }, .. } => {
+            Some((*s, *granted))
+        }
+        UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == entry => {
+            log(&format!("VIEWER_SESSION_ENDED_EARLY {reason:?}"));
+            None
+        }
+        UiEvent::Session { session_id: s, state: SessionState::NotOpened { why }, .. } if *s == entry => {
+            log(&format!("VIEWER_SESSION_NOT_OPENED {why:?}"));
+            None
+        }
+        _ => None,
+    })?;
     held.session = Some(session_id);
-    let granted =
-        pump.wait("the session to go active", cfg.connect_timeout, |e| match e {
-            UiEvent::Session {
-                session_id: s, state: SessionState::Active { role: Role::Viewer, granted, .. }, ..
-            } if *s == session_id => Some(*granted),
-            UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == session_id => {
-                log(&format!("VIEWER_SESSION_ENDED_EARLY {reason:?}"));
-                None
-            }
-            _ => None,
-        })?;
     let active_at = Instant::now();
     report.session_active = true;
     log(&format!("VIEWER_ACTIVE session={session_id} granted={:#06x}", granted.0));

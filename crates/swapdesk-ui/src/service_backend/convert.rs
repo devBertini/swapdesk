@@ -54,6 +54,8 @@ pair_enum!(theme_to_wire, theme_from_wire, a::Theme, w::Theme; System, Light, Da
 pair_enum!(keyboard_to_wire, keyboard_from_wire, a::KeyboardMode, w::KeyboardMode; Auto, Physical, Text);
 pair_enum!(keys_to_wire, keys_from_wire, a::SpecialKeys, w::SpecialKeys; CtrlAltDel, AltTab, WinOrCmd, AltF4OrCmdQ, PrintScreen);
 pair_enum!(swap_why_to_wire, swap_why_from_wire, a::SwapWhy, w::SwapWhy; Declined, TimedOut, NobodyPresent, NotPermitted, Busy);
+pair_enum!(connect_why_to_wire, connect_why_from_wire, a::ConnectWhy, w::ConnectWhy;
+    Declined, TimedOut, NobodyPresent, Busy, Forgotten, NotPermitted, Unreachable, Failed);
 
 // ---------- Msg ----------
 
@@ -243,6 +245,7 @@ pub fn session_state_to_wire(s: &a::SessionState) -> w::SessionState {
         a::SessionState::Reconnecting { attempt } => w::SessionState::Reconnecting { attempt: *attempt },
         a::SessionState::Waking { remaining_s } => w::SessionState::Waking { remaining_s: *remaining_s },
         a::SessionState::Ended { reason } => w::SessionState::Ended { reason: reason.map(code_to_wire) },
+        a::SessionState::NotOpened { why } => w::SessionState::NotOpened { why: connect_why_to_wire(*why) },
     }
 }
 
@@ -257,6 +260,7 @@ pub fn session_state_from_wire(s: w::SessionState) -> a::SessionState {
         w::SessionState::Reconnecting { attempt } => a::SessionState::Reconnecting { attempt },
         w::SessionState::Waking { remaining_s } => a::SessionState::Waking { remaining_s },
         w::SessionState::Ended { reason } => a::SessionState::Ended { reason: reason.map(code_from_wire) },
+        w::SessionState::NotOpened { why } => a::SessionState::NotOpened { why: connect_why_from_wire(why) },
     }
 }
 
@@ -743,6 +747,16 @@ mod tests {
             event_to_notify(&a::UiEvent::Chat { session_id: 1, message: mine }).is_none(),
             "an own message is a reply, not a notification"
         );
+    }
+
+    #[test]
+    fn a_not_opened_entry_round_trips_for_every_why() {
+        for why in w::ConnectWhy::ALL {
+            let wire = w::SessionState::NotOpened { why: *why };
+            let ui = session_state_from_wire(wire);
+            assert_eq!(ui, a::SessionState::NotOpened { why: connect_why_from_wire(*why) });
+            assert_eq!(session_state_to_wire(&ui), wire);
+        }
     }
 
     #[test]

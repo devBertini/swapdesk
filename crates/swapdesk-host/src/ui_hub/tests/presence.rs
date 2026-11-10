@@ -38,9 +38,7 @@ fn a_device_with_a_live_session_is_on_the_network_on_both_sides_without_any_dns_
     host_ui
         .call(UiOp::AnswerIncoming { request_id: incoming, decision: Decision::Accept, grants: ALL.bits() })
         .expect("accepted");
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     host_ui.notify("Active on the host", |n| match n {
         Notify::Session { session_id: id, state: SessionState::Active { .. }, .. } if *id == session_id => Some(()),
         _ => None,
@@ -134,9 +132,7 @@ fn after_an_address_change_the_session_endpoint_listens_on_the_new_address_and_k
     host_ui
         .call(UiOp::AnswerIncoming { request_id: incoming, decision: Decision::Accept, grants: ALL.bits() })
         .expect("accepted");
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     wait_for("the host session", || (host.core.host().sessions().len() == 1).then_some(()));
 
     // The machine's Wi-Fi gets an address: the next network notice makes the endpoint listen there too.

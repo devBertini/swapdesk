@@ -509,18 +509,20 @@ fn gate_m3_a_loopback_session_through_the_service_with_control_and_audio() {
         })
         .is_ok()
     );
-    let ReplyBody::SessionId(session_id) = ui1.reply(connect_req, CONNECT_OP, WAIT).expect("the session opens") else {
+    // The reply is the id of the connect's entry; the session has its own id, the one of its first `Active`.
+    let ReplyBody::SessionId(entry) = ui1.reply(connect_req, CONNECT_OP, WAIT).expect("the connect is taken up") else {
         panic!("not SessionId")
     };
-    assert_ne!(session_id, 0);
+    assert_ne!(entry, 0);
     let active = |state: &SessionState| match state {
         SessionState::Active { role, granted, .. } => Some((*role, *granted)),
         _ => None,
     };
-    let (role, granted) = ui1.notify("Active on the viewer", |n| match n {
-        Notify::Session { session_id: id, state, .. } if *id == session_id => active(state),
+    let (session_id, role, granted) = ui1.notify("Active on the viewer", |n| match n {
+        Notify::Session { session_id: id, state, .. } if *id != entry => active(state).map(|(r, g)| (*id, r, g)),
         _ => None,
     });
+    assert_ne!(session_id, 0);
     assert_eq!((role, granted), (Role::Viewer, accepted.bits()));
     let (role, granted) = ui2.notify("Active on the host", |n| match n {
         Notify::Session { session_id: id, state, .. } if *id == session_id => active(state),

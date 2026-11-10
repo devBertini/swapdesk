@@ -107,8 +107,7 @@ impl Rig {
                 })
                 .is_ok()
         );
-        let ReplyBody::SessionId(id) = ui.reply(req, CONNECT_OP).expect("the session opens") else { panic!() };
-        id
+        ui.connected(req)
     }
 
     fn finish(self) {

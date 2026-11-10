@@ -65,7 +65,8 @@ pub use routing::{HelperKind, input_helper, media_helper};
 pub use shared::CoreEvent;
 pub use terminal::TerminalEnv;
 pub use viewer::{
-    ApplyError, ConnectError, StateChange, TermOut, Timeout, ViewerHandle, ViewerMessages, ViewerOut, end_reason,
+    ApplyError, ConnectError, StateChange, TermOut, Timeout, ViewerHandle, ViewerMessages, ViewerOut, WaitHook,
+    end_reason,
 };
 
 use clip_actions::{ActionsHost, ClipHooksCell};
@@ -135,6 +136,8 @@ pub(crate) struct Connector {
 impl Connector {
     /// Opens a session to `addr` as a viewer. The device must be paired (its key is read from the trust store, never
     /// from the address) and the address must pass the LAN guard. `swap_token` enters a swap (PROTOCOL.md 6.3).
+    /// `waiting` hears `Connecting` and `Prompted` while the host decides.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn connect(
         &self,
         addr: SocketAddr,
@@ -143,6 +146,7 @@ impl Connector {
         unattended: bool,
         extra: PermissionSet,
         swap_token: Option<[u8; 16]>,
+        waiting: Option<WaitHook>,
     ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
         let d = &self.dialer;
         let SocketAddr::V4(v4) = addr else { return Err(ConnectError::NotIpv4) };
@@ -191,6 +195,7 @@ impl Connector {
                 hooks: Arc::clone(&self.hooks),
                 clip_hooks: Arc::clone(&self.clip_hooks),
                 files: self.files.viewer(),
+                waiting,
             },
             cfg,
         )
@@ -734,7 +739,7 @@ impl ServiceCore {
         intent: Intent,
         unattended: bool,
     ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
-        self.connector.connect(addr, device, intent, unattended, PermissionSet::EMPTY, None).await
+        self.connector.connect(addr, device, intent, unattended, PermissionSet::EMPTY, None, None).await
     }
 
     /// [`ServiceCore::connect_with`] asking for `extra` permissions too: an unattended entry grants only what was asked
@@ -749,7 +754,22 @@ impl ServiceCore {
         unattended: bool,
         extra: PermissionSet,
     ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
-        self.handle().block_on(self.connector.connect(addr, device, intent, unattended, extra, None))
+        self.handle().block_on(self.connect_asking_async(addr, device, intent, unattended, extra, None))
+    }
+
+    /// [`ServiceCore::connect_asking`] for a caller already on the runtime: it awaits the host's decision and drops
+    /// the attempt when its future is dropped (the viewer then tells the host with a `Bye`). `waiting` hears
+    /// `Connecting` when the dial starts and `Prompted` when the host starts asking its user.
+    pub async fn connect_asking_async(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+        extra: PermissionSet,
+        waiting: Option<WaitHook>,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        self.connector.connect(addr, device, intent, unattended, extra, None, waiting).await
     }
 
     /// The live viewer session `session_id`.

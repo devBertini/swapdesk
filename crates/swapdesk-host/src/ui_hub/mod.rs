@@ -46,7 +46,7 @@ use swapdesk_trust::{DeviceId, Identity, PairingMode, TrustHandle, UserRef, Wall
 use tokio::runtime::Handle;
 
 use crate::service::{ServiceCore, ViewerHandle};
-use extras::{HubExtras, PendingSwap, WakeRun, WakeSetup};
+use extras::{Entry, HubExtras, PendingSwap, WakeSetup};
 use host_ui::HubHostUi;
 pub use presence::{DnsSdPresence, FakePresence, NoPresence, Presence, PresencePeer};
 use queue::UiQueue;
@@ -163,8 +163,8 @@ pub(crate) struct Hub {
     live_sessions: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
     swaps: Mutex<HashMap<u32, PendingSwap>>,
-    /// Wake-on-LAN attempts in flight, by the id of their waking entry.
-    wakes: Mutex<HashMap<u64, WakeRun>>,
+    /// Connect attempts in flight (a wake, a connect waiting for the host), by the id of their entry.
+    entries: Mutex<HashMap<u64, Entry>>,
     /// File transfers and listings in flight, for the files ops and notifications.
     files: Mutex<files::FilesTable>,
     wake: Mutex<WakeSetup>,
@@ -281,7 +281,7 @@ impl UiHub {
             learned: Mutex::new(HashMap::new()),
             live_sessions: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
-            wakes: Mutex::new(HashMap::new()),
+            entries: Mutex::new(HashMap::new()),
             files: Mutex::new(files::FilesTable::default()),
             wake: Mutex::new(WakeSetup::default()),
             elevation: Mutex::new(elevation::Elevation::default()),
@@ -474,7 +474,8 @@ impl UiHub {
         conn.clip.close();
         // The calls waiting for this UI's disk fail now (its read handles died with it).
         conn.fs.pending().close();
-        // The UI is gone: its viewer sessions go with it (nobody is left to decode them).
+        // The UI is gone: its connect attempts stop and its viewer sessions go with it (nobody is left to decode them).
+        hub.abort_entries_of(&conn);
         let viewers: Vec<Viewer> = lock(&conn.viewers).drain().map(|(_, v)| v).collect();
         for v in &viewers {
             v.handle.disconnect();

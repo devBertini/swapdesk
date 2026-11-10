@@ -182,6 +182,17 @@ impl Drop for ViewerSession {
     }
 }
 
+/// Armed while `open_io` waits for the host's answer: dropped armed, it says `Bye { NO_ERROR }`.
+struct UnansweredGuard(Option<SessionCtx>);
+
+impl Drop for UnansweredGuard {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.0.take() {
+            ctx.bye(ErrorCode::NoError);
+        }
+    }
+}
+
 impl ViewerSession {
     /// Dials `addr`, expecting the device whose key is `expected` (PROTOCOL.md 2.2), and opens the session.
     pub async fn connect(
@@ -238,8 +249,12 @@ impl ViewerSession {
         };
         let actor = Actor::new(side, ctx.clone(), io, conn, ev_tx, ev_rx, Arc::new(registry), liveness, now());
         let task = tokio::spawn(actor.run());
+        // A caller that gives up before the host answers (the future is dropped) ends the attempt with a `Bye`, so the
+        // host closes its question instead of leaving it open until its own deadline.
+        let mut unanswered = UnansweredGuard(Some(ctx.clone()));
         // The state machine has its own deadline; this one only guards against a task that never answers.
         let waited = tokio::time::timeout(grant_wait + Duration::from_secs(5), opened_rx).await;
+        unanswered.0 = None;
         match waited {
             Ok(Ok(Ok(grant))) => Ok(Self { ctx, events: events_rx, grant, task, quiet: false }),
             Ok(Ok(Err(e))) => Err(e),

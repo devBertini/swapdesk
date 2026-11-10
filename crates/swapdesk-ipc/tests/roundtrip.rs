@@ -11,7 +11,7 @@ use swapdesk_ipc::*;
 #[allow(unused_imports)]
 use swapdesk_proto::{
     Codec, CursorPosition, CursorShape, CursorShapeHeader, Desktop, Display, DisplayList, ErrorCode, Feature,
-    InputEvent, Intent, KeyframeRequest, MouseButton, Os, Preset, ReceiverReport, VideoHeader,
+    InputEvent, Intent, KeyframeRequest, MouseButton, Os, Preset, ReceiverReport, VideoHeader, Wire,
 };
 
 proptest! {
@@ -115,6 +115,24 @@ fn elevation_ops_and_replies_round_trip() {
     assert_eq!(IpcRole::Elevator.tag(), 4);
     let hello = Message::Hello { role: IpcRole::Elevator, version: IPC_VERSION, pid: 11 };
     assert_eq!(decode_message(&encode_message(&hello).unwrap()).unwrap(), hello);
+}
+
+#[test]
+fn a_connect_entry_end_round_trips_for_every_why() {
+    assert_eq!(ConnectWhy::ALL.len(), 8);
+    for (i, why) in ConnectWhy::ALL.iter().enumerate() {
+        assert_eq!(usize::from(why.tag()), i, "tags are appended, never reordered");
+        let state = SessionState::NotOpened { why: *why };
+        let note = Notify::Session { session_id: 1 << 63 | 5, device_id: "dev-1".into(), state };
+        let msg = Message::UiNotify(note);
+        let bytes = encode_message(&msg).unwrap();
+        assert_eq!(decode_message(&bytes).unwrap(), msg);
+    }
+    // The state is tag 7, after `Ended`; a tag past the last why is a codec error.
+    let mut w = swapdesk_proto::Writer::new();
+    SessionState::NotOpened { why: ConnectWhy::Failed }.put(&mut w, 0).unwrap();
+    assert_eq!(w.into_bytes(), [7, 7]);
+    assert!(SessionState::get(&mut swapdesk_proto::Reader::new(&[7, 8]), 0).is_err());
 }
 
 #[test]

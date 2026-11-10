@@ -141,7 +141,7 @@ impl SwapEnv for CoreEnv {
         self.shared.rt.spawn(async move {
             let opened = match hooks.address_of(&host) {
                 Some(addr) => {
-                    connector.connect(addr, host, Intent::Control, false, PermissionSet::EMPTY, Some(token)).await
+                    connector.connect(addr, host, Intent::Control, false, PermissionSet::EMPTY, Some(token), None).await
                 }
                 None => Err(ConnectError::UnknownDevice),
             };

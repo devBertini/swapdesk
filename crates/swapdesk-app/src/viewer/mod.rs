@@ -398,7 +398,8 @@ impl ViewerPipeline {
                             Some((*session_id, device_id.clone(), granted.has(Permission::Control))),
                         );
                     }
-                    SessionState::Connecting | SessionState::Paused { .. } | SessionState::Reconnecting { .. } => {
+                    // `Connecting` is a connect entry waiting for the host, not a session: it has no media to show.
+                    SessionState::Paused { .. } | SessionState::Reconnecting { .. } => {
                         if !same {
                             self.set_session(&mut ui, Some((*session_id, device_id.clone(), false)));
                         }

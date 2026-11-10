@@ -87,9 +87,7 @@ fn open(actions: &FakeActions, host_clip: &FakeClipboard) -> Pair {
             })
             .is_ok()
     );
-    let ReplyBody::SessionId(session) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!("not a session id")
-    };
+    let session = viewer_ui.connected(req);
     Pair { host, viewer, host_ui, viewer_ui, session }
 }
 

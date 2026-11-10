@@ -483,7 +483,8 @@ pub fn open_session(host: &ServiceBackend, viewer: &ServiceBackend, device: &str
     let grants = Permissions::NONE.with(Permission::Control);
     let grants = if audio { grants.with(Permission::Audio) } else { grants };
     hp.ask(Command::AnswerIncoming { request_id, decision: Decision::Accept { grants } }, WAIT)?;
-    let session_id = vp.wait("the reply to Connect", WAIT, |e| match e {
+    // The reply is the id of the connect's entry; the session has its own id, the one of its first `Active`.
+    let entry = vp.wait("the reply to Connect", WAIT, |e| match e {
         UiEvent::Reply { ticket: t, result } if *t == ticket => Some(match result {
             Ok(Reply::SessionId(id)) => Ok(*id),
             Ok(other) => Err(format!("Connect replied {other:?}")),
@@ -491,14 +492,13 @@ pub fn open_session(host: &ServiceBackend, viewer: &ServiceBackend, device: &str
         }),
         _ => None,
     })??;
-    vp.wait("the session to go active", WAIT, |e| match e {
-        UiEvent::Session { session_id: s, state: SessionState::Active { role: Role::Viewer, .. }, .. }
-            if *s == session_id =>
-        {
-            Some(())
+    let session_id = vp.wait("the session to go active", WAIT, |e| match e {
+        UiEvent::Session { session_id: s, state: SessionState::Active { role: Role::Viewer, .. }, .. } => Some(Ok(*s)),
+        UiEvent::Session { session_id: s, state: SessionState::NotOpened { why }, .. } if *s == entry => {
+            Some(Err(format!("the connect did not open a session: {why:?}")))
         }
         _ => None,
-    })?;
+    })??;
     if audio {
         vp.ask(Command::SetAudio { session_id, on: true }, WAIT)?;
     }

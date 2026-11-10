@@ -14,7 +14,7 @@ use super::*;
 
 /// What the host user's grants to the viewer machine are, and what the viewer's grants to the host machine are
 /// (each side needs `CONTROL` stored for the other, or a swap cannot make it the host: PROTOCOL.md 6.3 step 1).
-const CV: PermissionSet = PermissionSet::CONTROL;
+pub(super) const CV: PermissionSet = PermissionSet::CONTROL;
 const SWAP_ASK_OP: u16 = 22;
 const CHAT_SEND_OP: u16 = 24;
 const WAKE_OP: u16 = 26;
@@ -70,9 +70,7 @@ impl Duo {
                 })
                 .is_ok()
         );
-        let ReplyBody::SessionId(id) = self.viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-            panic!()
-        };
+        let id = self.viewer_ui.connected(req);
         active_as(&mut self.viewer_ui, Role::Viewer, &[]);
         active_as(&mut self.host_ui, Role::Host, &[]);
         id
@@ -87,7 +85,7 @@ impl Duo {
 }
 
 /// The id of the next session that goes active in `role` on this UI, other than the ones in `not`.
-fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
+pub(super) fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
     ui.notify("an active session", |n| match n {
         Notify::Session { session_id, state, .. }
             if !not.contains(session_id) && grants_active(state).is_some_and(|(r, _)| r == role) =>
@@ -98,7 +96,7 @@ fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
     })
 }
 
-fn ended(ui: &mut Client, session_id: u64) -> Option<ApiCode> {
+pub(super) fn ended(ui: &mut Client, session_id: u64) -> Option<ApiCode> {
     ui.notify("the end of a session", |n| match n {
         Notify::Session { session_id: id, state: SessionState::Ended { reason }, .. } if *id == session_id => {
             Some(*reason)
@@ -495,7 +493,7 @@ impl WakeSocket for RecordingWake {
 const MAC: [u8; 6] = [0x3C, 0x52, 0x82, 0xAA, 0xBB, 0xCC];
 
 /// A machine on `windows_typical` interfaces whose paired device `other` is asleep: its MAC and last address stored.
-fn sleeper(other: &Machine) -> (Machine, Sent) {
+pub(super) fn sleeper(other: &Machine) -> (Machine, Sent) {
     let m = Machine::with_interfaces("sala", FakeNetInterfaces::windows_typical());
     m.pin(other, CV);
     m.trust
@@ -520,7 +518,7 @@ fn sleeper(other: &Machine) -> (Machine, Sent) {
     (m, sent)
 }
 
-fn waking(ui: &mut Client, id: u64) -> u16 {
+pub(super) fn waking(ui: &mut Client, id: u64) -> u16 {
     ui.notify("Acordando", |n| match n {
         Notify::Session { session_id, state: SessionState::Waking { remaining_s }, .. } if *session_id == id => {
             Some(*remaining_s)

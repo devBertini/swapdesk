@@ -310,6 +310,31 @@ pub enum SessionState {
     Ended {
         reason: Option<ApiCode>,
     },
+    /// The last state of a connect entry whose session never opened, with why.
+    NotOpened {
+        why: ConnectWhy,
+    },
+}
+
+/// Why a connect did not open a session: who refused, or what did not answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectWhy {
+    /// The other computer's user said no.
+    Declined,
+    /// Nobody answered within the other computer's 20 s.
+    TimedOut,
+    /// Nobody is at the other computer.
+    NobodyPresent,
+    /// The other computer is in another session.
+    Busy,
+    /// The other computer no longer knows this one.
+    Forgotten,
+    /// The other computer does not allow this connection.
+    NotPermitted,
+    /// The other computer did not answer over the network.
+    Unreachable,
+    /// Anything else (a broken exchange, a version it does not speak).
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

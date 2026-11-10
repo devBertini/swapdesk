@@ -559,6 +559,9 @@ pub(crate) struct Opened {
     pub messages: ViewerMessages,
 }
 
+/// What a caller hears of an attempt before the host grants: `Connecting`, then `Prompted { remaining_s }`.
+pub type WaitHook = Arc<dyn Fn(SessionState) + Send + Sync>;
+
 /// What `open` needs besides the viewer configuration.
 pub(crate) struct OpenParams {
     pub rt: Handle,
@@ -574,6 +577,8 @@ pub(crate) struct OpenParams {
     pub clip_hooks: Arc<ClipHooksCell>,
     /// This session's files handler, registered in its registry.
     pub files: Arc<ViewerFiles>,
+    /// Told `Connecting` when the dial starts and `Prompted` when the host starts asking its user.
+    pub waiting: Option<WaitHook>,
 }
 
 /// What it takes to dial the same host again with a resume token.
@@ -746,12 +751,13 @@ impl Drive {
 
 /// Opens a viewer session on `p.endpoint` and starts its relays. `cfg.registry` is filled here.
 pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened, ConnectError> {
-    let OpenParams { rt, trace, wall, endpoint, identity, addr, expected, swap, hooks, clip_hooks, files } = p;
+    let OpenParams { rt, trace, wall, endpoint, identity, addr, expected, swap, hooks, clip_hooks, files, waiting } = p;
     let device = swapdesk_trust::device_id(&expected);
     let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
-    let _ = out_tx
-        .send(ViewerOut::State(StateChange { session_id: 0, device, state: SessionState::Connecting, end: None }))
-        .await;
+    // Before the grant there is no session to carry states: the caller's hook hears them.
+    if let Some(wait) = &waiting {
+        wait(SessionState::Connecting);
+    }
 
     // The receiver asks for keyframes through the session, which exists only after the grant.
     let session: Arc<Mutex<Option<SessionCtx>>> = Arc::default();
@@ -786,16 +792,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let _ = registry.register(files.channel());
     cfg.registry = registry;
     let redial_cfg = cfg.clone();
-    cfg.on_prompt = Some({
-        let out = out_tx.clone();
-        Arc::new(move |remaining_s: u16| {
-            let _ = out.try_send(ViewerOut::State(StateChange {
-                session_id: 0,
-                device,
-                state: SessionState::Prompted { remaining_s },
-                end: None,
-            }));
-        })
+    cfg.on_prompt = waiting.map(|wait| {
+        Arc::new(move |remaining_s: u16| wait(SessionState::Prompted { remaining_s })) as Arc<dyn Fn(u16) + Send + Sync>
     });
 
     let session_handle =
