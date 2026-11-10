@@ -124,11 +124,7 @@ pub(crate) struct Rig {
     live: Arc<AtomicUsize>,
 }
 
-fn deps(lost_at: Option<u32>, input: &RecordingInputSink, live: &Arc<AtomicUsize>) -> Deps {
-    deps_moving(lost_at, input, live, None)
-}
-
-/// As `deps`; with `moved`, the screens follow that flag (see `Tracked::moved`).
+/// The helper's parts over the fakes; with `moved`, the screens follow that flag (see `Tracked::moved`).
 fn deps_moving(
     lost_at: Option<u32>,
     input: &RecordingInputSink,
