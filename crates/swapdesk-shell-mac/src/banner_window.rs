@@ -90,7 +90,7 @@ impl BannerWindow {
             None => (0.0, 0.0),
         };
         self.panel.setFrame_display(frame(x, y, size.width, size.height), true);
-        self.panel.setTitle(&ns(&label));
+        self.panel.setTitle(&ns(&model.title));
         self.panel.orderFrontRegardless();
         *self.label.borrow_mut() = label;
     }

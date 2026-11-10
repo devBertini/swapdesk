@@ -15,14 +15,14 @@ macro_rules! ensure {
     };
 }
 
-fn open(mtm: MainThreadMarker, sc: Scenario, hooks: ViewerHooks) -> Rc<Shell> {
+pub(super) fn open(mtm: MainThreadMarker, sc: Scenario, hooks: ViewerHooks) -> Rc<Shell> {
     let state = sc.prepared_state();
     let waker = Arc::new(Waker::new());
     let backend = Arc::new(MockBackend::new(waker.clone()));
     start(mtm, state, backend, waker, Vec::new(), hooks)
 }
 
-fn close(shell: &Rc<Shell>) {
+pub(super) fn close(shell: &Rc<Shell>) {
     if let Some(v) = shell.viewer.borrow_mut().take() {
         v.window.setDelegate(None);
         v.window.close();
@@ -59,6 +59,9 @@ fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
         let shell = open(mtm, sc, ViewerHooks::default());
 
         ensure!(shell.main.canvas.paint_now(), "{}: the main window's canvas did not paint", sc.name());
+        // The shell says which system the viewer runs on: its shortcuts are written with the Mac's keys.
+        let keys = shell.state.borrow().shortcut_keys(swapdesk_ui::ViewerAction::ToggleBar);
+        ensure!(keys == "Control+Option+B", "{}: the session bar shortcut is written {keys}", sc.name());
         painted_all(&shell, &shell.main.canvas, WindowKind::Main, sc.name())?;
         match expected_viewer {
             Some(_) => {
@@ -164,5 +167,6 @@ pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
     scenarios_build_their_windows(mtm)?;
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;
-    render_slot_lifecycle(mtm)
+    render_slot_lifecycle(mtm)?;
+    super::ax_checks::run(mtm)
 }

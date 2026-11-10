@@ -1250,6 +1250,7 @@ dependencies = [
 name = "swapdesk-shell-mac"
 version = "1.0.0"
 dependencies = [
+ "accesskit",
  "dispatch2",
  "objc2",
  "objc2-app-kit",

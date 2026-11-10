@@ -838,6 +838,8 @@ pub fn viewer_model(state: &UiState) -> Option<ViewerModel> {
 pub struct BannerModel {
     pub dark: bool,
     pub session_id: u64,
+    /// The panel's accessible title (it has no title bar): the name of the banner in the shared accessibility tree.
+    pub title: String,
     /// "MacBook do escritório controla este computador", drawn bold.
     pub who: String,
     /// "há 12 min", drawn soft.
@@ -864,6 +866,7 @@ pub fn banner_model(state: &UiState) -> Option<BannerModel> {
     Some(BannerModel {
         dark: state.dark(),
         session_id: h.id,
+        title: swapdesk_ui::a11y::window_title(state, swapdesk_ui::WindowKind::Banner),
         who,
         since,
         swap,

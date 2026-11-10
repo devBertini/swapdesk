@@ -31,8 +31,8 @@ use objc2_app_kit::{
     NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect,
-    NSSize, NSString,
+    MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRange,
+    NSRect, NSSize, NSString,
 };
 use swapdesk_paint::{EditSlot, Frame, Interaction, Output, Rect, Widget, input, layout_dump};
 use swapdesk_ui::tokens::{Palette, palette, text};
@@ -40,6 +40,10 @@ use swapdesk_ui::{ControlId, EditId, WindowKind};
 
 use crate::painter::{CgPainter, Fonts};
 use crate::views::color;
+
+mod ax;
+
+pub use ax::ax_children_of;
 
 /// What one notch of a wheel without precise deltas scrolls, in DIPs per line the system reports.
 const WHEEL_LINE: f32 = 20.0;
@@ -91,6 +95,10 @@ pub struct CanvasIvars {
     /// The view that has the keyboard while no text field does: the video view of a viewer window (its keys go to
     /// the host), else the canvas itself.
     home: RefCell<Option<Retained<NSView>>>,
+    /// The accessibility elements of the last frame (see [`ax`]).
+    ax: RefCell<ax::AxState>,
+    /// Development: the accessibility dump of the first paint goes here once its text fields are placed (`--shot`).
+    ax_dump: RefCell<Option<PathBuf>>,
 }
 
 define_class!(
@@ -269,6 +277,25 @@ define_class!(
         fn menu_picked(&self, sender: &NSMenuItem) {
             self.ivars().picked.set(usize::try_from(sender.tag()).ok());
         }
+
+        // Accessibility: the view is painted, so it answers for its controls itself (see `ax`). It stays out of the
+        // tree (a plain view is not an element): its children are the window's landmarks.
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray<AnyObject>>> {
+            Some(self.ax_children())
+        }
+
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<AnyObject>> {
+            // SAFETY: forwards the same point to NSView's implementation.
+            self.ax_hit(point).or_else(|| unsafe { msg_send![super(self), accessibilityHitTest: point] })
+        }
+
+        #[unsafe(method_id(accessibilityFocusedUIElement))]
+        fn accessibility_focused(&self) -> Option<Retained<AnyObject>> {
+            // SAFETY: forwards to NSView's implementation.
+            self.ax_focused().or_else(|| unsafe { msg_send![super(self), accessibilityFocusedUIElement] })
+        }
     }
 
     // SAFETY: the selectors and signatures are the protocol's (the text view is taken as a plain object).
@@ -305,6 +332,8 @@ impl CanvasView {
             placing: Cell::new(false),
             fields_dark: Cell::new(None),
             home: RefCell::new(None),
+            ax: RefCell::default(),
+            ax_dump: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<CanvasView> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -328,7 +357,8 @@ impl CanvasView {
         view
     }
 
-    /// Development (`--shot`): the first paint writes its layout dump to `path`.
+    /// Development (`--shot`): the first paint writes its layout dump to `path` (`<name>.layout.txt`), and what an
+    /// assistive client reads in it to `<name>.a11y.txt`.
     pub fn set_dump(&self, path: PathBuf) {
         *self.ivars().dump.borrow_mut() = Some(path);
     }
@@ -486,10 +516,13 @@ impl CanvasView {
         }
         // The first paint is the scenario as it was opened; a later one may already show what the backend answered.
         if let Some(path) = iv.dump.borrow_mut().take() {
-            let _ = std::fs::write(path, layout_dump(&out));
+            let _ = std::fs::write(&path, layout_dump(&out));
+            let beside = path.to_string_lossy().strip_suffix("layout.txt").map(|stem| format!("{stem}a11y.txt"));
+            *iv.ax_dump.borrow_mut() = beside.map(PathBuf::from);
         }
         *iv.out.borrow_mut() = out;
         iv.painted.set(true);
+        iv.ax.borrow_mut().stale = true;
         // The view tree must not change inside `drawRect:`: the fields follow on the next turn of the main queue.
         if !iv.placing.replace(true) {
             DispatchQueue::main().exec_async(crate::shell::place_fields);

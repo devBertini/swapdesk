@@ -293,13 +293,15 @@ pub(crate) fn start(
 /// As [`start`]; `show_now` false leaves the main window closed until [`Shell::show_main`].
 fn start_with(
     mtm: MainThreadMarker,
-    state: UiState,
+    mut state: UiState,
     backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
     startup: Vec<Command>,
     hooks: ViewerHooks,
     show_now: bool,
 ) -> Rc<Shell> {
+    // The viewer's own shortcuts are written with this system's keys (Control+Option, not Ctrl+Alt).
+    state.set_viewer_os(swapdesk_ui::ViewerOs::MacOs);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // The system's font smoothing thickens the stems of text. The painter draws without it
@@ -509,7 +511,11 @@ impl Shell {
         self.waker.drained();
         let events = self.backend.drain();
         let mut changed = Changed::NONE;
-        self.state.borrow_mut().set_clock(local_clock());
+        // A capture (`--mock <scenario> --shot`) shows the scenario at the scenario's own time ("há 12 min", "Hoje,
+        // 15:25"), as the design boards and the Windows captures do.
+        if SHOT.get().is_none() {
+            self.state.borrow_mut().set_clock(local_clock());
+        }
         for e in events {
             changed = changed.union(self.state.borrow_mut().apply(e));
         }
@@ -591,9 +597,11 @@ impl Shell {
     /// the rectangle the frame left for it; the render lane is told when that area changed.
     fn after_paint(&self) {
         self.main.canvas.place_fields();
+        self.main.canvas.ax_after_paint();
         let viewer = self.viewer.borrow().as_ref().map(|v| (v.canvas.clone(), v.place_video()));
         if let Some((canvas, moved)) = viewer {
             canvas.place_fields();
+            canvas.ax_after_paint();
             if let (Some(area), Some(slot)) = (moved, &self.hooks.video) {
                 slot.resized(area);
             }
@@ -601,6 +609,7 @@ impl Shell {
         let banner = self.banner.borrow().as_ref().map(|b| b.canvas.clone());
         if let Some(canvas) = banner {
             canvas.place_fields();
+            canvas.ax_after_paint();
         }
     }
 
@@ -1055,6 +1064,7 @@ impl Shell {
     }
 }
 
+mod ax_checks;
 #[doc(hidden)]
 pub mod dev;
 #[doc(hidden)]

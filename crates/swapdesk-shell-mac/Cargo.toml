@@ -22,6 +22,7 @@ swapdesk-ui = { path = "../swapdesk-ui" }
 swapdesk-paint = { path = "../swapdesk-paint" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+accesskit.workspace = true
 objc2.workspace = true
 dispatch2.workspace = true
 
@@ -33,7 +34,7 @@ features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NS
 workspace = true
 features = [
     "std", "objc2-quartz-core", "objc2-core-foundation", "objc2-core-graphics", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle", "NSAttributedString",
-    "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols",
+    "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols",
     "NSAppearance", "NSApplication", "NSBitmapImageRep", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
     "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
     "NSPanel", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
