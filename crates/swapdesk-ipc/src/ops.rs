@@ -4,7 +4,7 @@ use swapdesk_proto::{Action, CodecError, Intent, Preset, Reader, Wire, Writer};
 
 use crate::error::{IpcError, Result};
 use crate::files::{FileListing, FilesNote, FilesOp};
-use crate::redact::Text;
+use crate::redact::{ElevationTicket, Text};
 use crate::term::{MAX_TERM_ACCOUNT, TermOutcome};
 use crate::types::*;
 
@@ -146,6 +146,26 @@ pub enum UiOp {
     TermClose {
         term_id: u32,
     },
+    /// Open an administrator confirmation for `action` (op 35). Sent by role `Ui`, the console's connection only; the
+    /// reply carries the ticket the elevated instance presents.
+    ElevationBegin {
+        action: ElevAction,
+    },
+    /// The elevated instance asks what ticket `ticket` is for (op 36). Sent by role `Elevator` only.
+    ElevationDescribe {
+        ticket: ElevationTicket,
+    },
+    /// The elevated instance's answer to the confirmation window (op 37): `approve` false closes the ticket. Sent
+    /// by role `Elevator` only. Reply `Done`.
+    ElevationConfirm {
+        ticket: ElevationTicket,
+        approve: bool,
+    },
+    /// The asking connection is done with `ticket` (op 38); the reply says how it ended. Sent by role `Ui`, the
+    /// asking connection only.
+    ElevationEnd {
+        ticket: ElevationTicket,
+    },
     /// Ops 40 to 49: the files feature (stage 44), see [`FilesOp`].
     Files(FilesOp),
 }
@@ -187,6 +207,10 @@ impl UiOp {
             Self::TermOpen { .. } => 32,
             Self::TermResize { .. } => 33,
             Self::TermClose { .. } => 34,
+            Self::ElevationBegin { .. } => 35,
+            Self::ElevationDescribe { .. } => 36,
+            Self::ElevationConfirm { .. } => 37,
+            Self::ElevationEnd { .. } => 38,
             Self::Files(f) => f.code(),
         }
     }
@@ -281,6 +305,12 @@ impl UiOp {
                 w.put_u16(*rows);
             }
             Self::TermClose { term_id } => w.put_u32(*term_id),
+            Self::ElevationBegin { action } => action.put(w, 0)?,
+            Self::ElevationDescribe { ticket } | Self::ElevationEnd { ticket } => ticket.put(w, 0)?,
+            Self::ElevationConfirm { ticket, approve } => {
+                ticket.put(w, 0)?;
+                w.put_bool(*approve);
+            }
             Self::Files(f) => f.put_body(w)?,
         }
         Ok(())
@@ -321,6 +351,10 @@ impl UiOp {
             32 => Self::TermOpen { session_id: r.u64()?, cols: r.u16()?, rows: r.u16()?, admin: r.bool()? },
             33 => Self::TermResize { term_id: r.u32()?, cols: r.u16()?, rows: r.u16()? },
             34 => Self::TermClose { term_id: r.u32()? },
+            35 => Self::ElevationBegin { action: ElevAction::get(r, 0)? },
+            36 => Self::ElevationDescribe { ticket: ElevationTicket::get(r, 0)? },
+            37 => Self::ElevationConfirm { ticket: ElevationTicket::get(r, 0)?, approve: r.bool()? },
+            38 => Self::ElevationEnd { ticket: ElevationTicket::get(r, 0)? },
             40..=49 => Self::Files(FilesOp::get_body(op, r)?),
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
@@ -335,7 +369,7 @@ fn unknown_op(op: u16) -> CodecError {
 /// carries no tag: [`ReplyBody::decode`] needs the op of the request with the same `req`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyBody {
-    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25, 28 to 30, 33, 34, 43 to 45).
+    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25, 28 to 30, 33, 34, 37, 43 to 45).
     Done,
     ThisDevice(ThisDevice),
     Network(NetworkStatus),
@@ -358,6 +392,19 @@ pub enum ReplyBody {
         outcome: TermOutcome,
         account: Text,
     },
+    /// The ticket of an administrator confirmation and how long it lives (op 35).
+    ElevationTicket {
+        ticket: ElevationTicket,
+        ttl_s: u16,
+    },
+    /// What a ticket is for, the name of the peer it concerns and the seconds left (op 36).
+    ElevationAction {
+        action: ElevAction,
+        peer_name: String,
+        remaining_s: u16,
+    },
+    /// How a ticket ended (op 38).
+    ElevationOutcome(ElevationOutcome),
     /// A folder of the host (op 40).
     Listing(FileListing),
     /// The transfer numbers of `FilesSend`, one per pick (op 41).
@@ -388,6 +435,16 @@ impl ReplyBody {
                 outcome.put(&mut w, 0)?;
                 account.put(&mut w, MAX_TERM_ACCOUNT)?;
             }
+            Self::ElevationTicket { ticket, ttl_s } => {
+                ticket.put(&mut w, 0)?;
+                w.put_u16(*ttl_s);
+            }
+            Self::ElevationAction { action, peer_name, remaining_s } => {
+                action.put(&mut w, 0)?;
+                w.put_str(peer_name, MAX_NAME)?;
+                w.put_u16(*remaining_s);
+            }
+            Self::ElevationOutcome(v) => v.put(&mut w, 0)?,
             Self::Listing(v) => v.put(&mut w, 0)?,
             Self::TransferIds(v) => v.put(&mut w, crate::files::MAX_PICKS)?,
             Self::TransferId(v) => w.put_u32(*v),
@@ -415,10 +472,17 @@ impl ReplyBody {
                 outcome: TermOutcome::get(&mut r, 0)?,
                 account: Text::get(&mut r, MAX_TERM_ACCOUNT)?,
             },
+            35 => Self::ElevationTicket { ticket: ElevationTicket::get(&mut r, 0)?, ttl_s: r.u16()? },
+            36 => Self::ElevationAction {
+                action: ElevAction::get(&mut r, 0)?,
+                peer_name: r.str(MAX_NAME)?,
+                remaining_s: r.u16()?,
+            },
+            38 => Self::ElevationOutcome(ElevationOutcome::get(&mut r, 0)?),
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 43..=45 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 43..=45 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;

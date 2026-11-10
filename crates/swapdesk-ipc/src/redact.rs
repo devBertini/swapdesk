@@ -64,6 +64,30 @@ impl Wire for Text {
     }
 }
 
+/// The 16-byte ticket of one administrator confirmation (ELEVATION.md 3.1). It is a bearer secret for its few
+/// minutes of life: `Debug` never prints a byte of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ElevationTicket(pub [u8; 16]);
+
+impl fmt::Debug for ElevationTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ElevationTicket(16 bytes)")
+    }
+}
+
+impl Wire for ElevationTicket {
+    const MIN_SIZE: usize = 16;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> Result<(), CodecError> {
+        w.put_bytes(&self.0);
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> Result<Self, CodecError> {
+        Ok(Self(r.array::<16>()?))
+    }
+}
+
 /// A cursor image (pixels of whatever is under the pointer).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Shape(pub CursorShape);

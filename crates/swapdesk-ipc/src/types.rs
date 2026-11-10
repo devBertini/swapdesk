@@ -45,7 +45,13 @@ wire_enum! {
 
 wire_enum! {
     /// `Hello.role`.
-    IpcRole { Ui = 1, HelperSystem = 2, HelperUser = 3 }
+    IpcRole {
+        Ui = 1,
+        HelperSystem = 2,
+        HelperUser = 3,
+        /// The elevated `Swapdesk.exe --elevated` instance that confirms one administrator action.
+        Elevator = 4,
+    }
 }
 
 wire_enum! {
@@ -99,6 +105,50 @@ wire_enum! {
 wire_enum! {
     /// `SendKeys.keys`.
     SpecialKeys { CtrlAltDel = 0, AltTab = 1, WinOrCmd = 2, AltF4OrCmdQ = 3, PrintScreen = 4 }
+}
+
+wire_enum! {
+    /// How an elevation ticket ended, in the reply of `ElevationEnd`.
+    ElevationOutcome {
+        /// The administrator confirmed in the elevated window.
+        Confirmed = 0,
+        /// The administrator pressed Cancel in the elevated window.
+        Declined = 1,
+        /// Never confirmed; the ticket is closed by this call.
+        Open = 2,
+        /// Expired, already ended, or never existed (also what a ticket of another connection answers).
+        Unknown = 3,
+    }
+}
+
+/// What an elevation ticket is for: the action the administrator confirms and the service lets through once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElevAction {
+    /// Set `grants` (the raw bit set of PROTOCOL.md 6.1, validated by the service) of a paired device.
+    SetGrants { device_id: String, grants: u16 },
+    // Tags 1 and 2 are unassigned: an unknown tag is a codec error.
+}
+
+impl Wire for ElevAction {
+    const MIN_SIZE: usize = 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::SetGrants { device_id, grants } => {
+                w.put_u8(0);
+                w.put_str(device_id, MAX_NAME)?;
+                w.put_u16(*grants);
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        match r.u8()? {
+            0 => Ok(Self::SetGrants { device_id: r.str(MAX_NAME)?, grants: r.u16()? }),
+            t => Err(unknown_tag("ElevAction", t)),
+        }
+    }
 }
 
 impl ApiCode {

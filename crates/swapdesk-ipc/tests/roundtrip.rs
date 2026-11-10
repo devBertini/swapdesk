@@ -80,3 +80,75 @@ fn the_new_ops_carry_their_numbers_and_the_chat_text_stays_out_of_debug() {
     let long = UiOp::ChatSend { session_id: 1, text: Text("x".repeat(4097)) };
     assert!(encode_message(&Message::UiRequest { req: 1, op: long }).is_err());
 }
+
+#[test]
+fn elevation_ops_and_replies_round_trip() {
+    let t = ElevationTicket([7; 16]);
+    let action = ElevAction::SetGrants { device_id: "dev-1".into(), grants: 0x1ff };
+    let ops = [
+        (UiOp::ElevationBegin { action: action.clone() }, 35),
+        (UiOp::ElevationDescribe { ticket: t }, 36),
+        (UiOp::ElevationConfirm { ticket: t, approve: true }, 37),
+        (UiOp::ElevationConfirm { ticket: t, approve: false }, 37),
+        (UiOp::ElevationEnd { ticket: t }, 38),
+    ];
+    for (op, code) in ops {
+        assert_eq!(op.code(), code);
+        let msg = Message::UiRequest { req: 9, op };
+        assert_eq!(decode_message(&encode_message(&msg).unwrap()).unwrap(), msg);
+    }
+    let replies = [
+        (35u16, ReplyBody::ElevationTicket { ticket: t, ttl_s: 120 }),
+        (36, ReplyBody::ElevationAction { action, peer_name: "Sala".into(), remaining_s: 97 }),
+        (37, ReplyBody::Done),
+    ];
+    for (op, body) in replies {
+        assert_eq!(ReplyBody::decode(op, &body.encode().unwrap()).unwrap(), body);
+    }
+    assert_eq!(ElevationOutcome::ALL.len(), 4);
+    for (i, outcome) in ElevationOutcome::ALL.iter().enumerate() {
+        assert_eq!(usize::from(outcome.tag()), i);
+        let body = ReplyBody::ElevationOutcome(*outcome);
+        assert_eq!(ReplyBody::decode(38, &body.encode().unwrap()).unwrap(), body);
+    }
+    assert!(ReplyBody::decode(38, &[4]).is_err());
+    assert_eq!(IpcRole::Elevator.tag(), 4);
+    let hello = Message::Hello { role: IpcRole::Elevator, version: IPC_VERSION, pid: 11 };
+    assert_eq!(decode_message(&encode_message(&hello).unwrap()).unwrap(), hello);
+}
+
+#[test]
+fn an_elevation_ticket_debug_prints_no_byte() {
+    let t = ElevationTicket([0xAB; 16]);
+    assert_eq!(format!("{t:?}"), "ElevationTicket(16 bytes)");
+    let op = format!("{:?}", UiOp::ElevationConfirm { ticket: t, approve: true });
+    assert!(!op.contains("171") && !op.to_lowercase().contains("ab"), "{op}");
+    let reply = format!("{:?}", ReplyBody::ElevationTicket { ticket: t, ttl_s: 120 });
+    assert!(reply.contains("16 bytes") && !reply.contains("171"), "{reply}");
+}
+
+#[test]
+fn an_unknown_elev_action_tag_is_a_codec_error() {
+    let begin = Message::UiRequest {
+        req: 1,
+        op: UiOp::ElevationBegin { action: ElevAction::SetGrants { device_id: "d".into(), grants: 1 } },
+    };
+    let wire = encode_message(&begin).unwrap();
+    // The action is the last body of the request: tag, str(len 1, "d"), u16.
+    let tag_at = wire.len() - 5;
+    assert_eq!(wire[tag_at], 0);
+    for tag in [1u8, 2, 255] {
+        let mut bad = wire.clone();
+        bad[tag_at] = tag;
+        assert!(matches!(decode_message(&bad), Err(IpcError::Codec(_))), "request, tag {tag}");
+        let mut body = ReplyBody::ElevationAction {
+            action: ElevAction::SetGrants { device_id: "d".into(), grants: 1 },
+            peer_name: "p".into(),
+            remaining_s: 5,
+        }
+        .encode()
+        .unwrap();
+        body[0] = tag;
+        assert!(matches!(ReplyBody::decode(36, &body), Err(IpcError::Codec(_))), "reply, tag {tag}");
+    }
+}

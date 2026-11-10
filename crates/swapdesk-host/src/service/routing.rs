@@ -17,12 +17,12 @@ pub enum HelperKind {
 }
 
 impl HelperKind {
-    /// The kind of a helper `Hello.role`; `None` for the UI role.
+    /// The kind of a helper `Hello.role`; `None` for the roles of the interface (the UI and its elevated instance).
     pub fn of_role(role: IpcRole) -> Option<Self> {
         match role {
             IpcRole::HelperSystem => Some(Self::System),
             IpcRole::HelperUser => Some(Self::User),
-            IpcRole::Ui => None,
+            IpcRole::Ui | IpcRole::Elevator => None,
         }
     }
 

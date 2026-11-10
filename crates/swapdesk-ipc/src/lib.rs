@@ -31,6 +31,6 @@ pub use message::{
     decode_message, encode_into, encode_message, limit_of,
 };
 pub use ops::{Notify, ReplyBody, STATUS_OK, UiOp, status_code};
-pub use redact::{Bytes, Events, Payload, Shape, Text};
+pub use redact::{Bytes, ElevationTicket, Events, Payload, Shape, Text};
 pub use term::{MAX_SESSION_USER, MAX_TERM_ACCOUNT, MAX_TERM_CHUNK, TermOutcome};
 pub use types::*;

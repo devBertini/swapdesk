@@ -238,6 +238,11 @@ impl Hub {
             | UiOp::RunAction { .. }
             | UiOp::TermOpen { .. }
             | UiOp::Files(_) => Err(ApiCode::Internal),
+            // The administrator confirmation (ELEVATION.md): not served yet.
+            UiOp::ElevationBegin { .. }
+            | UiOp::ElevationDescribe { .. }
+            | UiOp::ElevationConfirm { .. }
+            | UiOp::ElevationEnd { .. } => Err(ApiCode::Internal),
         }
     }
 

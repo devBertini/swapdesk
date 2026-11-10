@@ -570,6 +570,14 @@ pub fn files_note() -> BoxedStrategy<FilesNote> {
     .boxed()
 }
 
+pub fn ticket() -> BoxedStrategy<ElevationTicket> {
+    any::<[u8; 16]>().prop_map(ElevationTicket).boxed()
+}
+
+pub fn elev_action() -> BoxedStrategy<ElevAction> {
+    (txt(64), any::<u16>()).prop_map(|(device_id, grants)| ElevAction::SetGrants { device_id, grants }).boxed()
+}
+
 pub fn extra_op() -> BoxedStrategy<UiOp> {
     let all: Vec<BoxedStrategy<UiOp>> = vec![
         (any::<u64>(), any::<bool>()).prop_map(|(session_id, on)| UiOp::SetClipboardSync { session_id, on }).boxed(),
@@ -583,6 +591,10 @@ pub fn extra_op() -> BoxedStrategy<UiOp> {
             .prop_map(|(term_id, cols, rows)| UiOp::TermResize { term_id, cols, rows })
             .boxed(),
         any::<u32>().prop_map(|term_id| UiOp::TermClose { term_id }).boxed(),
+        elev_action().prop_map(|action| UiOp::ElevationBegin { action }).boxed(),
+        ticket().prop_map(|ticket| UiOp::ElevationDescribe { ticket }).boxed(),
+        (ticket(), any::<bool>()).prop_map(|(ticket, approve)| UiOp::ElevationConfirm { ticket, approve }).boxed(),
+        ticket().prop_map(|ticket| UiOp::ElevationEnd { ticket }).boxed(),
         files_op().prop_map(UiOp::Files).boxed(),
     ];
     Union::new(all).boxed()
@@ -699,6 +711,13 @@ pub fn reply_body() -> BoxedStrategy<(u16, ReplyBody)> {
         vec(display_view(), 0..3).prop_map(|d| (27u16, ReplyBody::Displays(d))),
         (any::<u32>(), pick(TermOutcome::ALL), text(40))
             .prop_map(|(term_id, outcome, account)| (32u16, ReplyBody::TermOpened { term_id, outcome, account })),
+        (ticket(), any::<u16>()).prop_map(|(ticket, ttl_s)| (35u16, ReplyBody::ElevationTicket { ticket, ttl_s })),
+        (elev_action(), txt(64), any::<u16>()).prop_map(|(action, peer_name, remaining_s)| (
+            36u16,
+            ReplyBody::ElevationAction { action, peer_name, remaining_s }
+        )),
+        Just((37u16, ReplyBody::Done)),
+        pick(ElevationOutcome::ALL).prop_map(|o| (38u16, ReplyBody::ElevationOutcome(o))),
         listing.prop_map(|l| (40u16, ReplyBody::Listing(l))),
         vec(any::<u32>(), 0..5).prop_map(|v| (41u16, ReplyBody::TransferIds(v))),
         any::<u32>().prop_map(|v| (42u16, ReplyBody::TransferId(v))),

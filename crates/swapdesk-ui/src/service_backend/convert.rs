@@ -365,6 +365,10 @@ fn chat_to_wire(m: &a::ChatView) -> w::ChatItem {
 pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
     Ok(match body {
         w::ReplyBody::Done => a::Reply::Done,
+        // The backend's own elevation worker reads these bodies; none of them is a reply of the interface.
+        w::ReplyBody::ElevationTicket { .. }
+        | w::ReplyBody::ElevationAction { .. }
+        | w::ReplyBody::ElevationOutcome(_) => a::Reply::Done,
         w::ReplyBody::ThisDevice(v) => a::Reply::ThisDevice(this_device_from_wire(v)),
         w::ReplyBody::Network(v) => a::Reply::Network(network_from_wire(v)),
         w::ReplyBody::Devices(v) => a::Reply::Devices(devices_from_wire(v)),
