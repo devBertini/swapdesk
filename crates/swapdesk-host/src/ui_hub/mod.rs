@@ -4,7 +4,8 @@
 //!
 //! * Requests: every stage-18 `UiOp` (1 to 21) is dispatched here, with the checks of C2.3 (`grants` validated as
 //!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL` and `Connect { unattended }`
-//!   only on an administrator connection; no request carries a path).
+//!   only on an administrator connection, or after an administrator confirmed exactly that change, see
+//!   `elevation.rs`; no request carries a path).
 //! * Notifications: devices, network, pairing, incoming requests, sessions, displays, stats, alerts and settings go
 //!   to the connections that should see them (host-side items to the console session's UI only).
 //! * Media: a viewer session opened here keeps its `ViewerHandle` on the connection; its video, audio and cursor
@@ -16,6 +17,7 @@
 //! [`UiHub::bind_core`]. The hub holds the core weakly, so the owner's `Arc<ServiceCore>` alone keeps it alive.
 
 mod clip_actions;
+mod elevation;
 mod extras;
 mod files;
 mod host_ui;
@@ -103,6 +105,9 @@ pub struct ConnInfo {
     pub user: UserRef,
     /// The impersonation token is elevated with Administrators enabled (C2.3).
     pub admin: bool,
+    /// The connection's user is an administrator account (its token holds the Administrators group, enabled or
+    /// deny-only): it may ask for an administrator confirmation (`ElevationBegin`) without being elevated itself.
+    pub can_elevate: bool,
 }
 
 /// One connected UI.
@@ -118,6 +123,8 @@ pub(crate) struct Conn {
     pub terms: Mutex<HashMap<u32, u64>>,
     /// The disk of this UI (C2.4 "Files"): the service's calls to it wait for the `FsReply` the reader routes back.
     pub fs: Arc<PipeCaller>,
+    /// What an administrator confirmed for this connection and it has not used yet (see `elevation.rs`).
+    pub passes: Mutex<Vec<elevation::Pass>>,
 }
 
 /// A viewer session on a connection.
@@ -161,6 +168,8 @@ pub(crate) struct Hub {
     /// File transfers and listings in flight, for the files ops and notifications.
     files: Mutex<files::FilesTable>,
     wake: Mutex<WakeSetup>,
+    /// The open administrator confirmations (tickets) and the lifetimes they run on.
+    elevation: Mutex<elevation::Elevation>,
     /// Host sessions: when they started (Unix ms) and what they hold, for the durations of the audit log and the
     /// `Active` states.
     started: Mutex<HashMap<u64, (u64, swapdesk_proto::PermissionSet)>>,
@@ -275,6 +284,7 @@ impl UiHub {
             wakes: Mutex::new(HashMap::new()),
             files: Mutex::new(files::FilesTable::default()),
             wake: Mutex::new(WakeSetup::default()),
+            elevation: Mutex::new(elevation::Elevation::default()),
             started: Mutex::new(HashMap::new()),
             shutting: AtomicBool::new(false),
         });
@@ -429,6 +439,7 @@ impl UiHub {
             viewers: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
             fs,
+            passes: Mutex::new(Vec::new()),
         });
         lock(&hub.conns).push(Arc::clone(&conn));
         hub.log(
@@ -457,6 +468,8 @@ impl UiHub {
             }
         };
         lock(&hub.conns).retain(|c| c.id != conn.id);
+        // Its open ticket and the passes it still held die with it.
+        hub.drop_elevation_of(&conn);
         // Whoever waits for this UI's clipboard stops waiting.
         conn.clip.close();
         // The calls waiting for this UI's disk fail now (its read handles died with it).

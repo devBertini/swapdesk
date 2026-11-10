@@ -234,8 +234,12 @@ impl UiPipes {
         }
         let name =
             session_user_name(session).ok().flatten().or_else(|| std::env::var("USERNAME").ok()).unwrap_or_default();
-        let info =
-            ConnInfo { session_id: session, user: UserRef { id: who.user_sid.clone(), name }, admin: who.is_admin() };
+        let info = ConnInfo {
+            session_id: session,
+            user: UserRef { id: who.user_sid.clone(), name },
+            admin: who.is_admin(),
+            can_elevate: false,
+        };
         // Back to blocking reads: the UI is quiet between requests.
         let mut reader_half = reader.into_inner();
         reader_half.set_read_timeout(None);

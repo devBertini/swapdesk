@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use swapdesk_ipc::{
-    ApiCode, Bytes, DisplayView, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK, SessionState, SettingsUpdate,
-    SpecialKeys, UiOp,
+    ApiCode, Bytes, DisplayView, ElevAction, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK, SessionState,
+    SettingsUpdate, SpecialKeys, UiOp,
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
@@ -30,7 +30,8 @@ const KEYBOARD_PAGE: u16 = 0x07;
 
 type OpResult = Result<ReplyBody, ApiCode>;
 
-pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
+/// The `UiReply` that answers request `req` with `result`.
+pub(super) fn reply_message(req: u32, result: OpResult) -> Ipc {
     let (status, body) = match result {
         Ok(b) => match b.encode() {
             Ok(bytes) => (STATUS_OK, bytes),
@@ -38,7 +39,11 @@ pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
         },
         Err(code) => (code.status(), Vec::new()),
     };
-    conn.queue.control(Ipc::UiReply { req, status, body: Bytes(body) });
+    Ipc::UiReply { req, status, body: Bytes(body) }
+}
+
+pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
+    conn.queue.control(reply_message(req, result));
 }
 
 fn done(r: Result<(), ApiCode>) -> OpResult {
@@ -238,11 +243,13 @@ impl Hub {
             | UiOp::RunAction { .. }
             | UiOp::TermOpen { .. }
             | UiOp::Files(_) => Err(ApiCode::Internal),
-            // The administrator confirmation (ELEVATION.md): not served yet.
-            UiOp::ElevationBegin { .. }
-            | UiOp::ElevationDescribe { .. }
-            | UiOp::ElevationConfirm { .. }
-            | UiOp::ElevationEnd { .. } => Err(ApiCode::Internal),
+            UiOp::ElevationBegin { action } => self.elevation_begin(conn, action),
+            UiOp::ElevationEnd { ticket } => Ok(ReplyBody::ElevationOutcome(self.elevation_end(conn, &ticket))),
+            // Only the restricted loop of an elevated instance (`serve_elevator`) answers these two: a UI
+            // connection is never the approver of its own ticket.
+            UiOp::ElevationDescribe { .. } | UiOp::ElevationConfirm { .. } => {
+                Err(self.api_error(ApiCode::NotPermitted, "an elevation approval on a UI connection"))
+            }
         }
     }
 
@@ -304,7 +311,8 @@ impl Hub {
 
     /// `SetGrants`: `grants` validated, `UNATTENDED` and `ADMIN_TERMINAL` only added from an administrator
     /// connection (C2.3, D7), and so is any bit added while the device has `UNATTENDED` (it would widen entry without
-    /// a prompt); taking bits away is open to any console connection (it narrows).
+    /// a prompt); taking bits away is open to any console connection (it narrows). A connection that is not elevated
+    /// may make that one change after an administrator confirmed exactly it (a pass, `elevation.rs`).
     fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
         let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
@@ -314,7 +322,11 @@ impl Hub {
         // Adding UNATTENDED or ADMIN_TERMINAL, or adding anything to a device that holds (or is given) UNATTENDED:
         // the added bits are then entry without a prompt.
         let unattended_involved = (old.bits() | new.bits()) & PermissionSet::BIT_UNATTENDED != 0;
-        if (added & admin_only != 0 || (unattended_involved && added != 0)) && !conn.info.admin {
+        // Short-circuit order matters: a pass is looked at, and used up, only for a change that needs one.
+        if (added & admin_only != 0 || (unattended_involved && added != 0))
+            && !conn.info.admin
+            && !self.take_pass(conn, &ElevAction::SetGrants { device_id: device_id_hex(&id), grants: new.bits() })
+        {
             return Err(self.api_error(
                 ApiCode::NeedsAdmin,
                 "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",

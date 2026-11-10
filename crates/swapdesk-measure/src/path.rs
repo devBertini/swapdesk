@@ -308,7 +308,7 @@ impl Machine {
                 return;
             }
             let user = UserRef { id: "S-1-5-21-1".into(), name: "measure".into() };
-            let _ = hub.serve(reader, writer, ConnInfo { session_id: 1, user, admin: false });
+            let _ = hub.serve(reader, writer, ConnInfo { session_id: 1, user, admin: false, can_elevate: false });
         });
         ServiceBackend::start_with_sink(client_end.reader, client_end.writer, Arc::new(NoWake), 1, sink)
             .map(Arc::new)

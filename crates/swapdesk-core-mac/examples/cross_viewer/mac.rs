@@ -275,6 +275,7 @@ fn run(
                 session_id: 1,
                 user: UserRef { id: "cross-viewer".into(), name: "cross-viewer".into() },
                 admin: false,
+                can_elevate: false,
             },
         )
     });

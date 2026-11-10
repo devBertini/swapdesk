@@ -281,6 +281,96 @@ fn the_elevation_step_runs_its_phases() {
 }
 
 #[test]
+fn a_confirmed_elevation_resends_the_command_that_needed_it() {
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let ElevatedAction::SetGrants { device_id, grants } = action.clone() else { panic!("{action:?}") };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    assert!(s.elevation().is_none(), "the step closes");
+    assert_eq!(s.take_followups(), vec![Command::SetGrants { device_id, grants }]);
+    assert!(s.take_followups().is_empty(), "sent once");
+
+    // A failure resends nothing.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, result: Err(ApiError::new(ApiCode::Refused)) });
+    assert!(s.take_followups().is_empty());
+
+    // The other two actions are on hold: their step closes and nothing is resent.
+    let mut s = viewer();
+    let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
+    tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
+    let action = s.elevation().unwrap().action.clone();
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    assert!(s.elevation().is_none());
+    assert!(s.take_followups().is_empty());
+}
+
+#[test]
+fn a_failed_elevate_reply_shows_in_the_step_not_the_strip() {
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7000), &a.commands[0]);
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
+    s.apply(UiEvent::Reply { ticket: Ticket(7000), result: Err(ApiError::new(ApiCode::Timeout)) });
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Timeout));
+    assert!(s.error().is_none(), "no strip over the content");
+
+    // The 120 s of the command run out in the state's own clock: the same.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7001), &a.commands[0]);
+    for _ in 0..120 {
+        s.tick();
+    }
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Timeout));
+    assert!(s.error().is_none());
+
+    // The step was cancelled meanwhile: nothing to show anywhere.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7002), &a.commands[0]);
+    s.activate(ControlId::DialogSecondary);
+    s.apply(UiEvent::Reply { ticket: Ticket(7002), result: Err(ApiError::new(ApiCode::Timeout)) });
+    assert!(s.elevation().is_none() && s.error().is_none());
+}
+
+#[test]
+fn each_failure_code_has_its_line_in_the_step() {
+    let line = |code: ApiCode| {
+        let mut s = Scenario::Elevacao.prepared_state();
+        let a = s.activate(ControlId::DialogPrimary);
+        let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+        s.apply(UiEvent::ElevationResult { action, result: Err(ApiError::new(code)) });
+        let t = s.dialog_texts(&DialogKind::Elevation);
+        assert_eq!(t.title, s.tm(&Msg::new(MsgKey::ElevFailedTitle)));
+        assert_eq!(t.body, vec![s.tm(&Msg::new(MsgKey::ElevFailedBody))], "{code:?}");
+        t.extra
+    };
+    let tm = |key: MsgKey| Some(Scenario::Elevacao.prepared_state().tm(&Msg::new(key)));
+    assert_eq!(line(ApiCode::Refused), None);
+    assert_eq!(line(ApiCode::NotPermitted), tm(MsgKey::ElevNotAdmin));
+    assert_eq!(line(ApiCode::Timeout), tm(MsgKey::ElevTimedOut));
+    assert_eq!(line(ApiCode::NotFound), tm(MsgKey::ErrNotFound));
+    assert_eq!(line(ApiCode::Busy), tm(MsgKey::ErrBusy));
+    assert_eq!(line(ApiCode::ServiceDown), tm(MsgKey::ErrServiceDown));
+    assert_eq!(line(ApiCode::Internal), tm(MsgKey::ErrInternal));
+    let all: Vec<_> = [ApiCode::NotPermitted, ApiCode::Timeout, ApiCode::NotFound, ApiCode::Busy, ApiCode::Internal]
+        .into_iter()
+        .map(line)
+        .collect();
+    for (i, a) in all.iter().enumerate() {
+        assert!(a.as_ref().is_some_and(|t| !t.is_empty()));
+        assert!(all[i + 1..].iter().all(|b| b != a), "each code reads its own line");
+    }
+}
+
+#[test]
 fn other_admin_only_commands_also_lead_to_the_elevation_step() {
     let mut s = viewer();
     let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };

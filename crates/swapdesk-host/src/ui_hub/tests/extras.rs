@@ -150,7 +150,8 @@ fn swap_runs_both_ways_and_the_card_goes_only_to_the_uis_it_was_sent_to() {
     assert_eq!(by, "other-pc", "the card names the machine that asks");
     assert!((1..=20).contains(&remaining), "the 20 s countdown: {remaining}");
     // A UI the card did not go to cannot answer it.
-    let mut stranger = d.host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false });
+    let mut stranger =
+        d.host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false, can_elevate: false });
     assert_eq!(stranger.call(UiOp::AnswerSwap { request_id: card, accept: true }).unwrap_err(), ApiCode::NotPermitted);
     assert_eq!(
         d.host_ui.call(UiOp::AnswerSwap { request_id: card + 100, accept: true }).unwrap_err(),
@@ -632,7 +633,8 @@ fn a_ui_outside_the_console_neither_hears_nor_answers_nor_asks_for_a_swap_that_m
     // The user at the console of the viewer machine moves to session 2; the UI of session 1 stays connected and
     // still owns the viewer session.
     d.viewer.hub.set_console_session(Some(2));
-    let mut console = d.viewer.client(ConnInfo { session_id: 2, user: user("S-1-5-21-3"), admin: false });
+    let mut console =
+        d.viewer.client(ConnInfo { session_id: 2, user: user("S-1-5-21-3"), admin: false, can_elevate: false });
 
     // It cannot ask for the swap itself: that would make this machine the host, with the swap token skipping the
     // prompt and the presence check.

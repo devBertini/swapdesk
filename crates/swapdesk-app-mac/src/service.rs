@@ -244,7 +244,11 @@ impl InProcessService {
                         let user = UserRef { id: "local-user".into(), name: std::env::var("USER").unwrap_or_default() };
                         // Not an administrator connection: nothing in the Mac app grants UNATTENDED or ADMIN_TERMINAL (stage 24).
                         serving
-                            .serve(reader, writer, ConnInfo { session_id: UI_SESSION, user, admin: false })
+                            .serve(
+                                reader,
+                                writer,
+                                ConnInfo { session_id: UI_SESSION, user, admin: false, can_elevate: false },
+                            )
                             .map_err(|e| e.to_string())
                     });
                 if let Err(e) = served {

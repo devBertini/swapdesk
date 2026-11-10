@@ -1432,7 +1432,13 @@ impl UiState {
             return Changed::NONE;
         }
         match result {
-            Ok(()) => self.elevation = None,
+            Ok(()) => {
+                self.elevation = None;
+                // The command that needed the administrator goes again: the service now lets it through once.
+                if let ElevatedAction::SetGrants { device_id, grants } = action {
+                    self.followups.push(Command::SetGrants { device_id, grants });
+                }
+            }
             Err(e) => {
                 if let Some(el) = &mut self.elevation {
                     el.phase = ElevPhase::Failed(e.code);
@@ -1594,6 +1600,16 @@ impl UiState {
             self.error = Some(error);
             return Changed::ALL;
         };
+        // The step tells how the confirmation failed (a timeout of its own 120 s too): no strip over the content.
+        if let Command::Elevate { action } = &pending.command {
+            return match &mut self.elevation {
+                Some(el) if el.action == *action => {
+                    el.phase = ElevPhase::Failed(error.code);
+                    Changed::ALL
+                }
+                _ => Changed::NONE,
+            };
+        }
         match pending.undo {
             Some(Undo::Grants(device_id, grants)) => {
                 if let Some(d) = self.devices.iter_mut().find(|d| d.id == device_id) {

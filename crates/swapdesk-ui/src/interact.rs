@@ -225,6 +225,32 @@ impl Specs {
     }
 }
 
+/// The line that says what an elevation is for, in `lang`: the step shows it and so does the elevated window.
+/// `peer_name` is the device the action concerns (unused by actions that name none).
+pub fn elevation_action_text(lang: Language, action: &ElevatedAction, peer_name: &str) -> String {
+    let say = |key: MsgKey, args: &[&str]| {
+        let mut msg = Msg::new(key);
+        for a in args {
+            msg = msg.with(*a);
+        }
+        crate::strings::text(lang, &msg)
+    };
+    match action {
+        ElevatedAction::SetGrants { grants, .. } => {
+            let key = if grants.has(Permission::Unattended) {
+                MsgKey::ElevActGrantUnattended
+            } else if grants.has(Permission::AdminTerminal) {
+                MsgKey::ElevActGrantAdminTerminal
+            } else {
+                MsgKey::ElevActGrants
+            };
+            say(key, &[peer_name])
+        }
+        ElevatedAction::ConnectUnattended { .. } => say(MsgKey::ElevActConnectUnattended, &[peer_name]),
+        ElevatedAction::OpenAdminTerminal { .. } => say(MsgKey::ElevActAdminTerminalOpen, &[]),
+    }
+}
+
 impl UiState {
     /// The controls of a window in Tab order, with their names and states.
     pub fn controls(&self, kind: WindowKind) -> Vec<ControlSpec> {
@@ -794,10 +820,10 @@ impl UiState {
                         primary: None,
                         secondary: Some(self.name_of(MsgKey::ElevCancel)),
                     },
-                    Some(ElevPhase::Failed(_)) => DialogTexts {
+                    Some(ElevPhase::Failed(code)) => DialogTexts {
                         title: self.name_of(MsgKey::ElevFailedTitle),
                         body: vec![self.name_of(MsgKey::ElevFailedBody)],
-                        extra: None,
+                        extra: self.elevation_failure_line(*code),
                         primary: Some(self.name_of(MsgKey::ElevRetry)),
                         secondary: Some(self.name_of(MsgKey::ElevClose)),
                     },
@@ -866,24 +892,30 @@ impl UiState {
     }
 
     fn elevation_action_text(&self, action: &ElevatedAction) -> String {
-        let device_name = |id: &str| self.device_by_id(id).map(|d| d.name.clone()).unwrap_or_default();
-        match action {
-            ElevatedAction::SetGrants { device_id, grants } => {
-                let name = device_name(device_id);
-                let key = if grants.has(Permission::Unattended) {
-                    MsgKey::ElevActGrantUnattended
-                } else if grants.has(Permission::AdminTerminal) {
-                    MsgKey::ElevActGrantAdminTerminal
-                } else {
-                    MsgKey::ElevActGrants
-                };
-                self.tm(&Msg::new(key).with(name))
+        let peer = match action {
+            ElevatedAction::SetGrants { device_id, .. } | ElevatedAction::ConnectUnattended { device_id, .. } => {
+                self.device_by_id(device_id).map(|d| d.name.clone()).unwrap_or_default()
             }
-            ElevatedAction::ConnectUnattended { device_id, .. } => {
-                self.tm(&Msg::new(MsgKey::ElevActConnectUnattended).with(device_name(device_id)))
-            }
-            ElevatedAction::OpenAdminTerminal { .. } => self.name_of(MsgKey::ElevActAdminTerminalOpen),
-        }
+            ElevatedAction::OpenAdminTerminal { .. } => String::new(),
+        };
+        elevation_action_text(self.lang, action, &peer)
+    }
+
+    /// The reason line of a failed elevation, by code (`None`: nothing more to say, the body already does).
+    fn elevation_failure_line(&self, code: ApiCode) -> Option<String> {
+        let key = match code {
+            ApiCode::Refused => return None,
+            ApiCode::NotPermitted => MsgKey::ElevNotAdmin,
+            ApiCode::Timeout => MsgKey::ElevTimedOut,
+            ApiCode::NotFound => MsgKey::ErrNotFound,
+            ApiCode::Busy => MsgKey::ErrBusy,
+            ApiCode::ServiceDown => MsgKey::ErrServiceDown,
+            ApiCode::NeedsAdmin => MsgKey::ErrNeedsAdmin,
+            ApiCode::Locked => MsgKey::ErrLocked,
+            ApiCode::Invalid => MsgKey::ErrInvalid,
+            ApiCode::Internal => MsgKey::ErrInternal,
+        };
+        Some(self.name_of(key))
     }
 
     pub(crate) fn swap_peer_name(&self) -> String {

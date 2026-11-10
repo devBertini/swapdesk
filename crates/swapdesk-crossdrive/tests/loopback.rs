@@ -335,8 +335,12 @@ fn ui(
     let serve = std::thread::spawn(move || {
         let (mut reader, mut writer) = (FrameReader::new(server_end.reader), FrameWriter::new(server_end.writer));
         Handshake::server(&mut reader, &mut writer, 1).expect("server handshake");
-        let info =
-            ConnInfo { session_id: 1, user: UserRef { id: "S-1-5-21-1".into(), name: "tester".into() }, admin: false };
+        let info = ConnInfo {
+            session_id: 1,
+            user: UserRef { id: "S-1-5-21-1".into(), name: "tester".into() },
+            admin: false,
+            can_elevate: false,
+        };
         let _ = hub.serve(reader, writer, info);
     });
     let backend = ServiceBackend::start_with_sink(client_end.reader, client_end.writer, Arc::new(NoWake), 4321, sink)

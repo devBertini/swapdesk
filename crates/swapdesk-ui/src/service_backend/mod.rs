@@ -15,9 +15,12 @@
 //!   reply of `TermOpen` is `Reply::TermId` followed by `UiEvent::Term { Opened }` when the shell runs, or an error
 //!   whose `detail` says why; `TermOutput` messages go to [`ViewerSink::term_output`]; `TermExited` is
 //!   `UiEvent::Term { Exited }`.
-//! - Commands with no op (files, transfers, `CancelSwap`, `BlockAddress`, `Elevate`,
+//! - Commands with no op (files, transfers, `CancelSwap`, `BlockAddress`,
 //!   `ActivityExport`, `OpenSystemSettings`, `RequestOsPermissions`) reply at once
 //!   `Err(ApiError { code: Internal, detail: None })`. `ListDisplays` is op 27: the reply is the session's display list.
+//! - `Elevate` runs on a worker thread of its own ([`elevation`]): it asks the service for a ticket (op 35), lets the
+//!   platform's [`Elevator`] run, ends the ticket (op 38) and reports `UiEvent::ElevationResult`, then answers `Done`.
+//!   Its requests go through the same writer and a reply table of their own, so neither thread waits for it.
 //! - `SetScale`, `SetKeyboardMode` and `SetGrab` are UI-local: they reply `Done` at once and write nothing.
 //! - `SetSettings` sends the machine fields only (`SettingsUpdate`); the per-user fields stay in the UI (C5.1).
 //! - The pipe closing or breaking fails every pending ticket with `ServiceDown`; every later `send` replies
@@ -28,6 +31,7 @@
 
 pub mod clipboard;
 pub mod convert;
+pub mod elevation;
 pub mod files;
 
 use std::collections::{HashMap, VecDeque};
@@ -44,6 +48,7 @@ use swapdesk_proto::{CursorPosition, CursorShape, InputEvent, KeyframeRequest, R
 
 use crate::api::{ApiCode, ApiError, Command, Reply, TermEvent, Ticket, UiBackend, UiEvent, UiWaker};
 use convert::Route;
+pub use elevation::{Elevator, ElevatorRun};
 
 /// Receives the viewer media the service sends (`ViewerVideo`, `ViewerAudio`, `ViewerCursorPos/Shape`). Called on
 /// the reader thread: it must hand the data to the viewer pipeline and return quickly.
@@ -67,6 +72,13 @@ struct Inner {
     /// `req -> (ticket, op number)`. `down` is only set while this lock is held, so no request is registered
     /// after the pending ones were failed.
     pending: Mutex<HashMap<u32, (Ticket, u16)>>,
+    /// `req -> (op number, where the answer goes)` of the requests a worker thread waits for. Failed together with
+    /// `pending` (same lock, same `down`).
+    waiters: Mutex<HashMap<u32, elevation::Waiter>>,
+    /// The next request id, shared by the backend thread and the workers.
+    next_req: AtomicU32,
+    /// What `Elevate` runs; none until [`ServiceBackend::set_elevator`].
+    elevator: Mutex<Option<Arc<dyn Elevator>>>,
     down: AtomicBool,
     waker: Arc<dyn UiWaker>,
     sink: Option<Arc<dyn ViewerSink>>,
@@ -107,6 +119,8 @@ impl Inner {
         let failed: Vec<UiEvent> = {
             let mut p = lock(&self.pending);
             self.down.store(true, Ordering::Release);
+            // A worker waiting on a dropped sender reads it as the service being down.
+            lock(&self.waiters).clear();
             let mut list: Vec<(Ticket, u16)> = p.drain().map(|(_, v)| v).collect();
             list.sort_by_key(|(t, _)| t.0);
             list.into_iter()
@@ -117,6 +131,9 @@ impl Inner {
     }
 
     fn answer(&self, req: u32, status: u16, body: &[u8]) {
+        if elevation::answer_waiter(self, req, status, body) {
+            return;
+        }
         let Some((ticket, op)) = lock(&self.pending).remove(&req) else { return };
         let result = match status_code(status) {
             Ok(Some(code)) => Err(ApiError::new(convert::code_from_wire(code))),
@@ -220,6 +237,8 @@ fn routed(command: &Command, tokens: &swapdesk_files::Tokens) -> Route {
 
 enum Item {
     Command(Ticket, Command),
+    /// A request a worker thread registered a waiter for; the backend thread only writes it.
+    Request(u32, swapdesk_ipc::UiOp),
     Viewer(Message),
 }
 
@@ -260,6 +279,9 @@ impl ServiceBackend {
         let inner = Arc::new(Inner {
             events: Mutex::new(VecDeque::new()),
             pending: Mutex::new(HashMap::new()),
+            waiters: Mutex::new(HashMap::new()),
+            next_req: AtomicU32::new(1),
+            elevator: Mutex::new(None),
             down: AtomicBool::new(false),
             waker,
             sink,
@@ -292,7 +314,6 @@ impl ServiceBackend {
 
         let writing = Arc::clone(&inner);
         thread::Builder::new().name("swapdesk-ui-pipe-write".into()).spawn(move || {
-            let next_req = AtomicU32::new(1);
             while let Ok(item) = rx.recv() {
                 match item {
                     Item::Command(ticket, command) => match routed(&command, &tokens) {
@@ -311,8 +332,9 @@ impl ServiceBackend {
                             writing.reply(ticket, Ok(Reply::Done));
                         }
                         Route::Invalid => writing.reply(ticket, Err(ApiError::new(ApiCode::Invalid))),
+                        Route::Elevate(action) => elevation::spawn(&writing, ticket, action),
                         Route::Op(op) => {
-                            let req = next_req.fetch_add(1, Ordering::Relaxed);
+                            let req = writing.next_req.fetch_add(1, Ordering::Relaxed);
                             {
                                 let mut p = lock(&writing.pending);
                                 if writing.is_down() {
@@ -328,6 +350,12 @@ impl ServiceBackend {
                             }
                         }
                     },
+                    Item::Request(req, op) => {
+                        if !writing.is_down() && writer.write_message(&Message::UiRequest { req, op }).is_err() {
+                            writing.fail_all();
+                            break;
+                        }
+                    }
                     Item::Viewer(msg) => {
                         if !writing.is_down() && writer.write_message(&msg).is_err() {
                             writing.fail_all();
@@ -356,6 +384,12 @@ impl ServiceBackend {
         if spawned.is_ok() {
             *lock(&self.inner.clip) = Some(ctx);
         }
+    }
+
+    /// Gives the backend what runs `Command::Elevate`: the platform's way to ask for an administrator. Without one
+    /// every `Elevate` ends as `ElevationResult { Err(Internal) }` and no ticket is asked for.
+    pub fn set_elevator(&self, elevator: Arc<dyn Elevator>) {
+        *lock(&self.inner.elevator) = Some(elevator);
     }
 
     /// The Windows session id the service reported in `HelloAck`.
@@ -401,6 +435,7 @@ impl Drop for ServiceBackend {
         *lock(&self.inner.out) = None;
         // Ends the disk thread, which holds a way to write to the pipe.
         lock(&self.inner.fs).take();
+        lock(&self.inner.elevator).take();
     }
 }
 

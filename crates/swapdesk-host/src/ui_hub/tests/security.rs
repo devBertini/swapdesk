@@ -6,7 +6,7 @@ use super::*;
 
 /// A UI of another session than the console's (session 1 in these tests): `admin` is the elevation of its token.
 fn background(machine: &Machine, admin: bool) -> Client {
-    machine.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin })
+    machine.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin, can_elevate: admin })
 }
 
 // ---------- 1 and 2: the operations that change who may reach this machine ----------

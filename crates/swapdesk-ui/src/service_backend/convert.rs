@@ -17,6 +17,8 @@ use crate::strings::MsgKey;
 pub enum ConvertError {
     /// `Msg.key` is past the last [`MsgKey`].
     UnknownMsgKey(u16),
+    /// A reply body only the elevation worker reads (ops 35, 36, 38) came to the general reply path.
+    ElevationReply,
 }
 
 type CResult<T> = Result<T, ConvertError>;
@@ -366,9 +368,10 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
     Ok(match body {
         w::ReplyBody::Done => a::Reply::Done,
         // The backend's own elevation worker reads these bodies; none of them is a reply of the interface.
+        // The elevation worker reads these through its own reply table (`elevation.rs`); C6 has no reply for them.
         w::ReplyBody::ElevationTicket { .. }
         | w::ReplyBody::ElevationAction { .. }
-        | w::ReplyBody::ElevationOutcome(_) => a::Reply::Done,
+        | w::ReplyBody::ElevationOutcome(_) => return Err(ConvertError::ElevationReply),
         w::ReplyBody::ThisDevice(v) => a::Reply::ThisDevice(this_device_from_wire(v)),
         w::ReplyBody::Network(v) => a::Reply::Network(network_from_wire(v)),
         w::ReplyBody::Devices(v) => a::Reply::Devices(devices_from_wire(v)),
@@ -503,12 +506,14 @@ pub enum Route {
     Op(w::UiOp),
     /// UI-local (`SetScale`, `SetKeyboardMode`, `SetGrab`): answered `Done` at once, the viewer pipeline applies it.
     LocalDone,
-    /// No stage-18 op: answered `Internal` at once.
+    /// No op: answered `Internal` at once.
     Unsupported,
     /// Written to the pipe as these messages (terminal input, cut into chunks), answered `Done` at once.
     Messages(Vec<w::Message>),
     /// The command's arguments cannot be sent (a picked file with no name): answered `Invalid` at once.
     Invalid,
+    /// `Elevate`: a worker thread asks for a ticket, runs the platform's elevator, ends the ticket and reports.
+    Elevate(a::ElevatedAction),
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -576,8 +581,8 @@ pub fn route(c: &a::Command) -> Route {
         C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } | C::SetReleaseKey { .. } => {
             return Route::LocalDone;
         }
-        C::Elevate { .. }
-        | C::CancelSwap { .. }
+        C::Elevate { action } => return Route::Elevate(action.clone()),
+        C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }
         | C::FilesGet { .. }

@@ -12,6 +12,7 @@
 pub mod a11y;
 pub mod api;
 pub mod debounce;
+pub mod elevated_client;
 pub mod format;
 pub mod home;
 pub mod inflight;

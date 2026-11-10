@@ -480,6 +480,13 @@ strings! {
     AuditControlledFromHere => "Controlado a partir deste computador", "Controlled from this computer";
     RemovedDevice => "Dispositivo removido", "Removed device";
     RemovedDeviceInLine => "dispositivo removido", "removed device";
+
+    // Elevation step and window. Appended last: a key travels as its index, so a new key in the middle would shift
+    // the activity texts of a service built before it.
+    ElevNotAdmin => "Esta conta não é administradora deste computador. Entre com uma conta de administrador para fazer esta mudança.", "This account is not an administrator of this computer. Sign in with an administrator account to make this change.";
+    ElevTimedOut => "O tempo para confirmar acabou.", "The time to confirm ran out.";
+    ElevConfirmBody => "Confirme como administrador para aplicar esta mudança.", "Confirm as an administrator to apply this change.";
+    ElevConfirm => "Confirmar", "Confirm";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

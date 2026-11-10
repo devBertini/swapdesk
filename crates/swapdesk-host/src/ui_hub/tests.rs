@@ -33,6 +33,7 @@ use crate::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use crate::testpipe::{PipeWriter, duplex_blocking};
 
 mod clip_actions;
+mod elevation;
 mod extras;
 mod files;
 mod presence;
@@ -81,7 +82,9 @@ fn user(sid: &str) -> UserRef {
 }
 
 fn info(admin: bool) -> ConnInfo {
-    ConnInfo { session_id: 1, user: user("S-1-5-21-1"), admin }
+    // An elevated token belongs to an administrator account; a plain one is a standard account here (the
+    // elevation tests build the filtered administrator token themselves).
+    ConnInfo { session_id: 1, user: user("S-1-5-21-1"), admin, can_elevate: admin }
 }
 
 /// One machine: a core, its hub and the stores a test looks into.
@@ -853,7 +856,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert_eq!(incoming.preset, ALL.bits(), "the stored grants are the preset");
     assert!(incoming.timeout_s > 0 && incoming.timeout_s <= 20);
     // A reserved bit is invalid whatever the decision; a UI that is not the console's may not answer.
-    let mut stranger = host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false });
+    let mut stranger =
+        host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false, can_elevate: false });
     assert_eq!(
         stranger
             .call(UiOp::AnswerIncoming {
