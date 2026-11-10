@@ -4,6 +4,7 @@
 //! ([`Output`]), so both systems show the same layout, spacing, type and colours. No OS API lives here.
 
 mod font;
+pub mod input;
 mod painter;
 mod screens_files;
 mod screens_main;

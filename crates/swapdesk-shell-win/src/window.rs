@@ -584,37 +584,19 @@ impl Window {
 
     fn hit_test(&self, x: i32, y: i32) -> Option<ControlId> {
         let s = self.scale();
-        let (dx, dy) = (x as f32 / s, y as f32 / s);
-        self.widgets.borrow().iter().rev().find(|w| w.rect.contains(dx, dy)).map(|w| w.id)
+        swapdesk_paint::input::hit_test(&self.widgets.borrow(), x as f32 / s, y as f32 / s)
     }
 
     /// The focusable controls that were drawn, in Tab order.
     fn tab_order(&self) -> Vec<ControlId> {
-        let drawn = self.widgets.borrow();
-        self.shared
-            .state
-            .borrow()
-            .controls(self.kind)
-            .into_iter()
-            .filter(|c| c.id.focusable() && !c.disabled && drawn.iter().any(|w| w.id == c.id))
-            .map(|c| c.id)
-            .collect()
+        swapdesk_paint::input::tab_order(&self.shared.state.borrow(), self.kind, &self.widgets.borrow())
     }
 
     fn move_focus(&self, backwards: bool) {
-        let order = self.tab_order();
-        if order.is_empty() {
-            return;
+        let current = self.ix.borrow().focus;
+        if let Some(next) = swapdesk_paint::input::next_focus(&self.tab_order(), current, backwards) {
+            self.focus_control(next, true);
         }
-        let current = self.ix.borrow().focus.and_then(|f| order.iter().position(|&i| i == f));
-        let n = order.len();
-        let next = match (current, backwards) {
-            (None, false) => 0,
-            (None, true) => n - 1,
-            (Some(i), false) => (i + 1) % n,
-            (Some(i), true) => (i + n - 1) % n,
-        };
-        self.focus_control(order[next], true);
     }
 
     pub fn focus_control(&self, id: ControlId, visible: bool) {

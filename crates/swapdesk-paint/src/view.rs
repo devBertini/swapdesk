@@ -71,6 +71,9 @@ pub struct Frame<'a> {
     pub out: Output,
     /// Offscreen captures draw input values themselves; a live window shows the native inputs.
     pub offscreen: bool,
+    /// The shell shows the remote picture in a view under a transparent canvas (macOS): the viewer screen then leaves
+    /// the video rectangle unpainted. `false` where the picture is composed over the frame (Windows) and offscreen.
+    pub video_under: bool,
     pub w: f32,
     pub h: f32,
 }
@@ -83,7 +86,17 @@ impl<'a> Frame<'a> {
         size: (f32, f32),
         offscreen: bool,
     ) -> Frame<'a> {
-        Frame { p, pal: palette(st.dark()), st, ix, out: Output::default(), offscreen, w: size.0, h: size.1 }
+        Frame {
+            p,
+            pal: palette(st.dark()),
+            st,
+            ix,
+            out: Output::default(),
+            offscreen,
+            video_under: false,
+            w: size.0,
+            h: size.1,
+        }
     }
 
     pub fn t(&self, key: swapdesk_ui::MsgKey) -> String {

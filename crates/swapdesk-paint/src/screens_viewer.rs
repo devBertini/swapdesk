@@ -13,8 +13,17 @@ use crate::view::{Frame, Kind, icons};
 /// The viewer window.
 pub fn paint_viewer(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
-    p.clear(pal.canvas);
-    let Some(session) = f.st.viewer_session().cloned() else { return };
+    // With the picture in a view under the canvas, nothing may cover its rectangle: no clear, and the column is
+    // filled around it below.
+    if !f.video_under {
+        p.clear(pal.canvas);
+    }
+    let Some(session) = f.st.viewer_session().cloned() else {
+        if f.video_under {
+            p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), pal.canvas);
+        }
+        return;
+    };
     let peer = f.st.device_by_id(&session.device_id).map(|d| d.name.clone()).unwrap_or_default();
     let bw = p.hairline();
 
@@ -45,7 +54,6 @@ pub fn paint_viewer(f: &mut Frame) {
     let body = Rect::new(0.0, bar_h, f.w, f.h - bar_h);
     let drawer = f.st.drawer();
     let video_col = Rect::new(0.0, body.y, if drawer.is_some() { body.w - layout::DRAWER_W } else { body.w }, body.h);
-    p.fill_rect(video_col, pal.remote);
     let pad = if fullscreen {
         0.0
     } else if drawer.is_some() {
@@ -54,12 +62,18 @@ pub fn paint_viewer(f: &mut Frame) {
         48.0
     };
     let video = fit_16_10(video_col.inset(pad));
-    p.fill_rrect(video, 4.0, fixed::REMOTE_SCREEN);
+    if f.video_under {
+        for strip in around(video_col, video) {
+            p.fill_rect(strip, pal.remote);
+        }
+    } else {
+        p.fill_rect(video_col, pal.remote);
+        p.fill_rrect(video, 4.0, fixed::REMOTE_SCREEN);
+        let ph = p.label_in(&f.t(MsgKey::VideoPlaceholder), text::BODY, video.w - 40.0, Align::Center);
+        let (_, vy) = video.center();
+        p.draw(&ph, video.x + 20.0, vy - ph.h / 2.0, fixed::CARD_DARK_SOFT);
+    }
     f.out.video = Some(video);
-    let ph = p.label_in(&f.t(MsgKey::VideoPlaceholder), text::BODY, video.w - 40.0, Align::Center);
-    let (vx, vy) = video.center();
-    p.draw(&ph, video.x + 20.0, vy - ph.h / 2.0, fixed::CARD_DARK_SOFT);
-    let _ = vx;
 
     if let SessionState::Reconnecting { attempt } = session.state {
         reconnecting_card(f, video_col, &peer, attempt);
@@ -79,6 +93,19 @@ pub fn paint_viewer(f: &mut Frame) {
         f.out.widgets.clear();
         swap_confirm(f, &kind);
     }
+}
+
+/// The parts of `outer` not covered by `hole` (which lies inside it): above, below, left and right, without overlap.
+/// Empty strips are left out.
+fn around(outer: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
+    [
+        Rect::new(outer.x, outer.y, outer.w, hole.y - outer.y),
+        Rect::new(outer.x, hole.bottom(), outer.w, outer.bottom() - hole.bottom()),
+        Rect::new(outer.x, hole.y, hole.x - outer.x, hole.h),
+        Rect::new(hole.right(), hole.y, outer.right() - hole.right(), hole.h),
+    ]
+    .into_iter()
+    .filter(|r| r.w > 0.0 && r.h > 0.0)
 }
 
 fn fit_16_10(area: Rect) -> Rect {
