@@ -211,6 +211,7 @@ fn a_paired_device_typed_by_address_or_seen_by_dns_sd_is_one_entry_on_the_networ
             addrs: vec![addr],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         }])
     };
     announce(Ipv4Addr::new(192, 168, 1, 3));

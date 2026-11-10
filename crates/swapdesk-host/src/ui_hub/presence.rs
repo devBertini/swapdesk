@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use swapdesk_lan::discovery::{Config, Discovery, DiscoveryError, DiscoveryEvent};
+use swapdesk_lan::discovery::{Config, Discovery, DiscoveryError, DiscoveryEvent, Peer};
 use swapdesk_lan::txt::Txt;
 use swapdesk_platform::NetInterfaces;
 use swapdesk_proto::Os;
@@ -29,6 +29,8 @@ pub struct PresencePeer {
     /// The peer's pairing endpoint port. The record does not carry it: discovery assumes the next port of the
     /// session endpoint (PROTOCOL.md 1: 47820 and 47821).
     pub pair_port: u16,
+    /// The protocol minor of its record (`minor` TXT key, GRANTS-SYNC.md 4.5); 0 when absent: a 1.0 peer.
+    pub proto_minor: u16,
 }
 
 /// Presence of the other devices and the announcement of this one.
@@ -89,15 +91,7 @@ impl DnsSdPresence {
                             let mut map = lock(&peers);
                             match event {
                                 DiscoveryEvent::Found(p) => {
-                                    let peer = PresencePeer {
-                                        device_id: p.txt.fingerprint,
-                                        name: p.txt.name.clone(),
-                                        os: p.txt.os,
-                                        pairing_open: p.txt.pairing,
-                                        addrs: p.links.iter().map(|l| l.remote).collect(),
-                                        session_port: p.port,
-                                        pair_port: p.port.wrapping_add(1),
-                                    };
+                                    let peer = presence_peer(&p);
                                     found(&mut map, peer)
                                 }
                                 DiscoveryEvent::Lost { fingerprint } => map.remove(&fingerprint).is_some(),
@@ -111,6 +105,20 @@ impl DnsSdPresence {
                 .map_err(|e| DiscoveryError::Mdns(format!("thread: {e}")))?
         };
         Ok(Self { discovery, peers, listener, stop, worker: Some(worker) })
+    }
+}
+
+/// What the device list keeps of a peer discovery found.
+fn presence_peer(p: &Peer) -> PresencePeer {
+    PresencePeer {
+        device_id: p.txt.fingerprint,
+        name: p.txt.name.clone(),
+        os: p.txt.os,
+        pairing_open: p.txt.pairing,
+        addrs: p.links.iter().map(|l| l.remote).collect(),
+        session_port: p.port,
+        pair_port: p.port.wrapping_add(1),
+        proto_minor: p.minor,
     }
 }
 
@@ -211,6 +219,7 @@ mod found_tests {
             addrs: vec![Ipv4Addr::from(ip)],
             session_port: port,
             pair_port: port + 1,
+            proto_minor: 0,
         }
     }
 
@@ -228,5 +237,33 @@ mod found_tests {
         // A second instance on another port of the same machine is another endpoint: both stay.
         assert!(found(&mut map, peer(3, [192, 168, 1, 3], 50000)));
         assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn a_discovered_peers_minor_reaches_presence_peer_proto_minor() {
+        let found_peer = |minor| Peer {
+            txt: Txt { name: "m".into(), os: swapdesk_proto::Os::MacOs, fingerprint: [4; 16], pairing: false },
+            port: 47820,
+            minor,
+            links: Vec::new(),
+        };
+        assert_eq!(presence_peer(&found_peer(0)).proto_minor, 0);
+        assert_eq!(presence_peer(&found_peer(1)).proto_minor, 1);
+        // A record that gains `minor` is a change of the set.
+        let mut map = HashMap::new();
+        assert!(found(&mut map, presence_peer(&found_peer(0))));
+        assert!(found(&mut map, presence_peer(&found_peer(1))));
+        assert!(!found(&mut map, presence_peer(&found_peer(1))));
+    }
+
+    #[test]
+    fn a_scripted_peers_minor_is_what_the_fake_presence_reports() {
+        let fake = FakePresence::new();
+        fake.set(vec![
+            PresencePeer { proto_minor: 1, ..peer(1, [192, 168, 1, 3], 47820) },
+            peer(2, [192, 168, 1, 4], 47820),
+        ]);
+        let minors: Vec<u16> = fake.peers().iter().map(|p| p.proto_minor).collect();
+        assert_eq!(minors, [1, 0]);
     }
 }

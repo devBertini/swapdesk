@@ -216,6 +216,7 @@ impl Machine {
             addrs: vec![*addr.ip()],
             session_port: addr.port(),
             pair_port: other.hub.pair_local_addrs().first().map_or(0, SocketAddr::port),
+            proto_minor: 0,
         }]);
     }
 
@@ -495,6 +496,7 @@ fn this_device_network_devices_and_the_manual_address() {
             addrs: vec![Ipv4Addr::new(192, 168, 0, 20)],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         },
         PresencePeer {
             device_id: stranger_id,
@@ -504,6 +506,7 @@ fn this_device_network_devices_and_the_manual_address() {
             addrs: vec![Ipv4Addr::new(192, 168, 0, 21)],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         },
     ]);
     // The presence listener pushed the new list.

@@ -88,6 +88,7 @@ impl Pair {
                 addrs: vec![Ipv4Addr::LOCALHOST],
                 session_port: r.port,
                 pair_port: 0,
+                proto_minor: 0,
             }]),
             None => viewer.sees(&host, false),
         }

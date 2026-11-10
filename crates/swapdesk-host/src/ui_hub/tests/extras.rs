@@ -406,6 +406,7 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
         addrs: vec![Ipv4Addr::LOCALHOST],
         session_port: relay.port,
         pair_port: 0,
+        proto_minor: 0,
     }]);
     let s = d.open();
     d.viewer_ui.take("video before the cut", |m| {
@@ -466,6 +467,7 @@ fn disconnect_while_reconnecting_ends_the_session_and_stops_the_attempts() {
         addrs: vec![Ipv4Addr::LOCALHOST],
         session_port: relay.port,
         pair_port: 0,
+        proto_minor: 0,
     }]);
     let s = d.open();
     relay.cut(true);

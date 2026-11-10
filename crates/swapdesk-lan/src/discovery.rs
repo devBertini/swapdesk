@@ -27,7 +27,7 @@ use swapdesk_platform::{NetInterface, NetInterfaces, PlatformError};
 use swapdesk_proto::SESSION_PORT;
 
 use crate::guard::{ApprovedAddr, PeerLink, approved_addrs, check_discovered};
-use crate::txt::{FINGERPRINT_BYTES, Txt, TxtError, fingerprint_hex};
+use crate::txt::{FINGERPRINT_BYTES, Txt, TxtError, fingerprint_hex, minor_entry, read_minor};
 
 /// The DNS-SD service type (SPEC F-FIND-01).
 pub const SERVICE_TYPE: &str = "_swapdesk._udp.local.";
@@ -46,11 +46,13 @@ pub struct Config {
     pub mdns_port: u16,
     /// The session endpoint port announced in the SRV record.
     pub service_port: u16,
+    /// The protocol minor put in each own record as the `minor` key (none for 0).
+    pub minor: u16,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { mdns_port: MDNS_PORT, service_port: SESSION_PORT }
+        Self { mdns_port: MDNS_PORT, service_port: SESSION_PORT, minor: swapdesk_proto::PROTO_MINOR }
     }
 }
 
@@ -60,6 +62,8 @@ pub struct Peer {
     pub txt: Txt,
     /// The session endpoint port from the SRV record.
     pub port: u16,
+    /// The protocol minor of its record (`minor` key; 0 when absent or bad: a 1.0 peer).
+    pub minor: u16,
     /// The addresses that passed the guard, each with the approved interface that reaches it.
     pub links: Vec<PeerLink>,
 }
@@ -200,6 +204,13 @@ fn host_name(fp: &[u8; FINGERPRINT_BYTES]) -> String {
     format!("swapdesk-{}.local.", &fingerprint_hex(fp)[..12])
 }
 
+/// The properties of an own record: the 1.0 keys, then `minor` when it is 1 or more.
+fn own_properties(own: &Txt, minor: u16) -> Result<Vec<(String, String)>, DiscoveryError> {
+    let mut props = own.encode().map_err(DiscoveryError::Txt)?;
+    props.extend(minor_entry(minor));
+    Ok(props)
+}
+
 impl Discovery {
     /// Starts the daemon on the approved interfaces, announces `own` and starts browsing.
     pub fn start(nets: Arc<dyn NetInterfaces>, own: Txt, config: Config) -> Result<Self, DiscoveryError> {
@@ -244,7 +255,7 @@ impl Discovery {
         st.own.pairing = on;
         let (own, approved) = (st.own.clone(), st.applied.clone());
         match st.engine.as_mut() {
-            Some(engine) => engine.register(&own, &approved, self.config.service_port),
+            Some(engine) => engine.register(&own, &approved, self.config.service_port, self.config.minor),
             None => Ok(()),
         }
     }
@@ -334,7 +345,7 @@ impl Engine {
             }
         };
         let mut engine = Self { daemon, registered: None, worker: Some(worker), last };
-        if let Err(e) = engine.register(own, approved, config.service_port) {
+        if let Err(e) = engine.register(own, approved, config.service_port, config.minor) {
             engine.stop(false, Duration::from_secs(1));
             return Err(e);
         }
@@ -354,14 +365,14 @@ impl Engine {
         Ok(())
     }
 
-    fn register(&mut self, own: &Txt, approved: &[ApprovedAddr], port: u16) -> Result<(), DiscoveryError> {
+    fn register(&mut self, own: &Txt, approved: &[ApprovedAddr], port: u16, minor: u16) -> Result<(), DiscoveryError> {
         if approved.is_empty() {
             if let Some(full) = self.registered.take() {
                 self.daemon.unregister(&full).map_err(mdns)?;
             }
             return Ok(());
         }
-        let props = own.encode().map_err(DiscoveryError::Txt)?;
+        let props = own_properties(own, minor)?;
         let addrs: Vec<IpAddr> = approved.iter().map(|a| IpAddr::V4(a.addr)).collect();
         let mut info = ServiceInfo::new(
             SERVICE_TYPE,
@@ -444,6 +455,7 @@ fn run_worker(
                     drop_known(&mut known, &rs.fullname, events);
                     continue;
                 };
+                let minor = read_minor(&entries);
                 if txt.fingerprint == own_fp {
                     continue;
                 }
@@ -469,7 +481,7 @@ fn run_worker(
                     continue;
                 }
                 known.insert(rs.fullname.clone(), txt.fingerprint);
-                events.push(DiscoveryEvent::Found(Peer { txt, port: rs.port, links }));
+                events.push(DiscoveryEvent::Found(Peer { txt, port: rs.port, minor, links }));
             }
             ServiceEvent::ServiceRemoved(_, fullname) => drop_known(&mut known, &fullname, events),
             _ => {}
@@ -500,10 +512,19 @@ pub fn addrs_of(list: &[ApprovedAddr]) -> Vec<Ipv4Addr> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn own_records_carry_minor_from_1_and_not_before() {
+        let own = Txt { name: "n".into(), os: swapdesk_proto::Os::Windows, fingerprint: [1; 16], pairing: false };
+        let keys = |m| own_properties(&own, m).unwrap().into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys(0), ["name", "os", "fp"]);
+        assert_eq!(keys(1), ["name", "os", "fp", "minor"]);
+    }
+
     fn peer(fp: u8, port: u16) -> DiscoveryEvent {
         DiscoveryEvent::Found(Peer {
             txt: Txt { name: format!("p{fp}"), os: swapdesk_proto::Os::Windows, fingerprint: [fp; 16], pairing: false },
             port,
+            minor: 0,
             links: Vec::new(),
         })
     }

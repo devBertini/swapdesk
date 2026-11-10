@@ -94,7 +94,7 @@ fn found(ev: &DiscoveryEvent, fp: u8) -> Option<&Peer> {
 }
 
 fn config(mdns_port: u16, service_port: u16) -> Config {
-    Config { mdns_port, service_port }
+    Config { mdns_port, service_port, ..Config::default() }
 }
 
 #[test]
