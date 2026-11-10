@@ -47,7 +47,7 @@ Requirements: macOS 14 or later on Apple silicon.
 2. The app is signed ad hoc, not with an Apple Developer ID (decision D22), so macOS refuses the first open. Open it once, then go to System Settings > Privacy & Security, find the line saying Swapdesk was blocked and click **Open Anyway**.
 3. Allow what it asks for: **Local Network** (to find and reach the other computer) and, for this Mac to be controlled, **Screen & System Audio Recording** and **Accessibility**. To control another computer from the Mac, also **Input Monitoring**.
 
-Swapdesk adds itself to the items that open at login and stays in the menu bar when its window is closed, so the Mac can be reached while you are logged in. macOS ties the permissions to the exact build of an ad hoc signed app: after an update, remove Swapdesk from each list in Privacy & Security and allow it again.
+On its first start Swapdesk adds itself to the items that open at login and stays in the menu bar when its window is closed, so the Mac can be reached while you are logged in. The switch "Open when the computer starts" in Settings takes it out of the login items and puts it back. macOS ties the permissions to the exact build of an ad hoc signed app: after an update, remove Swapdesk from each list in Privacy & Security and allow it again.
 
 To uninstall on macOS: choose "Quit Swapdesk" in its menu bar item, remove Swapdesk from System Settings > General > Login Items & Extensions and from each list in Privacy & Security, move the app from Applications to the Trash, and delete `~/Library/Application Support/Swapdesk` (the device key, the paired devices and the trace log).
 
