@@ -121,7 +121,7 @@ flowchart LR
 - **Input.** The viewer's interface grabs keyboard and pointer (physical keys as HID usages, or Unicode text for differing layouts) and sends records on the input stream. The host service checks the session's grants, then forwards them to the helper that injects them: the user helper for prompted sessions, the system helper for `UNATTENDED` ones. View-only sessions drop every input event on both sides.
 - **Local relay.** The host service relays helper messages to the network and the viewer service relays network streams to the interface, both over the C2.4 message set. The OS-free logic is in `swapdesk-host`.
 
-Performance budgets (B1 to B8, such as median capture-to-present latency of at most 40 ms at 1080p60 on loopback with a synthetic source) are in [SPEC.md](SPEC.md). They are targets, and their proof is tracked in the plan and in [FLUXOS.md](FLUXOS.md).
+Performance budgets (B1 to B10, such as median capture-to-present latency of at most 40 ms at 1080p60 on loopback with a synthetic source) are in [SPEC.md](SPEC.md). They are targets; the numbers measured against them, and how each is taken, are in [PERFORMANCE.md](PERFORMANCE.md), and the proof of the flows is in [FLUXOS.md](FLUXOS.md).
 
 ## Crate map
 

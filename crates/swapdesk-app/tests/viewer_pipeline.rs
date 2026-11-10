@@ -112,6 +112,7 @@ fn rig() -> Rig {
     let pipeline = ViewerPipeline::new(ViewerOptions {
         on_present: Some(Arc::new(move |e| seen.lock().unwrap().push(*e))),
         audio: false,
+        probe: None,
     })
     .expect("pipeline");
     let recorder = Arc::new(Recorder::default());

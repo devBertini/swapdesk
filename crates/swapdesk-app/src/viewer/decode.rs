@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use swapdesk_codec_win::{DecoderOptions, DecoderOutput, MfH264Decoder};
 use swapdesk_platform::{ErrorKind, NativeSurface, Rect, Renderer, ScaleMode, VideoDecoder};
-use swapdesk_render_win::{RendererOptions, WinRenderer};
+use swapdesk_render_win::{Probe, RendererOptions, WinRenderer};
 
 use super::ViewerOut;
 use super::cursor::CursorTracker;
@@ -39,9 +39,26 @@ pub struct PresentEvent {
     pub decode_us: u32,
     /// Arrival in the viewer to the end of `present`.
     pub lag_us: u32,
+    /// The machine's monotonic clock right after `Present` returned.
+    pub presented_at_us: u64,
+    /// Inside `present`: the wait for the swap chain's frame-latency object, recording the blit, the `Present` call.
+    pub wait_us: u32,
+    pub blt_us: u32,
+    pub present_us: u32,
 }
 
 pub type PresentObserver = Arc<dyn Fn(&PresentEvent) + Send + Sync>;
+pub type ProbeObserver = Arc<dyn Fn(&PresentEvent, &Probe) + Send + Sync>;
+
+/// Measurements only: a rectangle of the swap chain (in its pixels) copied from every picture just before it is
+/// presented, handed to `on_probe` on the decode thread once the GPU has finished the copy. The wait for that copy
+/// comes after the picture's present time was taken; it delays the next frame's decode, which a measurement accepts
+/// and a session never pays (the default is no tap).
+#[derive(Clone)]
+pub struct ProbeTap {
+    pub rect: (u32, u32, u32, u32),
+    pub on_probe: ProbeObserver,
+}
 
 /// What the decode thread shares with the rest of the pipeline.
 #[derive(Default)]
@@ -78,6 +95,7 @@ pub struct Worker {
     out: Arc<Mutex<Option<Arc<dyn ViewerOut>>>>,
     shared: Arc<Shared>,
     observer: Option<PresentObserver>,
+    probe: Option<ProbeTap>,
     renderer: Option<WinRenderer>,
     decoder: Option<MfH264Decoder>,
     surface: Option<(NativeSurface, Rect)>,
@@ -96,6 +114,7 @@ pub fn spawn(
     out: Arc<Mutex<Option<Arc<dyn ViewerOut>>>>,
     shared: Arc<Shared>,
     observer: Option<PresentObserver>,
+    probe: Option<ProbeTap>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("swapdesk-viewer-decode".into()).spawn(move || {
         let mut w = Worker {
@@ -103,6 +122,7 @@ pub fn spawn(
             out,
             shared,
             observer,
+            probe,
             renderer: None,
             decoder: None,
             surface: None,
@@ -218,6 +238,9 @@ impl Worker {
             self.shared.error("attach", e);
             return;
         }
+        if let Some(tap) = &self.probe {
+            renderer.set_probe(Some(tap.rect));
+        }
         self.decoder = Some(MfH264Decoder::new(DecoderOptions {
             output: DecoderOutput::Gpu,
             device: renderer.device(),
@@ -287,8 +310,28 @@ impl Worker {
         let decode_us = decoder.last_decode_us();
         let (width, height, frame_id, display) = (picture.width, picture.height, picture.frame_id, picture.display.0);
         match renderer.present(picture, self.scale) {
-            Ok(_) => {
+            Ok(stats) => {
                 let lag_us = u32::try_from(arrived.elapsed().as_micros()).unwrap_or(u32::MAX);
+                let timing = renderer.timing();
+                let event = PresentEvent {
+                    frame_id,
+                    display,
+                    width,
+                    height,
+                    decode_us,
+                    lag_us,
+                    presented_at_us: stats.presented_at.0,
+                    wait_us: timing.wait_us,
+                    blt_us: timing.blt_us,
+                    present_us: timing.present_us,
+                };
+                if let Some(tap) = &self.probe {
+                    match renderer.take_probe() {
+                        Ok(Some(pixels)) => (tap.on_probe)(&event, &pixels),
+                        Ok(None) => {}
+                        Err(e) => self.shared.error("probe", e),
+                    }
+                }
                 self.feedback.on_presented(frame_id, decode_us, lag_us);
                 self.shared.presented.fetch_add(1, Ordering::Relaxed);
                 self.shared.last_frame_id.store(u64::from(frame_id), Ordering::Relaxed);
@@ -301,7 +344,7 @@ impl Worker {
                     self.apply_cursor(update);
                 }
                 if let Some(obs) = &self.observer {
-                    obs(&PresentEvent { frame_id, display, width, height, decode_us, lag_us });
+                    obs(&event);
                 }
             }
             Err(e) => {

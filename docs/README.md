@@ -10,6 +10,7 @@ Project overview and status: the [README](../README.md). The Portuguese (pt-BR) 
 | [THREAT-MODEL.md](THREAT-MODEL.md) | Assets, attackers, mitigations as designed, what is out of scope and what is not yet verified. |
 | [SPEC.md](SPEC.md) | Version 1 flows and criteria, budgets, threats table, risks, what is deferred. |
 | [PROTOCOL.md](PROTOCOL.md) | The wire protocol (QUIC, ALPN, streams, pairing, message formats). |
+| [PERFORMANCE.md](PERFORMANCE.md) | The budgets as measured on the development PC: latency, frame rate, audio delay, CPU and memory through the whole chain, and how each number is taken. |
 | [FAQ.md](FAQ.md) | Questions people ask, starting with "the other computer does not show up". |
 | [../SECURITY.md](../SECURITY.md) | How to report a vulnerability. |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | How to build, test and contribute. |

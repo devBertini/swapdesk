@@ -768,7 +768,7 @@ impl UiState {
 
 ## Crates
 
-All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` and `*-mac` crates may use `unsafe` (workspace lint `unsafe_code = "forbid"`, opted out per crate); the binaries hold no logic that tests need (flows cite library tests: a binary target's id is not scanned).
+All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` and `*-mac` crates and the development tool `swapdesk-measure` may use `unsafe` (workspace lint `unsafe_code = "forbid"`, opted out per crate); the binaries hold no logic that tests need (flows cite library tests: a binary target's id is not scanned).
 
 | Crate | Kind | Holds / implements | `unsafe` | Created in stage |
 |---|---|---|---|---|
@@ -803,6 +803,7 @@ All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` a
 | `swapdesk-term` | lib | terminal relay (PTY bytes ↔ 0x10 streams; the spawner is C3 `PtySpawner`, used in the user helper / Aqua agent and in the service / daemon for the admin terminal), quick-action relay, the D13 consent step | no | 20 |
 | `swapdesk-files` | lib | offers, resume, SHA-256 check, folder listing | no | 21 |
 | `swapdesk-extras` | lib | clipboard sync, chat, Wake-on-LAN sender, reconnect policy | no | 22 |
+| `swapdesk-measure` | bin (dev) | the measurement of the session budgets (SPEC B1 to B3, B7 to B10) on the C7 sources, never shipped: `session` runs two real `swapdesk-service --console --dev-loopback` processes and is both users and the viewer (`ViewerPipeline` in a window, the barcode read from every presented picture, the marker onsets, the process counters); the host's helper is this executable under the helper's name, `run_helper` with the synthetic screen as textures and the hardware encoder; `path` counts allocations per frame on the frame path in one process; `idle` reads a program's idle memory and CPU. `scripts/measure.py` runs it and writes `docs/PERFORMANCE.md` | yes | 1.1 M2 |
 | `swapdesk-core-mac` | lib | `mac_service_config`: assembles `ServiceConfig` on macOS (identity, trust, settings, net-mac, secret-mac), as `swapdesk-service/src/app.rs` does on Windows; the app embeds `ServiceCore` with it until the stage 24 daemon (D27) | no | 23 |
 | `swapdesk-capture-mac` | lib | `ScreenSource` and `AudioSource` (ScreenCaptureKit) | yes | 24 |
 | `swapdesk-codec-mac` | lib | `VideoEncoder`, `VideoDecoder` (VideoToolbox) | yes | 23 (decoder), 24 (encoder) |

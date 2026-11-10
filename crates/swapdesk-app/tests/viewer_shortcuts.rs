@@ -43,7 +43,8 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    let pipeline = ViewerPipeline::new(ViewerOptions { on_present: None, audio: false }).expect("pipeline");
+    let pipeline =
+        ViewerPipeline::new(ViewerOptions { on_present: None, audio: false, probe: None }).expect("pipeline");
     let recorder = Arc::new(Recorder::default());
     pipeline.set_out(recorder.clone());
     let waker = Arc::new(CountingWaker::default());
@@ -170,7 +171,8 @@ fn ime_text_is_sent_as_a_text_record_and_its_process_keys_are_dropped() {
 
 #[test]
 fn nothing_is_sent_without_control() {
-    let pipeline = ViewerPipeline::new(ViewerOptions { on_present: None, audio: false }).expect("pipeline");
+    let pipeline =
+        ViewerPipeline::new(ViewerOptions { on_present: None, audio: false, probe: None }).expect("pipeline");
     assert!(!pipeline.captures_keyboard());
     assert!(!pipeline.key(&text("a")));
     assert!(!pipeline.key(&key(0x7A, 0x57, false, true)));

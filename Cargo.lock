@@ -1118,6 +1118,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "swapdesk-measure"
+version = "1.0.0"
+dependencies = [
+ "swapdesk-app",
+ "swapdesk-audio",
+ "swapdesk-capture-win",
+ "swapdesk-codec-win",
+ "swapdesk-crossdrive",
+ "swapdesk-fakes",
+ "swapdesk-host",
+ "swapdesk-ipc",
+ "swapdesk-platform",
+ "swapdesk-proto",
+ "swapdesk-render-win",
+ "swapdesk-shell-win",
+ "swapdesk-sys-win",
+ "swapdesk-trust",
+ "swapdesk-ui",
+ "windows",
+]
+
+[[package]]
 name = "swapdesk-net-mac"
 version = "1.0.0"
 dependencies = [

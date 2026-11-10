@@ -56,7 +56,7 @@ use swapdesk_ui::{
 use crate::shared::out::input_loop;
 use audio::AudioPlayer;
 use decode::Shared;
-pub use decode::{PresentEvent, PresentObserver};
+pub use decode::{PresentEvent, PresentObserver, ProbeObserver, ProbeTap};
 use keys::{KeyConfig, WindowKeys, action_of};
 use mailbox::{Cmd, Frame, Mailbox};
 use pointer::PointerRouter;
@@ -68,11 +68,13 @@ pub struct ViewerOptions {
     pub on_present: Option<PresentObserver>,
     /// Start the audio thread (the real WASAPI sink). Tests turn it off.
     pub audio: bool,
+    /// Measurements only: pixels of every presented picture (see [`ProbeTap`]). `None` in the application.
+    pub probe: Option<ProbeTap>,
 }
 
 impl Default for ViewerOptions {
     fn default() -> Self {
-        Self { on_present: None, audio: true }
+        Self { on_present: None, audio: true, probe: None }
     }
 }
 
@@ -162,7 +164,13 @@ impl ViewerPipeline {
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = sync_channel(INPUT_QUEUE);
         let audio = options.audio.then(|| AudioPlayer::start(Arc::clone(&shared.audio_underruns)));
-        let decode = decode::spawn(Arc::clone(&mailbox), Arc::clone(&out), Arc::clone(&shared), options.on_present)?;
+        let decode = decode::spawn(
+            Arc::clone(&mailbox),
+            Arc::clone(&out),
+            Arc::clone(&shared),
+            options.on_present,
+            options.probe,
+        )?;
         let (o, s, st) = (Arc::clone(&out), Arc::clone(&input_session), Arc::clone(&stop));
         let input = std::thread::Builder::new()
             .name("swapdesk-viewer-input".into())

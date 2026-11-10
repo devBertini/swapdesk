@@ -480,6 +480,7 @@ fn loopback_swap_works_both_ways_each_under_one_second() {
         eventually(Duration::from_secs(5), "M1 to be granted on M2", || !lock(&m1.results).is_empty()).await;
         let (at, mode) = lock(&m1.results)[0];
         assert_eq!(mode, GrantMode::Swap, "a swap grants without a prompt");
+        eprintln!("B4: swap 1 (the viewer asks) in {:.1} ms", (at - t0).as_secs_f64() * 1000.0);
         assert!(at - t0 < Duration::from_secs(1), "B4: swap 1 took {:?}", at - t0);
         assert_eq!(first.ctx().wait_ended().await.code, ErrorCode::Swapped);
 
@@ -496,6 +497,7 @@ fn loopback_swap_works_both_ways_each_under_one_second() {
         eventually(Duration::from_secs(5), "M2 to be granted on M1", || !lock(&m2.results).is_empty()).await;
         let (at, mode) = lock(&m2.results)[0];
         assert_eq!(mode, GrantMode::Swap);
+        eprintln!("B4: swap 2 (the new viewer asks) in {:.1} ms", (at - t1).as_secs_f64() * 1000.0);
         assert!(at - t1 < Duration::from_secs(1), "B4: swap 2 took {:?}", at - t1);
         assert_eq!(second.ctx().wait_ended().await.code, ErrorCode::Swapped);
         let third = lock(&m2.viewing).take().expect("M2 holds the session again");
