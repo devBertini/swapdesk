@@ -9,7 +9,8 @@ viewer window takes the foreground and must keep it):
 
 Options: --skip-build (the binaries are already built from this tree), --only <name>[,<name>] (configurations by
 their short name; the document is then not rewritten), --strict (exit 1 when a judged budget is outside),
---logs <folder> (default target/measure).
+--logs <folder> (default target/measure), --when-idle (after the builds, wait until nobody has touched the keyboard
+or the mouse for 150 s before the first run: for a PC somebody is still using).
 
 What runs, in this order:
 
@@ -515,6 +516,35 @@ def document(mode, seconds, results, path, idle, b4, b5):
     return "\n".join(out), inside
 
 
+IDLE_SECONDS = 150
+
+
+def seconds_without_input():
+    """How long ago the keyboard or the mouse was last touched on this PC."""
+    import ctypes
+
+    class LastInput(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+    info = LastInput()
+    info.cbSize = ctypes.sizeof(info)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def wait_for_idle():
+    """Waits until nobody has touched this PC for IDLE_SECONDS: the viewer's window takes the foreground, so a run
+    must not start under somebody's hands. The builds are over by now, so nothing compiles while it waits."""
+    import time
+
+    started = time.time()
+    print(f"measure: waiting for {IDLE_SECONDS} s without keyboard or mouse", flush=True)
+    while seconds_without_input() < IDLE_SECONDS:
+        time.sleep(5)
+    print(f"measure: idle after {time.time() - started:.0f} s of waiting", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -524,6 +554,7 @@ def main():
     parser.add_argument("--only")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--logs", default=os.path.join(ROOT, "target", "measure"))
+    parser.add_argument("--when-idle", action="store_true")
     args = parser.parse_args()
 
     seconds, path_seconds = (600, 60) if args.long else (30, 10)
@@ -531,6 +562,8 @@ def main():
     os.makedirs(logs, exist_ok=True)
     if not args.skip_build:
         build(logs)
+    if args.when_idle:
+        wait_for_idle()
     wanted = set(args.only.split(",")) if args.only else None
     unknown = (wanted or set()) - {c[0] for c in CONFIGS}
     if unknown:
