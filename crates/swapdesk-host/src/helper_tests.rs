@@ -341,6 +341,43 @@ fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_str
     rig.finish().expect("clean end");
 }
 
+/// The helper that only injects input (the user's, in a prompted session) never starts a video, so nothing made it
+/// list the displays again: after the owner changed monitors its sink refused every pointer ("unknown display")
+/// while the keys still worked. A pointer for a display the sink does not know makes the helper list again, tell the
+/// service and the sink, and only then apply the pointer.
+#[test]
+fn a_pointer_for_a_display_that_appeared_after_the_start_is_applied_after_the_displays_are_listed_again() {
+    let moved = Arc::new(AtomicBool::new(false));
+    let mut rig = rig_moving(None, None, Some(Arc::clone(&moved)));
+    let ids = |m: &Message| match m {
+        Message::Displays(list) => Some(list.displays.iter().map(|d| d.id).collect::<Vec<_>>()),
+        _ => None,
+    };
+    assert_eq!(rig.wait(ids), [0], "the list of the start");
+
+    moved.store(true, Ordering::SeqCst);
+    let pointer = InputEvent::Pointer { display: MOVED_DISPLAY, x: 100, y: 200 };
+    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
+    assert_eq!(rig.wait(ids), [MOVED_DISPLAY], "the service learns the displays of now");
+    // A second pointer right after needs no new listing: the sink knows the display now.
+    let second = InputEvent::Pointer { display: MOVED_DISPLAY, x: 300, y: 400 };
+    rig.send(&Message::Input { events: Events(vec![second.clone()]) });
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+
+    let sink_ids = |r: &InputRecord| match r {
+        InputRecord::DisplaysChanged(list) => Some(list.iter().map(|d| d.id.0).collect::<Vec<_>>()),
+        _ => None,
+    };
+    let records = rig.input.records();
+    let lists: Vec<Vec<u16>> = records.iter().filter_map(|r| sink_ids(&r.what)).collect();
+    assert_eq!(lists, [vec![0], vec![MOVED_DISPLAY]], "the sink got the list of the start, then the new one, once");
+    let relisted = records.iter().position(|r| sink_ids(&r.what) == Some(vec![MOVED_DISPLAY])).expect("the new list");
+    let applied = records.iter().position(|r| r.what == InputRecord::Event(pointer.clone())).expect("the pointer");
+    assert!(relisted < applied, "the sink learns the display before the pointer is applied");
+    assert_eq!(rig.input.events(), [pointer, second]);
+}
+
 #[test]
 fn force_keyframe_yields_a_keyframe() {
     let mut rig = rig(None);

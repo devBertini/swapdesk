@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swapdesk_audio::AudioSender;
 use swapdesk_ipc::{
@@ -330,6 +330,11 @@ struct CaptureEnv<S, E> {
 impl<S: ScreenSource, E> CaptureEnv<S, E> {
     fn display(&self, id: u16) -> Option<DisplayInfo> {
         self.displays.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|d| d.id.0 == id).cloned()
+    }
+
+    /// The displays as they were last listed.
+    fn display_list(&self) -> Vec<DisplayInfo> {
+        self.displays.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Lists the displays again. When the list changed since it was last sent (a monitor plugged or unplugged, the
@@ -672,9 +677,12 @@ enum InputCmd {
     Displays(Vec<DisplayInfo>),
 }
 
-fn input_main<I: InputSink>(
+/// Pause between two listings of the displays made for pointers that name an unknown one.
+const RELIST_PAUSE: Duration = Duration::from_secs(1);
+
+fn input_main<I: InputSink, S: ScreenSource, E>(
     factory: &InputFactory<I>,
-    displays: &[DisplayInfo],
+    env: &CaptureEnv<S, E>,
     rx: &Receiver<InputCmd>,
     outbox: &Outbox,
     epoch: &AtomicU64,
@@ -688,7 +696,10 @@ fn input_main<I: InputSink>(
             return;
         }
     };
-    sink.displays_changed(displays);
+    // The displays the sink was last given.
+    let mut known = env.display_list();
+    sink.displays_changed(&known);
+    let mut relisted: Option<Instant> = None;
     let mut faulted = false;
     let report = |faulted: &mut bool, what: &str, e: &PlatformError| {
         if !*faulted {
@@ -712,6 +723,23 @@ fn input_main<I: InputSink>(
         match cmd {
             InputCmd::Events(events) => {
                 for event in &events {
+                    // A pointer for a display the sink does not know: the monitors changed since the list it has.
+                    // The capture side lists again when a video starts, but this helper may never start one (the
+                    // user's helper only injects the input of a prompted session), and its sink would refuse every
+                    // pointer of the session while the keys still work. So the displays are listed again here, at
+                    // most once a second, before the event is applied.
+                    if let InputEvent::Pointer { display, .. } = event
+                        && !known.iter().any(|d| d.id.0 == *display)
+                        && relisted.is_none_or(|at| at.elapsed() >= RELIST_PAUSE)
+                    {
+                        relisted = Some(Instant::now());
+                        env.refresh_displays();
+                        let now = env.display_list();
+                        if now != known {
+                            known = now;
+                            sink.displays_changed(&known);
+                        }
+                    }
                     let r =
                         if matches!(event, InputEvent::ReleaseAll) { sink.release_all() } else { sink.apply(event) };
                     if let Err(e) = r {
@@ -719,7 +747,12 @@ fn input_main<I: InputSink>(
                     }
                 }
             }
-            InputCmd::Displays(list) => sink.displays_changed(&list),
+            InputCmd::Displays(list) => {
+                if list != known {
+                    known = list;
+                    sink.displays_changed(&known);
+                }
+            }
             InputCmd::ReleaseAll => {
                 if let Err(e) = sink.release_all() {
                     failed = Some(e);
@@ -1088,13 +1121,23 @@ where
 
     let desktop_epoch = Arc::new(AtomicU64::new(0));
     let (input_tx, input_rx) = sync_channel(INPUT_QUEUE);
+    // The display list is shared by the capture threads and the input thread: either may find it stale.
+    let capture = Arc::new(CaptureEnv {
+        screen,
+        encoder,
+        clock,
+        outbox: outbox.clone(),
+        displays: Mutex::new(displays),
+        input_tx: Mutex::new(Some(input_tx.clone())),
+        desktop_epoch: Arc::clone(&desktop_epoch),
+    });
     let input_thread = {
         let outbox = outbox.clone();
         let epoch = Arc::clone(&desktop_epoch);
-        let for_input = displays.clone();
+        let env = Arc::clone(&capture);
         std::thread::Builder::new()
             .name("helper-input".into())
-            .spawn(move || input_main(&input, &for_input, &input_rx, &outbox, &epoch))
+            .spawn(move || input_main(&input, &env, &input_rx, &outbox, &epoch))
             .map_err(HelperError::Spawn)?
     };
 
@@ -1127,15 +1170,7 @@ where
     };
 
     let mut host = Host {
-        capture: Arc::new(CaptureEnv {
-            screen,
-            encoder,
-            clock,
-            outbox: outbox.clone(),
-            displays: Mutex::new(displays),
-            input_tx: Mutex::new(Some(input_tx.clone())),
-            desktop_epoch,
-        }),
+        capture,
         audio_env: Arc::new(AudioEnv { source: audio, mode: audio_mode, outbox: outbox.clone() }),
         videos: HashMap::new(),
         frame_ids: HashMap::new(),
