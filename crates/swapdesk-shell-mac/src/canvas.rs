@@ -170,22 +170,29 @@ define_class!(
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
-            self.hover(self.hit(event));
+            let hit = self.hit(event);
+            let over_video = hit.is_none() && self.over_video(event);
+            self.hover(hit, over_video);
+            if over_video {
+                self.pass_move_to_video(event);
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.hover(self.hit(event));
+            let hit = self.hit(event);
+            self.hover(hit, hit.is_none() && self.over_video(event));
         }
 
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
-            self.hover(self.hit(event));
+            let hit = self.hit(event);
+            self.hover(hit, hit.is_none() && self.over_video(event));
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
-            self.hover(None);
+            self.hover(None, false);
         }
 
         #[unsafe(method(mouseDown:))]
@@ -405,10 +412,14 @@ impl CanvasView {
     }
 
     /// The control under the pointer changed: its tint is repainted and the pointer shows what a click would do.
-    fn hover(&self, hit: Option<ControlId>) {
+    /// Over the video rectangle the pointer is the video view's (the host's cursor shape): it is left alone.
+    fn hover(&self, hit: Option<ControlId>, over_video: bool) {
         let was = std::mem::replace(&mut self.ivars().ix.borrow_mut().hover, hit);
         if was != hit {
             self.setNeedsDisplay(true);
+        }
+        if over_video {
+            return;
         }
         let cursor = match hit {
             Some(ControlId::Edit(_)) => NSCursor::IBeamCursor(),
@@ -416,6 +427,28 @@ impl CanvasView {
             None => NSCursor::arrowCursor(),
         };
         cursor.set();
+    }
+
+    /// The event is over the video rectangle of a viewer (where the video view below takes the mouse).
+    fn over_video(&self, event: &NSEvent) -> bool {
+        if self.ivars().home.borrow().is_none() {
+            return false;
+        }
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.ivars().out.borrow().video.is_some_and(|v| v.contains(p.x as f32, p.y as f32))
+    }
+
+    /// A pointer move over the video rectangle belongs to the video view. AppKit sends a move to the owner of the
+    /// tracking area under the pointer, which is this canvas (it covers the window, and its area is always active);
+    /// the video view below would get moves by itself only as the first responder of the key window. So the canvas
+    /// is the one path: every move over the video goes on to the video view, with the keyboard anywhere and with the
+    /// window in front or not, as the Windows viewer forwards the mouse over its video. (The viewer window does not
+    /// ask AppKit for mouse-moved events, or the video view would get each move twice.)
+    fn pass_move_to_video(&self, event: &NSEvent) {
+        let home = self.ivars().home.borrow().clone();
+        if let Some(home) = home {
+            home.mouseMoved(event);
+        }
     }
 
     /// Paints the frame on the context AppKit made current for `drawRect:` and keeps what it registered.
@@ -767,11 +800,7 @@ impl CanvasView {
     pub fn send_keys(&self, text: &str) -> bool {
         let Some(window) = self.window() else { return false };
         for c in text.chars() {
-            let code = match c {
-                '\r' => KEY_RETURN,
-                '\t' => KEY_TAB,
-                _ => 0,
-            };
+            let code = key_code_of(c);
             let chars = NSString::from_str(&c.to_string());
             for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
                 let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -791,6 +820,28 @@ impl CanvasView {
             }
         }
         true
+    }
+}
+
+/// The virtual key code of the key that types `c` on the ANSI layout (`kVK_ANSI_*`, `kVK_Return`, `kVK_Tab`,
+/// `kVK_Space`); 0 (the A key) for a character with no key of its own here. A text field reads the characters of a
+/// key event, the video view sends the key itself to the host, so the sent keys must be the real ones.
+fn key_code_of(c: char) -> u16 {
+    const LETTERS: [u16; 26] =
+        [0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6];
+    const DIGITS: [u16; 10] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25];
+    match c {
+        'a'..='z' => LETTERS[c as usize - 'a' as usize],
+        'A'..='Z' => LETTERS[c as usize - 'A' as usize],
+        '0'..='9' => DIGITS[c as usize - '0' as usize],
+        '\r' => KEY_RETURN,
+        '\t' => KEY_TAB,
+        ' ' => KEY_SPACE,
+        '.' => 47,
+        ',' => 43,
+        '-' => 27,
+        '/' => 44,
+        _ => 0,
     }
 }
 

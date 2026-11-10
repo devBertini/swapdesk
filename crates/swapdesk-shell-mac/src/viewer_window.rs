@@ -56,7 +56,9 @@ impl ViewerWindow {
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&ns(title));
         window.setContentMinSize(size(640.0, 400.0));
-        window.setAcceptsMouseMovedEvents(true);
+        // Pointer moves reach the video view through the canvas's tracking area (`CanvasView::pass_move_to_video`),
+        // not through the first responder: the window does not ask for mouse-moved events.
+        window.setAcceptsMouseMovedEvents(false);
         window.setDelegate(Some(delegate));
 
         // A flipped container, so the video view's frame is the frame's rectangle as it is (y down). It is filled with
