@@ -61,7 +61,9 @@ pub fn paint_viewer(f: &mut Frame) {
     } else {
         48.0
     };
-    let video = fit_16_10(video_col.inset(pad));
+    // A real picture gets the whole column: the renderer keeps its proportion inside it, so it touches the window's
+    // edges and only a band is left on one axis. A mock scenario and a capture keep the design's framed rectangle.
+    let video = if f.st.live_picture() { video_col } else { fit_16_10(video_col.inset(pad)) };
     if f.video_under {
         for strip in around(video_col, video) {
             p.fill_rect(strip, pal.remote);

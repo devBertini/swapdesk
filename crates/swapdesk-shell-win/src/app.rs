@@ -27,6 +27,9 @@ pub struct Shared {
     waker: Arc<Waker>,
     /// The viewer pipeline's hooks (stage 18g); `None` in the mock and offscreen runs.
     pub host: Option<Arc<dyn ViewerHost>>,
+    /// The main window minimizes itself when a session starts: only in a real run (one with the viewer pipeline),
+    /// never in the mock and offscreen runs.
+    minimize_on_session: bool,
     windows: RefCell<Vec<Rc<Window>>>,
     tick_on: Cell<bool>,
     placeholder_on: Cell<bool>,
@@ -68,7 +71,7 @@ pub fn run(state: UiState, backend: Arc<dyn UiBackend>, waker: Arc<Waker>, start
 /// As [`run`], with the viewer pipeline's hooks (see [`ViewerHost`]): the viewer window reports its video rectangle,
 /// focus, mouse and keyboard to `host`.
 pub fn run_with_host(
-    state: UiState,
+    mut state: UiState,
     backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
     startup: Vec<Command>,
@@ -79,6 +82,8 @@ pub fn run_with_host(
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
+    state.set_live_picture(host.is_some());
     register_gdi_font();
     // R-UI-10: UI-thread work over 16 ms goes to the debugger output with its name and duration, nothing else.
     swapdesk_ui::trace::set_hook(|e| {
@@ -101,6 +106,7 @@ pub fn run_with_host(
         state: RefCell::new(state),
         backend,
         waker: Arc::clone(&waker),
+        minimize_on_session: host.is_some(),
         host,
         windows: RefCell::new(Vec::new()),
         tick_on: Cell::new(false),
@@ -391,7 +397,23 @@ impl Shared {
             }
         }
         self.attention();
+        self.minimize_main_for_session();
         self.sync_timers();
+    }
+
+    /// A session of this computer just came up (either role): the main window goes to the taskbar, once per session,
+    /// unless it is already minimized or hidden. Nothing brings it back when the session ends.
+    fn minimize_main_for_session(&self) {
+        if !self.minimize_on_session || !self.state.borrow_mut().take_minimize_request() {
+            return;
+        }
+        let Some(h) = self.main_hwnd() else { return };
+        // SAFETY: our window.
+        unsafe {
+            if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_MINIMIZE);
+            }
+        }
     }
 
     /// A request that needs an answer brings the main window up (restored, flashing) if it is not in front.

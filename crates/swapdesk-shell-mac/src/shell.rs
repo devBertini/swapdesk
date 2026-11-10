@@ -337,6 +337,8 @@ fn start_with(
 ) -> Rc<Shell> {
     // The viewer's own shortcuts are written with this system's keys (Control+Option, not Ctrl+Alt).
     state.set_viewer_os(swapdesk_ui::ViewerOs::MacOs);
+    // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
+    state.set_live_picture(hooks.video.is_some());
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // The system's font smoothing thickens the stems of text. The painter draws without it
@@ -559,6 +561,20 @@ impl Shell {
         followups.extend(want);
         self.send_commands(followups);
         self.refresh(changed);
+        self.minimize_main_for_session();
+    }
+
+    /// A session of this Mac just came up (either role): the main window goes to the Dock, once per session, unless
+    /// it is already minimized or hidden. Only in a real run (it has the video slot): a mock run keeps its window.
+    /// Nothing brings the window back when the session ends.
+    fn minimize_main_for_session(&self) {
+        if self.hooks.video.is_none() || !self.state.borrow_mut().take_minimize_request() {
+            return;
+        }
+        let window = &self.main.window;
+        if window.isVisible() && !window.isMiniaturized() {
+            window.miniaturize(None);
+        }
     }
 
     fn dispatch(&self, act: Activation) {

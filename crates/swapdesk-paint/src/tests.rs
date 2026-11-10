@@ -217,6 +217,44 @@ fn tab_moves_through_the_order_and_wraps_at_both_ends() {
 // ----- the video under the canvas -----
 
 #[test]
+fn a_real_picture_gets_the_whole_video_column_and_a_mock_keeps_the_designs_framed_rectangle() {
+    let mut viewers = 0;
+    for sc in Scenario::ALL {
+        let mut state = sc.prepared_state();
+        if !state.windows().contains(&WindowKind::Viewer) {
+            continue;
+        }
+        viewers += 1;
+        let (name, kind) = (sc.name(), WindowKind::Viewer);
+        let ix = Interaction::default();
+        let remote = swapdesk_ui::tokens::palette(state.dark()).remote;
+
+        // A mock scenario: the column is filled in one piece and the picture's rectangle sits inside it.
+        let mock = Fixed::default();
+        let framed = paint(Frame::new(&mock, &state, &ix, design_size(kind), true), kind).video.expect("a video");
+        let column = mock.fills.borrow().iter().find(|(_, c, _)| *c == remote).map(|(r, ..)| *r).expect("the column");
+        assert!(!state.live_picture(), "{name}: a scenario is not a real run");
+        assert!(framed.w <= column.w && framed.h <= column.h, "{name}: {framed:?} inside {column:?}");
+
+        // A real run: the picture's rectangle is the column itself, so nothing is left around it for a margin; the
+        // renderer keeps the picture's proportion inside it.
+        state.set_live_picture(true);
+        for under in [false, true] {
+            let live = Fixed::default();
+            let mut frame = Frame::new(&live, &state, &ix, design_size(kind), true);
+            frame.video_under = under;
+            let video = paint(frame, kind).video.expect("a video");
+            assert_eq!(video, column, "{name}: the picture gets the whole column (video under the canvas: {under})");
+            if under {
+                let strips = live.fills.borrow().iter().filter(|(_, c, rounded)| *c == remote && !rounded).count();
+                assert_eq!(strips, 0, "{name}: no strip is painted around a picture that fills the column");
+            }
+        }
+    }
+    assert!(viewers >= 5, "only {viewers} scenarios open a viewer");
+}
+
+#[test]
 fn with_the_video_under_the_canvas_the_viewer_leaves_its_rectangle_unpainted_and_moves_nothing() {
     let mut viewers = 0;
     for sc in Scenario::ALL {

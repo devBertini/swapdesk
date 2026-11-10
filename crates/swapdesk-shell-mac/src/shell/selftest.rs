@@ -162,6 +162,61 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
+/// Lets the run loop turn for up to two seconds until the main window's miniaturized state is `want`.
+fn settles_miniaturized(shell: &Shell, want: bool) -> bool {
+    for _ in 0..20 {
+        if shell.main.window.isMiniaturized() == want {
+            return true;
+        }
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.1));
+    }
+    shell.main.window.isMiniaturized() == want
+}
+
+/// A session coming up minimizes the main window to the Dock in a real run (one with the video slot) and in neither
+/// a mock run nor a second state of the same session; a new session minimizes it again.
+fn a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm: MainThreadMarker) -> Result<(), String> {
+    use swapdesk_ui::{Role, SessionState, UiEvent};
+
+    struct Slot;
+    impl VideoSlot for Slot {
+        fn attached(&self, _s: &crate::video::VideoSurface) {}
+        fn resized(&self, _a: VideoArea) {}
+        fn detached(&self) {}
+    }
+    let session = |id: u64, state: SessionState| UiEvent::Session { session_id: id, device_id: String::new(), state };
+    let active = |role: Role| SessionState::Active { since_ms: 0, role, granted: swapdesk_ui::Permissions::NONE };
+
+    // A mock run: the scenario holds an Active host session and the window stays.
+    let shell = open(mtm, Scenario::Banner, ViewerHooks::default());
+    ensure!(!settles_miniaturized(&shell, true), "a mock run minimized the main window");
+    close(&shell);
+
+    // A real run: the first Active state of the scenario's session minimizes it.
+    let hooks = ViewerHooks { video: Some(Arc::new(Slot)), ..ViewerHooks::default() };
+    let shell = open(mtm, Scenario::Banner, hooks);
+    ensure!(settles_miniaturized(&shell, true), "the main window was not minimized when the session started");
+
+    // Brought back by the person, the same session never minimizes it again.
+    shell.main.window.deminiaturize(None);
+    ensure!(settles_miniaturized(&shell, false), "the main window did not come back");
+    let host_id = shell.state.borrow().host_session().map(|s| s.id).ok_or("no host session")?;
+    let paused = SessionState::Paused { desktop: swapdesk_ui::DesktopKind::Locked };
+    shell.state.borrow_mut().apply(session(host_id, paused));
+    shell.state.borrow_mut().apply(session(host_id, active(Role::Host)));
+    shell.minimize_main_for_session();
+    ensure!(!settles_miniaturized(&shell, true), "the same session minimized the main window twice");
+
+    // A new session does.
+    shell.state.borrow_mut().apply(session(host_id + 100, active(Role::Host)));
+    shell.minimize_main_for_session();
+    ensure!(settles_miniaturized(&shell, true), "a new session did not minimize the main window");
+    shell.main.window.deminiaturize(None);
+    close(&shell);
+    Ok(())
+}
+
 /// The mock backend, keeping every command the shell sends.
 struct Recording {
     inner: Arc<MockBackend>,
@@ -247,6 +302,7 @@ pub fn run_window_checks() -> Result<(), String> {
     scenarios_build_their_windows(mtm)?;
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;
     render_slot_lifecycle(mtm)?;
+    a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm)?;
     the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm)?;
     super::ax_checks::run(mtm)
 }

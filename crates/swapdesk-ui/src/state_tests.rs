@@ -1207,6 +1207,61 @@ fn the_display_listing_is_asked_once_per_viewer_session() {
     assert!(s.take_display_request().is_none());
 }
 
+fn active(role: Role, granted: Permissions) -> SessionState {
+    SessionState::Active { since_ms: 0, role, granted }
+}
+
+#[test]
+fn the_first_active_state_of_a_session_asks_to_minimize_the_main_window_once() {
+    for role in [Role::Viewer, Role::Host] {
+        let mut s = base();
+        assert!(!s.take_minimize_request());
+        s.apply(session_event(3, MAC, SessionState::Connecting));
+        assert!(!s.take_minimize_request(), "not before the session is up ({role:?})");
+        s.apply(session_event(3, MAC, active(role, Permissions::NONE)));
+        assert!(s.take_minimize_request(), "asked at the first Active state ({role:?})");
+        assert!(!s.take_minimize_request(), "asked once ({role:?})");
+    }
+}
+
+#[test]
+fn a_reconnect_or_a_grant_change_does_not_ask_again() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
+    assert!(!s.take_minimize_request());
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(!s.take_minimize_request(), "active again after a pause");
+    s.apply(session_event(3, MAC, SessionState::Reconnecting { attempt: 1 }));
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(!s.take_minimize_request(), "active again after a reconnect");
+    let more = Permissions::NONE.with(Permission::Control);
+    s.apply(session_event(3, MAC, active(Role::Viewer, more)));
+    assert!(!s.take_minimize_request(), "a change of granted permissions");
+}
+
+#[test]
+fn a_new_session_asks_again() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    s.apply(session_event(4, MAC, active(Role::Host, Permissions::NONE)));
+    assert!(s.take_minimize_request(), "the session a swap creates is a new one");
+    assert!(!s.take_minimize_request());
+}
+
+#[test]
+fn a_session_that_never_starts_asks_nothing() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, SessionState::Prompted { remaining_s: 30 }));
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: Some(ApiCode::Refused) }));
+    s.apply(session_event(4, MAC, SessionState::Connecting));
+    s.apply(session_event(4, MAC, SessionState::Ended { reason: Some(ApiCode::Timeout) }));
+    assert!(!s.take_minimize_request());
+}
+
 #[test]
 fn the_connect_flow_keeps_connecting_prompted_and_the_ended_reason_until_dismissed() {
     let mut s = base();

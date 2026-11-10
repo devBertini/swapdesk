@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::WindowsProgramming::QueryThreadCycleTime;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, IsWindow, PostMessageW, SendMessageW, WM_APP, WM_CLOSE, WM_GETTEXTLENGTH, WM_MOUSEMOVE,
+    GetClientRect, IsIconic, IsWindow, PostMessageW, SendMessageW, WM_APP, WM_CLOSE, WM_GETTEXTLENGTH, WM_MOUSEMOVE,
 };
 
 use crate::offscreen::render;
@@ -31,14 +31,21 @@ struct Live {
 
 impl Live {
     fn start(scenario: Scenario) -> Live {
+        Live::start_with(move |w| {
+            let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(w.clone()));
+            crate::run(scenario.prepared_state(), backend, w, Vec::new()).expect("shell");
+        })
+    }
+
+    /// Starts the shell with `run` on the window thread; `run` gets the waker the window will be set on.
+    fn start_with(run: impl FnOnce(Arc<Waker>) + Send + 'static) -> Live {
         let waker = Arc::new(Waker::new());
         let (tx, rx) = std::sync::mpsc::channel();
         let w = Arc::clone(&waker);
         let join = std::thread::spawn(move || {
             // SAFETY: a plain query of this thread's id.
             tx.send(unsafe { GetCurrentThreadId() }).expect("thread id");
-            let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(w.clone()));
-            crate::run(scenario.prepared_state(), backend, w, Vec::new()).expect("shell");
+            run(w);
         });
         let thread_id = rx.recv().expect("thread id");
         let live = Live { waker, thread_id, join: Some(join) };
@@ -236,4 +243,111 @@ fn hover_cpu_of_the_window_thread() {
             per_ms
         );
     }
+}
+
+/// A backend that answers nothing and delivers the events a test pushes.
+#[derive(Default)]
+struct Scripted(std::sync::Mutex<Vec<swapdesk_ui::UiEvent>>);
+
+impl Scripted {
+    fn push(&self, e: swapdesk_ui::UiEvent) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(e);
+    }
+}
+
+impl UiBackend for Scripted {
+    fn send(&self, _command: swapdesk_ui::Command) -> swapdesk_ui::Ticket {
+        swapdesk_ui::Ticket(0)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+/// The viewer pipeline's hooks of a real run, doing nothing.
+struct NoHost;
+
+impl crate::ViewerHost for NoHost {
+    fn opened(&self, _surface: swapdesk_platform::NativeSurface, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn resized(&self, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn closed(&self) {}
+    fn focus(&self, _focused: bool) {}
+    fn mouse(&self, _msg: crate::MouseMsg) -> bool {
+        false
+    }
+    fn captures_keyboard(&self) -> bool {
+        false
+    }
+    fn key(&self, _msg: &crate::KeyMsg) -> bool {
+        false
+    }
+    fn pointer_shape(&self) -> Option<Arc<swapdesk_platform::CursorShape>> {
+        None
+    }
+}
+
+fn session(id: u64, state: swapdesk_ui::SessionState) -> swapdesk_ui::UiEvent {
+    swapdesk_ui::UiEvent::Session { session_id: id, device_id: swapdesk_ui::mock::DESKTOP.into(), state }
+}
+
+fn active(role: swapdesk_ui::Role) -> swapdesk_ui::SessionState {
+    swapdesk_ui::SessionState::Active { since_ms: 0, role, granted: swapdesk_ui::Permissions::NONE }
+}
+
+fn iconic(live: &Live) -> bool {
+    // SAFETY: a plain query of our window.
+    unsafe { IsIconic(live.hwnd()) }.as_bool()
+}
+
+/// Waits up to two seconds for the main window to be (or not to be) minimized.
+fn settles_iconic(live: &Live, want: bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        if iconic(live) == want {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    iconic(live) == want
+}
+
+#[test]
+fn the_main_window_minimizes_when_a_session_starts_and_not_in_a_mock_run() {
+    use swapdesk_ui::{Role, SessionState, UiWaker};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, ShowWindow};
+
+    // A mock run holds sessions already Active, and keeps its window (captures show it).
+    for scenario in [Scenario::Banner, Scenario::Visualizador] {
+        let mock = Live::start(scenario);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!iconic(&mock), "a mock run never minimizes ({scenario:?})");
+    }
+
+    // A real run (with the viewer pipeline's hooks): this machine is controlled, then it controls.
+    let backend = Arc::new(Scripted::default());
+    backend.push(session(1, active(Role::Host)));
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    assert!(settles_iconic(&live, true), "the first Active state of a session minimizes the main window");
+
+    // The person brings it back: a pause and an Active state of the same session leave it where it is.
+    // SAFETY: our window.
+    unsafe {
+        let _ = ShowWindow(live.hwnd(), SW_RESTORE);
+    }
+    assert!(settles_iconic(&live, false), "the window was restored");
+    backend.push(session(1, SessionState::Paused { desktop: swapdesk_ui::DesktopKind::Locked }));
+    backend.push(session(1, active(Role::Host)));
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!iconic(&live), "the same session never minimizes twice");
+
+    // A new session, this time controlling, minimizes it again.
+    backend.push(session(2, active(Role::Viewer)));
+    live.waker.wake();
+    assert!(settles_iconic(&live, true), "a new session minimizes the main window again");
 }

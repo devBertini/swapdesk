@@ -416,6 +416,10 @@ pub struct UiState {
     pub(crate) connect_end: Option<ConnectEnd>,
     /// The viewer session whose display list was asked for by [`UiState::take_display_request`].
     pub(crate) displays_asked: Option<u64>,
+    /// The sessions whose first `Active` state already asked the shell to minimize the main window.
+    minimize_asked: Vec<u64>,
+    /// The shell composes a real remote picture in the viewer window (a real run, not a mock scenario or a capture).
+    live_picture: bool,
     pub(crate) error: Option<ApiError>,
     pub(crate) pending: HashMap<Ticket, Pending>,
     pub(crate) undo_slot: Option<Undo>,
@@ -483,6 +487,8 @@ impl UiState {
             local_monitors: 1,
             connect_end: None,
             displays_asked: None,
+            minimize_asked: Vec::new(),
+            live_picture: false,
             error: None,
             pending: HashMap::new(),
             undo_slot: None,
@@ -790,6 +796,33 @@ impl UiState {
         let session_id = s.id;
         self.displays_asked = Some(session_id);
         Some(Command::ListDisplays { session_id })
+    }
+
+    /// Whether the viewer window shows a real remote picture. The viewer screen then gives the picture its whole area,
+    /// with no margin, and the renderer keeps the picture's own proportion inside it; a mock scenario and a capture
+    /// keep the design's framed 16:10 rectangle.
+    pub fn live_picture(&self) -> bool {
+        self.live_picture
+    }
+
+    /// The shell says, once at its start, that it composes real pictures (see [`UiState::live_picture`]).
+    pub fn set_live_picture(&mut self, on: bool) {
+        self.live_picture = on;
+    }
+
+    /// True once per session id, when a session of this computer (viewer or host) is first seen `Active`: the shell
+    /// then minimizes the main window, which does not need to stay on screen. A later state of the same session
+    /// (paused, reconnecting, active again, other grants) asks nothing; a new session asks again. A shell that
+    /// never shows a real session (a mock run) does not call it.
+    pub fn take_minimize_request(&mut self) -> bool {
+        let mut asked = false;
+        for s in &self.sessions {
+            if matches!(s.state, SessionState::Active { .. }) && !self.minimize_asked.contains(&s.id) {
+                self.minimize_asked.push(s.id);
+                asked = true;
+            }
+        }
+        asked
     }
 
     /// Which windows exist now.
