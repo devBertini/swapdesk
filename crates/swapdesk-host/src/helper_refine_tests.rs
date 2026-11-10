@@ -143,7 +143,8 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
         encoder: Arc::new(move |_f, _c, _b| Ok(CountingEncoder { counts: encoder_counts.clone(), refuse })),
         clock: Arc::new(RealClock(Instant::now())),
         outbox,
-        displays: Vec::new(),
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 5000, preset: Preset::Auto, backend: VideoBackend::Auto };

@@ -317,9 +317,53 @@ struct CaptureEnv<S, E> {
     encoder: EncoderFactory<E>,
     clock: Arc<dyn Clock>,
     outbox: Outbox,
-    displays: Vec<DisplayInfo>,
+    /// The displays as they were last listed: at the start, and again whenever a video starts or a capture fails,
+    /// because a monitor can be plugged in or a lid closed at any time (see [`CaptureEnv::refresh_displays`]).
+    displays: Mutex<Vec<DisplayInfo>>,
+    /// Where a new display list goes for the input thread. Emptied when the helper ends: the input thread ends only
+    /// when every sender is gone, and this one lives as long as the last capture thread.
+    input_tx: Mutex<Option<SyncSender<InputCmd>>>,
     /// Bumped on every `AccessLost`; the input thread follows the input desktop when it changes.
     desktop_epoch: Arc<AtomicU64>,
+}
+
+impl<S: ScreenSource, E> CaptureEnv<S, E> {
+    fn display(&self, id: u16) -> Option<DisplayInfo> {
+        self.displays.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|d| d.id.0 == id).cloned()
+    }
+
+    /// Lists the displays again. When the list changed since it was last sent (a monitor plugged or unplugged, the
+    /// lid closed, another primary), the service gets the new list, so it stops asking for a display that is gone and
+    /// streams one that exists, and the input thread gets it, so the pointer lands on the right pixels. A listing
+    /// that fails changes nothing. Returns whether the list changed.
+    fn refresh_displays(&self) -> bool {
+        let listed = (self.screen)(DisplayId(0)).and_then(|mut source| {
+            let list = source.displays();
+            source.close();
+            list
+        });
+        let Ok(list) = listed else { return false };
+        {
+            let mut known = self.displays.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *known == list {
+                return false;
+            }
+            known.clone_from(&list);
+        }
+        let wire = DisplayList { displays: list.iter().take(swapdesk_ipc::MAX_DISPLAYS).map(to_proto).collect() };
+        self.outbox.send_control(Message::Displays(wire));
+        // The queue is the input thread's; a full one drops this copy and the next refresh sends it again only if the
+        // list changes again, so the reader is never held up by it.
+        if let Some(tx) = self.input_tx.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let _ = tx.try_send(InputCmd::Displays(list));
+        }
+        true
+    }
+
+    /// The helper is ending: lets go of the input thread's queue.
+    fn close_input(&self) {
+        self.input_tx.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
 }
 
 fn capture_main<S: ScreenSource, E: VideoEncoder>(
@@ -340,7 +384,11 @@ fn capture_run<S: ScreenSource, E: VideoEncoder>(
     ids: &AtomicU32,
 ) -> PResult<()> {
     let mut source = (env.screen)(DisplayId(p.display))?;
-    source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps })?;
+    if let Err(e) = source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps }) {
+        // The display may have gone between the listing and now: the service learns the displays that exist.
+        env.refresh_displays();
+        return Err(e);
+    }
     let result = capture_loop(env, p, ctl, ids, &mut source);
     source.close();
     result
@@ -353,9 +401,9 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     ids: &AtomicU32,
     source: &mut S,
 ) -> PResult<()> {
-    let info = env.displays.iter().find(|d| d.id.0 == p.display);
-    let adapter = info.map(|d| d.adapter).unwrap_or(swapdesk_platform::AdapterId(0));
-    let mut dims = info.map_or((0, 0), |d| (d.bounds.width, d.bounds.height));
+    let info = env.display(p.display);
+    let adapter = info.as_ref().map(|d| d.adapter).unwrap_or(swapdesk_platform::AdapterId(0));
+    let mut dims = info.as_ref().map_or((0, 0), |d| (d.bounds.width, d.bounds.height));
     let (mut fps, mut kbps) = (p.fps, p.kbps);
     let mut encoder: Option<E> = None;
     let mut config: Option<EncoderConfig> = None;
@@ -439,6 +487,12 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                             if !faulted {
                                 platform_fault(&env.outbox, &format!("video {}: reacquire", p.display), &e);
                                 faulted = true;
+                            }
+                            // The display itself may be gone (unplugged, the lid closed): the service then gets the
+                            // displays that exist and starts the video on one of them; this thread has nothing left
+                            // to capture.
+                            if env.refresh_displays() && env.display(p.display).is_none() {
+                                return Ok(());
                             }
                             std::thread::sleep(RETRY_PAUSE);
                         }
@@ -614,6 +668,8 @@ fn pump_cursor<S: ScreenSource, E>(
 enum InputCmd {
     Events(Vec<InputEvent>),
     ReleaseAll,
+    /// The displays changed: the sink maps the pointer onto the new ones.
+    Displays(Vec<DisplayInfo>),
 }
 
 fn input_main<I: InputSink>(
@@ -663,6 +719,7 @@ fn input_main<I: InputSink>(
                     }
                 }
             }
+            InputCmd::Displays(list) => sink.displays_changed(&list),
             InputCmd::ReleaseAll => {
                 if let Err(e) = sink.release_all() {
                     failed = Some(e);
@@ -863,7 +920,10 @@ where
     }
 
     fn start_video(&mut self, p: StartParams) {
-        if !self.capture.displays.iter().any(|d| d.id.0 == p.display) {
+        // The list sent at the start can be hours old: a monitor plugged in since then changed the ids. A session
+        // that starts now must find the displays of now (the service asks again with the list this sends).
+        self.capture.refresh_displays();
+        if self.capture.display(p.display).is_none() {
             fault(&self.outbox, ErrorCode::NotFound, format!("video {}: no such display", p.display));
             return;
         }
@@ -1067,7 +1127,15 @@ where
     };
 
     let mut host = Host {
-        capture: Arc::new(CaptureEnv { screen, encoder, clock, outbox: outbox.clone(), displays, desktop_epoch }),
+        capture: Arc::new(CaptureEnv {
+            screen,
+            encoder,
+            clock,
+            outbox: outbox.clone(),
+            displays: Mutex::new(displays),
+            input_tx: Mutex::new(Some(input_tx.clone())),
+            desktop_epoch,
+        }),
         audio_env: Arc::new(AudioEnv { source: audio, mode: audio_mode, outbox: outbox.clone() }),
         videos: HashMap::new(),
         frame_ids: HashMap::new(),
@@ -1114,6 +1182,7 @@ where
     drop(pty);
     drop(host_outbox);
     drop(input_tx);
+    capture.close_input();
     drop(extras_tx);
     drop(fs_tx);
     if let Some(t) = fs_thread {

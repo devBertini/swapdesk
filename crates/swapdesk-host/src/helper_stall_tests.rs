@@ -304,7 +304,8 @@ fn a_cursor_shape_that_finds_no_room_is_kept_and_sent_again_and_the_capture_loop
         encoder: Arc::new(|_f, _c, _b| Ok(NoEncoder)),
         clock: Arc::new(RealClock(Instant::now())),
         outbox,
-        displays: Vec::new(),
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 1000, preset: Preset::Auto, backend: VideoBackend::Auto };
@@ -353,7 +354,8 @@ fn the_cursor_state_names_a_shape_only_once_its_message_is_queued() {
         encoder: Arc::new(|_f, _c, _b| Ok(NoEncoder)),
         clock: Arc::new(RealClock(Instant::now())),
         outbox,
-        displays: Vec::new(),
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
     };
     let mut state = CursorState::default();

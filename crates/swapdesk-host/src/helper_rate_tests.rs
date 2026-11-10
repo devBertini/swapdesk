@@ -109,7 +109,8 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
         encoder: Arc::new(move |_f, _c, _b| Ok(factory_enc.clone())),
         clock: Arc::new(RealClock(Instant::now())),
         outbox,
-        displays: Vec::new(),
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 20_000, preset: Preset::Auto, backend: VideoBackend::Auto };

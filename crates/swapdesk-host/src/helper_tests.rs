@@ -1,7 +1,7 @@
 //! Helper loop tests: a service-side driver talks to `run_helper` over an in-memory duplex pipe, with the C7 fakes.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -20,10 +20,22 @@ use crate::testpipe::{PipeWriter, duplex};
 const WAIT: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_millis(400);
 
+/// The id the one display has after the monitors changed (see `Tracked::moved`).
+const MOVED_DISPLAY: u16 = 5;
+
 /// A synthetic screen that counts how many of it are alive.
 struct Tracked {
     inner: SyntheticScreen,
     live: Arc<AtomicUsize>,
+    /// Set while the test plays "a monitor was plugged in and the lid closed": display 0 is gone and the same
+    /// picture is display `MOVED_DISPLAY`, the only one and the primary.
+    moved: Option<Arc<AtomicBool>>,
+}
+
+impl Tracked {
+    fn is_moved(&self) -> bool {
+        self.moved.as_ref().is_some_and(|m| m.load(Ordering::SeqCst))
+    }
 }
 
 impl Drop for Tracked {
@@ -34,9 +46,20 @@ impl Drop for Tracked {
 
 impl ScreenSource for Tracked {
     fn displays(&mut self) -> PResult<Vec<DisplayInfo>> {
-        self.inner.displays()
+        let mut list = self.inner.displays()?;
+        if self.is_moved() {
+            for d in &mut list {
+                d.id = DisplayId(MOVED_DISPLAY);
+            }
+        }
+        Ok(list)
     }
     fn open(&mut self, display: DisplayId, config: CaptureConfig) -> PResult<()> {
+        if self.is_moved() {
+            // Only the new id exists; any other is refused as the fake refuses an unknown display.
+            let inner = if display == DisplayId(MOVED_DISPLAY) { DisplayId(0) } else { DisplayId(u16::MAX) };
+            return self.inner.open(inner, config);
+        }
         self.inner.open(display, config)
     }
     fn next_frame(&mut self, timeout: Duration) -> PResult<Option<Frame>> {
@@ -102,6 +125,16 @@ pub(crate) struct Rig {
 }
 
 fn deps(lost_at: Option<u32>, input: &RecordingInputSink, live: &Arc<AtomicUsize>) -> Deps {
+    deps_moving(lost_at, input, live, None)
+}
+
+/// As `deps`; with `moved`, the screens follow that flag (see `Tracked::moved`).
+fn deps_moving(
+    lost_at: Option<u32>,
+    input: &RecordingInputSink,
+    live: &Arc<AtomicUsize>,
+    moved: Option<Arc<AtomicBool>>,
+) -> Deps {
     let screens = Arc::clone(live);
     let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
     let audio_clock = Arc::clone(&clock);
@@ -112,7 +145,7 @@ fn deps(lost_at: Option<u32>, input: &RecordingInputSink, live: &Arc<AtomicUsize
                 inner.script_access_lost_at(n);
             }
             screens.fetch_add(1, Ordering::SeqCst);
-            Ok(Tracked { inner, live: Arc::clone(&screens) })
+            Ok(Tracked { inner, live: Arc::clone(&screens), moved: moved.clone() })
         },
         |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
         {
@@ -131,10 +164,15 @@ fn rig(lost_at: Option<u32>) -> Rig {
 
 /// As `rig`, the helper serving `fs` (the user's disk) when it is given.
 pub(crate) fn rig_with(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsServer>>) -> Rig {
+    rig_moving(lost_at, fs, None)
+}
+
+/// As `rig_with`; with `moved`, the screens follow that flag (see `Tracked::moved`).
+fn rig_moving(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsServer>>, moved: Option<Arc<AtomicBool>>) -> Rig {
     let input = RecordingInputSink::new();
     let live = Arc::new(AtomicUsize::new(0));
     let (helper_end, service_end) = duplex();
-    let d = deps(lost_at, &input, &live);
+    let d = deps_moving(lost_at, &input, &live, moved);
     let d = match fs {
         Some(server) => d.with_fs(server),
         None => d,
@@ -252,6 +290,57 @@ fn start_video_streams_frames_and_stop_video_ends_them() {
     rig.send(&Message::StopVideo { display: 0 });
     rig.drain_until_quiet();
     assert_eq!(rig.live.load(Ordering::SeqCst), 0, "the capture thread dropped its screen");
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+/// The helper runs for hours; meanwhile a monitor is plugged in and the lid closed, so the display it listed at the
+/// start is gone and another id is the only one. The service still asks for the old display: the helper must list
+/// again, tell the service the displays that exist, and stream the new one when asked. (Before the fix the old list
+/// stayed, the capture of the vanished display failed, and the session had sound and no picture.)
+#[test]
+fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_streams_the_new_display() {
+    let moved = Arc::new(AtomicBool::new(false));
+    let mut rig = rig_moving(None, None, Some(Arc::clone(&moved)));
+    let ids = |m: &Message| match m {
+        Message::Displays(list) => Some(list.displays.iter().map(|d| d.id).collect::<Vec<_>>()),
+        _ => None,
+    };
+    assert_eq!(rig.wait(ids), [0], "the list of the start");
+
+    moved.store(true, Ordering::SeqCst);
+    rig.start_video(); // display 0: what the service still believes
+    assert_eq!(rig.wait(ids), [MOVED_DISPLAY], "the service learns the displays of now");
+
+    rig.send(&Message::StartVideo {
+        display: MOVED_DISPLAY,
+        fps: 100,
+        kbps: 1000,
+        quality: Preset::Auto,
+        backend: VideoBackend::Auto,
+    });
+    let (first, _) = rig.next_frame();
+    assert_eq!(first.display_id, MOVED_DISPLAY, "the picture of the display that exists");
+    assert!(first.keyframe && first.config);
+
+    // An unchanged list is not sent again: a second start of the same display only streams.
+    rig.send(&Message::StopVideo { display: MOVED_DISPLAY });
+    rig.drain_until_quiet();
+    rig.send(&Message::StartVideo {
+        display: MOVED_DISPLAY,
+        fps: 100,
+        kbps: 1000,
+        quality: Preset::Auto,
+        backend: VideoBackend::Auto,
+    });
+    let end = Instant::now() + WAIT;
+    loop {
+        match rig.inbox.recv_timeout(end.saturating_duration_since(Instant::now())).expect("a frame") {
+            Message::VideoFrame { .. } => break,
+            Message::Displays(_) => panic!("the list did not change: it must not be sent again"),
+            _ => {}
+        }
+    }
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
 }
@@ -400,6 +489,7 @@ fn a_failing_encoder_factory_is_a_fault_and_the_loop_goes_on() {
             Ok(Tracked {
                 inner: SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime),
                 live: Arc::clone(&screens),
+                moved: None,
             })
         },
         |_, _, _| {
@@ -465,6 +555,7 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
             Ok(Tracked {
                 inner: SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime),
                 live: Arc::clone(&screens),
+                moved: None,
             })
         },
         |_, _, _| Ok(Passthrough { n: 0 }),
