@@ -85,7 +85,7 @@ Cada recurso está num de três estados, descritos de forma conservadora:
 
 As execuções entre máquinas são conduzidas por um harness de testes sobre o código de host e visualizador que é distribuído, mais uma sessão manual com o Mac controlando o PC. Windows com Windows em dois PCs separados e Mac com Mac não foram verificados: o projeto tem um PC e um Mac. O mapa de prova fluxo a fluxo é o [docs/FLUXOS.md](docs/FLUXOS.md).
 
-**Dependências:** o projeto mantém um conjunto pequeno e auditado de crates de terceiros (`cargo deny` e `cargo vet` no CI); transporte e criptografia ficam em `quinn`, `rustls` e `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). As licenças delas estão em [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+**Dependências:** o projeto mantém um conjunto pequeno de crates de terceiros, conferido no CI por `cargo deny` e `cargo vet`: parte delas se apoia em auditorias públicas importadas de outros projetos (Mozilla, Google, Bytecode Alliance e outros), e o restante é uma lista de isenções que nenhuma auditoria cobre ainda (`supply-chain/`); transporte e criptografia ficam em `quinn`, `rustls` e `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). As licenças delas estão em [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
 ## Fora da 1.0
 

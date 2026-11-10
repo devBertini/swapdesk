@@ -85,7 +85,7 @@ Each feature is in one of three states, written conservatively:
 
 The runs between machines are driven by a test harness over the shipped host and viewer code, plus a manual session with the Mac controlling the PC. Windows to Windows across two separate PCs and Mac to Mac are not verified: the project has one PC and one Mac. The flow-by-flow proof map is [docs/FLUXOS.md](docs/FLUXOS.md).
 
-**Dependencies:** the project keeps a small, audited set of third-party crates (`cargo deny` and `cargo vet` in CI); transport and cryptography stay on `quinn`, `rustls` and `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). Their licenses are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+**Dependencies:** the project keeps a small set of third-party crates, checked in CI by `cargo deny` and `cargo vet`: part of them rests on public audits imported from other projects (Mozilla, Google, the Bytecode Alliance and others), and the rest is a list of exemptions that no audit covers yet (`supply-chain/`); transport and cryptography stay on `quinn`, `rustls` and `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). Their licenses are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
 ## Not in 1.0 yet
 
