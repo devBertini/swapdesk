@@ -492,7 +492,9 @@ fn streams_a_session_opens_carry_their_kind_and_the_priority_of_the_protocol_tab
         for (kind, priority) in [(StreamKind::Input, 4), (StreamKind::Clipboard, 0), (StreamKind::FileData, 0)] {
             let mut stream = s.ctx().open_uni(kind).await.unwrap();
             assert_eq!(stream.priority().unwrap(), priority, "{kind:?}");
-            stream.write_all(&[0; 12]).await.unwrap();
+            // The recorder lets a stream go as soon as it has counted it, which stops the stream: a write that comes
+            // after that is refused, and says nothing about the kind or the priority.
+            let _ = stream.write_all(&[0; 12]).await;
         }
         eventually(Duration::from_secs(3), "the three streams", || {
             rec.streams.load(std::sync::atomic::Ordering::SeqCst) == 3
