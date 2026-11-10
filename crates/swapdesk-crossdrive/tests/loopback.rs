@@ -92,12 +92,14 @@ impl Write for PipeWriter {
 // ---------- fakes of the host's desktop and of the viewer's decoder ----------
 
 /// A synthetic screen of 64x48 whose cursor starts at the middle and then follows the pointer events the user helper's
-/// sink received.
+/// sink received. After each move the pointer is hidden, as an application does while its user types: Windows then
+/// reports the corner of the display with `visible` off.
 struct FollowingScreen {
     inner: SyntheticScreen,
     input: RecordingInputSink,
     seen: usize,
     started: bool,
+    hide_next: bool,
 }
 
 impl ScreenSource for FollowingScreen {
@@ -118,12 +120,17 @@ impl ScreenSource for FollowingScreen {
             self.started = true;
             return Some(CursorUpdate { display: DisplayId(0), x: 32, y: 24, visible: true, shape: None });
         }
+        if self.hide_next {
+            self.hide_next = false;
+            return Some(CursorUpdate { display: DisplayId(0), x: 0, y: 0, visible: false, shape: None });
+        }
         let events = self.input.events();
         while self.seen < events.len() {
             let event = &events[self.seen];
             self.seen += 1;
             if let InputEvent::Pointer { x, y, .. } = event {
                 let (x, y) = (i32::from(*x) * 64 / 65535, i32::from(*y) * 48 / 65535);
+                self.hide_next = true;
                 return Some(CursorUpdate { display: DisplayId(0), x, y, visible: true, shape: None });
             }
         }
@@ -276,6 +283,7 @@ impl Machine {
                         input: for_screen.clone(),
                         seen: 0,
                         started: false,
+                        hide_next: false,
                     })
                 },
                 |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
@@ -439,6 +447,8 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
     assert!(report.audio_datagrams >= 1, "audio: {report:?}");
     assert_eq!(report.pointer_moves, 8);
     assert!(report.pointer_echo_samples >= 3, "the host's cursor followed: {report:?}");
+    // The walk spans 20 px each way: an update that hides the pointer is not a position and adds nothing to it.
+    assert!(report.pointer_max_deviation_px <= 24, "a hidden pointer counted as a position: {report:?}");
     assert!(report.ended_clean && report.forgotten);
     // Nothing stays paired on either side.
     assert_eq!(host.trust.read(|s| s.devices.len()), 0, "host forgot the viewer");

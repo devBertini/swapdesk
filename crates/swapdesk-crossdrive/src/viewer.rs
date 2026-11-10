@@ -38,6 +38,9 @@ struct CursorSample {
     at: Instant,
     x: u16,
     y: u16,
+    /// False while the host hides its pointer (an application does that while its user types): the position of
+    /// such an update is not a place on the screen.
+    visible: bool,
 }
 
 #[derive(Default)]
@@ -97,7 +100,7 @@ impl ViewerSink for Sink {
         self.shared.cursor_updates.fetch_add(1, Ordering::Relaxed);
         let mut samples = lock(&self.shared.cursor);
         if samples.len() < MAX_CURSOR_SAMPLES {
-            samples.push(CursorSample { at: Instant::now(), x: pos.x, y: pos.y });
+            samples.push(CursorSample { at: Instant::now(), x: pos.x, y: pos.y, visible: pos.visible });
         }
     }
 
@@ -629,7 +632,7 @@ fn pointer_moves(
         while lock(&s.cursor).is_empty() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
-        lock(&s.cursor).last().map_or((32768, 32768), |c| (c.x, c.y))
+        lock(&s.cursor).iter().rev().find(|c| c.visible).map_or((32768, 32768), |c| (c.x, c.y))
     } else {
         log("VIEWER_NEED_ANCHOR");
         let text = wait_file(&cfg.anchor_file, "the pointer reading of the host", cfg.anchor_timeout)?;
@@ -665,7 +668,11 @@ fn pointer_moves(
     }
     // The host's pointer position comes back as cursor updates; some of them must show the moves.
     std::thread::sleep(Duration::from_millis(600));
-    let samples = lock(&s.cursor).clone();
+    let all = lock(&s.cursor).clone();
+    // A hidden pointer reports no place (Windows gives the corner of the display for it): only the updates that
+    // show the pointer say where it is.
+    let hidden = all.iter().filter(|c| !c.visible).count();
+    let samples: Vec<CursorSample> = all.into_iter().filter(|c| c.visible).collect();
     // For the record: the host's own pointer positions around the moves (px), the first few distinct ones.
     let mut shown: Vec<String> = Vec::new();
     for c in &samples {
@@ -682,7 +689,11 @@ fn pointer_moves(
             shown.push(at);
         }
     }
-    log(&format!("POINTER host cursor samples ({} total): {}", samples.len(), shown.join(" ")));
+    log(&format!(
+        "POINTER host cursor samples ({} visible, {hidden} with the pointer hidden): {}",
+        samples.len(),
+        shown.join(" ")
+    ));
     // Movement, not position: the distinct positions the host reported while the moves ran, and how far they spread.
     let mut seen: Vec<(i32, i32)> = Vec::new();
     for c in samples.iter().filter(|c| c.at >= started) {
