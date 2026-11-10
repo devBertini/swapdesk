@@ -1079,9 +1079,8 @@ fn activity_main(f: &mut Frame) {
             }
         }
     } else {
-        f.out.scroll_max = max_scroll(total, 50.0, list.h);
+        let scroll = f.page_scroll(SCROLL_ACTIVITY, max_scroll(total, 50.0, list.h));
         f.out.list_area = Some(list);
-        let scroll = f.ix.scroll.clamp(0.0, f.out.scroll_max);
         for n in visible_rows(total, 50.0, scroll, list.h) {
             let row = &rows[n];
             let ry = list.y + n as f32 * 50.0 - scroll;
@@ -1122,7 +1121,6 @@ fn settings_main(f: &mut Frame) {
     let a = area(f);
     let y = 32.0;
     let title = p.label(&f.t(MsgKey::SettingsTitle), text::H1);
-    p.draw(&title, a.x, y, pal.ink);
     let top = y + title.h + 28.0;
     let colw = (a.cw - 24.0) / 2.0;
     let (lx, rx) = (a.x, a.x + colw + 24.0);
@@ -1258,34 +1256,63 @@ fn settings_main(f: &mut Frame) {
             vec![SettingRow::Status { label: net_row, hint: Some(f.t(MsgKey::NetworkHint)), value: None }],
         ),
     ];
-    let mut gy = top;
+    // The page scrolls when a column is taller than the window: the bottom margin equals the top one.
+    let column = |f: &Frame, groups: &[(MsgKey, Vec<SettingRow>)]| {
+        groups.iter().map(|(title, rows)| settings_group_height(f, colw, &f.t(*title), rows) + 24.0).sum::<f32>()
+    };
+    let content = top + column(f, &left).max(column(f, &right)) - 24.0 + y;
+    let scroll = f.page_scroll(SCROLL_SETTINGS, (content - f.h).max(0.0));
+    p.push_clip(Rect::new(SIDEBAR_W, 0.0, f.w - SIDEBAR_W, f.h));
+    p.draw(&title, a.x, y - scroll, pal.ink);
+    let mut gy = top - scroll;
     for (title, rows) in left {
         gy += settings_group(f, lx, gy, colw, &f.t(title), &rows) + 24.0;
     }
-    let mut gy = top;
+    let mut gy = top - scroll;
     for (title, rows) in right {
         gy += settings_group(f, rx, gy, colw, &f.t(title), &rows) + 24.0;
     }
+    p.pop_clip();
 }
 
+/// The scrolling contents of the main window (`Output::scroll_key`).
+const SCROLL_ACTIVITY: u8 = 1;
+const SCROLL_SETTINGS: u8 = 2;
+
 /// `.group`: h2, gap 10, a panel of rows (min-height 52, padding 0 18, border-top). Returns the height.
+/// The space a settings row keeps above and below its label and hint (`.row{padding:7px 18px}` of the board).
+const SETTING_ROW_PAD: f32 = 7.0;
+
+/// The height of each row of a group: at least 52 px, growing with its label and hint and keeping the row padding
+/// of the design above and below the text (a two-line hint or the list of shortcuts makes a taller row, never a
+/// cramped one).
+fn setting_row_heights(f: &Frame, w: f32, rows: &[SettingRow]) -> Vec<f32> {
+    let p = f.p;
+    let bw = p.hairline();
+    rows.iter()
+        .map(|row| {
+            let (label, hint, control_w) = row_parts(p, row);
+            let text_w = w - 2.0 * bw - 36.0 - control_w - 16.0;
+            let l = p.label_in(label, text::BODY, text_w, Align::Start).h;
+            let h = hint.map_or(0.0, |h| p.label_in(h, text::SMALL, text_w, Align::Start).h);
+            (l + h + 2.0 * SETTING_ROW_PAD).max(52.0)
+        })
+        .collect()
+}
+
+/// What [`settings_group`] returns for the same group, without painting it.
+fn settings_group_height(f: &Frame, w: f32, title: &str, rows: &[SettingRow]) -> f32 {
+    let bw = f.p.hairline();
+    f.p.label(title, text::H2).h + 10.0 + 2.0 * bw + setting_row_heights(f, w, rows).iter().sum::<f32>()
+}
+
 fn settings_group(f: &mut Frame, x: f32, y: f32, w: f32, title: &str, rows: &[SettingRow]) -> f32 {
     let (p, pal) = (f.p, f.pal);
     let bw = p.hairline();
     let h2 = p.label(title, text::H2);
     p.draw(&h2, x, y, pal.ink);
     let top = y + h2.h + 10.0;
-    // Rows are at least 52 px and grow with their label and hint (a two-line hint makes a taller row).
-    let heights: Vec<f32> = rows
-        .iter()
-        .map(|row| {
-            let (label, hint, control_w) = row_parts(p, row);
-            let text_w = w - 2.0 * bw - 36.0 - control_w - 16.0;
-            let l = p.label_in(label, text::BODY, text_w, Align::Start).h;
-            let h = hint.map_or(0.0, |h| p.label_in(h, text::SMALL, text_w, Align::Start).h);
-            (l + h).max(52.0)
-        })
-        .collect();
+    let heights = setting_row_heights(f, w, rows);
     let panel_h = 2.0 * bw + heights.iter().sum::<f32>();
     f.panel(Rect::new(x, top, w, panel_h), pal.surface);
     let mut ry = top + bw;

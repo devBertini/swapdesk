@@ -18,6 +18,9 @@ pub struct Interaction {
     /// Scroll offsets of the lists, in DIPs.
     pub scroll: f32,
     pub drawer_scroll: f32,
+    /// Which scrolling content of the main window `scroll` belongs to (the `scroll_key` of the last frame's
+    /// [`Output`]): another one starts at its top.
+    pub scroll_key: u8,
 }
 
 /// Where a control ended up in the last frame, for hit testing, the focus ring and the accessibility bounds.
@@ -46,6 +49,9 @@ pub struct Output {
     pub video: Option<Rect>,
     /// The largest scroll offset of the list on screen.
     pub scroll_max: f32,
+    /// Which scrolling content this frame has in the main window (0: none or the only one of its window). The
+    /// window keeps it with its scroll offset (see [`Interaction::scroll_key`]).
+    pub scroll_key: u8,
     /// The drawer's scrollable list, if any, in DIPs (for wheel routing).
     pub list_area: Option<Rect>,
     /// Where the drawer's terminal grid goes, in DIPs, when the panel shows the terminal tab: the window draws the
@@ -210,6 +216,14 @@ impl<'a> Frame<'a> {
     }
 
     /// A bordered panel (radius 12).
+    /// Registers the scrolling content `key` of the main window with its largest offset and gives the offset to
+    /// paint it at: the window's own while it shows the same content, the top when it comes from another screen.
+    pub fn page_scroll(&mut self, key: u8, max: f32) -> f32 {
+        self.out.scroll_max = max;
+        self.out.scroll_key = key;
+        if self.ix.scroll_key == key { self.ix.scroll.clamp(0.0, max) } else { 0.0 }
+    }
+
     pub fn panel(&self, r: Rect, fill: Color) {
         self.p.bordered(r, layout::PANEL_RADIUS, self.pal.line, fill);
     }

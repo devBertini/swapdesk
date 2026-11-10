@@ -510,8 +510,13 @@ impl CanvasView {
             return;
         };
         {
-            // The wheel can leave the list scrolled past a list that got shorter.
+            // The wheel can leave the list scrolled past a list that got shorter; another scrolling content starts
+            // at its top.
             let mut ix = iv.ix.borrow_mut();
+            if ix.scroll_key != out.scroll_key {
+                ix.scroll_key = out.scroll_key;
+                ix.scroll = 0.0;
+            }
             ix.scroll = ix.scroll.clamp(0.0, out.scroll_max);
         }
         // The first paint is the scenario as it was opened; a later one may already show what the backend answered.

@@ -19,6 +19,8 @@ struct Fixed {
     fills: RefCell<Vec<(Rect, Color, bool)>>,
     /// Every text drawn, in order.
     drawn: RefCell<Vec<String>>,
+    /// Where each text was drawn: x, y and its height.
+    placed: RefCell<Vec<(f32, f32, f32)>>,
 }
 
 impl Fixed {
@@ -84,9 +86,10 @@ impl Painter for Fixed {
         let lines = if ellipsis || one_line <= max_w { 1.0 } else { (one_line / max_w).ceil() };
         Label::new(one_line.min(max_w), lines * st.size * st.line, st.size, text.to_owned())
     }
-    fn draw(&self, l: &Label, _: f32, _: f32, _: Color) {
+    fn draw(&self, l: &Label, x: f32, y: f32, _: Color) {
         let text = l.handle::<String>().expect("a label is drawn by the painter that made it");
         self.drawn.borrow_mut().push(text.clone());
+        self.placed.borrow_mut().push((x, y, l.h));
         self.op();
     }
 }
@@ -266,4 +269,129 @@ fn with_the_video_under_the_canvas_the_viewer_leaves_its_rectangle_unpainted_and
         assert!((around - want).abs() < 0.5, "{name}: strips cover {around}, the column less the video is {want}");
     }
     assert!(viewers >= 5, "only {viewers} scenarios have a viewer window");
+}
+
+// ----- the settings rows -----
+
+/// The rows of a settings panel as (top, bottom) spans: the panel's inner edges and the separators between rows.
+fn rows_of(panel: Rect, bw: f32, separators: &[Rect]) -> Vec<(f32, f32)> {
+    let mut edges: Vec<f32> = vec![panel.y + bw];
+    let mut inside: Vec<f32> = separators
+        .iter()
+        .filter(|s| s.x >= panel.x && s.right() <= panel.right() && s.y > panel.y && s.bottom() < panel.bottom())
+        .map(|s| s.y)
+        .collect();
+    inside.sort_by(f32::total_cmp);
+    edges.extend(inside);
+    edges.push(panel.bottom() - bw);
+    edges.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+#[test]
+fn a_settings_row_keeps_its_padding_around_a_label_and_a_hint_of_any_height() {
+    // Defect: a row grew to the height of its text and no more, so a hint of two lines (or the list of shortcuts)
+    // touched the lines above and below it. The design gives every row 7 px above and below its content.
+    let mut rows_seen = 0;
+    let mut tall_rows = 0;
+    // The settings screen is the one whose rows grow with their text.
+    for sc in [Scenario::Ajustes] {
+        let state = sc.prepared_state();
+        let pal = swapdesk_ui::tokens::palette(state.dark());
+        let p = Fixed::default();
+        let kind = WindowKind::Main;
+        paint(Frame::new(&p, &state, &Interaction::default(), design_size(kind), true), kind);
+        let bw = p.hairline();
+        let fills = p.fills.borrow();
+        // A panel is a rounded surface inside a rounded border; a separator is a plain hairline of the line colour.
+        let panels: Vec<Rect> = fills
+            .iter()
+            .filter(|(r, c, rounded)| *rounded && *c == pal.line && r.w > 300.0 && r.h > 40.0)
+            .map(|(r, ..)| *r)
+            .collect();
+        let separators: Vec<Rect> = fills
+            .iter()
+            .filter(|(r, c, rounded)| !*rounded && *c == pal.line && (r.h - bw).abs() < 0.01 && r.w > 300.0)
+            .map(|(r, ..)| *r)
+            .collect();
+        assert!(!panels.is_empty(), "{}: no panel found", sc.name());
+        for panel in &panels {
+            let rows = rows_of(*panel, bw, &separators);
+            for &(x, y, h) in p.placed.borrow().iter() {
+                if !(x > panel.x && x < panel.right() && y >= panel.y && y + h <= panel.bottom() + 0.01) {
+                    continue;
+                }
+                let Some(&(top, bottom)) = rows.iter().find(|(t, b)| y + h / 2.0 >= *t && y + h / 2.0 <= *b) else {
+                    panic!("{}: a text at y {y} of the panel {panel:?} is in no row", sc.name());
+                };
+                rows_seen += 1;
+                if bottom - top > 60.0 {
+                    tall_rows += 1;
+                }
+                assert!(
+                    y - top >= 7.0 - 0.01 && bottom - (y + h) >= 7.0 - 0.01,
+                    "{}: a text spans y {y}..{} in the row {top}..{bottom}: it needs 7 px above and below",
+                    sc.name(),
+                    y + h
+                );
+            }
+        }
+    }
+    assert!(rows_seen > 20, "only {rows_seen} texts were checked");
+    assert!(tall_rows > 0, "no row taller than the minimum was checked: the test would not see the defect");
+}
+
+/// Where the settings title was drawn and the bottom of the lowest panel, for a frame of `size` painted with `ix`.
+fn settings_frame(size: (f32, f32), ix: &Interaction) -> (f32, f32, Output) {
+    let state = Scenario::Ajustes.prepared_state();
+    let pal = swapdesk_ui::tokens::palette(state.dark());
+    let p = Fixed::default();
+    let out = paint(Frame::new(&p, &state, ix, size, true), WindowKind::Main);
+    let title = state.t(swapdesk_ui::MsgKey::SettingsTitle);
+    // The page title, not the sidebar item of the same name.
+    let drawn = p.drawn.borrow();
+    let placed = p.placed.borrow();
+    let title_y = drawn
+        .iter()
+        .zip(placed.iter())
+        .find(|(t, (x, ..))| **t == title && *x > 240.0)
+        .map(|(_, (_, y, _))| *y)
+        .expect("the title is drawn");
+    let lowest = p
+        .fills
+        .borrow()
+        .iter()
+        .filter(|(r, c, rounded)| *rounded && *c == pal.line && r.w > 300.0 && r.h > 40.0)
+        .map(|(r, ..)| r.bottom())
+        .fold(0.0, f32::max);
+    (title_y, lowest, out)
+}
+
+#[test]
+fn the_settings_page_scrolls_when_it_is_taller_than_the_window_and_starts_at_its_top() {
+    // With the rows padded the page is taller than a short window: what does not fit is reached by scrolling.
+    let size = (1200.0, 520.0);
+    let (title_y, lowest, out) = settings_frame(size, &Interaction::default());
+    assert!((title_y - 32.0).abs() < 0.01, "the title starts at the top margin, not {title_y}");
+    assert!(lowest > size.1, "the test needs a page taller than the window: lowest panel ends at {lowest}");
+    assert!((out.scroll_max - (lowest + 32.0 - size.1)).abs() < 0.01, "scroll_max {} for {lowest}", out.scroll_max);
+    assert_ne!(out.scroll_key, 0, "the page names its scrolling content");
+
+    // Scrolled to the end, the last panel sits one margin above the bottom edge.
+    let end = Interaction { scroll: out.scroll_max, scroll_key: out.scroll_key, ..Interaction::default() };
+    let (title_end, lowest_end, out_end) = settings_frame(size, &end);
+    assert!((lowest_end - (size.1 - 32.0)).abs() < 0.01, "the last panel ends at {lowest_end}");
+    assert!((title_end - (32.0 - out.scroll_max)).abs() < 0.01, "the title moved to {title_end}");
+    assert!((out_end.scroll_max - out.scroll_max).abs() < 0.01);
+    // Every control moved with the page.
+    let (first, moved) = (out.widgets.first().expect("controls"), out_end.widgets.first().expect("controls"));
+    assert_eq!(first.id, moved.id);
+
+    // An offset kept from another scrolling screen (the activity list) does not carry over: the page starts at its top.
+    let other = Interaction { scroll: out.scroll_max, scroll_key: out.scroll_key + 1, ..Interaction::default() };
+    let (title_other, ..) = settings_frame(size, &other);
+    assert!((title_other - 32.0).abs() < 0.01, "an offset of another screen moved the title to {title_other}");
+
+    // A window tall enough for the whole page does not scroll.
+    let (_, lowest_tall, out_tall) = settings_frame((1200.0, lowest + 200.0), &Interaction::default());
+    assert_eq!(out_tall.scroll_max, 0.0, "the page ends at {lowest_tall}");
 }

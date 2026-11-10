@@ -912,9 +912,13 @@ impl Window {
         self.list_area.set(out.list_area);
         self.video.set(out.video);
         self.sync_viewer_host();
-        // The wheel can leave the list scrolled past a shorter list.
+        // The wheel can leave the list scrolled past a shorter list; another scrolling content starts at its top.
         {
             let mut ix = self.ix.borrow_mut();
+            if ix.scroll_key != out.scroll_key {
+                ix.scroll_key = out.scroll_key;
+                ix.scroll = 0.0;
+            }
             ix.scroll = ix.scroll.clamp(0.0, out.scroll_max);
         }
         *self.widgets.borrow_mut() = out.widgets;
