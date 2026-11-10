@@ -38,8 +38,11 @@ fn every_scenario_renders_to_a_png_and_every_control_has_a_place() {
             let name = format!("{}{}.png", sc.name(), suffix(kind));
             r.save_png(&dir.join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             // The layout the Mac painter must reproduce (stage 28 compares its own dump with this one).
-            std::fs::write(dir.join(format!("{}{}.layout.txt", sc.name(), suffix(kind))), swapdesk_paint::layout_dump(&r.output))
-                .expect("layout dump");
+            std::fs::write(
+                dir.join(format!("{}{}.layout.txt", sc.name(), suffix(kind))),
+                swapdesk_paint::layout_dump(&r.output),
+            )
+            .expect("layout dump");
             written.push(name);
 
             let missing: Vec<_> = state

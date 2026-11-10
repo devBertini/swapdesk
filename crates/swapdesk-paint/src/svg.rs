@@ -206,7 +206,8 @@ fn push_center_arc(c: (f32, f32), r: (f32, f32), phi: f32, theta1: f32, delta: f
     let step = delta / n as f32;
     let k = 4.0 / 3.0 * (step / 4.0).tan();
     let (sin_phi, cos_phi) = phi.sin_cos();
-    let map = |x: f32, y: f32| (c.0 + cos_phi * r.0 * x - sin_phi * r.1 * y, c.1 + sin_phi * r.0 * x + cos_phi * r.1 * y);
+    let map =
+        |x: f32, y: f32| (c.0 + cos_phi * r.0 * x - sin_phi * r.1 * y, c.1 + sin_phi * r.0 * x + cos_phi * r.1 * y);
     let mut t = theta1;
     for _ in 0..n {
         let (s1, c1) = t.sin_cos();

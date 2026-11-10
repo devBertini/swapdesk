@@ -184,11 +184,15 @@ pub fn main() -> ExitCode {
     let (Some(host_addr), Some(peer_code), Some(go)) =
         (value(&args, "--host-addr"), value(&args, "--peer-code"), value(&args, "--go"))
     else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]");
+        eprintln!(
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]"
+        );
         return ExitCode::from(2);
     };
     let Some(anchor) = value(&args, "--anchor-file") else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]");
+        eprintln!(
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]"
+        );
         return ExitCode::from(2);
     };
     match run(&host_addr, PathBuf::from(peer_code), PathBuf::from(go), PathBuf::from(anchor), value(&args, "--clip")) {

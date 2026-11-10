@@ -84,7 +84,12 @@ impl Fonts {
             let len = CFStringGetLength(s.get());
             let all = CFRange { location: 0, length: len };
             CFAttributedStringSetAttribute(a.mut_ptr(), all, kCTFontAttributeName, regular.get());
-            CFAttributedStringSetAttribute(a.mut_ptr(), all, kCTForegroundColorFromContextAttributeName, kCFBooleanTrue);
+            CFAttributedStringSetAttribute(
+                a.mut_ptr(),
+                all,
+                kCTForegroundColorFromContextAttributeName,
+                kCFBooleanTrue,
+            );
             if st.tracking != 0.0 {
                 let kern = f64::from(st.tracking * st.size);
                 if let Some(n) =
@@ -156,9 +161,9 @@ impl Fonts {
                 if ellipsis {
                     if let Some(line) = Owned::new(CTLineCreateWithAttributedString(a.mut_ptr())) {
                         let line = if Line::measure(&line).0 > f64::from(max_w) {
-                            let token = self.attributed("\u{2026}", st, 0).and_then(|(t, _)| {
-                                Owned::new(CTLineCreateWithAttributedString(t.mut_ptr()))
-                            });
+                            let token = self
+                                .attributed("\u{2026}", st, 0)
+                                .and_then(|(t, _)| Owned::new(CTLineCreateWithAttributedString(t.mut_ptr())));
                             let token_ref = token.as_ref().map_or(std::ptr::null(), Owned::get);
                             Owned::new(CTLineCreateTruncatedLine(
                                 line.get(),

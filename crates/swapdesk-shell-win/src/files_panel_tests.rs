@@ -12,12 +12,7 @@ fn panel_state() -> UiState {
     let mut s = Scenario::Visualizador.prepared_state();
     s.activate(ControlId::TbFiles);
     let entries = (0..12)
-        .map(|i| DirEntryView {
-            name: format!("arquivo-{i:02}.pdf"),
-            is_dir: i % 4 == 0,
-            size: 1500 * i,
-            mtime_ms: 1,
-        })
+        .map(|i| DirEntryView { name: format!("arquivo-{i:02}.pdf"), is_dir: i % 4 == 0, size: 1500 * i, mtime_ms: 1 })
         .collect();
     s.apply(UiEvent::Reply {
         ticket: Ticket(0),
@@ -75,10 +70,8 @@ fn the_panel_draws_every_control_the_state_lists_and_nothing_else_in_light_and_d
         // and the last transfer's controls are in view.
         assert!(r.output.scroll_max > 0.0, "dark {dark}: the long panel scrolls");
         let end = Interaction { scroll: r.output.scroll_max, ..Interaction::default() };
-        let r2 =
-            render(&s, WindowKind::Viewer, design_size(WindowKind::Viewer), 1.0, &end).expect("renders scrolled");
-        let widget =
-            |r: &crate::offscreen::Rendered, id| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
+        let r2 = render(&s, WindowKind::Viewer, design_size(WindowKind::Viewer), 1.0, &end).expect("renders scrolled");
+        let widget = |r: &crate::offscreen::Rendered, id| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
         assert_eq!(
             widget(&r2, ControlId::FilesChange).map(|x| x.w),
             Some(0.0),

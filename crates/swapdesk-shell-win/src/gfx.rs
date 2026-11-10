@@ -21,8 +21,8 @@ use windows::core::{BOOL, HSTRING, Interface, Result};
 
 pub use swapdesk_paint::INSTRUMENT_SANS;
 
-pub use swapdesk_paint::{Align, Label, Rect};
 use swapdesk_paint::Painter;
+pub use swapdesk_paint::{Align, Label, Rect};
 
 /// Size, weight, line height, tracking and scale, as bits.
 type FormatKey = (u32, u16, u32, u32);

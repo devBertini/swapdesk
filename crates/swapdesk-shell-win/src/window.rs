@@ -35,8 +35,8 @@ use crate::app::Shared;
 use crate::gfx::{D2dPainter, Rect};
 use crate::surface::Surface;
 use crate::system::{WM_ACCESS, WM_EDIT_EVENT, WM_WAKE, edit_font, get_x, get_y, hiword, loword};
-use swapdesk_paint::{EditSlot, Frame, Interaction, Widget};
 use crate::viewer::{KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};
+use swapdesk_paint::{EditSlot, Frame, Interaction, Widget};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS_NAME: PCWSTR = w!("SwapdeskWindow");
