@@ -94,6 +94,9 @@ pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), 
             };
             log("HOST_DRIVE_START");
             let (out, result) = host_drive(&backend, &cfg, &log);
+            // What this host handed to the system for the viewer's keys: the keyboard proof compares it with what
+            // the application in front received.
+            log(&format!("HOST_KEYS posted_presses={}", swapdesk_input_mac::posted_key_presses()));
             let code = match (&result, out.session_active && out.session_ended) {
                 (Ok(()), true) => {
                     log("HOST_RESULT PASS");

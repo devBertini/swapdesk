@@ -32,7 +32,7 @@ pub mod sink_logic;
 #[cfg(target_os = "macos")]
 pub use clipboard::MacClipboard;
 #[cfg(target_os = "macos")]
-pub use sink::{MacInputSink, can_post};
+pub use sink::{MacInputSink, can_post, posted_key_presses};
 
 pub use input::{Access, GrabStatus, KeyboardState, MacInput, NoKeyboardState, PointerMap};
 pub use logic::{InputConfig, InputCore, Outcome, ScrollConfig};
