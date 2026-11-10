@@ -602,3 +602,34 @@ fn the_palette_follows_the_theme_setting_and_sistema_follows_the_os() {
     s.apply(UiEvent::ThemeChanged { dark: false });
     assert_eq!(canvas(&s), LIGHT.canvas.hex());
 }
+
+#[test]
+fn the_elevated_window_shows_the_action_from_the_service_and_two_buttons_in_order() {
+    let line = "Permitir que o MacBook do escritório entre sem perguntar";
+    let state = swapdesk_ui::UiState::for_elevated_confirm(swapdesk_ui::Language::PtBr, false, line.into(), 90);
+    let size = swapdesk_paint::confirm_size();
+    let r = render(&state, WindowKind::Main, size, 1.0, &Interaction::default()).unwrap();
+    // Nothing of the app is in the window: the two buttons only, the negative on the left and the positive on the right.
+    let ids: Vec<ControlId> = r.output.widgets.iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let rect = |id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect).unwrap();
+    let (cancel, confirm) = (rect(ControlId::DialogSecondary), rect(ControlId::DialogPrimary));
+    assert!(cancel.right() < confirm.x, "Cancelar {cancel:?} is left of Confirmar {confirm:?}");
+    for b in [cancel, confirm] {
+        assert!(b.x >= 0.0 && b.right() <= size.0 && b.y >= 0.0 && b.bottom() <= size.1 - 16.0, "{b:?} is inside");
+        assert!((b.h - 40.0).abs() < 0.01);
+    }
+    // What a screen reader gets: the heading, the action as the service described it, what to do, the two buttons.
+    let labels: Vec<String> = state.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    for want in [
+        "Confirmação de administrador",
+        line,
+        "Confirme como administrador para aplicar esta mudança.",
+        "Cancelar",
+        "Confirmar",
+    ] {
+        assert!(labels.iter().any(|l| l == want), "{want:?} is missing from {labels:?}");
+    }
+    assert_eq!(labels.len(), 5, "{labels:?}");
+    r.save_png(&shots_dir().join("confirmacao-elevada.png")).unwrap();
+}

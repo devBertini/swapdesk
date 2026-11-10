@@ -254,8 +254,11 @@ impl Window {
             if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
                 work = info.rcWork;
             }
+            let confirm = self.shared.state.borrow().elevated_confirm().is_some();
             let (dw, dh) = match self.kind {
                 WindowKind::Banner => swapdesk_paint::banner_size(),
+                // The elevated instance's window is the confirmation card alone.
+                _ if confirm => swapdesk_paint::confirm_size(),
                 _ => (layout::DESIGN_W, layout::DESIGN_H),
             };
             let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
@@ -279,6 +282,10 @@ impl Window {
                 let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
             }
             let _ = ShowWindow(hwnd, if self.kind == WindowKind::Banner { SW_SHOWNOACTIVATE } else { SW_SHOW });
+            if confirm {
+                // Started from the UAC prompt: the person must see it in front, not find it behind the app.
+                let _ = SetForegroundWindow(hwnd);
+            }
         }
     }
 
@@ -1019,7 +1026,8 @@ impl Window {
                 Some(LRESULT(0))
             }
             WM_GETMINMAXINFO => {
-                if self.kind == WindowKind::Banner {
+                // The banner and the confirmation window keep the size they were given.
+                if self.kind == WindowKind::Banner || self.shared.state.borrow().elevated_confirm().is_some() {
                     return None;
                 }
                 let dpi = self.dpi.get();

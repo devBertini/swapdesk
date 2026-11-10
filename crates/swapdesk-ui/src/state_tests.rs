@@ -2453,3 +2453,38 @@ fn a_pending_action_disables_the_actions_and_says_so() {
     }
     assert!(!s.actions_disabled());
 }
+
+#[test]
+fn the_elevated_window_answers_only_by_its_buttons_and_declines_when_the_time_runs_out() {
+    let make = || UiState::for_elevated_confirm(Language::PtBr, false, "Permitir X".into(), 3);
+    let s = make();
+    assert_eq!(s.dialog(WindowKind::Main), Some(DialogKind::ElevatedConfirm));
+    let t = s.dialog_texts(&DialogKind::ElevatedConfirm);
+    assert_eq!(t.title, "Confirmação de administrador");
+    assert_eq!(t.body, ["Permitir X", "Confirme como administrador para aplicar esta mudança."]);
+    assert_eq!((t.secondary.as_deref(), t.primary.as_deref()), (Some("Cancelar"), Some("Confirmar")));
+    assert_eq!(s.confirm_answer(), None);
+    assert!(s.needs_tick());
+    // "Confirmar" approves, and the first answer stands.
+    let mut s = make();
+    assert!(s.activate(ControlId::DialogPrimary).commands.is_empty());
+    assert_eq!(s.confirm_answer(), Some(true));
+    s.activate(ControlId::DialogSecondary);
+    assert_eq!(s.confirm_answer(), Some(true));
+    assert!(!s.needs_tick());
+    // "Cancelar", which is also what Esc means there, declines.
+    let mut s = make();
+    assert_eq!(s.escape_target(WindowKind::Main), Some(ControlId::DialogSecondary));
+    s.activate(ControlId::DialogSecondary);
+    assert_eq!(s.confirm_answer(), Some(false));
+    // The ticket's time running out declines.
+    let mut s = make();
+    s.tick();
+    s.tick();
+    assert_eq!(s.confirm_answer(), None);
+    s.tick();
+    assert_eq!(s.confirm_answer(), Some(false));
+    // The normal interface never has one.
+    assert!(UiState::new(Language::PtBr, false).elevated_confirm().is_none());
+    assert_eq!(base().escape_target(WindowKind::Main), None);
+}

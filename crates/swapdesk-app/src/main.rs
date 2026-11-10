@@ -34,10 +34,10 @@ fn main() {
     if options.help {
         return message_box(&usage());
     }
-    // The elevated instance is only that: no window, no viewer pipeline, no preferences, no autostart, no startup
+    // The elevated instance is only that: its confirmation window, no viewer pipeline, no preferences, no autostart, no startup
     // commands, no panic record. Its exit code says how the confirmation ended (ELEVATION.md 3.5).
     if let Some(ticket) = &options.elevated {
-        let code = swapdesk_app::elevate::run_instance(&options, ticket, swapdesk_app::elevate::confirm_without_window);
+        let code = swapdesk_app::elevate::run_instance(&options, ticket, swapdesk_app::elevate::confirm_in_window);
         std::process::exit(i32::from(code));
     }
     let language = system_language();

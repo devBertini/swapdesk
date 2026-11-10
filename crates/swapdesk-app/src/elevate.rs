@@ -107,10 +107,21 @@ impl WinElevator {
     }
 }
 
-/// What the person's answer will be until the confirmation window exists: yes. This is where the window plugs in: it
-/// gets the action as the service holds it, the peer's name and the seconds left, and answers whether to approve.
-pub fn confirm_without_window(_action: &ElevAction, _peer_name: &str, _remaining_s: u16) -> bool {
-    true
+/// The person's answer, from the instance's own window (ELEVATION.md 3.5): it shows the action as the service holds
+/// it, in this process's display language, with "Cancelar" and "Confirmar", and closes as declined when the
+/// ticket's time runs out. Only a real click or key on "Confirmar" approves; a window that cannot be shown
+/// declines.
+pub fn confirm_in_window(action: &ElevAction, peer_name: &str, remaining_s: u16) -> bool {
+    let lang = swapdesk_shell_win::system_language();
+    let line = elevated_client::action_line(lang, action, peer_name);
+    let state = swapdesk_ui::UiState::for_elevated_confirm(lang, swapdesk_shell_win::system_dark(), line, remaining_s);
+    match swapdesk_shell_win::run_confirm(state) {
+        Ok(answer) => answer == Some(true),
+        Err(e) => {
+            trace(&format!("the confirmation window could not be shown: {e}"));
+            false
+        }
+    }
 }
 
 /// How a failure to open the pipe ends the instance: the system refusing this process is its own code, anything else
@@ -315,9 +326,6 @@ mod tests {
         });
         assert_eq!(code, 3);
         assert!(!asked.get());
-        // Until the window exists the answer is yes.
-        let action = ElevAction::SetGrants { device_id: "d".into(), grants: 1 };
-        assert!(confirm_without_window(&action, "peer", 60));
     }
 
     #[test]

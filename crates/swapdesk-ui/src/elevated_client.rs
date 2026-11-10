@@ -10,6 +10,19 @@ use swapdesk_ipc::{
 };
 use swapdesk_proto::ErrorCode;
 
+use crate::{ElevatedAction, Language, Permissions};
+
+/// The line the confirmation window shows for `action`, in `lang`: the words of the step that asked.
+pub fn action_line(lang: Language, action: &ElevAction, peer_name: &str) -> String {
+    match action {
+        ElevAction::SetGrants { device_id, grants } => crate::interact::elevation_action_text(
+            lang,
+            &ElevatedAction::SetGrants { device_id: device_id.clone(), grants: Permissions(*grants) },
+            peer_name,
+        ),
+    }
+}
+
 /// How the elevated instance ended. The code is the process exit code (ELEVATION.md 3.5; 2 is the command line's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElevatedExit {

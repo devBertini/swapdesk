@@ -41,7 +41,7 @@ pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRo
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
     Activation, ButtonSide, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId,
-    Effect, Fetch, Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, SwapWait, TermPhase, UiState, WaitBar,
-    WaitButton, WaitCard, WaitIcon, WaitPhase, WindowKind,
+    Effect, ElevatedConfirm, Fetch, Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, SwapWait, TermPhase,
+    UiState, WaitBar, WaitButton, WaitCard, WaitIcon, WaitPhase, WindowKind,
 };
 pub use strings::MsgKey;

@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use swapdesk_ui::trace::SlowGuard;
-use swapdesk_ui::{Activation, Changed, Command, ControlId, EditId, Effect, SelectId, UiBackend, UiState, WindowKind};
+use swapdesk_ui::{
+    Activation, Changed, Command, ControlId, EditId, Effect, SelectId, Ticket, UiBackend, UiEvent, UiState, WindowKind,
+};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -71,12 +73,50 @@ pub fn run(state: UiState, backend: Arc<dyn UiBackend>, waker: Arc<Waker>, start
 /// As [`run`], with the viewer pipeline's hooks (see [`ViewerHost`]): the viewer window reports its video rectangle,
 /// focus, mouse and keyboard to `host`.
 pub fn run_with_host(
-    mut state: UiState,
+    state: UiState,
     backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
     startup: Vec<Command>,
     host: Option<Arc<dyn ViewerHost>>,
 ) -> Result<()> {
+    run_shell(state, backend, waker, startup, host).map(|_| ())
+}
+
+/// The confirmation window talks to nobody: the instance's own connection carries the answer.
+struct NoBackend;
+
+impl UiBackend for NoBackend {
+    fn send(&self, _command: Command) -> Ticket {
+        Ticket(0)
+    }
+
+    fn drain(&self) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+/// Runs the elevated instance's confirmation window (ELEVATION.md 3.5; `state` from
+/// `UiState::for_elevated_confirm`) until the person answers, the time runs out or the window is closed. The
+/// answer is `Some(true)` only for a real click or key on "Confirmar"; a closed window is `None`.
+pub fn run_confirm(state: UiState) -> Result<Option<bool>> {
+    run_confirm_with(state, Arc::new(Waker::new()))
+}
+
+/// [`run_confirm`] with the waker the window is set on (tests find the window through it).
+pub(crate) fn run_confirm_with(state: UiState, waker: Arc<Waker>) -> Result<Option<bool>> {
+    let shared = run_shell(state, Arc::new(NoBackend), waker, Vec::new(), None)?;
+    let answer = shared.state.borrow().confirm_answer();
+    Ok(answer)
+}
+
+/// The shell's run: builds the shared state, shows the main window and pumps messages until it closes.
+fn run_shell(
+    mut state: UiState,
+    backend: Arc<dyn UiBackend>,
+    waker: Arc<Waker>,
+    startup: Vec<Command>,
+    host: Option<Arc<dyn ViewerHost>>,
+) -> Result<Rc<Shared>> {
     // SAFETY: called once at startup, before any window exists; failures (already set by a manifest) are harmless.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -135,7 +175,7 @@ pub fn run_with_host(
         }
     }
     SHARED.with(|s| *s.borrow_mut() = None);
-    Ok(())
+    Ok(shared)
 }
 
 impl Shared {
@@ -391,6 +431,17 @@ impl Shared {
 
     /// Windows follow the state (a viewer exists while a session does), then whatever changed redraws.
     pub fn refresh(self: &Rc<Self>, changed: Changed) {
+        // The elevated instance's confirmation window ends with its answer.
+        let answered = self.state.borrow().confirm_answer().is_some();
+        if answered {
+            if let Some(main) = self.window(WindowKind::Main) {
+                // SAFETY: our window; its WM_DESTROY ends the message loop.
+                unsafe {
+                    let _ = DestroyWindow(main.hwnd());
+                }
+            }
+            return;
+        }
         let wanted = self.state.borrow().windows();
         for kind in &wanted {
             if self.window(*kind).is_none()

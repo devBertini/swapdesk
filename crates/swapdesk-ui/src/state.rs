@@ -208,6 +208,17 @@ pub struct Elevation {
     pub phase: ElevPhase,
 }
 
+/// What the elevated instance's own window asks (ELEVATION.md 3.5): the action as the service holds it, the
+/// seconds the ticket still lives and the person's answer once given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElevatedConfirm {
+    /// The line that says what is about to be allowed, in the window's language.
+    pub line: String,
+    pub remaining_s: u16,
+    /// `Some(true)` only for "Confirmar"; "Cancelar", Esc and the time running out answer no.
+    pub answer: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
     pub id: u64,
@@ -483,6 +494,8 @@ pub struct TransferView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogKind {
     Elevation,
+    /// The elevated instance's confirmation: the only thing its window shows.
+    ElevatedConfirm,
     Consent,
     SwapConfirm,
     SwapAsk,
@@ -569,6 +582,7 @@ pub struct UiState {
     pub(crate) pairing: Option<PairingView>,
     pub(crate) incoming: Option<IncomingView>,
     pub(crate) elevation: Option<Elevation>,
+    pub(crate) confirm: Option<ElevatedConfirm>,
     pub(crate) sessions: Vec<SessionView>,
     pub(crate) swap: Option<SwapView>,
     pub(crate) rename: Option<RenameDraft>,
@@ -651,6 +665,7 @@ impl UiState {
             pairing: None,
             incoming: None,
             elevation: None,
+            confirm: None,
             sessions: Vec::new(),
             swap: None,
             activity: Vec::new(),
@@ -1134,6 +1149,10 @@ impl UiState {
     /// The control Esc activates in a window: "Cancelar" while a card waits, "Fechar" on an ended card. Only the
     /// main window's page, and not while a dialog or another screen is over it.
     pub fn escape_target(&self, kind: WindowKind) -> Option<ControlId> {
+        // In the elevated instance's window Esc is "Cancelar".
+        if kind == WindowKind::Main && self.confirm.is_some() {
+            return Some(ControlId::DialogSecondary);
+        }
         if kind != WindowKind::Main
             || self.dialog(kind).is_some()
             || self.incoming_session_open()
@@ -1269,7 +1288,9 @@ impl UiState {
     pub fn dialog(&self, kind: WindowKind) -> Option<DialogKind> {
         match kind {
             WindowKind::Main => {
-                if self.elevation.is_some() {
+                if self.confirm.is_some() {
+                    Some(DialogKind::ElevatedConfirm)
+                } else if self.elevation.is_some() {
                     Some(DialogKind::Elevation)
                 } else if matches!(self.incoming.as_ref().map(|i| &i.request.kind), Some(RequestKind::Consent { .. })) {
                     Some(DialogKind::Consent)
@@ -1304,8 +1325,27 @@ impl UiState {
     }
 
     /// True while something counts seconds down (the shell then runs a one-second timer, otherwise none).
+    /// The state of the elevated instance's window (ELEVATION.md 3.5): nothing but the step that says what an
+    /// administrator is about to allow, with "Cancelar" and "Confirmar". `line` is the action as the service
+    /// described it; `remaining_s` is what is left of the ticket.
+    pub fn for_elevated_confirm(lang: Language, dark: bool, line: String, remaining_s: u16) -> UiState {
+        let mut state = UiState::new(lang, dark);
+        state.confirm = Some(ElevatedConfirm { line, remaining_s, answer: None });
+        state
+    }
+
+    pub fn elevated_confirm(&self) -> Option<&ElevatedConfirm> {
+        self.confirm.as_ref()
+    }
+
+    /// The answer given in the elevated instance's window, once there is one. The window closes on it.
+    pub fn confirm_answer(&self) -> Option<bool> {
+        self.confirm.as_ref().and_then(|c| c.answer)
+    }
+
     pub fn needs_tick(&self) -> bool {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
+            || self.confirm.as_ref().is_some_and(|c| c.answer.is_none())
             || self.incoming.is_some()
             || matches!(self.swap.as_ref().map(|s| &s.phase), Some(SwapPhase::Asked { .. }))
             || self.swap_requested()
@@ -1558,6 +1598,16 @@ impl UiState {
         }
         for t in expired {
             changed = changed.union(self.apply_reply(t, Err(ApiError::new(ApiCode::Timeout))));
+        }
+        if let Some(c) = &mut self.confirm
+            && c.answer.is_none()
+        {
+            c.remaining_s = c.remaining_s.saturating_sub(1);
+            if c.remaining_s == 0 {
+                // The ticket ran out: the window closes as declined.
+                c.answer = Some(false);
+            }
+            changed = changed.union(Changed::MAIN);
         }
         if let Some(p) = &mut self.pairing
             && let PairingState::Open { remaining_s } = &mut p.state

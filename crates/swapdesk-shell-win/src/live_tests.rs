@@ -458,3 +458,67 @@ fn a_service_event_that_ends_a_connect_in_failure_moves_focus_to_fechar() {
     deliver(&live, &backend, entry_event(SessionState::NotOpened { why: ConnectWhy::Declined }));
     assert_eq!(last_focus(), Some(ControlId::ConnectClose), "the end card's Fechar takes the focus");
 }
+
+const CONFIRM_LINE: &str = "Permitir que o MacBook do escritório entre sem perguntar";
+
+fn confirm_state(remaining_s: u16) -> swapdesk_ui::UiState {
+    swapdesk_ui::UiState::for_elevated_confirm(swapdesk_ui::Language::PtBr, false, CONFIRM_LINE.into(), remaining_s)
+}
+
+/// The elevated instance's confirmation window on a thread; the channel gets its answer when it closes.
+fn start_confirm(remaining_s: u16) -> (Live, std::sync::mpsc::Receiver<Option<bool>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let live = Live::start_with(move |w| {
+        let _ = tx.send(crate::app::run_confirm_with(confirm_state(remaining_s), w).expect("shell"));
+    });
+    (live, rx)
+}
+
+#[test]
+fn enter_alone_confirms_nothing() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+    let (live, answer) = start_confirm(90);
+    // SAFETY: sends to our window from another thread (it blocks until the window thread has answered).
+    unsafe { SendMessageW(live.hwnd(), WM_KEYDOWN, Some(WPARAM(usize::from(VK_RETURN.0))), Some(LPARAM(0))) };
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(answer.try_recv().is_err(), "no button has the keyboard: Enter confirms nothing and the window stays");
+    // Esc is "Cancelar": the window closes with a no.
+    press_escape(&live);
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Some(false)));
+}
+
+#[test]
+fn it_closes_as_declined_when_the_time_runs_out() {
+    let (_live, answer) = start_confirm(4);
+    assert_eq!(answer.recv_timeout(Duration::from_secs(15)), Ok(Some(false)));
+}
+
+#[test]
+fn closing_the_elevated_window_is_no_approval_and_a_click_on_confirmar_is_one() {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDOWN, WM_LBUTTONUP};
+    let (live, answer) = start_confirm(90);
+    // SAFETY: posting to our window.
+    unsafe {
+        let _ = PostMessageW(Some(live.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(None));
+    drop(live);
+
+    // A real button press where "Confirmar" is painted approves.
+    let (live, answer) = start_confirm(90);
+    let ((w, h), scale) = live.geometry();
+    let size = (w as f32 / scale, h as f32 / scale);
+    let r = render(&confirm_state(90), WindowKind::Main, size, scale, &Interaction::default()).unwrap();
+    let rect = r.output.widgets.iter().find(|w| w.id == ControlId::DialogPrimary).map(|w| w.rect).unwrap();
+    let (cx, cy) = rect.center();
+    let (px, py) = ((cx * scale) as isize, (cy * scale) as isize);
+    let at = LPARAM(((py & 0xFFFF) << 16) | (px & 0xFFFF));
+    // SAFETY: sends to our window from another thread.
+    unsafe {
+        SendMessageW(live.hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(at));
+        SendMessageW(live.hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(at));
+        SendMessageW(live.hwnd(), WM_LBUTTONUP, Some(WPARAM(0)), Some(at));
+    }
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Some(true)));
+}

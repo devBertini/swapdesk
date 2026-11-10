@@ -49,6 +49,11 @@ pub fn layout_dump(out: &Output) -> String {
     s
 }
 
+/// The size of the elevated instance's confirmation window in DIPs: the dialog card and its margin.
+pub fn confirm_size() -> (f32, f32) {
+    (swapdesk_ui::tokens::layout::DIALOG_W + 48.0, 380.0)
+}
+
 /// The window size a scenario's window has in the design.
 pub fn design_size(kind: WindowKind) -> (f32, f32) {
     match kind {

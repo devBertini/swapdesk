@@ -875,6 +875,16 @@ impl UiState {
                     },
                 }
             }
+            DialogKind::ElevatedConfirm => DialogTexts {
+                title: self.name_of(MsgKey::ElevTitle),
+                body: vec![
+                    self.confirm.as_ref().map(|c| c.line.clone()).unwrap_or_default(),
+                    self.name_of(MsgKey::ElevConfirmBody),
+                ],
+                extra: None,
+                primary: Some(self.name_of(MsgKey::ElevConfirm)),
+                secondary: Some(self.name_of(MsgKey::ElevCancel)),
+            },
             DialogKind::Consent => {
                 let (name, feature, remaining) = match &self.incoming {
                     Some(i) => (
@@ -1667,6 +1677,13 @@ impl UiState {
                         a.commands.push(Command::Elevate { action: el.action.clone() });
                     }
                     _ => self.elevation = None,
+                }
+            }
+            DialogKind::ElevatedConfirm => {
+                if let Some(c) = &mut self.confirm
+                    && c.answer.is_none()
+                {
+                    c.answer = Some(primary);
                 }
             }
             DialogKind::Consent => {

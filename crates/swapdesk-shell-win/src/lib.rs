@@ -20,7 +20,7 @@ mod terminal;
 mod viewer;
 mod window;
 
-pub use app::{native_surface, run, run_with_host, video_area};
+pub use app::{native_surface, run, run_confirm, run_with_host, video_area};
 pub use offscreen::{Rendered, design_size, render};
 pub use swapdesk_paint::{Interaction, Output, Widget};
 pub use swapdesk_platform::NativeSurface;

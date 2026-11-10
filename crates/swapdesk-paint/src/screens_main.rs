@@ -18,6 +18,11 @@ const SIDEBAR_W: f32 = layout::SIDEBAR_W;
 
 pub fn paint(f: &mut Frame) {
     f.p.clear(f.pal.canvas);
+    // The elevated instance's window is the confirmation step alone: nothing of the app is behind it.
+    if f.st.elevated_confirm().is_some() {
+        dialog(f, &DialogKind::ElevatedConfirm);
+        return;
+    }
     if f.st.screen() == Screen::Pairing {
         pairing(f);
     } else {
@@ -1536,6 +1541,13 @@ fn card(f: &Frame, content_h: f32) -> Rect {
     let w = layout::DIALOG_W.min(f.w - 48.0);
     let h = content_h + 64.0;
     let r = Rect::new(f.p.snap((f.w - w) / 2.0), f.p.snap(((f.h - h) / 2.0).max(16.0)), w, h);
+    if f.st.elevated_confirm().is_some() {
+        // Alone in its own window the card sits on the window's canvas with a hairline: a dialog's shadow needs the
+        // room of a screen behind it.
+        f.p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), f.pal.canvas);
+        f.p.bordered(r, layout::DIALOG_RADIUS, f.pal.line, f.pal.surface);
+        return r;
+    }
     f.p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), f.pal.remote);
     f.p.shadow(r, layout::DIALOG_RADIUS, 30.0, 80.0, fixed::SHADOW_DIALOG);
     f.p.fill_rrect(r, layout::DIALOG_RADIUS, f.pal.surface);
@@ -1622,7 +1634,7 @@ fn dialog(f: &mut Frame, kind: &DialogKind) {
     let r = card(f, content_h);
     let (x, mut y) = (r.x + 32.0, r.y + 32.0);
     let icon = match kind {
-        DialogKind::Elevation => icons::SHIELD.to_owned(),
+        DialogKind::Elevation | DialogKind::ElevatedConfirm => icons::SHIELD.to_owned(),
         DialogKind::Consent => icons::terminal(),
         DialogKind::SwapConfirm | DialogKind::SwapAsk => icons::SWAP.to_owned(),
     };
