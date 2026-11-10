@@ -81,6 +81,7 @@ fn interactive_launch_on_the_mock_backend_takes_a_click_typing_and_return_in_the
     assert_eq!(value(&report, "click.activated"), Some("true"), "a click on the sidebar changes the screen: {report}");
     assert_eq!(value(&report, "field.typed"), Some("true"), "the rename field takes the typed name: {report}");
     assert_eq!(value(&report, "rename.ok"), Some("true"), "Return renames the device and closes the field: {report}");
+    assert_eq!(value(&report, "repaint.ok"), Some("true"), "a state change repaints the window by itself: {report}");
 }
 
 #[test]

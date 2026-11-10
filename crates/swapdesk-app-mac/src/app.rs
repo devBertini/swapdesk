@@ -235,7 +235,6 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let hooks = ViewerHooks {
         video: Some(Arc::new(MacVideoSlot::new(&viewer))),
         input: Some(Arc::new(viewer.input())),
-        show_swap: true,
         note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
     };
     // The host drive owns the backend's events: the window gets a backend that says nothing.

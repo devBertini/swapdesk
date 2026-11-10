@@ -69,18 +69,24 @@ pub fn schedule(file: PathBuf, delay: Duration, service_addrs: String, viewer: A
 /// loop starts, a click on the sidebar, then a paired device renamed through its native text field with real key
 /// events; once the mock backend had time to answer, the report is written: `selftest=ok`, `mode=mock`,
 /// `click.activated`, `field.typed` (the field held exactly the typed name), `rename.ok` (the device carries it and
-/// the field closed).
+/// the field closed), `repaint.ok` (after the state changed, the window painted again in AppKit's own display pass
+/// and no pass found the state busy) and `repaint.passes` (the counts).
 pub fn schedule_mock(file: PathBuf, delay: Duration) {
     watchdog(&file);
     let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
     let queued = DispatchQueue::main().after(when, move || {
         let click = swapdesk_shell_mac::selftest_click() == Some(true);
         let typed = swapdesk_shell_mac::selftest_rename_begin(MOCK_NAME) == Some(true);
+        let before = swapdesk_shell_mac::selftest_display_passes().unwrap_or((0, 0));
         let later = DispatchTime::try_from(MOCK_ANSWER).unwrap_or(DispatchTime::NOW);
         let queued = DispatchQueue::main().after(later, move || {
             let renamed = swapdesk_shell_mac::selftest_rename_end(MOCK_NAME) == Some(true);
-            let report =
+            let after = swapdesk_shell_mac::selftest_display_passes().unwrap_or((0, 0));
+            let repainted = after.0 > before.0 && after.1 == 0;
+            let mut report =
                 format!("selftest=ok\nmode=mock\nclick.activated={click}\nfield.typed={typed}\nrename.ok={renamed}\n");
+            report.push_str(&format!("repaint.ok={repainted}\n"));
+            report.push_str(&format!("repaint.passes={}..{} skipped={}\n", before.0, after.0, after.1));
             finish(&file, report);
         });
         if queued.is_err() {

@@ -50,7 +50,7 @@ pub use shell::{ViewerHooks, run, run_with_host, selftest, set_shot};
 #[cfg(target_os = "macos")]
 pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};
 #[cfg(target_os = "macos")]
-pub use shell::{selftest_click, selftest_rename_begin, selftest_rename_end};
+pub use shell::{selftest_click, selftest_display_passes, selftest_rename_begin, selftest_rename_end};
 #[cfg(target_os = "macos")]
 pub use system::{Waker, system_dark, system_language};
 #[cfg(target_os = "macos")]

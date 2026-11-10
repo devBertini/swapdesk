@@ -3,7 +3,6 @@
 //! `SWAPDESK_INTERACTIVE=1` is set, so they stay out of the default gate (`interactive: opens windows`). Each check
 //! closes every window it opens.
 
-use objc2_app_kit::NSAccessibility;
 use swapdesk_ui::mock::{MockBackend, Scenario};
 
 use super::*;
@@ -14,23 +13,6 @@ macro_rules! ensure {
             return Err(format!($($arg)*));
         }
     };
-}
-
-fn labels(view: &NSView, out: &mut Vec<String>) {
-    for sub in view.subviews().to_vec() {
-        if let Some(l) = sub.accessibilityLabel() {
-            out.push(l.to_string());
-        }
-        labels(&sub, out);
-    }
-}
-
-fn found(window: &NSWindow) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(v) = window.contentView() {
-        labels(&v, &mut out);
-    }
-    out
 }
 
 fn open(mtm: MainThreadMarker, sc: Scenario, hooks: ViewerHooks) -> Rc<Shell> {
@@ -45,14 +27,31 @@ fn close(shell: &Rc<Shell>) {
         v.window.setDelegate(None);
         v.window.close();
     }
+    if let Some(b) = shell.banner.borrow_mut().take() {
+        b.close();
+    }
     shell.main.window.setDelegate(None);
     shell.main.window.close();
     clear_shell();
 }
 
-/// Every scenario of the mock backend builds its windows: the main window's canvas paints every control the state
-/// lists, every tool of the viewer carries its accessible name, and a viewer window exists exactly while a viewer
-/// session does.
+/// Every control the state lists for window `kind` was painted by `canvas`.
+fn painted_all(shell: &Shell, canvas: &CanvasView, kind: WindowKind, scenario: &str) -> Result<(), String> {
+    let widgets = canvas.widgets();
+    for c in shell.state.borrow().controls(kind) {
+        ensure!(
+            !c.id.focusable() || widgets.iter().any(|w| w.id == c.id),
+            "{scenario}: {:?} '{}' was not painted in the {kind:?} window",
+            c.id,
+            c.label
+        );
+    }
+    Ok(())
+}
+
+/// Every scenario of the mock backend builds its windows: each canvas (main, viewer, banner) paints every control
+/// the state lists for it; a viewer window exists exactly while a viewer session does, with its video view under the
+/// canvas on the frame's video rectangle; a banner exists exactly while this Mac is hosted.
 fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
@@ -60,35 +59,38 @@ fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
         let shell = open(mtm, sc, ViewerHooks::default());
 
         ensure!(shell.main.canvas.paint_now(), "{}: the main window's canvas did not paint", sc.name());
-        let widgets = shell.main.canvas.widgets();
-        for c in shell.state.borrow().controls(WindowKind::Main) {
-            ensure!(
-                !c.id.focusable() || widgets.iter().any(|w| w.id == c.id),
-                "{}: {:?} '{}' was not painted in the main window",
-                sc.name(),
-                c.id,
-                c.label
-            );
-        }
+        painted_all(&shell, &shell.main.canvas, WindowKind::Main, sc.name())?;
         match expected_viewer {
-            Some(m) => {
+            Some(_) => {
                 let v = shell.viewer.borrow();
                 let Some(v) = v.as_ref() else { return Err(format!("{}: a viewer window should exist", sc.name())) };
-                let names = found(&v.window);
-                for t in &m.tools {
-                    let label = match t {
-                        Tool::Screen { label, .. }
-                        | Tool::Quality { label, .. }
-                        | Tool::Switch { label, .. }
-                        | Tool::Keys { label, .. }
-                        | Tool::Disconnect { label } => label,
-                        Tool::Swap { .. } => continue, // hidden unless `show_swap`
-                    };
-                    ensure!(names.contains(label), "{}: tool '{label}' missing ({names:?})", sc.name());
-                }
+                ensure!(v.canvas.paint_now(), "{}: the viewer's canvas did not paint", sc.name());
+                painted_all(&shell, &v.canvas, WindowKind::Viewer, sc.name())?;
                 ensure!(v.surface().is_some(), "{}: the video view has a layer", sc.name());
+                // The video view sits under the canvas, on the rectangle the frame left for it.
+                v.place_video();
+                let (video, hole) = (v.video.frame(), v.canvas.video_rect());
+                let hole = hole.ok_or_else(|| format!("{}: the viewer's frame has no video rectangle", sc.name()))?;
+                ensure!(
+                    (video.origin.x - f64::from(hole.x)).abs() < 1.0
+                        && (video.origin.y - f64::from(hole.y)).abs() < 1.0
+                        && (video.size.width - f64::from(hole.w)).abs() < 1.0
+                        && (video.size.height - f64::from(hole.h)).abs() < 1.0,
+                    "{}: the video view is at {video:?}, the frame's rectangle is {hole:?}",
+                    sc.name()
+                );
             }
             None => ensure!(shell.viewer.borrow().is_none(), "{}: no viewer window without a session", sc.name()),
+        }
+        let banner = shell.banner.borrow().as_ref().map(|b| b.canvas.clone());
+        ensure!(
+            banner.is_some() == shell.state.borrow().host_session().is_some(),
+            "{}: a banner exists exactly while this Mac is hosted",
+            sc.name()
+        );
+        if let Some(canvas) = banner {
+            ensure!(canvas.paint_now(), "{}: the banner's canvas did not paint", sc.name());
+            painted_all(&shell, &canvas, WindowKind::Banner, sc.name())?;
         }
         close(&shell);
     }

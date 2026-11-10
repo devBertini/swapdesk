@@ -15,9 +15,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSControl,
-    NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField,
-    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSImage,
+    NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
@@ -27,8 +27,7 @@ use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
-    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, Theme, UiBackend,
-    UiState, WindowKind,
+    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, SelectId, Theme, UiBackend, UiState, WindowKind,
 };
 
 use crate::banner_window::BannerWindow;
@@ -50,8 +49,6 @@ pub struct ViewerHooks {
     pub video: Option<Arc<dyn VideoSlot>>,
     /// The input lane: gets the keyboard, mouse and focus events of the video view.
     pub input: Option<Arc<dyn ViewerInput>>,
-    /// Draw the "Inverter" button in the toolbar (its slot is always laid out in the model).
-    pub show_swap: bool,
     /// Told what the shell decided on its own at launch (login-item launch, status item), for the app's trace log.
     pub note: Option<LaunchNote>,
 }
@@ -117,11 +114,6 @@ define_class!(
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: &AnyObject) {
             with_shell(|s| s.quit());
-        }
-
-        #[unsafe(method(act:))]
-        fn act(&self, sender: &AnyObject) {
-            with_shell(|s| s.on_action(sender));
         }
 
         #[unsafe(method(tick:))]
@@ -209,6 +201,8 @@ pub struct Shell {
     started: std::time::Instant,
     /// The theme whose `NSApp.appearance` is in force (the app starts with none: Sistema).
     appearance: std::cell::Cell<Theme>,
+    /// The question the main window was last brought up for: the incoming request and the dialog on screen.
+    raised_for: RefCell<Option<(Option<u32>, Option<swapdesk_ui::DialogKind>)>>,
     /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
     status_item: RefCell<Option<Retained<NSStatusItem>>>,
 }
@@ -245,9 +239,10 @@ pub(crate) fn cancel_rename() {
     with_shell(|s| s.cancel_rename());
 }
 
-/// The main-queue block a canvas posts after a paint: the native text fields follow the frame's edit slots.
+/// The main-queue block a canvas posts after a paint: the native text fields follow the frame's edit slots and the
+/// video view follows the frame's video rectangle.
 pub(crate) fn place_fields() {
-    with_shell(|s| s.main.canvas.place_fields());
+    with_shell(|s| s.after_paint());
 }
 
 /// The main-queue block the waker posts.
@@ -318,9 +313,6 @@ fn start_with(
     // R-UI-10: UI-thread work over 16 ms goes to stderr with its name and duration, nothing else.
     swapdesk_ui::trace::set_hook(|e| eprintln!("swapdesk: slow UI work {} took {} ms", e.name, e.millis));
 
-    let mut state = state;
-    // This toolbar has the quality select and the view-only switch: the state lists them.
-    state.set_viewer_extras(true);
     install_menus(mtm, &app, &state);
     let (window, canvas) = make_main_window(mtm, &controller, &state.t(swapdesk_ui::MsgKey::AppName));
     if let Some(shot) = SHOT.get() {
@@ -342,6 +334,7 @@ fn start_with(
         debounce: RefCell::new(Debouncer::new()),
         started: std::time::Instant::now(),
         appearance: std::cell::Cell::new(Theme::System),
+        raised_for: RefCell::new(None),
         status_item: RefCell::new(None),
     });
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
@@ -390,6 +383,12 @@ pub fn selftest_click() -> Option<bool> {
 /// [`selftest_rename_end`].
 pub fn selftest_rename_begin(name: &str) -> Option<bool> {
     with_shell(|s| s.selftest_rename_begin(name)).flatten()
+}
+
+/// Development (`--selftest`): how many times AppKit's own display pass painted the main window, and how many of
+/// those found the state busy and drew nothing.
+pub fn selftest_display_passes() -> Option<(u64, u64)> {
+    with_shell(|s| s.main.canvas.display_passes())
 }
 
 /// Development: after [`selftest_rename_begin`] and the backend's answer, the device carries `name` and the rename
@@ -579,11 +578,29 @@ impl Shell {
         }
     }
 
-    /// The canvas of window `kind`, where one paints it (the viewer and the banner come in M1.4).
+    /// The canvas of window `kind`, while that window exists.
     fn canvas(&self, kind: WindowKind) -> Option<Retained<CanvasView>> {
         match kind {
             WindowKind::Main => Some(self.main.canvas.clone()),
-            WindowKind::Viewer | WindowKind::Banner => None,
+            WindowKind::Viewer => self.viewer.borrow().as_ref().map(|v| v.canvas.clone()),
+            WindowKind::Banner => self.banner.borrow().as_ref().map(|b| b.canvas.clone()),
+        }
+    }
+
+    /// After a paint, outside `drawRect:`: every canvas places its text fields, and the viewer's video view goes to
+    /// the rectangle the frame left for it; the render lane is told when that area changed.
+    fn after_paint(&self) {
+        self.main.canvas.place_fields();
+        let viewer = self.viewer.borrow().as_ref().map(|v| (v.canvas.clone(), v.place_video()));
+        if let Some((canvas, moved)) = viewer {
+            canvas.place_fields();
+            if let (Some(area), Some(slot)) = (moved, &self.hooks.video) {
+                slot.resized(area);
+            }
+        }
+        let banner = self.banner.borrow().as_ref().map(|b| b.canvas.clone());
+        if let Some(canvas) = banner {
+            canvas.place_fields();
         }
     }
 
@@ -614,76 +631,6 @@ impl Shell {
     }
 
     // ----- what AppKit tells the shell -----
-
-    fn on_action(&self, sender: &AnyObject) {
-        let Some(control) = sender.downcast_ref::<NSControl>() else { return };
-        let tag = control.tag();
-        let (idx, parity) = ((tag / WINDOWS) as usize, tag % WINDOWS);
-        let action = match parity {
-            // The main window is painted: its controls are not AppKit controls.
-            PARITY_MAIN => None,
-            PARITY_VIEWER => self.viewer.borrow().as_ref().and_then(|v| v.actions.borrow().get(idx).copied()),
-            _ => self.banner.borrow().as_ref().and_then(|b| b.actions.borrow().get(idx).copied()),
-        };
-        let Some(action) = action else { return };
-        let _g = SlowGuard::ui("on_action");
-        let picked =
-            sender.downcast_ref::<objc2_app_kit::NSPopUpButton>().map(|p| p.indexOfSelectedItem().max(0) as usize);
-        match action {
-            Action::Control(id) => self.activate(id),
-            // The rename field acts on Return only: ending the editing by a click (on "Cancelar") must not save.
-            Action::Edit(EditId::Rename) if !self.return_pressed() => {}
-            Action::Edit(e) => {
-                let text =
-                    sender.downcast_ref::<NSTextField>().map(|f| f.stringValue().to_string()).unwrap_or_default();
-                self.debounce.borrow_mut().flush();
-                let act = self.state.borrow_mut().submit_edit(e, text);
-                self.dispatch(act);
-            }
-            Action::Select(select) => {
-                let act = self.state.borrow_mut().choose(select, picked.unwrap_or(0));
-                self.dispatch(act);
-            }
-            Action::ToolScreen => {
-                let id = picked.and_then(|i| self.state.borrow().viewer_displays().get(i).map(|d| d.id));
-                if let Some(display_id) = id {
-                    let act = self.state.borrow_mut().choose_display(display_id);
-                    self.dispatch(act);
-                }
-            }
-            Action::ToolQuality => {
-                let q = Quality::ALL[picked.unwrap_or(0).min(2)];
-                let act = self.state.borrow_mut().choose_quality(q);
-                self.dispatch(act);
-            }
-            Action::ToolKeys => {
-                let key = picked.and_then(|i| i.checked_sub(1)).and_then(|i| SpecialKeys::ALL.get(i).copied());
-                if let Some(keys) = key {
-                    let act = self.state.borrow_mut().send_keys(keys);
-                    self.dispatch(act);
-                }
-            }
-            Action::ToolSwitch(tool) => match tool {
-                SwitchTool::Fit => self.activate(ControlId::TbFit),
-                SwitchTool::Audio => self.activate(ControlId::TbAudio),
-                SwitchTool::Grab => self.activate(ControlId::TbGrab),
-                SwitchTool::ViewOnly => self.activate(ControlId::TbViewOnly),
-            },
-            Action::ToolSwap => self.activate(ControlId::TbSwap),
-            Action::StripCancel(session_id) => self.send_commands(vec![Command::Disconnect { session_id }]),
-            Action::StripDismiss => {
-                let changed = self.state.borrow_mut().dismiss_connect();
-                self.refresh(changed);
-            }
-        }
-    }
-
-    /// The event being handled is the Return or Enter key.
-    fn return_pressed(&self) -> bool {
-        NSApplication::sharedApplication(self.mtm)
-            .currentEvent()
-            .is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 36 | 76))
-    }
 
     /// Esc: closes the rename field without saving.
     fn cancel_rename(&self) {
@@ -803,8 +750,9 @@ impl Shell {
         let is_viewer = self.viewer.borrow().as_ref().is_some_and(|v| {
             std::ptr::eq(&*v.window as *const NSWindow as *const AnyObject, &*obj as *const AnyObject)
         });
-        if is_viewer && let (Some(slot), Some(v)) = (&self.hooks.video, self.viewer.borrow().as_ref()) {
-            slot.resized(v.video.area());
+        // The paint that follows moves the video view and tells the render lane its new area.
+        if is_viewer && let Some(v) = self.viewer.borrow().as_ref() {
+            v.canvas.setNeedsDisplay(true);
         }
     }
 
@@ -856,8 +804,8 @@ impl Shell {
 
     // ----- drawing -----
 
-    /// Windows follow the state (a viewer exists while a session does); then what changed is painted again (the main
-    /// window) or rebuilt when its model differs from the last one drawn (the viewer and the banner).
+    /// Windows follow the state (a viewer exists while a session does, a banner while this Mac is hosted); then what
+    /// changed is painted again.
     fn refresh(&self, changed: Changed) {
         let changed = changed.union(self.sync_appearance());
         if changed.is_none() {
@@ -876,21 +824,28 @@ impl Shell {
             && let Some(v) = self.viewer.borrow().as_ref()
             && let Some(model) = viewer_model(&self.state.borrow())
         {
-            v.update(self.mtm, self.target(), &model, self.hooks.show_swap);
+            v.window.setTitle(&ns(&model.title));
+            v.canvas.setNeedsDisplay(true);
         }
         self.attention();
         self.sync_timers();
     }
 
-    /// The banner follows the host session: created with it, rebuilt when its line changes, gone with it.
+    /// The banner follows the host session: created with it, painted again when its line changes, gone with it.
     fn sync_banner(&self) {
         let model = banner_model(&self.state.borrow());
         let mut slot = self.banner.borrow_mut();
         match model {
             Some(m) => {
                 let first = slot.is_none();
-                let b = slot.get_or_insert_with(|| BannerWindow::create(self.mtm));
-                b.update(self.mtm, self.target(), &m);
+                let b = slot.get_or_insert_with(|| {
+                    let b = BannerWindow::create(self.mtm);
+                    if let Some(shot) = SHOT.get() {
+                        b.canvas.set_dump(shot.with_extension("banner.layout.txt"));
+                    }
+                    b
+                });
+                b.update(&m);
                 if first && let Some(dir) = crate::banner_window::snapshot_dir() {
                     b.snapshot(dir);
                 }
@@ -910,7 +865,12 @@ impl Shell {
             (Some(m), false) => {
                 let delegate = ProtocolObject::from_ref(&*self.controller);
                 let v = ViewerWindow::create(self.mtm, delegate, &m.title);
-                v.update(self.mtm, self.target(), &m, self.hooks.show_swap);
+                if let Some(shot) = SHOT.get() {
+                    v.canvas.set_dump(shot.with_extension("viewer.layout.txt"));
+                }
+                // The first paint says where the video goes: the render lane gets the view already in place.
+                v.canvas.paint_now();
+                v.place_video();
                 if let (Some(slot), Some(surface)) = (&self.hooks.video, v.surface()) {
                     slot.attached(&surface);
                 }
@@ -944,6 +904,16 @@ impl Shell {
         self.main.canvas.save_png(&path.with_extension("content.png"));
         // Where each native text field sits against the slot the frame drew for it.
         let _ = std::fs::write(path.with_extension("fields.txt"), self.main.canvas.fields_dump());
+        // The same for the viewer (without the video: a layer filled outside `drawRect:` is not in the bitmap) and
+        // the banner.
+        if let Some(v) = self.viewer.borrow().as_ref() {
+            v.canvas.paint_now();
+            v.place_video();
+            crate::canvas::save_view_png(&v.content, &path.with_extension("viewer.content.png"));
+        }
+        if let Some(b) = self.banner.borrow().as_ref() {
+            b.canvas.save_png(&path.with_extension("banner.content.png"));
+        }
         // A scenario with a session films the viewer window, any other the main window.
         let window = self.viewer.borrow().as_ref().map_or(self.main.window.windowNumber(), |v| v.window.windowNumber());
         let path = path.clone();
@@ -1018,13 +988,19 @@ impl Shell {
         Some(typed)
     }
 
-    /// A request that needs an answer brings the main window up.
+    /// A request that needs an answer brings the main window up, once, when it appears. Not on every refresh: the
+    /// request stays open for its countdown, and the person must be able to go on working in another app meanwhile
+    /// (the app taking the front again each second also swallowed the keys typed there).
     fn attention(&self) {
         let asks = {
             let st = self.state.borrow();
-            st.incoming_session_open() || st.dialog(WindowKind::Main).is_some()
+            let request = st.incoming().filter(|_| st.incoming_session_open()).map(|i| i.request.request_id);
+            let dialog = st.dialog(WindowKind::Main);
+            (request.is_some() || dialog.is_some()).then_some((request, dialog))
         };
-        if asks {
+        let new = asks.is_some() && *self.raised_for.borrow() != asks;
+        *self.raised_for.borrow_mut() = asks;
+        if new {
             self.show_main();
         }
     }

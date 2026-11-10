@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSControl, NSControlStateValueOn, NSControlTextEditingDelegate, NSCursor,
     NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSFontAttributeName,
@@ -72,6 +72,12 @@ pub struct CanvasIvars {
     /// What the last paint registered: the controls, the edit slots, the areas and the scroll range.
     out: RefCell<Output>,
     painted: Cell<bool>,
+    /// Paints AppKit asked for in its own display pass (not the ones `paint_now` forces), and the ones among them
+    /// that found the state busy and drew nothing.
+    passes: Cell<u64>,
+    skipped: Cell<u64>,
+    /// `paint_now` is painting: the pass is not AppKit's.
+    forcing: Cell<bool>,
     /// The option chosen in the menu that is open (see [`CanvasView::pick`]).
     picked: Cell<Option<usize>>,
     /// Development: the first paint writes its layout dump here (`--shot`).
@@ -82,6 +88,9 @@ pub struct CanvasIvars {
     placing: Cell<bool>,
     /// The theme the fields' colours were set for.
     fields_dark: Cell<Option<bool>>,
+    /// The view that has the keyboard while no text field does: the video view of a viewer window (its keys go to
+    /// the host), else the canvas itself.
+    home: RefCell<Option<Retained<NSView>>>,
 }
 
 define_class!(
@@ -139,6 +148,26 @@ define_class!(
             self.paint();
         }
 
+        // A viewer's canvas lets the mouse through to the video view below, where the frame left the video
+        // rectangle free of controls.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            // The point comes in the superview's coordinates: a viewer's container is flipped like this view, so
+            // the view's own origin is all that separates the two.
+            let origin = self.frame().origin;
+            let (x, y) = ((point.x - origin.x) as f32, (point.y - origin.y) as f32);
+            let through = {
+                let out = self.ivars().out.borrow();
+                out.video.is_some_and(|v| v.contains(x, y)) && input::hit_test(&out.widgets, x, y).is_none()
+            };
+            if through && self.ivars().home.borrow().is_some() {
+                None
+            } else {
+                // SAFETY: forwards the same point to NSView's implementation.
+                unsafe { msg_send![super(self), hitTest: point] }
+            }
+        }
+
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.hover(self.hit(event));
@@ -174,11 +203,13 @@ define_class!(
                 Some(ControlId::Edit(e)) => self.field(e),
                 _ => None,
             };
-            if let Some(w) = self.window() {
-                match &field {
-                    Some(f) => w.makeFirstResponder(Some(f)),
-                    None => w.makeFirstResponder(Some(self)),
-                };
+            match &field {
+                Some(f) => {
+                    if let Some(w) = self.window() {
+                        w.makeFirstResponder(Some(f));
+                    }
+                }
+                None => self.take_keyboard(),
             }
             self.setNeedsDisplay(true);
         }
@@ -258,11 +289,15 @@ impl CanvasView {
             ix: RefCell::default(),
             out: RefCell::default(),
             painted: Cell::new(false),
+            passes: Cell::new(0),
+            skipped: Cell::new(0),
+            forcing: Cell::new(false),
             picked: Cell::new(None),
             dump: RefCell::new(None),
             fields: RefCell::default(),
             placing: Cell::new(false),
             fields_dark: Cell::new(None),
+            home: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<CanvasView> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -300,32 +335,31 @@ impl CanvasView {
         self.ivars().painted.get()
     }
 
-    /// Paints the view (and what sits on it) into a bitmap at the window's resolution, through `drawRect:`. It needs
-    /// neither the screen nor the screen recording grant, so it works with the Mac locked.
     fn snapshot(&self) -> Option<Retained<NSBitmapImageRep>> {
-        let bounds = self.bounds();
-        let rep = self.bitmapImageRepForCachingDisplayInRect(bounds)?;
-        self.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
-        Some(rep)
+        snapshot_of(self)
     }
 
     /// Paints now and places the text fields, without waiting for the window's next display pass: `true` when the
     /// frame was painted.
     pub fn paint_now(&self) -> bool {
         self.ivars().painted.set(false);
+        self.ivars().forcing.set(true);
         let painted = self.snapshot().is_some() && self.painted();
+        self.ivars().forcing.set(false);
         self.place_fields();
         painted
+    }
+
+    /// How many times AppKit's own display pass painted this view, and how many of those found the state busy.
+    pub fn display_passes(&self) -> (u64, u64) {
+        (self.ivars().passes.get(), self.ivars().skipped.get())
     }
 
     /// Development (`--shot`): the view with its text fields as a PNG at `path`.
     pub fn save_png(&self, path: &Path) -> bool {
         // The first pass places the fields the picture must show.
         self.paint_now();
-        let Some(rep) = self.snapshot() else { return false };
-        // SAFETY: PNG takes no properties: the dictionary is empty.
-        let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) };
-        data.is_some_and(|d| d.writeToFile_atomically(&NSString::from_str(&path.to_string_lossy()), true))
+        save_view_png(self, path)
     }
 
     /// Where control `id` was painted, in the view's coordinates (DIPs, y down).
@@ -404,8 +438,14 @@ impl CanvasView {
                 swapdesk_paint::paint(frame, iv.kind)
             })
         });
+        if !iv.forcing.get() {
+            iv.passes.set(iv.passes.get() + 1);
+        }
         // The state is busy only inside the shell's own calls, which mark the view dirty when they end.
-        let Some(out) = out else { return };
+        let Some(out) = out else {
+            iv.skipped.set(iv.skipped.get() + 1);
+            return;
+        };
         {
             // The wheel can leave the list scrolled past a list that got shorter.
             let mut ix = iv.ix.borrow_mut();
@@ -441,8 +481,11 @@ impl CanvasView {
                 true
             }
             KEY_ESCAPE => {
-                // The rename field closes without saving, wherever the keyboard is in the window.
-                crate::shell::cancel_rename();
+                // The rename field closes without saving, wherever the keyboard is in the main window; the other
+                // windows swallow the key.
+                if kind == WindowKind::Main {
+                    crate::shell::cancel_rename();
+                }
                 true
             }
             _ => false,
@@ -476,11 +519,13 @@ impl CanvasView {
             ControlId::Edit(e) => self.field(e),
             _ => None,
         };
-        if let Some(w) = self.window() {
-            match &field {
-                Some(f) => w.makeFirstResponder(Some(f)),
-                None => w.makeFirstResponder(Some(self)),
-            };
+        match &field {
+            Some(f) => {
+                if let Some(w) = self.window() {
+                    w.makeFirstResponder(Some(f));
+                }
+            }
+            None => self.take_keyboard(),
         }
         self.setNeedsDisplay(true);
     }
@@ -490,10 +535,24 @@ impl CanvasView {
         self.editing().map(ControlId::Edit).or(self.ivars().ix.borrow().focus)
     }
 
+    /// The keyboard leaves the text fields: it goes to the home view (see [`CanvasView::set_keyboard_home`]).
     fn take_keyboard(&self) {
-        if let Some(w) = self.window() {
-            w.makeFirstResponder(Some(self));
-        }
+        let Some(w) = self.window() else { return };
+        match self.ivars().home.borrow().as_ref() {
+            Some(home) => w.makeFirstResponder(Some(home)),
+            None => w.makeFirstResponder(Some(self)),
+        };
+    }
+
+    /// A viewer window's video view: it keeps the keyboard while no text field has it, and gets the mouse over the
+    /// video rectangle.
+    pub fn set_keyboard_home(&self, view: &NSView) {
+        *self.ivars().home.borrow_mut() = Some(view.retain());
+    }
+
+    /// Where the last paint left room for the video, in the view's coordinates (DIPs, y down).
+    pub fn video_rect(&self) -> Option<Rect> {
+        self.ivars().out.borrow().video
     }
 
     // ----- the native text fields -----
@@ -733,6 +792,24 @@ impl CanvasView {
         }
         true
     }
+}
+
+/// Paints `view` (and what sits on it) into a bitmap at the window's resolution, through `drawRect:`. It needs
+/// neither the screen nor the screen recording grant, so it works with the Mac locked. A layer filled from outside
+/// `drawRect:` (the video) is not in it.
+fn snapshot_of(view: &NSView) -> Option<Retained<NSBitmapImageRep>> {
+    let bounds = view.bounds();
+    let rep = view.bitmapImageRepForCachingDisplayInRect(bounds)?;
+    view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+    Some(rep)
+}
+
+/// Development (`--shot`): `view` as a PNG at `path`.
+pub fn save_view_png(view: &NSView, path: &Path) -> bool {
+    let Some(rep) = snapshot_of(view) else { return false };
+    // SAFETY: PNG takes no properties: the dictionary is empty.
+    let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) };
+    data.is_some_and(|d| d.writeToFile_atomically(&NSString::from_str(&path.to_string_lossy()), true))
 }
 
 /// The colours of a field for the palette: ink for the text, soft for the placeholder (in the same face).
