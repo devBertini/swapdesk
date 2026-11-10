@@ -45,17 +45,26 @@ pub fn main() -> ExitCode {
     let stay = args.iter().any(|a| a == "--stay");
     let peer_code = value(&args, "--peer-code");
     if !stay && peer_code.is_none() {
-        eprintln!("usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] | --stay");
+        eprintln!(
+            "usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] | --stay \
+             [--service-pid <pid> --instance <n>]"
+        );
         return ExitCode::from(2);
     }
+    // A development instance (`swapdesk-service --console --instance <n>`) instead of the installed service: its pipe
+    // carries the instance's suffix and its server is the process named here, not the one the SCM reports.
+    let number = |flag: &str| value(&args, flag).and_then(|v| v.parse::<u32>().ok());
+    let options =
+        Options { service_pid: number("--service-pid"), instance: number("--instance"), ..Options::default() };
     let log = |line: &str| println!("{line}");
     let fail = |why: &str| {
         println!("HOST_RESULT FAIL {why}");
         ExitCode::FAILURE
     };
 
-    // The same open as the shell's: the pipe's server must be the service the SCM reports.
-    let conn = match open_pipe(&Options::default()) {
+    // The same open as the shell's: the pipe's server must be the service the SCM reports, or the development
+    // instance's process.
+    let conn = match open_pipe(&options) {
         Ok(c) => c,
         Err(e) => return fail(&format!("cannot open the UI pipe: {e}")),
     };

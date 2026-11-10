@@ -492,6 +492,30 @@ fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -
     Ok(host)
 }
 
+/// The devices known once the list has stopped changing. Discovery fills the list in over the first seconds after a
+/// start, so a snapshot taken at once would call every machine of the network "new" a moment later: the list must
+/// hold still for three seconds (or fifteen have passed).
+fn settled_devices(pump: &mut Pump<'_>) -> Result<BTreeSet<String>, String> {
+    let ids = |pump: &mut Pump<'_>| -> Result<BTreeSet<String>, String> {
+        match pump.ask(Command::ListDevices, REPLY)? {
+            Reply::Devices(list) => Ok(list.into_iter().map(|d| d.id).collect()),
+            _ => Err("ListDevices did not reply the devices".into()),
+        }
+    };
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut known = ids(pump)?;
+    let mut still_since = Instant::now();
+    while still_since.elapsed() < Duration::from_secs(3) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = ids(pump)?;
+        if now != known {
+            known = now;
+            still_since = Instant::now();
+        }
+    }
+    Ok(known)
+}
+
 /// The scripted host gets a new key on every run, and a record of an earlier run can still sit at its address on this
 /// PC (a service before 1.1 keeps it). So: note the devices known now, let the orchestrator start the host (it writes
 /// `up`), then pair with the one unpaired device that appears after that.
@@ -501,10 +525,7 @@ fn pair_with_fresh_host(
     log: &dyn Fn(&str),
     up: &std::path::Path,
 ) -> Result<String, String> {
-    let Reply::Devices(before) = pump.ask(Command::ListDevices, REPLY)? else {
-        return Err("ListDevices did not reply the devices".into());
-    };
-    let known: BTreeSet<String> = before.into_iter().map(|d| d.id).collect();
+    let known = settled_devices(pump)?;
     log(&format!("VIEWER_SNAPSHOT_TAKEN {} devices known", known.len()));
     wait_file(up, "the host started by the orchestrator", cfg.pair_timeout)?;
     let end = Instant::now() + Duration::from_secs(30);
