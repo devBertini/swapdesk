@@ -345,6 +345,15 @@ strings! {
     TbFiles => "Arquivos", "Files";
     TbChat => "Chat", "Chat";
     TbSwap => "Inverter", "Swap";
+    TipScreen => "Escolher qual tela do outro computador aparece", "Choose which screen of the other computer is shown";
+    TipFit => "Ajustar a imagem ao tamanho da janela", "Fit the picture to the window size";
+    TipAudio => "Ouvir o som do outro computador", "Hear the other computer's sound";
+    TipGrab => "Enviar os atalhos do sistema ao outro computador", "Send system shortcuts to the other computer";
+    TipTerminal => "Abrir um terminal no outro computador", "Open a terminal on the other computer";
+    TipFiles => "Enviar e receber arquivos", "Send and receive files";
+    TipChat => "Conversar com quem está no outro computador", "Chat with the person at the other computer";
+    TipSwap => "Inverter o controle: o outro computador passa a controlar este", "Swap control: the other computer controls this one";
+    TipDisconnect => "Encerrar a sessão ({0})", "End the session ({0})";
     DrawerLabel => "Ferramentas da sessão", "Session tools";
     DrawerTabsLabel => "Ferramentas", "Tools";
     DrawerTerminal => "Terminal", "Terminal";

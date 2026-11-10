@@ -953,8 +953,7 @@ impl UiState {
         let on = self.grab_on;
         let c = s.add(ControlId::TbGrab, UiRole::Button, self.name_of(MsgKey::TbGrab));
         c.toggled = Some(on);
-        let c = s.add(ControlId::TbKeys, UiRole::Button, self.name_of(MsgKey::TbKeys));
-        c.description = Some(self.shortcuts_tooltip());
+        s.add(ControlId::TbKeys, UiRole::Button, self.name_of(MsgKey::TbKeys));
         for (id, key, tab) in [
             (ControlId::TbTerminal, MsgKey::TbTerminal, DrawerTab::Terminal),
             (ControlId::TbFiles, MsgKey::TbFiles, DrawerTab::Files),
@@ -981,6 +980,11 @@ impl UiState {
             }
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
+        // What each button does (the hint under it while the pointer is on it) is its description, where that says
+        // more than its name.
+        for c in s.v.iter_mut().filter(|c| c.region == Region::Toolbar) {
+            c.description = self.toolbar_hint(c.id).filter(|hint| *hint != c.label);
+        }
         if !self.session_bar_visible() {
             // Full screen with the bar hidden: its controls are not on screen, so they are not reachable either.
             s.v.retain(|c| c.region != Region::Toolbar);

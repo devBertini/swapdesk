@@ -74,3 +74,36 @@ fn a_retina_paint_has_twice_the_pixels_and_the_same_layout() {
     two.save_png(&shots_dir().join("inicio@2x.png")).expect("png");
     assert_eq!(one.output.widgets.len(), two.output.widgets.len());
 }
+
+#[test]
+fn hovering_a_button_of_the_session_bar_paints_that_buttons_hint_under_it() {
+    use swapdesk_ui::ControlId;
+    let fonts = Fonts::new();
+    let state = Scenario::Visualizador.prepared_state();
+    let size = design_size(WindowKind::Viewer);
+    let plain = render(&fonts, &state, WindowKind::Viewer, size, 1.0, &Interaction::default()).expect("plain");
+    assert!(plain.output.hint.is_none(), "no hint while the pointer is off the bar");
+    let mut widths = Vec::new();
+    for id in [ControlId::TbScreen, ControlId::TbAudio, ControlId::TbKeys, ControlId::TbChat, ControlId::TbDisconnect] {
+        let button = plain.output.widgets.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("{id:?}")).rect;
+        let ix = Interaction { hover: Some(id), ..Interaction::default() };
+        let hovered = render(&fonts, &state, WindowKind::Viewer, size, 1.0, &ix).expect("hovered");
+        if id == ControlId::TbAudio {
+            hovered.save_png(&shots_dir().join("visualizador-dica-botao.png")).expect("png");
+        }
+        // One line in a small card right under the bar, over or beside its button and inside the window: the
+        // same hint the Windows renderer draws, never the shortcut list.
+        let (of, card) = hovered.output.hint.unwrap_or_else(|| panic!("{id:?}: no hint"));
+        assert_eq!(of, id);
+        assert!(card.h <= 30.0, "{id:?}: one line, {} tall", card.h);
+        let gap = card.y - button.bottom();
+        assert!((0.0..=16.0).contains(&gap), "{id:?}: {gap} under its button");
+        assert!(card.x >= 8.0 && card.right() <= size.0 - 8.0, "{id:?}: outside the window");
+        assert!(card.x < button.right() && button.x < card.right(), "{id:?}: not under its button");
+        assert_ne!(hovered.pixels, plain.pixels, "{id:?}: the card is drawn");
+        widths.push(card.w);
+    }
+    widths.sort_by(f32::total_cmp);
+    widths.dedup();
+    assert_eq!(widths.len(), 5, "each button has a hint of its own");
+}

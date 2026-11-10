@@ -220,6 +220,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
     p.shadow(bar, 12.0, 10.0, 30.0, Color::rgba(0, 0, 0, 35));
     p.fill_rrect(bar, 12.0, fixed::TOOLBAR);
     let mut x = bar.x + 6.0;
+    let mut pointed = None;
     for (n, (t, w)) in tools.iter().zip(&widths).enumerate() {
         if n > 0 {
             x += 2.0;
@@ -264,40 +265,35 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
             p.svg(icons::CHEVRON, cx, r.y + 13.0, 14.0, 2.0, color);
         }
         f.register(t.id, r, 8.0);
+        if f.hovered(t.id) {
+            pointed = Some((t.id, r));
+        }
         if t.id == ControlId::TbChat && f.st.drawer() != Some(DrawerTab::Chat) {
             unread_badge(f, (r.right() - 8.0, r.y + 6.0));
         }
         x += w;
     }
-    // The tooltip of the bar (D30): the shortcut list, under the bar while a button of it is hovered.
-    if tools.iter().any(|t| f.hovered(t.id)) {
-        shortcuts_tooltip(f, col, bar);
+    // The hint of the button under the pointer (D42): what that button does, right under it.
+    if let Some((id, button)) = pointed {
+        button_hint(f, col, bar, id, button);
     }
 }
 
-/// The shortcut list as a dark card under the session bar: the title, one line for each shortcut and the note that
-/// they hold with the system-shortcut capture on.
-fn shortcuts_tooltip(f: &Frame, col: Rect, bar: Rect) {
+/// What the hovered button of the session bar does: one line in a small dark card under the bar, centred on the
+/// button and kept inside the column.
+fn button_hint(f: &mut Frame, col: Rect, bar: Rect, id: ControlId, button: Rect) {
+    let Some(what) = f.st.toolbar_hint(id) else { return };
     let p = f.p;
-    let lines = f.st.shortcuts_tooltip();
-    let mut rows = lines.lines();
-    let title = rows.next().unwrap_or_default();
-    let rest: Vec<&str> = rows.collect();
-    let w = 340.0f32.min(col.w - 24.0);
-    let inner = w - 32.0;
-    let t = p.label_in(title, text::SMALL_BOLD, inner, Align::Start);
-    let labels: Vec<_> = rest.iter().map(|l| p.label_in(l, text::SMALL, inner, Align::Start)).collect();
-    let h = 12.0 + t.h + 6.0 + labels.iter().map(|l| l.h + 2.0).sum::<f32>() + 10.0;
-    let r = Rect::new(p.snap(col.x + (col.w - w) / 2.0), bar.bottom() + 8.0, w, h);
-    p.shadow(r, 10.0, 8.0, 24.0, Color::rgba(0, 0, 0, 35));
-    p.fill_rrect(r, 10.0, fixed::TOOLBAR);
-    let (x, mut y) = (r.x + 16.0, r.y + 12.0);
-    p.draw(&t, x, y, fixed::TOOLBAR_INK);
-    y += t.h + 6.0;
-    for l in &labels {
-        p.draw(l, x, y, fixed::CARD_DARK_SOFT);
-        y += l.h + 2.0;
-    }
+    let room = (col.w - 16.0 - 20.0).max(40.0);
+    let label = p.label_in(&what, text::SMALL, room, Align::Start);
+    let (w, h) = (label.w + 20.0, label.h + 12.0);
+    let (cx, _) = button.center();
+    let x = (cx - w / 2.0).min(col.right() - 8.0 - w).max(col.x + 8.0);
+    let r = Rect::new(p.snap(x), bar.bottom() + 6.0, w, h);
+    p.shadow(r, 8.0, 6.0, 18.0, Color::rgba(0, 0, 0, 35));
+    p.fill_rrect(r, 8.0, fixed::TOOLBAR);
+    p.draw(&label, r.x + 10.0, r.y + 6.0, fixed::TOOLBAR_INK);
+    f.out.hint = Some((id, r));
 }
 
 /// The count of chat messages not read yet, as a small red dot with the number, centred on `at`; nothing at zero.

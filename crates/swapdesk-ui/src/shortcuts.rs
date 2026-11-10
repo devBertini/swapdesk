@@ -1,5 +1,5 @@
 //! The viewer's own shortcuts (D30) as the interface shows and runs them: the definitions, their names for the
-//! settings screen and the toolbar tooltip, and the full-screen state. Recognising the keys is `swapdesk-keys`'s
+//! settings screen, the hint of each button of the session bar, and the full-screen state. Recognising the keys is `swapdesk-keys`'s
 //! `shortcuts` (on HID usages); the shells and the viewer pipeline hand the recognised [`ViewerAction`] to
 //! [`UiState::run_shortcut`].
 //!
@@ -116,13 +116,27 @@ impl UiState {
         ViewerAction::ALL.iter().map(|a| (self.t(a.label()), self.shortcut_keys(*a))).collect()
     }
 
-    /// The toolbar's tooltip: the title, one line per shortcut and the note that they hold with the system-shortcut
-    /// capture on.
-    pub fn shortcuts_tooltip(&self) -> String {
-        let mut lines = vec![self.t(MsgKey::ShortcutsTitle)];
-        lines.extend(self.shortcut_rows().into_iter().map(|(what, keys)| format!("{what}: {keys}")));
-        lines.push(self.t(MsgKey::ShortcutsKeepHint));
-        lines.join("\n")
+    /// What a button of the session bar does, in one line: the hint shown under the button while the pointer is on
+    /// it, and its description for a screen reader. `None` for a control that is not a button of the bar. The
+    /// shortcut list is in the settings, not here (D42).
+    pub fn toolbar_hint(&self, id: ControlId) -> Option<String> {
+        let key = match id {
+            ControlId::TbScreen => MsgKey::TipScreen,
+            ControlId::TbFit => MsgKey::TipFit,
+            ControlId::TbAudio => MsgKey::TipAudio,
+            ControlId::TbGrab => MsgKey::TipGrab,
+            ControlId::TbKeys => MsgKey::TbKeys,
+            ControlId::TbTerminal => MsgKey::TipTerminal,
+            ControlId::TbFiles => MsgKey::TipFiles,
+            ControlId::TbChat => MsgKey::TipChat,
+            ControlId::TbSwap => MsgKey::TipSwap,
+            ControlId::TbDisconnect => {
+                let keys = self.shortcut_keys(ViewerAction::Disconnect);
+                return Some(self.tm(&Msg::new(MsgKey::TipDisconnect).with(keys)));
+            }
+            _ => return None,
+        };
+        Some(self.t(key))
     }
 
     // ----- full screen -----

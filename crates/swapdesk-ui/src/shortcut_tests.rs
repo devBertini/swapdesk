@@ -57,24 +57,52 @@ fn the_english_names_follow_the_language() {
 }
 
 #[test]
-fn the_toolbar_tooltip_lists_every_shortcut_and_says_they_hold_with_the_system_capture_on() {
-    let s = viewer();
-    let tip = s.shortcuts_tooltip();
-    for line in [
-        "Atalhos",
-        "Liberar o teclado: Ctrl+Alt",
-        "Mostrar a barra da sessão: Ctrl+Alt+B",
-        "Tela cheia: F11",
-        "Enviar Ctrl+Alt+Del: Ctrl+Alt+End",
-        "Desconectar: Ctrl+Alt+Q",
-        "Valem também com “Capturar atalhos do sistema” ligado.",
-    ] {
-        assert!(tip.lines().any(|l| l == line), "{line:?} missing in {tip:?}");
-    }
-    // The same text is the keys button's description for a screen reader.
+fn each_button_of_the_session_bar_has_a_hint_of_its_own_that_says_what_it_does() {
+    // A session toward a machine of this system: its bar has every button, "Inverter" included.
+    let mut s = viewer();
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: crate::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
+    let expected = [
+        (ControlId::TbScreen, "Escolher qual tela do outro computador aparece"),
+        (ControlId::TbFit, "Ajustar a imagem ao tamanho da janela"),
+        (ControlId::TbAudio, "Ouvir o som do outro computador"),
+        (ControlId::TbGrab, "Enviar os atalhos do sistema ao outro computador"),
+        (ControlId::TbKeys, "Enviar Ctrl+Alt+Del e outras teclas"),
+        (ControlId::TbTerminal, "Abrir um terminal no outro computador"),
+        (ControlId::TbFiles, "Enviar e receber arquivos"),
+        (ControlId::TbChat, "Conversar com quem está no outro computador"),
+        (ControlId::TbSwap, "Inverter o controle: o outro computador passa a controlar este"),
+        (ControlId::TbDisconnect, "Encerrar a sessão (Ctrl+Alt+Q)"),
+    ];
     let specs = s.controls(WindowKind::Viewer);
-    let keys = specs.iter().find(|c| c.id == ControlId::TbKeys).unwrap();
-    assert_eq!(keys.description.as_deref(), Some(tip.as_str()));
+    let bar: Vec<_> = specs.iter().filter(|c| c.region == Region::Toolbar).collect();
+    assert_eq!(bar.len(), expected.len(), "every button of the bar is in the table");
+    for (id, text) in expected {
+        let hint = s.toolbar_hint(id).unwrap_or_else(|| panic!("{id:?} has no hint"));
+        assert_eq!(hint, text, "{id:?}");
+        // One line about that button: never the shortcut list, which is in the settings.
+        assert!(!hint.contains('\n') && !hint.contains("Atalhos"), "{id:?}: {hint:?}");
+        // A screen reader hears it as the button's description, where it says more than the button's name.
+        let c = bar.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id:?} is not in the bar"));
+        assert_eq!(c.description, (hint != c.label).then_some(hint), "{id:?}");
+    }
+    assert!(s.toolbar_hint(ControlId::DrawerClose).is_none(), "only the bar's buttons have one");
+    // The keys in a hint are the viewer's own: a Mac says Control+Option.
+    let mut mac = viewer();
+    mac.set_viewer_os(ViewerOs::MacOs);
+    assert_eq!(mac.toolbar_hint(ControlId::TbDisconnect).as_deref(), Some("Encerrar a sessão (Control+Option+Q)"));
+    // And in English.
+    let mut en = viewer();
+    en.set_language(Language::En);
+    assert_eq!(en.toolbar_hint(ControlId::TbAudio).as_deref(), Some("Hear the other computer's sound"));
+    assert_eq!(en.toolbar_hint(ControlId::TbDisconnect).as_deref(), Some("End the session (Ctrl+Alt+Q)"));
 }
 
 #[test]

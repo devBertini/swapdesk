@@ -57,6 +57,9 @@ pub struct Output {
     /// Where the drawer's terminal grid goes, in DIPs, when the panel shows the terminal tab: the window draws the
     /// grid there after the frame (R-UI-11: its renderer is made the first time this is `Some`).
     pub terminal: Option<Rect>,
+    /// The hint on screen and the control it is about, in DIPs: the card under the hovered button of the session
+    /// bar that says what the button does.
+    pub hint: Option<(ControlId, Rect)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

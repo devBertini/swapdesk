@@ -333,20 +333,75 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     assert!(missing.is_empty(), "controls listed but not drawn with the bar shown: {missing:?}");
 }
 
+/// The buttons of the session bar, in the order they are drawn.
+const BAR_BUTTONS: [ControlId; 10] = [
+    ControlId::TbScreen,
+    ControlId::TbFit,
+    ControlId::TbAudio,
+    ControlId::TbGrab,
+    ControlId::TbKeys,
+    ControlId::TbTerminal,
+    ControlId::TbFiles,
+    ControlId::TbChat,
+    ControlId::TbSwap,
+    ControlId::TbDisconnect,
+];
+
 #[test]
-fn the_toolbar_tooltip_draws_the_shortcut_list_under_the_bar_and_only_while_hovered() {
+fn hovering_a_button_of_the_session_bar_shows_what_that_button_does_and_never_the_shortcut_list() {
+    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
     let (w, h) = design_size(WindowKind::Viewer);
-    let state = Scenario::Visualizador.prepared_state();
+    // A session toward a machine of this system: its bar has every button, "Inverter" included.
+    let mut state = Scenario::Visualizador.prepared_state();
+    state.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: swapdesk_ui::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+        },
+    });
     let plain = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
-    let ix = Interaction { hover: Some(ControlId::TbKeys), ..Interaction::default() };
-    let hovered = render(&state, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
-    hovered.save_png(&shots68().join("visualizador-dica-atalhos.png")).unwrap();
-    let bar = hovered.output.widgets.iter().find(|x| x.id == ControlId::TbKeys).unwrap().rect;
-    // A pixel inside the tooltip card (under the bar, at its right side) is the dark card colour only when it shows.
-    let (px, py) = ((w / 2.0 + 150.0) as u32, (bar.bottom() + 60.0) as u32);
-    assert_ne!(hovered.rgb_at(px, py), plain.rgb_at(px, py), "the card darkens the picture under it");
-    // Away from the card both frames are the same picture.
-    assert_eq!(hovered.rgb_at(w as u32 - 40, py), plain.rgb_at(w as u32 - 40, py));
+    assert!(plain.output.hint.is_none(), "no hint while the pointer is off the bar");
+    let mut cards = Vec::new();
+    for id in BAR_BUTTONS {
+        let button = plain.output.widgets.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id:?}")).rect;
+        let ix = Interaction { hover: Some(id), ..Interaction::default() };
+        let hovered = render(&state, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
+        if id == ControlId::TbAudio {
+            // The capture for the design canvas: the scenario as it is, with the pointer on the audio button.
+            let scenario = Scenario::Visualizador.prepared_state();
+            let shot = render(&scenario, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
+            shot.save_png(&shots68().join("visualizador-dica-botao.png")).unwrap();
+        }
+        // The hint is about the button under the pointer: one line in a small card right under the bar, over or
+        // beside its button and inside the window.
+        let (of, card) = hovered.output.hint.unwrap_or_else(|| panic!("{id:?}: no hint"));
+        assert_eq!(of, id);
+        assert!(card.h <= 30.0, "{id:?}: one line, {card:?}");
+        let gap = card.y - button.bottom();
+        assert!((0.0..=16.0).contains(&gap), "{id:?}: {gap} under its button");
+        assert!(card.x >= 8.0 && card.right() <= w - 8.0, "{id:?}: inside the window, {card:?}");
+        assert!(card.x < button.right() && button.x < card.right(), "{id:?}: {card:?} is not under {button:?}");
+        let (cx, cy) = card.center();
+        assert_ne!(
+            hovered.rgb_at(cx as u32, (cy + card.h / 2.0 - 3.0) as u32),
+            plain.rgb_at(cx as u32, (cy + card.h / 2.0 - 3.0) as u32),
+            "{id:?}: the card is drawn"
+        );
+        cards.push(card.w);
+        // The shortcut list was a card 340 wide and some 150 tall in the middle of the window, whatever the button:
+        // 70 under the bar nothing is drawn any more.
+        let far = (button.bottom() + 76.0) as u32;
+        for x in [w / 2.0 - 150.0, w / 2.0, w / 2.0 + 150.0] {
+            assert_eq!(hovered.rgb_at(x as u32, far), plain.rgb_at(x as u32, far), "{id:?}: a card far under the bar");
+        }
+    }
+    // Each card is as wide as its own text: the buttons do not share one hint.
+    cards.sort_by(f32::total_cmp);
+    cards.dedup();
+    assert!(cards.len() >= 8, "{} different widths in ten hints", cards.len());
 }
 
 #[test]
