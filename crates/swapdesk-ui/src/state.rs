@@ -400,7 +400,7 @@ pub struct UiState {
     pub(crate) audio_on: bool,
     pub(crate) grab_on: bool,
     pub(crate) fit: bool,
-    /// The viewer's own "Só ver" switch and quality preset (per viewer session; reset when it ends).
+    /// The viewer's own "Assistir" switch and quality preset (per viewer session; reset when it ends).
     pub(crate) view_only: bool,
     pub(crate) quality: Quality,
     /// The shell's viewer toolbar offers the quality select and the view-only switch (the Windows toolbar does not).
@@ -657,7 +657,7 @@ impl UiState {
     pub fn fit(&self) -> bool {
         self.fit
     }
-    /// The viewer's "Só ver" switch (the peer may also deny control: see the session's granted permissions).
+    /// The viewer's "Assistir" switch (the peer may also deny control: see the session's granted permissions).
     pub fn view_only(&self) -> bool {
         self.view_only
     }

@@ -670,7 +670,7 @@ pub enum Command {
     ForgetDevice { device_id: String },                                  // [Permissões: Esquecer]
     RenameDevice { device_id: String, name: String },                    // [Dispositivo: Renomear] local alias, 1 to 64 bytes
     Elevate { action: ElevatedAction },                                  // [UI] UAC (runas) / Authorization Services; [elevation step]
-    Connect { device_id: String, intent: Intent, unattended: bool },     // [Dispositivos: Só ver / Controlar]; unattended needs admin (D10)
+    Connect { device_id: String, intent: Intent, unattended: bool },     // [Dispositivos: Assistir / Controlar]; unattended needs admin (D10)
     Disconnect { session_id: u64 },                                      // [Visualizador, Banner: Desconectar]
     AnswerIncoming { request_id: u32, decision: Decision },              // [Pedido de conexão; consent card, D13]
     ListDisplays { session_id: u64 },                                    // [Visualizador: Escolher tela]

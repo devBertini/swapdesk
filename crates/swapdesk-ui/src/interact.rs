@@ -85,7 +85,7 @@ pub enum ControlId {
     TbFit,
     /// The viewer's quality select (the settings' default quality is `Select(SelectId::Quality)`).
     TbQuality,
-    /// The viewer's "Só ver" switch (`ViewOnly` is the device header's "connect view-only" button).
+    /// The viewer's "Assistir" switch (`ViewOnly` is the device header's "connect view-only" button).
     TbViewOnly,
     TbAudio,
     TbGrab,

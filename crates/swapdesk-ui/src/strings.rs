@@ -70,7 +70,7 @@ strings! {
     DetailAsleepNoWake => "Dormindo", "Asleep";
     DetailOffline => "Fora da rede", "Not on the network";
     DetailUnpaired => "Aparece na rede, ainda não pareado", "Seen on the network, not paired yet";
-    ViewOnly => "Só ver", "View only";
+    ViewOnly => "Assistir", "Watch";
     Control => "Controlar", "Control";
     Wake => "Acordar", "Wake";
     PairWithDevice => "Parear", "Pair";
