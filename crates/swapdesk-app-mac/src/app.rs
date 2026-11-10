@@ -216,6 +216,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if options.selftest.is_none() {
         params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
     }
+    // The administrator confirmation (docs/ELEVATION-MAC.md): macOS's own dialog on a normal run. The self-test, the
+    // host drive and a scripted run have nobody at the keyboard to answer it, so an `Elevate` there ends in an error
+    // instead of a dialog left on the screen. (`--mock` never gets here.)
+    if options.selftest.is_none() && options.drive_host.is_none() && options.ui_script.is_none() {
+        params.admin_confirm = Some(Arc::new(crate::elevate::SystemAdminPrompt::new(Arc::clone(&trace))));
+    }
     let sink: Arc<dyn ViewerSink> = viewer.clone();
     let service = InProcessService::start(params, waker.clone(), Some(sink))
         .map_err(|e| format!("the service did not start: {e}"))?;

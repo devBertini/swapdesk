@@ -1318,6 +1318,7 @@ name = "swapdesk-sys-mac"
 version = "1.0.0"
 dependencies = [
  "libc",
+ "objc2-security",
  "swapdesk-platform",
  "swapdesk-proto",
 ]

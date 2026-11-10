@@ -9,7 +9,7 @@
 //! - the OS-free half of the pipeline is `swapdesk-app`'s `shared` module (mailbox, feedback, cursor, audio player,
 //!   output side), the same one `Swapdesk.exe` uses.
 //!
-//! Built on every host: [`cli`], [`handoff`], [`layout_state`], [`login_switch`], [`pipe`], [`prefs`], [`service`], [`trace`] and the
+//! Built on every host: [`cli`], [`elevate`] (the administrator confirmation; only its system dialog is macOS), [`handoff`], [`layout_state`], [`login_switch`], [`pipe`], [`prefs`], [`service`], [`trace`] and the
 //! command language of [`ui_script`] (so the Windows gate type-checks and tests them). macOS only: [`decode`], [`main_side`], [`pipeline`], [`slot`], [`app`],
 //! [`selftest`].
 //!
@@ -17,6 +17,7 @@
 //! and the `atexit` registration of [`app`].
 
 pub mod cli;
+pub mod elevate;
 pub mod handoff;
 pub mod layout_state;
 pub mod login_switch;

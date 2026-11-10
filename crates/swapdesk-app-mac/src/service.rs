@@ -18,6 +18,11 @@
 //! hears of it. No timer looks. Without it a Mac whose Wi-Fi address changed under the running app kept listening and
 //! announcing on the old one and vanished from every other machine's list.
 //!
+//! Administrator confirmation (`docs/ELEVATION-MAC.md`): the app's one connection may ask for a ticket (`can_elevate`) but is
+//! never an administrator itself. When [`ServiceParams::admin_confirm`] is set, the backend gets a
+//! [`crate::elevate::MacElevator`] that asks the system through it and, only after an approval, confirms the ticket in
+//! this process.
+//!
 //! Everything here is generic over the C3 traits: the macOS pieces (login keychain, physical interfaces) are chosen by
 //! [`crate::app`], so this module builds and is tested on any host with the C7 fakes.
 
@@ -27,6 +32,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::elevate::{AdminConfirm, MacElevator};
 use swapdesk_core_mac::{MacServiceParams, MacServiceSetup, mac_service_config};
 use swapdesk_host::service::ServiceCore;
 use swapdesk_host::ui_hub::{
@@ -84,6 +90,9 @@ pub struct ServiceParams {
     pub host_helper: Option<HostHelper>,
     /// Where network change notices come from (`None`: none, the network is taken as it was at the start).
     pub network_notices: Option<NetworkNotices>,
+    /// How the administrator is asked for (`None`: nobody is, and an `Elevate` ends in an error). [`crate::app`] gives the
+    /// system's dialog on a normal run; tests give a scripted one.
+    pub admin_confirm: Option<Arc<dyn AdminConfirm>>,
 }
 
 impl ServiceParams {
@@ -110,8 +119,17 @@ impl ServiceParams {
             hooks: Arc::new(NoHooks),
             host_helper: None,
             network_notices: None,
+            admin_confirm: None,
         }
     }
+}
+
+/// The app's one connection to its own hub. Not an administrator connection: nothing in the Mac app grants `UNATTENDED` or
+/// `ADMIN_TERMINAL` by itself. It `can_elevate`: it may ask for a ticket, and the administrator's name and password typed
+/// into macOS's dialog are what let [`MacElevator`] confirm it (`docs/ELEVATION-MAC.md` 3.4).
+pub(crate) fn app_connection() -> ConnInfo {
+    let user = UserRef { id: "local-user".into(), name: std::env::var("USER").unwrap_or_default() };
+    ConnInfo { session_id: UI_SESSION, user, admin: false, can_elevate: true }
 }
 
 /// The `HostUi` the config is built with; the hub's replaces it before the core starts.
@@ -160,6 +178,7 @@ impl InProcessService {
             hooks,
             host_helper,
             network_notices,
+            admin_confirm,
         } = p;
         let MacServiceSetup { mut config, identity, trust, settings } = mac_service_config(MacServiceParams {
             default_name,
@@ -239,18 +258,9 @@ impl InProcessService {
             .spawn(move || {
                 let (mut reader, mut writer) =
                     (FrameReader::new(server_end.reader), FrameWriter::new(server_end.writer));
-                let served =
-                    Handshake::server(&mut reader, &mut writer, UI_SESSION).map_err(|e| e.to_string()).and_then(|_| {
-                        let user = UserRef { id: "local-user".into(), name: std::env::var("USER").unwrap_or_default() };
-                        // Not an administrator connection: nothing in the Mac app grants UNATTENDED or ADMIN_TERMINAL (stage 24).
-                        serving
-                            .serve(
-                                reader,
-                                writer,
-                                ConnInfo { session_id: UI_SESSION, user, admin: false, can_elevate: false },
-                            )
-                            .map_err(|e| e.to_string())
-                    });
+                let served = Handshake::server(&mut reader, &mut writer, UI_SESSION)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| serving.serve(reader, writer, app_connection()).map_err(|e| e.to_string()));
                 if let Err(e) = served {
                     log.log(Level::Debug, "app", format_args!("the UI hub connection ended: {e}"));
                 }
@@ -263,6 +273,9 @@ impl InProcessService {
         // Windows UI does with its own clipboard.
         #[cfg(target_os = "macos")]
         backend.set_clipboard(swapdesk_input_mac::MacClipboard::new());
+        if let Some(confirm) = admin_confirm {
+            backend.set_elevator(Arc::new(MacElevator::new(hub.clone(), app_connection(), confirm)));
+        }
         Ok(Self {
             hub,
             cancel,
@@ -610,5 +623,340 @@ mod tests {
         svc.shutdown();
         svc.shutdown(); // twice is fine
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- the administrator confirmation (docs/ELEVATION-MAC.md 5.2, M3) ----------
+
+    use crate::elevate::Confirmation;
+    use swapdesk_ui::state::ElevPhase;
+    use swapdesk_ui::{ApiCode, ControlId, DeviceTab, DialogKind, Language, Permission, UiState, WindowKind};
+    use test_support::{Rig, Scripted, grants_with_unattended, initial_grants};
+
+    /// What the shell does with the commands an activation returns: send each and track its ticket.
+    fn send_all(rig: &Rig, state: &mut UiState, commands: Vec<Command>) {
+        for command in commands {
+            let ticket = rig.backend.send(command.clone());
+            state.track(ticket, &command);
+        }
+    }
+
+    /// Applies what the service says to `state` until `done` holds.
+    fn settle(rig: &Rig, state: &mut UiState, what: &str, done: impl Fn(&UiState) -> bool) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !done(state) {
+            assert!(Instant::now() < end, "never reached: {what}");
+            for event in rig.inbox.drain() {
+                state.apply(event);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The window of the Mac app up to the unattended switch of the paired device, as the shell loads it.
+    fn open_permissions(rig: &Rig) -> UiState {
+        let mut state = UiState::new(Language::PtBr, false);
+        send_all(rig, &mut state, vec![Command::GetThisDevice, Command::ListDevices]);
+        settle(rig, &mut state, "the device list", |s| s.this_device().is_some() && !s.devices().is_empty());
+        state.select_device(&rig.device);
+        state.activate(ControlId::Tab(DeviceTab::Permissions));
+        state
+    }
+
+    fn unattended_here(state: &UiState, device: &str) -> bool {
+        state.device_by_id(device).is_some_and(|d| d.grants_here.has(Permission::Unattended))
+    }
+
+    #[test]
+    fn the_app_connection_can_elevate_and_is_not_admin() {
+        let c = app_connection();
+        assert!(c.can_elevate, "it may ask for a ticket");
+        assert!(!c.admin, "it is never an administrator itself");
+        assert_eq!((c.session_id, c.user.id.as_str()), (UI_SESSION, "local-user"));
+
+        // Through the hub: the widening is refused as `NeedsAdmin` (not an administrator), and a ticket is given (it can
+        // ask), so the scripted approval ends the way an administrator's would.
+        let confirm = Scripted::new(Confirmation::Approved);
+        let rig = Rig::start("conn", Some(confirm.clone()));
+        assert_eq!(rig.set_grants(grants_with_unattended()), Err(ApiCode::NeedsAdmin));
+        assert_eq!(rig.elevate(), Ok(()));
+        assert_eq!(confirm.calls(), 1);
+    }
+
+    #[test]
+    fn continuar_asks_the_system_and_the_unattended_grant_passes_once() {
+        let confirm = Scripted::new(Confirmation::Approved);
+        let rig = Rig::start("continuar", Some(confirm.clone()));
+        let mut state = open_permissions(&rig);
+        assert!(!unattended_here(&state, &rig.device));
+
+        // The switch asks the service; the service answers `NeedsAdmin` and the step opens.
+        let a = state.activate(ControlId::Grant(Permission::Unattended));
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the elevation step", |s| s.dialog(WindowKind::Main) == Some(DialogKind::Elevation));
+        assert_eq!(confirm.calls(), 0, "nothing asked the system before Continuar");
+        assert_eq!(rig.grants_here(), initial_grants().0);
+
+        // "Continuar": the system is asked once, the step closes and the resend passes.
+        let a = state.activate(ControlId::DialogPrimary);
+        assert_eq!(state.elevation().map(|e| e.phase.clone()), Some(ElevPhase::Waiting));
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the step closing", |s| s.elevation().is_none());
+        let followups = state.take_followups();
+        assert!(matches!(followups.as_slice(), [Command::SetGrants { .. }]), "{followups:?}");
+        send_all(&rig, &mut state, followups);
+        settle(&rig, &mut state, "the grant in the list", |s| unattended_here(s, &rig.device));
+        assert_eq!(confirm.calls(), 1);
+        assert_eq!(rig.grants_here(), grants_with_unattended().0, "the trust store holds it");
+        assert_eq!(
+            rig.unattended_granted_by().as_deref(),
+            Some("local-user"),
+            "the account that asked, not the approver"
+        );
+
+        // The pass was used up: take the grant away, and asking for it again is `NeedsAdmin` and a step again.
+        let a = state.activate(ControlId::Grant(Permission::Unattended));
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the grant taken away", |s| !unattended_here(s, &rig.device));
+        let a = state.activate(ControlId::Grant(Permission::Unattended));
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the second step", |s| s.dialog(WindowKind::Main) == Some(DialogKind::Elevation));
+        assert_eq!(confirm.calls(), 1, "no second dialog without a second Continuar");
+        assert_eq!(rig.grants_here(), initial_grants().0);
+    }
+
+    #[test]
+    fn a_cancelled_system_dialog_shows_the_failure_and_changes_nothing() {
+        let confirm = Scripted::new(Confirmation::Cancelled);
+        let rig = Rig::start("cancelled", Some(confirm.clone()));
+        let mut state = open_permissions(&rig);
+        let a = state.activate(ControlId::Grant(Permission::Unattended));
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the elevation step", |s| s.dialog(WindowKind::Main) == Some(DialogKind::Elevation));
+        let a = state.activate(ControlId::DialogPrimary);
+        send_all(&rig, &mut state, a.commands);
+        settle(&rig, &mut state, "the failure", |s| {
+            s.elevation().is_some_and(|e| e.phase == ElevPhase::Failed(ApiCode::Refused))
+        });
+        assert!(state.take_followups().is_empty(), "nothing is sent again");
+        assert_eq!(confirm.calls(), 1);
+        assert_eq!(rig.grants_here(), initial_grants().0, "nothing changed");
+        assert!(!unattended_here(&state, &rig.device));
+        // "Tentar de novo" asks the system again, and a second cancel ends the same way.
+        let a = state.activate(ControlId::DialogPrimary);
+        assert!(matches!(a.commands.as_slice(), [Command::Elevate { .. }]));
+        send_all(&rig, &mut state, a.commands);
+        let end = Instant::now() + Duration::from_secs(10);
+        while confirm.calls() < 2 {
+            assert!(Instant::now() < end, "the retry never asked the system");
+            for event in rig.inbox.drain() {
+                state.apply(event);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(rig.grants_here(), initial_grants().0);
+    }
+}
+
+/// What the tests of this module and of [`crate::elevate`] share: a service with one paired device and a scripted
+/// `AdminConfirm` that never shows a dialog.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use swapdesk_fakes::{FakeNetInterfaces, LogCapture, MemorySecretStore, MonotonicClock};
+    use swapdesk_proto::Os;
+    use swapdesk_trust::{Identity, PairedDevice, TrustHandle, device_id_hex};
+    use swapdesk_ui::service_backend::ServiceBackend;
+    use swapdesk_ui::{ApiCode, Command, Permission, Permissions, Reply, UiBackend, UiEvent, UiWaker};
+
+    use super::{InProcessService, ServiceParams};
+    use crate::elevate::{AdminConfirm, Confirmation};
+
+    struct NoWaker;
+    impl UiWaker for NoWaker {
+        fn wake(&self) {}
+    }
+
+    /// What the paired device may do before anything is asked: control (and so view).
+    pub(crate) fn initial_grants() -> Permissions {
+        Permissions::NONE.with(Permission::Control)
+    }
+
+    /// The widening that needs an administrator.
+    pub(crate) fn grants_with_unattended() -> Permissions {
+        initial_grants().with(Permission::Unattended)
+    }
+
+    /// An `AdminConfirm` that answers as told, after `delay`, and runs `during` once while it is asking: no dialog, ever.
+    pub(crate) struct Scripted {
+        answer: Confirmation,
+        delay: Duration,
+        calls: AtomicUsize,
+        during: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl Scripted {
+        /// Answers at once.
+        pub(crate) fn new(answer: Confirmation) -> Arc<Self> {
+            Self::slow(answer, Duration::ZERO)
+        }
+
+        /// Answers after `delay`, as a person who takes their time.
+        pub(crate) fn slow(answer: Confirmation, delay: Duration) -> Arc<Self> {
+            Arc::new(Self { answer, delay, calls: AtomicUsize::new(0), during: Mutex::new(None) })
+        }
+
+        /// `f` runs once, on the asking thread, while the dialog would be on screen.
+        pub(crate) fn while_asking(&self, f: impl FnOnce() + Send + 'static) {
+            *self.during.lock().unwrap() = Some(Box::new(f));
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AdminConfirm for Scripted {
+        fn confirm(&self, _line: &str) -> Confirmation {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(f) = self.during.lock().unwrap().take() {
+                f();
+            }
+            std::thread::sleep(self.delay);
+            self.answer
+        }
+    }
+
+    /// The events of a backend, shared by whoever waits for one: an event nobody asked for stays for the next waiter.
+    pub(crate) struct Inbox {
+        backend: Arc<ServiceBackend>,
+        seen: Mutex<Vec<UiEvent>>,
+    }
+
+    impl Inbox {
+        /// Everything that came in and nobody took.
+        pub(crate) fn drain(&self) -> Vec<UiEvent> {
+            let mut seen = self.seen.lock().unwrap();
+            seen.extend(self.backend.drain());
+            std::mem::take(&mut *seen)
+        }
+
+        /// The first event `pick` accepts, taken out; waits up to ten seconds.
+        pub(crate) fn wait_for(&self, pick: impl Fn(&UiEvent) -> bool) -> UiEvent {
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                {
+                    let mut seen = self.seen.lock().unwrap();
+                    seen.extend(self.backend.drain());
+                    if let Some(i) = seen.iter().position(&pick) {
+                        return seen.remove(i);
+                    }
+                }
+                assert!(Instant::now() < end, "the event never came");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// A running service with one paired device holding `CONTROL`, and its backend.
+    pub(crate) struct Rig {
+        pub(crate) svc: InProcessService,
+        pub(crate) backend: Arc<ServiceBackend>,
+        pub(crate) inbox: Arc<Inbox>,
+        /// The paired device's id as the interface names it.
+        pub(crate) device: String,
+        secrets: Arc<MemorySecretStore>,
+        dir: std::path::PathBuf,
+    }
+
+    impl Rig {
+        pub(crate) fn start(tag: &str, admin_confirm: Option<Arc<dyn AdminConfirm>>) -> Self {
+            let dir = std::env::temp_dir().join(format!("swapdesk-app-mac-elev-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let secrets = Arc::new(MemorySecretStore::new());
+            // The pairing ceremony, done by hand before the service opens its trust store.
+            let device = {
+                let trust = TrustHandle::open(secrets.clone()).expect("trust store");
+                let other = Identity::generate(0).expect("identity");
+                let mut paired =
+                    PairedDevice::new_paired(*other.spki(), "PC de teste".into(), Os::Windows, "11".into(), 1, None);
+                paired.grants_here = swapdesk_proto::PermissionSet::CONTROL;
+                let id = device_id_hex(&paired.device_id);
+                trust.update(|s| s.devices.push(paired)).expect("store");
+                id
+            };
+            let mut p = ServiceParams::new(
+                "Mac de teste",
+                "27.2",
+                secrets.clone(),
+                dir.clone(),
+                Arc::new(FakeNetInterfaces::new(Vec::new())),
+                Arc::new(MonotonicClock::new()),
+                Arc::new(LogCapture::new()),
+            );
+            p.discovery = false;
+            p.dev_loopback = Some(std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0));
+            p.ports = Some((0, 0));
+            p.admin_confirm = admin_confirm;
+            let svc = InProcessService::start(p, Arc::new(NoWaker), None).expect("the service starts");
+            let backend = svc.backend();
+            let inbox = Arc::new(Inbox { backend: Arc::clone(&backend), seen: Mutex::new(Vec::new()) });
+            Self { svc, backend, inbox, device, secrets, dir }
+        }
+
+        /// `SetGrants` for the paired device and the service's answer.
+        pub(crate) fn set_grants(&self, grants: Permissions) -> Result<(), ApiCode> {
+            let t = self.backend.send(Command::SetGrants { device_id: self.device.clone(), grants });
+            let event = self.inbox.wait_for(|e| matches!(e, UiEvent::Reply { ticket, .. } if *ticket == t));
+            let UiEvent::Reply { result, .. } = event else { unreachable!() };
+            result.map(|_: Reply| ()).map_err(|e| e.code)
+        }
+
+        /// The widening that needs an administrator.
+        pub(crate) fn widen(&self) -> Result<(), ApiCode> {
+            self.set_grants(grants_with_unattended())
+        }
+
+        /// Takes the widening back: open to any console connection.
+        pub(crate) fn narrow(&self) -> Result<(), ApiCode> {
+            self.set_grants(initial_grants())
+        }
+
+        /// `Command::Elevate` for the widening, through the backend's worker, and its `ElevationResult`.
+        pub(crate) fn elevate(&self) -> Result<(), ApiCode> {
+            let action = swapdesk_ui::ElevatedAction::SetGrants {
+                device_id: self.device.clone(),
+                grants: grants_with_unattended(),
+            };
+            self.backend.send(Command::Elevate { action: action.clone() });
+            let event = self.inbox.wait_for(|e| matches!(e, UiEvent::ElevationResult { .. }));
+            let UiEvent::ElevationResult { action: got, result } = event else { unreachable!() };
+            assert_eq!(got, action);
+            result.map_err(|e| e.code)
+        }
+
+        fn read<R>(&self, f: impl FnOnce(&swapdesk_trust::TrustStore) -> R) -> R {
+            // A fresh handle reads `trust.bin` as the service wrote it: the proof does not rely on the service's own copy.
+            TrustHandle::open(self.secrets.clone()).expect("trust store").read(f)
+        }
+
+        /// The device's grants as the trust store holds them, as the interface's bits.
+        pub(crate) fn grants_here(&self) -> u16 {
+            self.read(|s| s.devices[0].grants_here.bits())
+        }
+
+        /// The account that granted `UNATTENDED`, when one did.
+        pub(crate) fn unattended_granted_by(&self) -> Option<String> {
+            self.read(|s| s.devices[0].unattended_granted_by.clone().map(|u| u.id))
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            self.svc.shutdown();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
