@@ -218,7 +218,7 @@ impl Client {
                 let at = Instant::now();
                 let sent = match msg {
                     Message::ViewerVideo { session_id, header, payload } => {
-                        vid_tx.send((at, session_id, header, payload.0)).is_ok()
+                        vid_tx.send((at, session_id, header, payload.0.into())).is_ok()
                     }
                     Message::ViewerAudio { session_id, datagram } => aud_tx.send((at, session_id, datagram.0)).is_ok(),
                     other => ctl_tx.send(other).is_ok(),

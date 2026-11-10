@@ -2,14 +2,14 @@
 
 use swapdesk_proto::{
     Action, CodecError, CursorPosition, CursorShape, Desktop, DisplayList, ErrorCode, InputEvent, KeyframeRequest,
-    Preset, Reader, ReceiverReport, VideoHeader, Wire, Writer,
+    Preset, Reader, ReceiverReport, VIDEO_HEADER_LEN, VideoHeader, Wire, Writer,
 };
 
 use crate::clip::{ClipData, ClipReplyBody, MAX_CLIP_MESSAGE};
 use crate::error::{IpcError, Result};
 use crate::files::{FsAnswer, FsCall, MAX_FS_MESSAGE, get_result, put_fs_reply, put_fs_request};
 use crate::ops::{Notify, UiOp};
-use crate::redact::{Bytes, Events, Shape, Text};
+use crate::redact::{Bytes, Events, Payload, Shape, Text};
 use crate::term::{
     MAX_SESSION_USER, MAX_TERM_ACCOUNT, MAX_TERM_BODY, MAX_TERM_CHUNK, MAX_TERM_OPEN_BODY, MAX_TERM_SMALL_BODY,
 };
@@ -86,7 +86,7 @@ pub enum Message {
     /// The header's `payload_len` equals `payload.len()`.
     VideoFrame {
         header: VideoHeader,
-        payload: Bytes,
+        payload: Payload,
     },
     CursorPos(CursorPosition),
     CursorShape(Shape),
@@ -122,7 +122,7 @@ pub enum Message {
     ViewerVideo {
         session_id: u64,
         header: VideoHeader,
-        payload: Bytes,
+        payload: Payload,
     },
     ViewerAudio {
         session_id: u64,
@@ -289,22 +289,56 @@ fn get_events(r: &mut Reader<'_>) -> Result<Events> {
     Ok(Events(out))
 }
 
-fn put_video(w: &mut Writer, header: &VideoHeader, payload: &Bytes) -> Result<()> {
+/// The header of a video message. Its payload is the message's tail: the bytes that follow the body on the wire,
+/// which the encoder never copies ([`encode_into`]).
+fn put_video_head(w: &mut Writer, header: &VideoHeader, payload: &Payload) -> Result<()> {
     if header.payload_len as usize != payload.0.len() {
         return Err(CodecError::InvalidValue("video payload length").into());
     }
     header.put(w, 0)?;
-    w.put_bytes(&payload.0);
     Ok(())
 }
 
-fn get_video(r: &mut Reader<'_>) -> Result<(VideoHeader, Bytes)> {
+fn get_video(r: &mut Reader<'_>) -> Result<(VideoHeader, Payload)> {
     let header = VideoHeader::get(r, 0)?;
     let payload = r.take(r.remaining())?;
     if header.payload_len as usize != payload.len() {
         return Err(CodecError::InvalidValue("video payload length").into());
     }
-    Ok((header, Bytes(payload.to_vec())))
+    Ok((header, Payload(bytes::Bytes::copy_from_slice(payload))))
+}
+
+/// The bytes a video message of type `ty` has in front of its payload (`ViewerVideo` carries the session first), or
+/// `None` for every other type.
+pub(crate) const fn video_prefix(ty: u64) -> Option<usize> {
+    match ty {
+        0x31 => Some(VIDEO_HEADER_LEN),
+        0x50 => Some(8 + VIDEO_HEADER_LEN),
+        _ => None,
+    }
+}
+
+/// The payload length that the header in `prefix` (the [`video_prefix`] bytes of a message of type `ty`) declares,
+/// for the stream reader to check against the frame's length before it reads the payload.
+pub(crate) fn video_declared(ty: u64, prefix: &[u8]) -> Result<usize> {
+    let header = VideoHeader::decode(&prefix[if ty == 0x50 { 8 } else { 0 }..])?;
+    Ok(header.payload_len as usize)
+}
+
+/// A video message of type `ty` from its `prefix` and the payload that followed it, which is taken as it is. The same
+/// checks and errors as [`decode_message`] makes on the whole body.
+pub(crate) fn video_from_parts(ty: u64, prefix: &[u8], payload: Payload) -> Result<Message> {
+    let mut r = Reader::new(prefix);
+    let session_id = if ty == 0x50 { Some(r.u64()?) } else { None };
+    let header = VideoHeader::get(&mut r, 0)?;
+    r.finish()?;
+    if header.payload_len as usize != payload.0.len() {
+        return Err(CodecError::InvalidValue("video payload length").into());
+    }
+    Ok(match session_id {
+        Some(session_id) => Message::ViewerVideo { session_id, header, payload },
+        None => Message::VideoFrame { header, payload },
+    })
 }
 
 fn put_datagram(w: &mut Writer, d: &Bytes) -> Result<()> {
@@ -397,7 +431,9 @@ impl Message {
         }
     }
 
-    fn put_body(&self, w: &mut Writer) -> Result<()> {
+    /// Writes the body into `w` and returns its tail: the bytes that follow on the wire and are not copied into `w`
+    /// (a video payload; empty for every other message).
+    fn put_body<'a>(&'a self, w: &mut Writer) -> Result<&'a [u8]> {
         match self {
             Self::Hello { role, version, pid } => {
                 role.put(w, 0)?;
@@ -427,7 +463,10 @@ impl Message {
             Self::StartAudio { exclude_pid } => w.put_u32(*exclude_pid),
             Self::SetAudioMuted { muted } => w.put_bool(*muted),
             Self::Displays(list) => list.put(w, 0)?,
-            Self::VideoFrame { header, payload } => put_video(w, header, payload)?,
+            Self::VideoFrame { header, payload } => {
+                put_video_head(w, header, payload)?;
+                return Ok(&payload.0);
+            }
             Self::CursorPos(p) => p.put(w, 0)?,
             Self::CursorShape(s) => s.0.put(w, 0)?,
             Self::AudioPacket(d) => put_datagram(w, d)?,
@@ -454,7 +493,8 @@ impl Message {
             }
             Self::ViewerVideo { session_id, header, payload } => {
                 w.put_u64(*session_id);
-                put_video(w, header, payload)?;
+                put_video_head(w, header, payload)?;
+                return Ok(&payload.0);
             }
             Self::ViewerAudio { session_id, datagram } => {
                 w.put_u64(*session_id);
@@ -531,7 +571,7 @@ impl Message {
             Self::FsRequest { req, call } => put_fs_request(w, *req, call)?,
             Self::FsReply { req, result } => put_fs_reply(w, *req, result)?,
         }
-        Ok(())
+        Ok(&[])
     }
 
     /// Decodes the whole body `body` of message type `ty` (already checked against its limit).
@@ -642,20 +682,53 @@ impl Message {
     }
 }
 
-/// One frame: `varint type`, `varint length`, body. Refuses a body above the type's limit.
-pub fn encode_message(msg: &Message) -> Result<Vec<u8>> {
+/// Room kept in front of a body for its type and its length (two varints of at most 8 bytes each).
+const FRAME_PREFIX: usize = 16;
+
+/// One frame, `varint type`, `varint length`, body, as two slices that follow each other on the wire: the head, built
+/// in `scratch` (its old contents are discarded, its capacity is reused), and the tail, which is the message's own
+/// video payload, not copied (empty for every other message). Refuses a body above the type's limit.
+pub fn encode_into<'s, 'm>(msg: &'m Message, scratch: &'s mut Vec<u8>) -> Result<(&'s [u8], &'m [u8])> {
+    let (start, tail) = frame_parts(msg, scratch)?;
+    Ok((&scratch[start..], tail))
+}
+
+/// [`encode_into`] for a caller that goes on using `scratch`: the head is `scratch[start..]`.
+pub(crate) fn frame_parts<'m>(msg: &'m Message, scratch: &mut Vec<u8>) -> Result<(usize, &'m [u8])> {
     let ty = msg.type_code();
-    let mut body = Writer::new();
-    msg.put_body(&mut body)?;
     let limit = limit_of(ty).ok_or(IpcError::UnknownType(ty))?;
-    if body.len() > limit {
-        return Err(IpcError::TooLarge { ty, len: body.len() as u64, limit: limit as u64 });
-    }
-    let mut out = Writer::new();
-    out.put_varint(ty)?;
-    out.put_varint(body.len() as u64)?;
-    out.put_bytes(&body.into_bytes());
-    Ok(out.into_bytes())
+    scratch.clear();
+    scratch.resize(FRAME_PREFIX, 0);
+    // The writer borrows the buffer and hands it back whatever happens, so an error keeps its capacity too.
+    let mut w = Writer::appending(core::mem::take(scratch));
+    let body = msg.put_body(&mut w);
+    let body_end = w.len();
+    let framed = body.and_then(|tail| {
+        let len = body_end - FRAME_PREFIX + tail.len();
+        if len > limit {
+            return Err(IpcError::TooLarge { ty, len: len as u64, limit: limit as u64 });
+        }
+        // The two varints are written after the body and then moved in front of it: nothing but `scratch` is used.
+        w.put_varint(ty)?;
+        w.put_varint(len as u64)?;
+        Ok(tail)
+    });
+    *scratch = w.into_bytes();
+    let tail = framed?;
+    let start = FRAME_PREFIX - (scratch.len() - body_end);
+    scratch.copy_within(body_end.., start);
+    scratch.truncate(body_end);
+    Ok((start, tail))
+}
+
+/// One frame in a buffer of its own ([`encode_into`] makes one without it).
+pub fn encode_message(msg: &Message) -> Result<Vec<u8>> {
+    let mut scratch = Vec::new();
+    let (head, tail) = encode_into(msg, &mut scratch)?;
+    let mut out = Vec::with_capacity(head.len() + tail.len());
+    out.extend_from_slice(head);
+    out.extend_from_slice(tail);
+    Ok(out)
 }
 
 /// Decodes exactly one frame from `bytes`: an unknown type, a length above the type's limit (checked before

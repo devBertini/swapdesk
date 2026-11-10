@@ -446,7 +446,10 @@ def document(mode, seconds, results, path, idle, b4, b5):
     add(
         "\"Payload-sized buffers per frame\" is the bytes allocated per frame divided by the payload size: how many "
         "buffers of the frame's size the path allocates for each frame, which is what a copy is made into. The "
-        "payload is the median frame of the 1080p60 NVENC session above."
+        "payload is the median frame of the 1080p60 NVENC session above. Five are the path's floor without a pool of "
+        "buffers: the encoder's output, the service's read of the helper's pipe, the datagrams QUIC receives, the "
+        "frame put together from them, and the UI's read of the service's pipe; the frame is not copied on the way "
+        "into a pipe or into QUIC. A test of `swapdesk-measure` caps the buffers and the allocations per frame."
     )
     add("")
     add("## How it is measured")

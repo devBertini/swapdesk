@@ -413,3 +413,115 @@ pub fn run(cfg: &PathConfig) -> Result<Fields, String> {
 fn crossdrive_ask(backend: &ServiceBackend, command: Command) -> Result<(), String> {
     swapdesk_crossdrive::Pump::new(backend).ask(command, Duration::from_secs(5)).map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+    use std::sync::{Mutex, PoisonError};
+
+    use swapdesk_ipc::{Message, encode_message};
+    use swapdesk_proto::Codec;
+
+    use super::*;
+
+    /// The median frame of the 1080p60 NVENC session of docs/PERFORMANCE.md.
+    const PAYLOAD: usize = 80_667;
+
+    /// The counters are the process's: one test counts at a time.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// What `work` allocated: how many times and how many bytes.
+    fn counted<T>(work: impl FnOnce() -> T) -> (T, u64, u64) {
+        ALLOCATIONS.store(0, Ordering::SeqCst);
+        ALLOCATED_BYTES.store(0, Ordering::SeqCst);
+        COUNTING.store(true, Ordering::SeqCst);
+        let out = work();
+        COUNTING.store(false, Ordering::SeqCst);
+        (out, ALLOCATIONS.load(Ordering::SeqCst), ALLOCATED_BYTES.load(Ordering::SeqCst))
+    }
+
+    fn frame() -> Message {
+        let header = VideoHeader {
+            keyframe: false,
+            config: false,
+            discontinuity: false,
+            display_id: 0,
+            frame_id: 7,
+            capture_us: 1,
+            encode_us: 1,
+            width: 1920,
+            height: 1080,
+            codec: Codec::H264,
+            payload_len: PAYLOAD as u32,
+        };
+        Message::VideoFrame { header, payload: vec![0x5A; PAYLOAD].into() }
+    }
+
+    /// A pipe that only counts what is written to it.
+    struct Counted(usize);
+
+    impl Write for Counted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_video_frame_is_written_to_a_pipe_without_an_allocation() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let msg = frame();
+        let wire = encode_message(&msg).expect("encodes").len();
+        let mut writer = FrameWriter::new(Counted(0));
+        // The first message brings the writer's own buffer to its size.
+        writer.write_message(&msg).expect("writes");
+        let ((), allocations, bytes) = counted(|| writer.write_message(&msg).expect("writes"));
+        assert_eq!(writer.get_ref().0, 2 * wire, "both frames reached the pipe whole");
+        assert_eq!((allocations, bytes), (0, 0), "writing a video frame allocated");
+    }
+
+    #[test]
+    fn a_video_frame_is_read_from_a_pipe_into_one_buffer_of_its_exact_size() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let msg = frame();
+        let wire = encode_message(&msg).expect("encodes");
+        let mut reader = FrameReader::new(Cursor::new([wire.as_slice(), wire.as_slice()].concat()));
+        // The first message brings the reader's own buffer to its size.
+        assert_eq!(reader.read_message().expect("reads"), Some(msg.clone()));
+        let (second, allocations, bytes) = counted(|| reader.read_message().expect("reads"));
+        assert_eq!(second, Some(msg));
+        assert_eq!((allocations, bytes), (1, PAYLOAD as u64), "reading a video frame costs its payload, once");
+    }
+
+    /// The caps of the whole path, between the encoder's output and the viewer's sink, both machines in this process.
+    /// Per frame: the encoder's buffer, the service's read of the helper's pipe, the bytes QUIC receives, the
+    /// reassembled frame and the UI's read of the service's pipe are five buffers of the frame's size; the rest is
+    /// QUIC's packets and the cores' housekeeping.
+    #[test]
+    fn the_frame_path_stays_inside_its_caps_of_buffers_and_allocations_per_frame() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        // The numbers are per frame that reached the sink, and a frame dropped on the way was still paid for: a run
+        // that lost frames (a busy machine) says nothing about the caps and is run again.
+        let (seconds, fps) = (2u64, 60u16);
+        let mut whole = None;
+        for _ in 0..3 {
+            let fields = run(&PathConfig { seconds, payload: PAYLOAD, fps }).expect("the path ran");
+            let frames = fields.get("path_frames").and_then(|v| v.parse::<f64>().ok()).expect("path_frames");
+            if frames >= (seconds * u64::from(fps)) as f64 * 0.97 {
+                whole = Some(fields);
+                break;
+            }
+            eprintln!("the path delivered {frames} frames of {}: measured again", seconds * u64::from(fps));
+        }
+        let fields = whole.expect("three runs of the path lost frames: the machine is too busy to measure");
+        let number = |name: &str| fields.get(name).and_then(|v| v.parse::<f64>().ok()).expect(name);
+        assert_eq!(fields.get("valid"), Some("yes"), "{}", fields.render());
+        let (buffers, allocations) = (number("path_payload_copies_per_frame"), number("path_allocations_per_frame"));
+        // Measured 5.3 and 160 (before the copies were removed: 15.5 and 184).
+        assert!(buffers <= 6.0, "{buffers} buffers of the frame's size per frame (cap 6)");
+        assert!(allocations <= 172.0, "{allocations} allocations per frame (cap 172)");
+    }
+}

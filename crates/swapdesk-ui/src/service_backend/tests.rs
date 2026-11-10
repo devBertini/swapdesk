@@ -285,7 +285,7 @@ fn viewer_video_reaches_the_sink_and_viewer_input_is_written() {
         payload_len: 3,
     };
     let pos = CursorPosition { visible: true, display: 1, seq: 2, x: 100, y: 200, shape_id: 0 };
-    svc.write(Message::ViewerVideo { session_id: 8, header, payload: Bytes(vec![1, 2, 3]) });
+    svc.write(Message::ViewerVideo { session_id: 8, header, payload: vec![1, 2, 3].into() });
     svc.write(Message::ViewerAudio { session_id: 8, datagram: Bytes(vec![9; 20]) });
     svc.write(Message::ViewerCursorPos { session_id: 8, pos });
     let end = Instant::now() + WAIT;

@@ -147,7 +147,9 @@ impl Inner {
             Message::UiNotify(n) => self.notify(n),
             Message::ViewerVideo { session_id, header, payload } => {
                 if let Some(s) = &self.sink {
-                    s.video(session_id, header, payload.0);
+                    // The reader made this buffer for this frame alone, so the sink gets the buffer itself: turning
+                    // the only handle to it back into a `Vec` copies nothing.
+                    s.video(session_id, header, payload.0.into());
                 }
             }
             Message::ViewerAudio { session_id, datagram } => {

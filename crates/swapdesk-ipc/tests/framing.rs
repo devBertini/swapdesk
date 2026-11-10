@@ -138,7 +138,7 @@ fn a_video_header_must_match_the_payload_it_carries() {
             codec: swapdesk_proto::Codec::H264,
             payload_len: 3,
         },
-        payload: Bytes(vec![1, 2]),
+        payload: Payload::from(vec![1, 2]),
     };
     assert!(encode_message(&msg).is_err());
 }
@@ -229,6 +229,16 @@ fn debug_prints_lengths_and_never_a_body() {
         }))
     ));
     shown.push(format!("{:?}", Message::UiReply { req: 1, status: 0, body: Bytes(b"BODYBYTES".to_vec()) }));
+    // A video payload prints as text where its bytes are text and as `\x..` where they are not.
+    let pixels = [b"PIXELS-OF-THE-SCREEN".as_slice(), &[0xAB; 13]].concat();
+    shown.push(format!(
+        "{:?}",
+        Message::VideoFrame { header: video_header(pixels.len()), payload: Payload::from(pixels.clone()) }
+    ));
+    shown.push(format!(
+        "{:?}",
+        Message::ViewerVideo { session_id: 4, header: video_header(pixels.len()), payload: Payload::from(pixels) }
+    ));
     let all = shown.join("\n");
     for needle in [
         "hunter2",
@@ -236,7 +246,9 @@ fn debug_prints_lengths_and_never_a_body() {
         secret,
         "argument-with",
         "BODYBYTES",
-        "171", // 0xAB as decimal, as a Vec<u8> would print it
+        "171",    // 0xAB as decimal, as a Vec<u8> would print it
+        "xab",    // and as the shared bytes of a video payload would
+        "PIXELS", // the text bytes of that payload
     ] {
         assert!(!all.contains(needle), "{needle} leaked in:\n{all}");
     }
@@ -244,6 +256,7 @@ fn debug_prints_lengths_and_never_a_body() {
     assert!(all.contains("Text(len 15)"), "{all}");
     assert!(all.contains("Bytes(len 40)"), "{all}");
     assert!(all.contains("Bytes(len 9)"), "{all}");
+    assert_eq!(all.matches("Payload(len 33)").count(), 2, "{all}");
 }
 
 /// The write half of an in-memory pipe.
@@ -322,4 +335,188 @@ fn client_and_service_talk_over_an_in_memory_pipe() {
     assert_eq!(ReplyBody::decode(5, &body.0).unwrap(), ReplyBody::PairingId(77));
     drop(writer);
     service.join().unwrap();
+}
+
+// ---------- the video frame's own path through the reader and the writer ----------
+
+fn video_header(payload_len: usize) -> swapdesk_proto::VideoHeader {
+    swapdesk_proto::VideoHeader {
+        keyframe: true,
+        config: false,
+        discontinuity: false,
+        display_id: 0,
+        frame_id: 1,
+        capture_us: 2,
+        encode_us: 3,
+        width: 1920,
+        height: 1080,
+        codec: swapdesk_proto::Codec::H264,
+        payload_len: payload_len as u32,
+    }
+}
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// A writer's stream that remembers how each `write` call cut the bytes.
+#[derive(Default)]
+struct Writes {
+    bytes: Vec<u8>,
+    calls: Vec<usize>,
+}
+
+impl Write for Writes {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        self.calls.push(buf.len());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A reader that hands out at most `step` bytes per call.
+struct Slow<R> {
+    inner: R,
+    step: usize,
+}
+
+impl<R: Read> Read for Slow<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.step.min(buf.len());
+        self.inner.read(&mut buf[..n])
+    }
+}
+
+#[test]
+fn encode_into_gives_the_frame_in_two_parts_and_the_payload_is_not_copied() {
+    let payload = Payload::from(pattern(5000));
+    let at = payload.0.as_ptr();
+    let msg = Message::ViewerVideo { session_id: 7, header: video_header(5000), payload };
+    // What was in the buffer is discarded; the buffer itself is reused.
+    let mut scratch = vec![0xEE; 300];
+    let (head, tail) = encode_into(&msg, &mut scratch).unwrap();
+    assert_eq!(tail.as_ptr(), at, "the tail is the payload itself, not a copy");
+    assert_eq!([head, tail].concat(), encode_message(&msg).unwrap());
+    assert_eq!(decode_message(&[head, tail].concat()).unwrap(), msg);
+    // Every other message is whole in the head.
+    let small = hello();
+    let (head, tail) = encode_into(&small, &mut scratch).unwrap();
+    assert!(tail.is_empty());
+    assert_eq!(head, encode_message(&small).unwrap());
+    // A message that cannot be encoded leaves the buffer usable.
+    let long = Message::AudioPacket(Bytes(vec![0; 1501]));
+    assert!(encode_into(&long, &mut scratch).is_err());
+    let (head, _) = encode_into(&hello(), &mut scratch).unwrap();
+    assert_eq!(head, encode_message(&hello()).unwrap());
+}
+
+#[test]
+fn a_writer_sends_a_large_payload_by_itself_and_a_small_one_with_its_head() {
+    for (len, calls) in [(0usize, 1usize), (300, 1), (16 * 1024, 1), (16 * 1024 + 1, 2), (200_000, 2)] {
+        let msg = Message::VideoFrame { header: video_header(len), payload: Payload::from(pattern(len)) };
+        let mut writer = FrameWriter::new(Writes::default());
+        writer.write_message(&hello()).unwrap();
+        writer.write_message(&msg).unwrap();
+        writer.write_message(&hello()).unwrap();
+        let out = writer.into_inner();
+        let hello_bytes = encode_message(&hello()).unwrap();
+        let expected = [hello_bytes.as_slice(), &encode_message(&msg).unwrap(), &hello_bytes].concat();
+        assert_eq!(out.bytes, expected, "a payload of {len} bytes");
+        assert_eq!(out.calls.len(), 2 + calls, "a payload of {len} bytes: {:?}", out.calls);
+        if calls == 2 {
+            assert_eq!(out.calls[2], len, "the payload went to the pipe in one piece");
+        }
+        // And a reader gets the three messages back, however the pipe cuts them.
+        let mut reader = FrameReader::new(Slow { inner: Cursor::new(out.bytes), step: 4093 });
+        assert_eq!(reader.read_message().unwrap(), Some(hello()));
+        assert_eq!(reader.read_message().unwrap(), Some(msg));
+        assert_eq!(reader.read_message().unwrap(), Some(hello()));
+        assert_eq!(reader.read_message().unwrap(), None);
+    }
+}
+
+#[test]
+fn a_payload_larger_than_the_reader_reserves_ahead_is_read_whole() {
+    // 1 MiB is reserved before the bytes arrive; the rest of the buffer follows them.
+    for len in [1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024 + 4567] {
+        let msg =
+            Message::ViewerVideo { session_id: 3, header: video_header(len), payload: Payload::from(pattern(len)) };
+        let wire = encode_message(&msg).unwrap();
+        let mut reader = FrameReader::new(Slow { inner: Cursor::new(wire.clone()), step: 100_000 });
+        let read = reader.read_message().unwrap();
+        assert_eq!(read.as_ref(), Some(&msg), "a payload of {len} bytes");
+        assert_eq!(reader.read_message().unwrap(), None);
+        // The message holds its payload in a buffer of exactly its length (the buffer grew with the bytes, and ends
+        // with nothing spare): the only handle gives the buffer itself back.
+        let Some(Message::ViewerVideo { payload, .. }) = read else { unreachable!() };
+        let at = payload.0.as_ptr();
+        let buffer = Vec::from(payload.0);
+        assert_eq!((buffer.as_ptr(), buffer.len(), buffer.capacity()), (at, len, len), "a payload of {len} bytes");
+        // Cut anywhere in the payload, the stream is an error, never a shorter frame.
+        for cut in [wire.len() - 1, wire.len() - len / 2, wire.len() - len] {
+            let mut reader = FrameReader::new(Cursor::new(wire[..cut].to_vec()));
+            match reader.read_message() {
+                Err(IpcError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+                other => panic!("a stream cut at {cut} of {}: {other:?}", wire.len()),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_video_frame_whose_header_disagrees_with_its_length_is_refused_before_its_payload_is_read() {
+    for (ty, session) in [(0x31u64, None), (0x50, Some(9u64))] {
+        let mut body = session.map(|s: u64| s.to_le_bytes().to_vec()).unwrap_or_default();
+        let mut w = Writer::new();
+        swapdesk_proto::Wire::put(&video_header(4_000_000), &mut w, 0).unwrap();
+        body.extend(w.into_bytes());
+        let prefix = body.len();
+        // The header says 4 MB; the length of the frame says 1000 bytes of payload.
+        body.extend(pattern(1000));
+        let wire = frame(ty, &body);
+        let head = wire.len() - 1000;
+        assert!(matches!(
+            decode_message(&wire),
+            Err(IpcError::Codec(CodecError::InvalidValue("video payload length")))
+        ));
+        let mut reader = FrameReader::new(Counting { inner: Cursor::new(wire), taken: 0 });
+        assert!(matches!(
+            reader.read_message(),
+            Err(IpcError::Codec(CodecError::InvalidValue("video payload length")))
+        ));
+        assert_eq!(reader.into_inner().taken, head, "type {ty:#x}: the two varints and the {prefix}-byte prefix only");
+        // A body too short to hold the header is the same error for both readers.
+        let short = frame(ty, &body[..prefix - 1]);
+        assert!(matches!(decode_message(&short), Err(IpcError::Codec(CodecError::Truncated))));
+        let mut reader = FrameReader::new(Cursor::new(short));
+        assert!(matches!(reader.read_message(), Err(IpcError::Codec(CodecError::Truncated))));
+    }
+}
+
+#[test]
+fn debug_of_a_reader_and_a_writer_shows_no_byte_of_the_last_message() {
+    let secret = Message::UiReply { req: 1, status: STATUS_OK, body: Bytes(vec![233; 40]) };
+    let mut writer = FrameWriter::new(io::sink());
+    writer.write_message(&secret).unwrap();
+    let shown = format!("{writer:?}");
+    assert!(shown.starts_with("FrameWriter") && !shown.contains("233"), "{shown}");
+    /// A stream whose own `Debug` shows nothing of what it holds.
+    struct Quiet(Cursor<Vec<u8>>);
+    impl Read for Quiet {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl core::fmt::Debug for Quiet {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("Quiet")
+        }
+    }
+    let mut reader = FrameReader::new(Quiet(Cursor::new(encode_message(&secret).unwrap())));
+    assert_eq!(reader.read_message().unwrap(), Some(secret));
+    let shown = format!("{reader:?}");
+    assert!(shown.starts_with("FrameReader") && shown.contains("Quiet") && !shown.contains("233"), "{shown}");
 }

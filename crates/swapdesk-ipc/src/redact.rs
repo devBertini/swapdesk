@@ -4,7 +4,25 @@ use core::fmt;
 
 use swapdesk_proto::{CodecError, CursorShape, InputEvent, Reader, Wire, Writer};
 
-/// Opaque bytes (video payload, audio datagram, an encoded reply body).
+/// An encoded video frame, shared by reference count: a clone is another handle to the same bytes, so a frame goes
+/// from a pipe to every session and to the network without being copied.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Payload(pub bytes::Bytes);
+
+impl fmt::Debug for Payload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Payload(len {})", self.0.len())
+    }
+}
+
+impl From<Vec<u8>> for Payload {
+    /// Takes the buffer as it is: nothing is copied.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes.into())
+    }
+}
+
+/// Opaque bytes (audio datagram, terminal bytes, an encoded reply body).
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Bytes(pub Vec<u8>);
 

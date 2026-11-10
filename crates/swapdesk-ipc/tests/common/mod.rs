@@ -43,7 +43,7 @@ pub fn events() -> BoxedStrategy<Events> {
     vec(event(), 0..20).prop_map(Events).boxed()
 }
 
-pub fn header_with(payload: Vec<u8>) -> BoxedStrategy<(VideoHeader, Bytes)> {
+pub fn header_with(payload: Vec<u8>) -> BoxedStrategy<(VideoHeader, Payload)> {
     (
         (any::<bool>(), any::<bool>(), any::<bool>()),
         any::<u16>(),
@@ -69,14 +69,14 @@ pub fn header_with(payload: Vec<u8>) -> BoxedStrategy<(VideoHeader, Bytes)> {
                         codec: Codec::H264,
                         payload_len: payload.len() as u32,
                     },
-                    Bytes(payload.clone()),
+                    Payload::from(payload.clone()),
                 )
             },
         )
         .boxed()
 }
 
-pub fn video() -> BoxedStrategy<(VideoHeader, Bytes)> {
+pub fn video() -> BoxedStrategy<(VideoHeader, Payload)> {
     vec(any::<u8>(), 0..300).prop_flat_map(header_with).boxed()
 }
 

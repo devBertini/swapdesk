@@ -122,7 +122,7 @@ fn start_producer(sender: VideoSender) -> Arc<Producer> {
                 payload_len: 0,
             };
             let len = if key { 60_000 } else { 30_000 };
-            let _ = sender.send(Frame { header, payload: payload_of(id, len) }).await;
+            let _ = sender.send(Frame { header, payload: payload_of(id, len).into() }).await;
         }
     });
     p

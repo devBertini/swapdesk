@@ -30,7 +30,7 @@ pub enum HelperEvent {
     Displays(DisplayList),
     Video {
         header: swapdesk_proto::VideoHeader,
-        payload: Vec<u8>,
+        payload: bytes::Bytes,
     },
     CursorPos(CursorPosition),
     CursorShape(CursorShape),
@@ -317,8 +317,16 @@ mod debug_tests {
         }
     }
 
+    /// Byte 233 as a `Vec<u8>` prints it (`233`) or as a `bytes::Bytes` does (`\xe9`).
     fn leaks_byte(shown: &str) -> bool {
-        shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233")
+        shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233") || shown.contains("xe9")
+    }
+
+    #[test]
+    fn the_leak_check_sees_a_byte_in_both_spellings() {
+        assert!(leaks_byte(&format!("{:?}", vec![233u8; 4])));
+        assert!(leaks_byte(&format!("{:?}", bytes::Bytes::from(vec![233u8; 4]))));
+        assert!(!leaks_byte("Video { payload: <redacted 32 bytes> }"));
     }
 
     #[test]
@@ -328,7 +336,7 @@ mod debug_tests {
             rgba: vec![233; 16],
         };
         let events = [
-            HelperEvent::Video { header: video_header(), payload: vec![233; 32] },
+            HelperEvent::Video { header: video_header(), payload: vec![233; 32].into() },
             HelperEvent::Audio(vec![233; 20]),
             HelperEvent::CursorShape(shape.clone()),
             HelperEvent::PtyOutput { id: 1, bytes: vec![233; 9] },
@@ -347,7 +355,7 @@ mod debug_tests {
         assert!(format!("{:?}", events[3]).contains("<redacted 9 bytes>"));
         // The shared media relay's copy of the same events.
         let media = [
-            super::super::shared::MediaEv::Video { header: video_header(), payload: vec![233; 32] },
+            super::super::shared::MediaEv::Video { header: video_header(), payload: vec![233; 32].into() },
             super::super::shared::MediaEv::Audio(vec![233; 20]),
             super::super::shared::MediaEv::CursorShape(shape),
         ];

@@ -1046,6 +1046,7 @@ dependencies = [
 name = "swapdesk-host"
 version = "1.0.0"
 dependencies = [
+ "bytes",
  "quinn",
  "swapdesk-audio",
  "swapdesk-extras",
@@ -1095,6 +1096,7 @@ dependencies = [
 name = "swapdesk-ipc"
 version = "1.0.0"
 dependencies = [
+ "bytes",
  "proptest",
  "swapdesk-proto",
 ]
@@ -1373,6 +1375,7 @@ dependencies = [
 name = "swapdesk-video"
 version = "1.0.0"
 dependencies = [
+ "bytes",
  "quinn",
  "swapdesk-fakes",
  "swapdesk-netsim",

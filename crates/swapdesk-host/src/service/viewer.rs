@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use quinn::Endpoint;
 use swapdesk_extras::chat::{ChatEntry, ChatError};
 use swapdesk_extras::reconnect::{GiveUp, ReconnectEvent, ReconnectPolicy, reconnect, should_reconnect};
-use swapdesk_ipc::{ApiCode, Bytes, Message as Ipc, SessionState, Shape};
+use swapdesk_ipc::{ApiCode, Bytes, Message as Ipc, Payload, SessionState, Shape};
 use swapdesk_platform::{Level, TraceSink};
 use swapdesk_proto::{
     AudioControl, CursorPosition, CursorShape, DisplayList, ErrorCode, InputEvent, KeyframeRequest, Message as Ctl,
@@ -849,7 +849,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
                     ask(&mut asked, last_good);
                     continue;
                 }
-                let msg = Ipc::ViewerVideo { session_id, header: f.header, payload: Bytes(f.payload) };
+                let msg = Ipc::ViewerVideo { session_id, header: f.header, payload: Payload::from(f.payload) };
                 match out.try_send(ViewerOut::Message(msg)) {
                     Ok(()) => {
                         if key {

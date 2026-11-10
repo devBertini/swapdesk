@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use swapdesk_audio::AudioSender;
 use swapdesk_ipc::{
-    AudioModeKind, Bytes, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, MAX_FAULT_TEXT, Message, Shape, Text,
-    VideoBackend,
+    AudioModeKind, Bytes, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, MAX_FAULT_TEXT, Message, Payload,
+    Shape, Text, VideoBackend,
 };
 use swapdesk_platform::{
     ActionRunner, AudioSource, CaptureConfig, ClipboardProvider, Clock, DisplayId, DisplayInfo, EncoderConfig,
@@ -552,7 +552,7 @@ fn emit_frames<S: ScreenSource, E: VideoEncoder>(
             codec: Codec::H264,
             payload_len,
         };
-        let sent = env.outbox.send_media(Message::VideoFrame { header, payload: Bytes(e.annex_b) });
+        let sent = env.outbox.send_media(Message::VideoFrame { header, payload: Payload::from(e.annex_b) });
         if sent {
             *discontinuity = false;
         } else {

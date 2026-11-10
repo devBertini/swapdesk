@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 swapdesk-ipc = { path = "../swapdesk-ipc" }
 swapdesk-proto = { path = "../swapdesk-proto" }
 swapdesk-platform = { path = "../swapdesk-platform" }

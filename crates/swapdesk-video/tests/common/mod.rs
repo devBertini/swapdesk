@@ -173,7 +173,7 @@ impl TestEncoder {
             codec: Codec::H264,
             payload_len: 0,
         };
-        Frame { header, payload: payload_of(id, len) }
+        Frame { header, payload: payload_of(id, len).into() }
     }
 
     /// The frame the encoder produced but the test chooses not to send (a frame lost at the host).

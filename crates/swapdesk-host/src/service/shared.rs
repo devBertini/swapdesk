@@ -49,9 +49,10 @@ pub enum CoreEvent {
 #[derive(Clone)]
 pub(crate) enum MediaEv {
     Displays(Vec<Display>),
+    /// A handle to the frame's bytes: every session gets one, none gets a copy.
     Video {
         header: VideoHeader,
-        payload: Vec<u8>,
+        payload: bytes::Bytes,
     },
     CursorPos(CursorPosition),
     CursorShape(CursorShape),
@@ -250,8 +251,14 @@ impl Shared {
     pub async fn fan(&self, ev: MediaEv) {
         match ev {
             MediaEv::Video { header, payload } => {
-                for h in self.relays() {
-                    h.video.offer(header, payload.clone());
+                // Every session but the last gets another handle to the frame; the last one gets this one.
+                let mut handles = self.relays().into_iter().peekable();
+                let mut payload = Some(payload);
+                while let Some(h) = handles.next() {
+                    let one = if handles.peek().is_some() { payload.clone() } else { payload.take() };
+                    if let Some(one) = one {
+                        h.video.offer(header, one);
+                    }
                 }
             }
             MediaEv::Audio(datagram) => {

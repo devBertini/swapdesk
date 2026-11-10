@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use quinn::Connection;
 use swapdesk_proto::{CursorPosition, CursorShape, PermissionSet, StreamKind, VideoHeader, Wire};
 use swapdesk_session::SessionCtx;
@@ -29,7 +30,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 struct Stamped {
     header: VideoHeader,
-    payload: Vec<u8>,
+    payload: Bytes,
     at: Instant,
 }
 
@@ -108,7 +109,7 @@ impl VideoPath {
     }
 
     /// A frame from the helper: never waits. It replaces the one still in the slot (newest wins).
-    pub fn offer(&self, header: VideoHeader, payload: Vec<u8>) {
+    pub fn offer(&self, header: VideoHeader, payload: Bytes) {
         match &*lock(&self.run) {
             Some(run) if run.display == header.display_id => {}
             _ => return,

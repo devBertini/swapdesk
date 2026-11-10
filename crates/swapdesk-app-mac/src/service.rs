@@ -47,7 +47,8 @@ use tokio::sync::oneshot;
 /// banner go to it).
 const UI_SESSION: u32 = 1;
 /// Chunks queued toward either side of the host helper's pipe before a write waits (see [`crate::pipe::bounded_duplex`]).
-const HELPER_PIPE_BOUND: usize = 32;
+/// A chunk is one write: a video frame over 16 KiB is two (its head, then its payload), so this holds 32 such frames.
+const HELPER_PIPE_BOUND: usize = 64;
 /// Pause before the host helper is started again after it ended; doubled after each quick end, up to the maximum.
 const HELPER_RESTART: Duration = Duration::from_millis(500);
 const HELPER_RESTART_MAX: Duration = Duration::from_secs(10);

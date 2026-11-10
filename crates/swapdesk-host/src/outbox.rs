@@ -443,7 +443,7 @@ mod tests {
             codec: swapdesk_proto::Codec::H264,
             payload_len: len as u32,
         };
-        Message::VideoFrame { header, payload: Bytes(vec![0; len]) }
+        Message::VideoFrame { header, payload: vec![0; len].into() }
     }
 
     fn video(n: u32) -> Message {

@@ -224,7 +224,7 @@ impl Rig {
 
     fn next_frame(&self) -> (VideoHeader, Vec<u8>) {
         self.wait(|m| match m {
-            Message::VideoFrame { header, payload } => Some((*header, payload.0.clone())),
+            Message::VideoFrame { header, payload } => Some((*header, payload.0.to_vec())),
             _ => None,
         })
     }
