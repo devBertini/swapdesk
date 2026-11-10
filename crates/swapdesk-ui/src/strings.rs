@@ -445,7 +445,8 @@ strings! {
     // The connect flow's line on the main window (appended after the first release of the table)
     PromptedTitle => "Esperando o {0} aceitar", "Waiting for {0} to accept";
     ConnectingTitle => "Conectando ao {0}", "Connecting to {0}";
-    EndedTitle => "A sessão com o {0} terminou", "The session with {0} ended";
+    // Unused since the connect card says why it ended: it stays because a key travels as its index.
+    EndedTitle =>"A sessão com o {0} terminou", "The session with {0} ended";
 
     // The macOS application menu
     MenuQuit => "Encerrar o Swapdesk", "Quit Swapdesk";
@@ -487,6 +488,25 @@ strings! {
     ElevTimedOut => "O tempo para confirmar acabou.", "The time to confirm ran out.";
     ElevConfirmBody => "Confirme como administrador para aplicar esta mudança.", "Confirm as an administrator to apply this change.";
     ElevConfirm => "Confirmar", "Confirm";
+
+    // Waits, appended last as above. `EndedTitle` stays unused further up: a key travels as its index.
+    ConnectingBody => "Abrindo a conexão pela rede local.", "Opening the connection over the local network.";
+    PromptedBody => "O {0} está mostrando o seu pedido. Quem estiver nele precisa aceitar e escolher o que você pode fazer.", "{0} is showing your request. Whoever is at it has to accept and choose what you may do.";
+    ConnectExpiresIn => "O pedido expira em {0} s", "The request expires in {0} s";
+    ConnectEndedTitle => "Não deu para conectar ao {0}", "Could not connect to {0}";
+    ConnectWhyTimedOut => "O {0} não respondeu em 20 segundos.", "{0} did not answer within 20 seconds.";
+    ConnectWhyBusy => "O {0} já está em outra sessão. Tente de novo quando ela terminar.", "{0} is already in another session. Try again when it ends.";
+    ConnectWhyForgotten => "O {0} não reconhece mais este computador. Pareie os dois de novo.", "{0} no longer knows this computer. Pair the two again.";
+    ConnectWhyNotPermitted => "O {0} não permite esta conexão.", "{0} does not allow this connection.";
+    ConnectWhyUnreachable => "O {0} não respondeu pela rede. Confira se ele está ligado e nesta mesma rede.", "{0} did not answer over the network. Check that it is on and on this same network.";
+    SidebarConnecting => "Conectando…", "Connecting…";
+    SidebarWaitingAccept => "Esperando aceitar", "Waiting to be accepted";
+    SidebarWaking => "Acordando…", "Waking…";
+    SwapWaitingTitle => "Esperando o {0} aceitar a inversão", "Waiting for {0} to accept the swap";
+    SwapWaitingBody => "Se ninguém responder em 20 segundos, você continua controlando o {0}.", "If nobody answers within 20 seconds, you keep controlling {0}.";
+    TermConsentWaiting => "Esperando quem usa o {0} permitir o terminal.", "Waiting for the person using {0} to allow the terminal.";
+    FilesConsentWaiting => "Esperando quem usa o {0} permitir os arquivos.", "Waiting for the person using {0} to allow the files.";
+    ActionWaiting => "Esperando o {0} executar a ação…", "Waiting for {0} to run the action…";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

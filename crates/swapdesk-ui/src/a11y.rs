@@ -7,7 +7,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use accesskit::{Action, AriaCurrent, Node, NodeId, Rect, Role, Toggled, TreeId, TreeInfo, TreeUpdate};
+use accesskit::{Action, AriaCurrent, Live, Node, NodeId, Rect, Role, Toggled, TreeId, TreeInfo, TreeUpdate};
 
 use crate::interact::{ControlId, ControlSpec, Region, UiRole};
 use crate::state::{UiState, WindowKind};
@@ -60,6 +60,7 @@ fn region_id(r: Region) -> NodeId {
                 Region::Toolbar => 3,
                 Region::Drawer => 4,
                 Region::Banner => 5,
+                Region::Status => 6,
             },
     )
 }
@@ -72,9 +73,16 @@ fn region_node(state: &UiState, r: Region) -> Node {
         Region::Toolbar => (Role::Toolbar, state.t(MsgKey::ToolbarLabel)),
         Region::Drawer => (Role::Complementary, state.t(MsgKey::DrawerLabel)),
         Region::Banner => (Role::Status, state.t(MsgKey::BannerLabel)),
+        // The wait card's title and body: its text is what is announced, so the region itself has no name.
+        Region::Status => (Role::Status, String::new()),
     };
     let mut n = Node::new(role);
-    n.set_label(name);
+    if !name.is_empty() {
+        n.set_label(name);
+    }
+    if r == Region::Status {
+        n.set_live(Live::Polite);
+    }
     if r == Region::Dialog {
         n.set_modal();
     }
@@ -135,7 +143,15 @@ pub fn build_tree(
     let mut root_children: Vec<NodeId> = Vec::new();
 
     let mut tablists = 0u64;
-    for region in [Region::Sidebar, Region::Content, Region::Dialog, Region::Toolbar, Region::Drawer, Region::Banner] {
+    for region in [
+        Region::Sidebar,
+        Region::Status,
+        Region::Content,
+        Region::Dialog,
+        Region::Toolbar,
+        Region::Drawer,
+        Region::Banner,
+    ] {
         let in_region: Vec<&ControlSpec> = specs.iter().filter(|c| c.region == region).collect();
         if in_region.is_empty() {
             continue;

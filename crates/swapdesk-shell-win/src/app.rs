@@ -220,6 +220,7 @@ impl Shared {
     fn dispatch(self: &Rc<Self>, act: Activation, from: &Window) {
         match act.effect {
             Some(Effect::FocusEdit(e)) => from.focus_control(ControlId::Edit(e), true),
+            Some(Effect::Focus(id)) => from.focus_control(id, true),
             Some(Effect::SubmitEdit(e)) => {
                 let text = from.edit_value(e);
                 let again = self.state.borrow_mut().submit_edit(e, text);

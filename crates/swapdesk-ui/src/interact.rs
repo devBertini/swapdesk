@@ -10,6 +10,14 @@ use crate::state::*;
 use crate::strings::MsgKey;
 use crate::tokens::layout::PAIR_COUNTDOWN_S;
 
+/// The device page's button that starts a connect with this intent.
+fn start_button(intent: Intent) -> ControlId {
+    match intent {
+        Intent::View => ControlId::ViewOnly,
+        Intent::Control => ControlId::Control,
+    }
+}
+
 /// Longest local name of a paired device, in bytes: what the trust record stores.
 const MAX_DEVICE_NAME: usize = 64;
 
@@ -77,6 +85,12 @@ pub enum ControlId {
     /// The "no computer found" card's action: focus the address field (F20).
     NoComputerAddress,
     WakeCancel,
+    /// "Cancelar" on the connect card: asks the service to drop the entry.
+    ConnectCancel,
+    /// "Fechar" on the card that says why a connect did not open.
+    ConnectClose,
+    /// "Tentar de novo" on that card.
+    ConnectRetry,
     ReconnectDisconnect,
     SwapDeclinedClose,
     ErrorClose,
@@ -162,6 +176,8 @@ pub enum Region {
     Toolbar,
     Drawer,
     Banner,
+    /// A polite live region: what a screen reader announces when its text changes (the wait card's title and body).
+    Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +289,6 @@ impl UiState {
     }
 
     fn main_controls(&self) -> Vec<ControlSpec> {
-        let lang = self.lang;
         let mut s = Specs::new(Region::Content);
         if let Some(kind) = self.dialog(WindowKind::Main) {
             self.dialog_controls(&mut s, kind);
@@ -294,7 +309,7 @@ impl UiState {
         let (paired, network) = self.device_groups();
         for i in paired.iter().chain(network.iter()) {
             let d = &self.devices[*i];
-            let label = format!("{}, {}", d.name, format::status_line(lang, d));
+            let label = format!("{}, {}", d.name, self.device_status_line(d));
             let selected = self.selected_device().is_some_and(|x| x.id == d.id) && self.nav() == Nav::Devices;
             let c = s.add(ControlId::Device(*i as u16), UiRole::Button, label);
             c.selected = selected;
@@ -313,6 +328,26 @@ impl UiState {
             Nav::Settings => self.settings_controls(&mut s),
         }
         s.v
+    }
+
+    /// The controls of a wait card: its title and body are a polite live region (announced when the phase changes),
+    /// the countdown is a progress node outside it (read when focused, never announced each second), then the buttons.
+    fn wait_card_controls(&self, s: &mut Specs, card: &WaitCard) {
+        s.region(Region::Status);
+        s.text(UiRole::Heading, card.title.clone());
+        s.text(UiRole::Text, card.body.clone());
+        s.region(Region::Content);
+        if card.phase == WaitPhase::Prompted
+            && let Some(e) = self.waiting_entry(&card.device_id)
+            && let SessionState::Prompted { remaining_s } = e.state
+        {
+            let label = self.tm(&Msg::new(MsgKey::ConnectExpiresIn).with(remaining_s.to_string()));
+            let c = s.add(ControlId::Static(u16::MAX), UiRole::Progress, label);
+            c.value = Some(remaining_s.to_string());
+        }
+        for b in &card.buttons {
+            s.button(b.id, b.label.clone());
+        }
     }
 
     /// The crash notice and the "no computer found" card (or the plain empty line): what the home shows when no
@@ -357,11 +392,8 @@ impl UiState {
             }
         }
         s.text(UiRole::Text, format::detail_line(lang, d));
-        if let Some(w) = self.waking_session().filter(|w| w.device_id == d.id) {
-            let _ = w;
-            s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::WakingTitle).with(d.name.clone())));
-            s.text(UiRole::Text, self.name_of(MsgKey::WakingBody));
-            s.button(ControlId::WakeCancel, self.name_of(MsgKey::Cancel));
+        if let Some(card) = self.wait_card(&d.id) {
+            self.wait_card_controls(s, &card);
             return;
         }
         if d.paired && Self::can_wake(d) {
@@ -1199,8 +1231,9 @@ impl UiState {
             }
             ControlId::ViewOnly | ControlId::Control => {
                 if let Some(d) = self.selected_device() {
+                    let device_id = d.id.clone();
                     let intent = if id == ControlId::Control { Intent::Control } else { Intent::View };
-                    a.commands.push(Command::Connect { device_id: d.id.clone(), intent, unattended: false });
+                    self.start_connect(device_id, intent, &mut a);
                 }
             }
             ControlId::Wake => {
@@ -1337,9 +1370,31 @@ impl UiState {
                 }
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),
-            ControlId::WakeCancel => {
-                if let Some(s) = self.waking_session() {
-                    a.commands.push(Command::Disconnect { session_id: s.id });
+            ControlId::WakeCancel | ControlId::ConnectCancel => {
+                let device_id = self.selected_device().map(|d| d.id.clone());
+                if let Some(device_id) = device_id
+                    && let Some(e) = self.sessions.iter_mut().find(|s| s.device_id == device_id && s.is_waiting_entry())
+                {
+                    if e.id == 0 {
+                        // No id to cancel yet: it is cancelled when the service gives it one.
+                        e.cancel_asked = true;
+                    } else {
+                        a.commands.push(Command::Disconnect { session_id: e.id });
+                    }
+                    if let Some(intent) = e.intent {
+                        a.effect = Some(Effect::Focus(start_button(intent)));
+                    }
+                }
+            }
+            ControlId::ConnectClose => {
+                let intent = self.connect_end.as_ref().and_then(|e| e.intent);
+                if self.dismiss_connect() != Changed::NONE {
+                    a.effect = Some(Effect::Focus(start_button(intent.unwrap_or(Intent::Control))));
+                }
+            }
+            ControlId::ConnectRetry => {
+                if let Some(end) = self.connect_end.take() {
+                    self.start_connect(end.device_id, end.intent.unwrap_or(Intent::Control), &mut a);
                 }
             }
             ControlId::ReconnectDisconnect | ControlId::TbDisconnect | ControlId::BannerDisconnect => {
@@ -1359,14 +1414,6 @@ impl UiState {
             }
             ControlId::ErrorClose => {
                 self.error = None;
-                // The connect line that the strip already said goes with it.
-                if self
-                    .connect_end
-                    .as_ref()
-                    .is_some_and(|e| matches!(e.reason, ApiCode::Refused | ApiCode::Timeout | ApiCode::Busy))
-                {
-                    self.connect_end = None;
-                }
                 a.changed = Changed::ALL;
             }
             ControlId::TbScreen => {
@@ -1702,7 +1749,25 @@ impl UiState {
 
     /// "Renomear" is offered on the page of a paired device, except while it is being woken (that card replaces the page).
     pub fn rename_available(&self, d: &DeviceView) -> bool {
-        d.paired && self.waking_session().is_none_or(|w| w.device_id != d.id)
+        d.paired && self.wait_card(&d.id).is_none()
+    }
+
+    /// A connect to a device: its card shows at once (id 0 until the service answers) and one `Connect` goes out. A
+    /// device with a card waiting sends nothing.
+    fn start_connect(&mut self, device_id: String, intent: Intent, a: &mut Activation) {
+        if self.sessions.iter().any(|s| s.device_id == device_id && s.is_waiting_entry()) {
+            a.changed = Changed::NONE;
+            return;
+        }
+        if self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
+            self.connect_end = None;
+        }
+        let mut entry = SessionView::new(0, device_id.clone(), SessionState::Connecting);
+        entry.intent = Some(intent);
+        self.sessions.push(entry);
+        a.commands.push(Command::Connect { device_id, intent, unattended: false });
+        a.effect = Some(Effect::Focus(ControlId::ConnectCancel));
+        a.changed = Changed::MAIN;
     }
 
     /// The line under the rename field: what was wrong with the name, or the service's refusal.

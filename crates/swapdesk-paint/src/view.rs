@@ -332,6 +332,7 @@ pub mod icons {
     pub const SHIELD_ALERT: &str = "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM12 9v4M12 16h.01";
     pub const WIFI: &str = "M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0M12 19.5h.01";
     pub const POWER: &str = "M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0";
+    pub const CLOCK: &str = "M21 12a9 9 0 1 1-18 0a9 9 0 1 1 18 0zM12 7v5l3 2";
     pub const KEY_DOTS: &str = "M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10";
 
     pub fn lock() -> String {

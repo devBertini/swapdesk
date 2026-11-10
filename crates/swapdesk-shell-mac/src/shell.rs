@@ -601,6 +601,7 @@ impl Shell {
         let canvas = self.canvas(kind).unwrap_or_else(|| self.main.canvas.clone());
         match handling {
             Handling::Focus(e) => canvas.focus_control(ControlId::Edit(e), true),
+            Handling::FocusControl(id) => canvas.focus_control(id, true),
             // The button beside a text input ("Salvar" of the rename field, "Enviar" of the chat): the field's text
             // goes through `submit_edit` like Return does.
             Handling::Submit(e) => {

@@ -96,6 +96,7 @@ fn every_effect() -> Vec<Effect> {
     let all = vec![
         Effect::Menu(SelectId::Theme),
         Effect::FocusEdit(EditId::Address),
+        Effect::Focus(swapdesk_ui::ControlId::ConnectCancel),
         Effect::SubmitEdit(EditId::Rename),
         Effect::SaveLog,
         Effect::OpenLogs,
@@ -106,6 +107,7 @@ fn every_effect() -> Vec<Effect> {
         match e {
             Effect::Menu(_)
             | Effect::FocusEdit(_)
+            | Effect::Focus(_)
             | Effect::SubmitEdit(_)
             | Effect::SaveLog
             | Effect::OpenLogs

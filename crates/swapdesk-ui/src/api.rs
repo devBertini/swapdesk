@@ -956,7 +956,8 @@ impl Command {
         match self {
             // A UAC or password prompt waits for a person.
             Command::Elevate { .. } => 120,
-            Command::Connect { .. } | Command::Wake { .. } => 20,
+            // Both answer at once with the entry's id; the wait itself is told by notifications, and the interface
+            // ends an entry that hears nothing for `CONNECT_GIVE_UP_S`.
             // The host's runner may wait on the machine (a suspend); the service gives up at 25 s.
             Command::RunAction { .. } => 30,
             // The host's user may be asked first (D13: 20 s), and the shell then starts.

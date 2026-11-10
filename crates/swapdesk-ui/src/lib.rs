@@ -40,7 +40,8 @@ pub use api::*;
 pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRole};
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
-    Activation, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId, Effect, Fetch,
-    Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
+    Activation, ButtonSide, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId,
+    Effect, Fetch, Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, TermPhase, UiState, WaitBar, WaitButton,
+    WaitCard, WaitIcon, WaitPhase, WindowKind,
 };
 pub use strings::MsgKey;

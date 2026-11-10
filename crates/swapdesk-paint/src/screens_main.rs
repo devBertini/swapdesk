@@ -8,7 +8,7 @@ use swapdesk_ui::list::{max_scroll, visible_rows};
 use swapdesk_ui::tokens::{Color, fixed, layout, text};
 use swapdesk_ui::{
     ControlId, DataKind, DeviceStatus, DeviceTab, DeviceView, DialogKind, EditId, Msg, MsgKey, Nav, NoticeKind,
-    PairingState, Screen, SelectId, SessionState, WindowKind,
+    PairingState, Screen, SelectId, WaitCard, WaitIcon, WindowKind,
 };
 
 use crate::painter::{Align, Rect};
@@ -109,7 +109,7 @@ fn sidebar(f: &mut Frame) {
         Row {
             id: Some(ControlId::Device(i as u16)),
             name: d.name.clone(),
-            status: format::status_line(f.st.language(), d),
+            status: f.st.device_status_line(d),
             dot: match d.status {
                 DeviceStatus::Online { .. } => Dot::Solid(pal.ok),
                 DeviceStatus::Asleep | DeviceStatus::Offline => Dot::Solid(pal.line),
@@ -546,7 +546,8 @@ fn devices_main(f: &mut Frame) {
         home_main(f);
         return;
     };
-    let waking = f.st.waking_session().filter(|s| s.device_id == d.id).cloned();
+    // A wake or a connect that waits, or a connect that did not open: its card takes the page's content.
+    let card = f.st.wait_card(&d.id);
 
     // Header: title block grows, the buttons sit at the end (gap 16, top-aligned).
     let head_w = a.cw - 260.0;
@@ -577,7 +578,7 @@ fn devices_main(f: &mut Frame) {
         (40.0, status)
     } else {
         let rename = f.t(MsgKey::RenameAction);
-        let can_rename = f.st.rename_available(&d);
+        let can_rename = f.st.rename_available(&d) && card.is_none();
         let rw = if can_rename { f.button_width(&rename, Kind::Quiet) + 12.0 } else { 0.0 };
         let title = p.label_ellipsis(&d.name, text::H1, (head_w - rw).max(80.0));
         let status = p.label_ellipsis(&detail, text::BODY, head_w);
@@ -595,7 +596,7 @@ fn devices_main(f: &mut Frame) {
         }
         (title.h, status)
     };
-    if waking.is_none() {
+    if card.is_none() {
         if d.paired && swapdesk_ui::UiState::can_wake(&d) {
             // Asleep: "Acordar" replaces the connect buttons (F-WAKE-01).
             let label = f.t(MsgKey::Wake);
@@ -618,8 +619,8 @@ fn devices_main(f: &mut Frame) {
     }
     y += (title_h + 6.0 + status.h).max(40.0) + 28.0;
 
-    if let Some(w) = waking {
-        waking_card(f, &a, y, &d, &w.state);
+    if let Some(card) = card {
+        wait_card(f, &a, y, &card);
         return;
     }
     if d.paired {
@@ -949,32 +950,48 @@ fn state_card(
     h
 }
 
-/// "Acordando o Desktop": a card with a progress bar and a cancel button, in place of the device's content.
-fn waking_card(f: &mut Frame, a: &Area, y: f32, d: &DeviceView, state: &SessionState) {
+/// The card a device's page shows in place of its content while a wake or a connect waits, or after a connect that
+/// did not open: an icon, what is waited for and on whom, the time left when there is a limit, and the way out.
+fn wait_card(f: &mut Frame, a: &Area, y: f32, card: &WaitCard) {
     let (p, pal) = (f.p, f.pal);
     let bw = p.hairline();
     let w = (a.cw - 40.0) / 3.0;
     let inner = w - 44.0 - 2.0 * bw;
-    let title = f.st.tm(&Msg::new(MsgKey::WakingTitle).with(d.name.clone()));
-    let body = f.t(MsgKey::WakingBody);
-    let t = p.label_in(&title, text::H2_STATE, inner, Align::Start);
-    let b = p.label_in(&body, text::BODY, inner, Align::Start);
-    let h = 2.0 * bw + 40.0 + 40.0 + 10.0 + t.h + 10.0 + b.h + 10.0 + 6.0 + 10.0 + 40.0;
+    let t = p.label_in(&card.title, text::H2_STATE, inner, Align::Start);
+    let b = p.label_in(&card.body, text::BODY, inner, Align::Start);
+    // The countdown row is there for the whole wait, also before the seconds are known, so the card never grows.
+    let widest = p.label("0:00", text::CAPTION);
+    let row_h = card.bar.as_ref().map(|_| widest.h.max(6.0));
+    let h = 2.0 * bw + 40.0 + 40.0 + 10.0 + t.h + 10.0 + b.h + 10.0 + row_h.map_or(0.0, |r| r + 10.0) + 40.0;
     f.panel(Rect::new(a.x, y, w, h), pal.surface);
     let (ix, mut iy) = (a.x + bw + 22.0, y + bw + 20.0);
-    f.icon_circle(ix, iy, pal.link_tint, pal.link, icons::POWER);
+    let (tint, ink, icon) = match card.icon {
+        WaitIcon::Power => (pal.link_tint, pal.link, icons::POWER),
+        WaitIcon::Clock => (pal.link_tint, pal.link, icons::CLOCK),
+        WaitIcon::ShieldAlert => (pal.danger_tint, pal.danger, icons::SHIELD_ALERT),
+    };
+    f.icon_circle(ix, iy, tint, ink, icon);
     iy += 50.0;
     p.draw(&t, ix, iy, pal.ink);
     iy += t.h + 10.0;
     p.draw(&b, ix, iy, pal.soft);
     iy += b.h + 10.0;
-    let remaining = if let SessionState::Waking { remaining_s } = state { *remaining_s } else { 60 };
-    let done = (60u16.saturating_sub(remaining) as f32 / 60.0).clamp(0.0, 1.0);
-    p.fill_rrect(Rect::new(ix, iy, inner, 6.0), 3.0, pal.line);
-    p.fill_rrect(Rect::new(ix, iy, inner * done, 6.0), 3.0, pal.link);
-    let cancel = f.t(MsgKey::Cancel);
-    let cw = f.button_width(&cancel, Kind::Default);
-    f.button(ControlId::WakeCancel, Rect::new(ix, y + h - bw - 20.0 - 40.0, cw, 40.0), Kind::Default, &cancel, false);
+    if let (Some(bar), Some(row_h)) = (&card.bar, row_h) {
+        let track = Rect::new(ix, iy + (row_h - 6.0) / 2.0, inner - widest.w - 8.0, 6.0);
+        p.fill_rrect(track, 3.0, pal.line);
+        p.fill_rrect(Rect::new(track.x, track.y, track.w * bar.fraction.clamp(0.0, 1.0), 6.0), 3.0, pal.link);
+        if let Some(time) = &bar.text {
+            let l = p.label(time, text::CAPTION);
+            p.draw(&l, ix + inner - l.w, iy + (row_h - l.h) / 2.0, pal.soft);
+        }
+    }
+    // Negative on the left, positive on the right (the order rule), on the card's bottom line.
+    let list: Vec<(ControlId, String, Kind)> = card
+        .buttons
+        .iter()
+        .map(|b| (b.id, b.label.clone(), if b.primary { Kind::Primary } else { Kind::Default }))
+        .collect();
+    actions_row(f, ix, y + h - bw - 20.0 - 40.0, inner, &list);
 }
 
 /// The error strip: floats over the bottom of the content so nothing moves when it appears.

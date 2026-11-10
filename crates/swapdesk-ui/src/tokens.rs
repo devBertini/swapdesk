@@ -203,6 +203,9 @@ pub mod layout {
     pub const PAIR_COUNTDOWN_S: u16 = 120;
     /// How long "Acordando" waits for the device to appear (F-WAKE-01).
     pub const WAKE_COUNTDOWN_S: u16 = 60;
+    /// How long a connect entry may go without news before the interface ends it itself: past the service's own
+    /// worst case (10 s handshake, 10 s control stream, 25 s answer and a 5 s guard).
+    pub const CONNECT_GIVE_UP_S: u16 = 60;
 }
 
 pub const FONT_FAMILY: &str = "Instrument Sans";

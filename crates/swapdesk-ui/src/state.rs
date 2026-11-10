@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use crate::api::*;
 use crate::format::Clock;
+use crate::interact::ControlId;
 use crate::strings::{self, MsgKey};
-use crate::tokens::layout::{PAIR_COUNTDOWN_S, WAKE_COUNTDOWN_S};
+use crate::tokens::layout::{CONNECT_GIVE_UP_S, PAIR_COUNTDOWN_S, WAKE_COUNTDOWN_S};
 
 /// Which windows must redraw after a change (a bit set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -211,11 +212,44 @@ pub struct SessionView {
     pub displays: Vec<DisplayView>,
     /// The display being shown: the primary one until the user picks another.
     pub display: Option<u16>,
+    /// For a connect entry: what the user asked for, kept so "Tentar de novo" asks the same.
+    pub intent: Option<Intent>,
+    /// For an entry that waits on a countdown (`Waking`, `Prompted`): the seconds it started from, for the bar.
+    pub countdown_total_s: Option<u16>,
+    /// Seconds a connect entry has spent in `Connecting` or `Prompted`, for the interface's own give-up.
+    pub age_s: u16,
+    /// The user pressed "Cancelar" before the service gave the entry its id: the id is cancelled when it arrives.
+    pub(crate) cancel_asked: bool,
 }
 
 impl SessionView {
-    fn new(id: u64, device_id: String, state: SessionState) -> SessionView {
-        SessionView { id, device_id, state, stats: None, displays: Vec::new(), display: None }
+    pub(crate) fn new(id: u64, device_id: String, state: SessionState) -> SessionView {
+        let countdown_total_s = countdown_of(&state);
+        SessionView {
+            id,
+            device_id,
+            state,
+            stats: None,
+            displays: Vec::new(),
+            display: None,
+            intent: None,
+            countdown_total_s,
+            age_s: 0,
+            cancel_asked: false,
+        }
+    }
+
+    /// Takes the state the service pushed. The bar's total is the first countdown value of a phase.
+    fn set_state(&mut self, state: SessionState) {
+        if std::mem::discriminant(&self.state) != std::mem::discriminant(&state) {
+            self.countdown_total_s = countdown_of(&state);
+        }
+        self.state = state;
+    }
+
+    /// Is this a connect entry still waiting (not a session)?
+    pub(crate) fn is_waiting_entry(&self) -> bool {
+        matches!(self.state, SessionState::Connecting | SessionState::Prompted { .. } | SessionState::Waking { .. })
     }
 
     pub fn display_count(&self) -> usize {
@@ -237,25 +271,95 @@ pub enum ConnectPhase {
     Connecting,
     /// The other side's prompt is open, with the seconds left.
     Prompted { remaining_s: u16 },
-    /// The session ended with a reason, kept until the user dismisses it. `in_error_line` is true when the state's own
-    /// error strip already says it (a refusal, a silence, a busy device).
-    Ended { reason: ApiCode, in_error_line: bool },
+    /// The attempt ended without a session, with why; kept until the user closes it or tries again.
+    Ended { why: ConnectWhy },
 }
 
-/// The connect flow: one line on the main window, from "Conectando" to "A sessão terminou".
+/// The connect flow of one device's page: from "Conectando" to why it did not open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectFlow {
-    pub session_id: u64,
+    /// The entry's id (0 until the service answers the click).
+    pub entry: u64,
     pub device_id: String,
     pub phase: ConnectPhase,
 }
 
-/// A session that ended with a reason, waiting to be dismissed.
+/// A connect attempt that ended without a session, waiting to be closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConnectEnd {
-    pub session_id: u64,
+    pub entry: u64,
     pub device_id: String,
-    pub reason: ApiCode,
+    pub why: ConnectWhy,
+    pub intent: Option<Intent>,
+}
+
+/// The icon of the wait card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitIcon {
+    /// Waking a sleeping computer.
+    Power,
+    /// Waiting for the other computer.
+    Clock,
+    /// The attempt did not open.
+    ShieldAlert,
+}
+
+/// Where the card's phase stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitPhase {
+    Waking,
+    Connecting,
+    Prompted,
+    Ended,
+}
+
+/// Which side of the card's button row a button sits on (positive actions on the right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitButton {
+    pub id: ControlId,
+    pub label: String,
+    pub side: ButtonSide,
+    /// The prominent button of the row.
+    pub primary: bool,
+}
+
+/// The countdown row of a waiting card: a track filled from the left, with the time beside it when there is one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitBar {
+    /// How much of the track is filled, 0.0 to 1.0.
+    pub fraction: f32,
+    /// "0:14", or `None` while the wait has no deadline to show (the track is drawn alone).
+    pub text: Option<String>,
+}
+
+/// What a device's page shows in place of its content while a connect or a wake waits or has just failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitCard {
+    pub device_id: String,
+    pub phase: WaitPhase,
+    pub icon: WaitIcon,
+    pub title: String,
+    pub body: String,
+    /// `None` on an ended card.
+    pub bar: Option<WaitBar>,
+    pub buttons: Vec<WaitButton>,
+}
+
+/// The seconds a state counts down from, if it counts.
+fn countdown_of(state: &SessionState) -> Option<u16> {
+    match state {
+        // A wake always lasts its minute, also when the first news of it arrives with the minute under way; a
+        // request counts from the first value the other computer reports.
+        SessionState::Waking { remaining_s } => Some((*remaining_s).max(WAKE_COUNTDOWN_S)),
+        SessionState::Prompted { remaining_s } => Some(*remaining_s),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +431,8 @@ pub enum Effect {
     PickFiles,
     /// Ask which folder to receive files into, then call [`UiState::set_receive_dir`] with it.
     PickReceiveFolder,
+    /// Move the keyboard focus to this control of the main window (the one that was activated has gone).
+    Focus(ControlId),
 }
 
 /// What to restore when an optimistic change is refused.
@@ -414,6 +520,8 @@ pub struct UiState {
     pub(crate) fullscreen_monitor: Option<u8>,
     pub(crate) local_monitors: u8,
     pub(crate) connect_end: Option<ConnectEnd>,
+    /// The control the shell should focus after the last events (the end card's "Fechar"), taken once.
+    focus_request: Option<ControlId>,
     /// The viewer session whose display list was asked for by [`UiState::take_display_request`].
     pub(crate) displays_asked: Option<u64>,
     /// The sessions whose first `Active` state already asked the shell to minimize the main window.
@@ -486,6 +594,7 @@ impl UiState {
             fullscreen_monitor: None,
             local_monitors: 1,
             connect_end: None,
+            focus_request: None,
             displays_asked: None,
             minimize_asked: Vec::new(),
             live_picture: false,
@@ -722,7 +831,7 @@ impl UiState {
     pub fn viewer_session(&self) -> Option<&SessionView> {
         self.sessions.iter().find(|s| match &s.state {
             SessionState::Active { role, .. } => *role == Role::Viewer,
-            SessionState::Connecting | SessionState::Paused { .. } | SessionState::Reconnecting { .. } => true,
+            SessionState::Paused { .. } | SessionState::Reconnecting { .. } => true,
             _ => false,
         })
     }
@@ -737,41 +846,154 @@ impl UiState {
         self.sessions.iter().find(|s| matches!(s.state, SessionState::Waking { .. }))
     }
 
-    /// The connect flow's line for the main window: the session being set up (Connecting, or Prompted with its
-    /// countdown), else the last session that ended with a reason, kept until [`UiState::dismiss_connect`].
-    pub fn connect_flow(&self) -> Option<ConnectFlow> {
-        for s in &self.sessions {
+    /// The entry of a device that is waiting (connecting, prompted or waking).
+    pub(crate) fn waiting_entry(&self, device_id: &str) -> Option<&SessionView> {
+        self.sessions.iter().find(|s| s.device_id == device_id && s.is_waiting_entry())
+    }
+
+    /// The connect flow of a device's page: the attempt being set up (`Connecting`, or `Prompted` with its seconds),
+    /// else why the last one did not open, kept until [`UiState::dismiss_connect`]. A wake's own wait is
+    /// [`UiState::waking_session`].
+    pub fn connect_flow(&self, device_id: &str) -> Option<ConnectFlow> {
+        if let Some(s) = self.sessions.iter().find(|s| s.device_id == device_id) {
             let phase = match s.state {
-                SessionState::Prompted { remaining_s } => ConnectPhase::Prompted { remaining_s },
-                SessionState::Connecting => ConnectPhase::Connecting,
-                _ => continue,
+                SessionState::Connecting => Some(ConnectPhase::Connecting),
+                SessionState::Prompted { remaining_s } => Some(ConnectPhase::Prompted { remaining_s }),
+                _ => None,
             };
-            return Some(ConnectFlow { session_id: s.id, device_id: s.device_id.clone(), phase });
+            if let Some(phase) = phase {
+                return Some(ConnectFlow { entry: s.id, device_id: s.device_id.clone(), phase });
+            }
         }
-        self.connect_end.as_ref().map(|e| ConnectFlow {
-            session_id: e.session_id,
+        self.connect_end.as_ref().filter(|e| e.device_id == device_id).map(|e| ConnectFlow {
+            entry: e.entry,
             device_id: e.device_id.clone(),
-            phase: ConnectPhase::Ended {
-                reason: e.reason,
-                in_error_line: matches!(e.reason, ApiCode::Refused | ApiCode::Timeout | ApiCode::Busy),
-            },
+            phase: ConnectPhase::Ended { why: e.why },
         })
     }
 
-    /// The title and the detail line (the countdown, or why it ended) of a connect flow.
-    pub fn connect_texts(&self, flow: &ConnectFlow) -> (String, Option<String>) {
-        let peer = self.device_by_id(&flow.device_id).map(|d| d.name.clone()).unwrap_or_default();
-        let (key, detail) = match &flow.phase {
-            ConnectPhase::Connecting => (MsgKey::ConnectingTitle, None),
-            ConnectPhase::Prompted { remaining_s } => {
-                (MsgKey::PromptedTitle, Some(crate::format::countdown(*remaining_s)))
-            }
-            ConnectPhase::Ended { reason, .. } => (MsgKey::EndedTitle, Some(self.error_text(&ApiError::new(*reason)))),
+    /// What a device's page shows in place of its content while a connect or a wake waits or has just failed, for
+    /// both cases: the painter draws this one card. `None` when the page is the normal page.
+    pub fn wait_card(&self, device_id: &str) -> Option<WaitCard> {
+        let name = self.device_by_id(device_id)?.name.clone();
+        let titled = |key: MsgKey| self.tm(&Msg::new(key).with(name.clone()));
+        let cancel = |id: ControlId| {
+            vec![WaitButton { id, label: self.t(MsgKey::Cancel), side: ButtonSide::Left, primary: false }]
         };
-        (self.tm(&Msg::new(key).with(peer)), detail)
+        if let Some(e) = self.waiting_entry(device_id) {
+            let bar = |remaining_s: u16| {
+                let total = e.countdown_total_s.unwrap_or(remaining_s).max(1);
+                let elapsed = total.saturating_sub(remaining_s);
+                WaitBar {
+                    fraction: (f32::from(elapsed) / f32::from(total)).clamp(0.0, 1.0),
+                    text: Some(crate::format::countdown(remaining_s)),
+                }
+            };
+            return Some(match e.state {
+                SessionState::Waking { remaining_s } => WaitCard {
+                    device_id: device_id.to_owned(),
+                    phase: WaitPhase::Waking,
+                    icon: WaitIcon::Power,
+                    title: titled(MsgKey::WakingTitle),
+                    body: self.t(MsgKey::WakingBody),
+                    bar: Some(bar(remaining_s)),
+                    buttons: cancel(ControlId::WakeCancel),
+                },
+                SessionState::Prompted { remaining_s } => WaitCard {
+                    device_id: device_id.to_owned(),
+                    phase: WaitPhase::Prompted,
+                    icon: WaitIcon::Clock,
+                    title: titled(MsgKey::PromptedTitle),
+                    body: titled(MsgKey::PromptedBody),
+                    bar: Some(bar(remaining_s)),
+                    buttons: cancel(ControlId::ConnectCancel),
+                },
+                _ => WaitCard {
+                    device_id: device_id.to_owned(),
+                    phase: WaitPhase::Connecting,
+                    icon: WaitIcon::Clock,
+                    title: titled(MsgKey::ConnectingTitle),
+                    body: self.t(MsgKey::ConnectingBody),
+                    // The track alone: there is no deadline to show until the other computer asks its user.
+                    bar: Some(WaitBar { fraction: 0.0, text: None }),
+                    buttons: cancel(ControlId::ConnectCancel),
+                },
+            });
+        }
+        let end = self.connect_end.as_ref().filter(|e| e.device_id == device_id)?;
+        let body = match end.why {
+            ConnectWhy::Declined => titled(MsgKey::SwapWhyDeclined),
+            ConnectWhy::TimedOut => titled(MsgKey::ConnectWhyTimedOut),
+            ConnectWhy::NobodyPresent => titled(MsgKey::SwapWhyNobody),
+            ConnectWhy::Busy => titled(MsgKey::ConnectWhyBusy),
+            ConnectWhy::Forgotten => titled(MsgKey::ConnectWhyForgotten),
+            ConnectWhy::NotPermitted => titled(MsgKey::ConnectWhyNotPermitted),
+            ConnectWhy::Unreachable => titled(MsgKey::ConnectWhyUnreachable),
+            ConnectWhy::Failed => self.t(MsgKey::ErrInternal),
+        };
+        Some(WaitCard {
+            device_id: device_id.to_owned(),
+            phase: WaitPhase::Ended,
+            icon: WaitIcon::ShieldAlert,
+            title: titled(MsgKey::ConnectEndedTitle),
+            body,
+            bar: None,
+            buttons: vec![
+                WaitButton {
+                    id: ControlId::ConnectClose,
+                    label: self.t(MsgKey::Close),
+                    side: ButtonSide::Left,
+                    primary: false,
+                },
+                WaitButton {
+                    id: ControlId::ConnectRetry,
+                    label: self.t(MsgKey::PairRetry),
+                    side: ButtonSide::Right,
+                    primary: true,
+                },
+            ],
+        })
     }
 
-    /// The user closed the "session ended" line.
+    /// The wait card of the device whose page is open, if any.
+    pub fn selected_wait_card(&self) -> Option<WaitCard> {
+        self.wait_card(&self.selected_device()?.id)
+    }
+
+    /// The second line of a sidebar row: the wait says so while the device has a connect or a wake under way,
+    /// otherwise [`crate::format::status_line`].
+    pub fn device_status_line(&self, d: &DeviceView) -> String {
+        let key = self.waiting_entry(&d.id).map(|e| match e.state {
+            SessionState::Waking { .. } => MsgKey::SidebarWaking,
+            SessionState::Prompted { .. } => MsgKey::SidebarWaitingAccept,
+            _ => MsgKey::SidebarConnecting,
+        });
+        match key {
+            Some(key) => self.t(key),
+            None => crate::format::status_line(self.lang, d),
+        }
+    }
+
+    /// The control Esc activates in a window: "Cancelar" while a card waits, "Fechar" on an ended card. Only the
+    /// main window's page, and not while a dialog or another screen is over it.
+    pub fn escape_target(&self, kind: WindowKind) -> Option<ControlId> {
+        if kind != WindowKind::Main
+            || self.dialog(kind).is_some()
+            || self.incoming_session_open()
+            || self.pairing.is_some()
+            || self.nav() != Nav::Devices
+        {
+            return None;
+        }
+        self.selected_wait_card()?.buttons.first().map(|b| b.id)
+    }
+
+    /// The control the shell should focus now, once (after a connect ended and its card says why).
+    pub fn take_focus_request(&mut self) -> Option<ControlId> {
+        self.focus_request.take()
+    }
+
+    /// The user closed the end card.
     pub fn dismiss_connect(&mut self) -> Changed {
         if self.connect_end.take().is_some() { Changed::MAIN } else { Changed::NONE }
     }
@@ -929,10 +1151,12 @@ impl UiState {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
             || self.incoming.is_some()
             || matches!(self.swap.as_ref().map(|s| &s.phase), Some(SwapPhase::Asked { .. }))
-            || self
-                .sessions
-                .iter()
-                .any(|s| matches!(s.state, SessionState::Waking { .. } | SessionState::Prompted { .. }))
+            || self.sessions.iter().any(|s| {
+                matches!(
+                    s.state,
+                    SessionState::Waking { .. } | SessionState::Prompted { .. } | SessionState::Connecting
+                )
+            })
             || !self.pending.is_empty()
     }
 
@@ -1041,6 +1265,9 @@ impl UiState {
         if self.devices.iter().any(|d| d.id == id) {
             self.selected = Some(id.to_owned());
             self.rename = None;
+            if self.connect_end.as_ref().is_some_and(|e| e.device_id != id) {
+                self.connect_end = None;
+            }
             self.crash_notice = false;
             self.nav = Nav::Devices;
             self.tab = DeviceTab::Overview;
@@ -1190,6 +1417,7 @@ impl UiState {
             *remaining_s -= 1;
             changed = changed.union(Changed::MAIN);
         }
+        let mut gave_up: Vec<(u64, String)> = Vec::new();
         for s in &mut self.sessions {
             match &mut s.state {
                 SessionState::Waking { remaining_s } | SessionState::Prompted { remaining_s } if *remaining_s > 0 => {
@@ -1198,6 +1426,21 @@ impl UiState {
                 }
                 _ => {}
             }
+            // News that never comes (a service that died) must not leave the card up for ever.
+            if matches!(s.state, SessionState::Connecting | SessionState::Prompted { .. }) {
+                s.age_s += 1;
+                if s.age_s >= CONNECT_GIVE_UP_S {
+                    gave_up.push((s.id, s.device_id.clone()));
+                }
+            }
+        }
+        for (id, device_id) in gave_up {
+            self.sessions.retain(|s| !(s.id == id && s.device_id == device_id));
+            if id != 0 {
+                self.followups.push(Command::Disconnect { session_id: id });
+            }
+            self.end_connect(id, device_id, ConnectWhy::Failed, None);
+            changed = changed.union(Changed::ALL);
         }
         changed
     }
@@ -1393,15 +1636,41 @@ impl UiState {
         Changed::MAIN
     }
 
+    /// A connect attempt ended without a session: its card says why, and the focus goes to "Fechar" when that card
+    /// is the page on screen.
+    fn end_connect(&mut self, entry: u64, device_id: String, why: ConnectWhy, intent: Option<Intent>) {
+        if self.selected_device().is_some_and(|d| d.id == device_id) {
+            self.focus_request = Some(ControlId::ConnectClose);
+        }
+        self.connect_end = Some(ConnectEnd { entry, device_id, why, intent });
+    }
+
+    /// Takes the entry a click made, which has no id until the service answers.
+    fn take_unanswered_entry(&mut self, device_id: &str) -> Option<SessionView> {
+        let at = self.sessions.iter().position(|s| s.id == 0 && s.device_id == device_id && s.is_waiting_entry())?;
+        Some(self.sessions.remove(at))
+    }
+
     fn apply_session(&mut self, id: u64, device_id: String, state: SessionState) -> Changed {
+        if let SessionState::NotOpened { why } = state {
+            let entry = match self.sessions.iter().position(|s| s.id == id) {
+                Some(at) => Some(self.sessions.remove(at)),
+                None => self.take_unanswered_entry(&device_id),
+            };
+            let device_id = entry.as_ref().map_or(device_id, |e| e.device_id.clone());
+            self.end_connect(id, device_id, why, entry.and_then(|e| e.intent));
+            return Changed::ALL;
+        }
         if let SessionState::Ended { reason } = &state {
             let before = self.sessions.iter().find(|s| s.id == id).map(|s| (s.state.clone(), s.device_id.clone()));
+            let entry = self.sessions.iter().find(|s| s.id == id && s.is_waiting_entry()).cloned();
             self.sessions.retain(|s| s.id != id);
-            // A session that ended with a reason stays as a line on the main window until the user closes it (the
-            // host side's own ends are not a connect attempt of this user).
-            let was_host = matches!(before, Some((SessionState::Active { role: Role::Host, .. }, _)));
-            if let (Some(reason), false) = (reason, was_host) {
-                self.connect_end = Some(ConnectEnd { session_id: id, device_id, reason: *reason });
+            // An entry that ends with a code (not a normal end) did not open: the card says it did not.
+            if let Some(e) = &entry
+                && reason.is_some()
+                && !matches!(e.state, SessionState::Waking { .. })
+            {
+                self.end_connect(id, e.device_id.clone(), ConnectWhy::Failed, e.intent);
             }
             if self.viewer_session().is_none() {
                 self.view_only = false;
@@ -1424,8 +1693,11 @@ impl UiState {
                     self.swap = None;
                 }
             }
-            // Only a refusal or a silence is worth a line; any other end is the user's own.
-            if let Some(reason @ (ApiCode::Refused | ApiCode::Timeout | ApiCode::Busy)) = reason {
+            // Only a refusal or a silence of a session is worth a line (an entry's card says its own); any other end
+            // is the user's own.
+            if entry.is_none()
+                && let Some(reason @ (ApiCode::Refused | ApiCode::Timeout | ApiCode::Busy)) = reason
+            {
                 self.error = Some(ApiError::new(*reason));
             }
             // The minute of reconnecting or of waking ran out: say which.
@@ -1442,8 +1714,21 @@ impl UiState {
             }
             return Changed::ALL;
         }
-        if self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
+        let waiting =
+            matches!(state, SessionState::Connecting | SessionState::Prompted { .. } | SessionState::Waking { .. });
+        if waiting && self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
             self.connect_end = None;
+        }
+        // The service's first word about the entry a click made: it takes the id.
+        if waiting
+            && !self.sessions.iter().any(|s| s.id == id)
+            && let Some(at) =
+                self.sessions.iter().position(|s| s.id == 0 && s.device_id == device_id && s.is_waiting_entry())
+        {
+            self.sessions[at].id = id;
+            if self.sessions[at].cancel_asked {
+                self.followups.push(Command::Disconnect { session_id: id });
+            }
         }
         let was_active = self.sessions.iter().any(|s| s.id == id && matches!(s.state, SessionState::Active { .. }));
         if !was_active && matches!(state, SessionState::Active { role: Role::Viewer, .. }) {
@@ -1452,7 +1737,7 @@ impl UiState {
             self.followups.push(Command::SetAudio { session_id: id, on: self.audio_on });
         }
         if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-            s.state = state;
+            s.set_state(state);
             s.device_id = device_id;
         } else {
             self.sessions.push(SessionView::new(id, device_id, state));
@@ -1550,26 +1835,35 @@ impl UiState {
                 }
                 Changed::MAIN
             }
-            Reply::SessionId(id) => {
-                let state = match pending.map(|p| p.command) {
-                    Some(Command::Connect { device_id, .. }) => Some((device_id, SessionState::Connecting)),
-                    // "Acordar": the entry that shows "Acordando" until the device appears or the minute ends.
-                    Some(Command::Wake { device_id }) => {
-                        Some((device_id, SessionState::Waking { remaining_s: WAKE_COUNTDOWN_S }))
+            Reply::SessionId(id) => match pending.map(|p| p.command) {
+                // The click made its entry already: the reply gives it the id.
+                Some(Command::Connect { device_id, .. }) => {
+                    if self.sessions.iter().any(|s| s.id == id) {
+                        return Changed::NONE;
                     }
-                    _ => None,
-                };
-                if let Some((device_id, state)) = state
-                    && !self.sessions.iter().any(|s| s.id == id)
-                {
+                    match self.sessions.iter_mut().find(|s| s.id == 0 && s.device_id == device_id) {
+                        Some(entry) => {
+                            entry.id = id;
+                            if entry.cancel_asked {
+                                self.followups.push(Command::Disconnect { session_id: id });
+                            }
+                        }
+                        // The card ended before the answer came (the interface gave up): stop what the service began.
+                        None => self.followups.push(Command::Disconnect { session_id: id }),
+                    }
+                    Changed::MAIN
+                }
+                // "Acordar": the entry that shows "Acordando" until the device appears or the minute ends.
+                Some(Command::Wake { device_id }) if !self.sessions.iter().any(|s| s.id == id) => {
                     if self.connect_end.as_ref().is_some_and(|e| e.device_id == device_id) {
                         self.connect_end = None;
                     }
+                    let state = SessionState::Waking { remaining_s: WAKE_COUNTDOWN_S };
                     self.sessions.push(SessionView::new(id, device_id, state));
-                    return Changed::ALL;
+                    Changed::ALL
                 }
-                Changed::NONE
-            }
+                _ => Changed::NONE,
+            },
             Reply::RequestId(request_id) => {
                 if let Some(s) = &mut self.swap
                     && matches!(s.phase, SwapPhase::Requested { .. })
@@ -1642,6 +1936,15 @@ impl UiState {
                 }
                 _ => Changed::NONE,
             };
+        }
+        // The click's card goes; a refusal that is not the elevation step ends it with its why.
+        if let Command::Connect { device_id, unattended, .. } = &pending.command {
+            let entry = self.take_unanswered_entry(device_id);
+            if !(*unattended && error.code == ApiCode::NeedsAdmin) {
+                let why = if error.code == ApiCode::NotFound { ConnectWhy::Unreachable } else { ConnectWhy::Failed };
+                self.end_connect(0, device_id.clone(), why, entry.and_then(|e| e.intent));
+                return Changed::ALL;
+            }
         }
         match pending.undo {
             Some(Undo::Grants(device_id, grants)) => {

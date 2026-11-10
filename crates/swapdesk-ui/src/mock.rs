@@ -30,6 +30,12 @@ fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
 }
 
 pub const MAC: &str = "mac-alex";
+
+/// Bit 63 of an id marks a connect entry (or a wake's), as the service does.
+const ENTRY_BIT: u64 = 1 << 63;
+
+/// The id of a connect entry in the scenarios.
+pub const ENTRY: u64 = ENTRY_BIT | 7;
 pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
 
@@ -190,6 +196,14 @@ pub enum Scenario {
     EstadoPermissoesMac,
     EstadoReconectando,
     EstadoAcordando,
+    /// "Controlar" pressed: the card before the other computer has said anything.
+    EstadoConectando,
+    /// The other computer shows the request: the card with the seconds left.
+    EstadoAguardandoAceite,
+    /// The other computer's user said no.
+    EstadoConexaoRecusada,
+    /// Nobody is at the other computer (the longest line).
+    EstadoConexaoNinguem,
     EstadoInversaoRecusada,
     Visualizador,
     VisualizadorEscuro,
@@ -212,7 +226,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 33] = [
+    pub const ALL: [Scenario; 37] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -231,6 +245,10 @@ impl Scenario {
         Scenario::EstadoPermissoesMac,
         Scenario::EstadoReconectando,
         Scenario::EstadoAcordando,
+        Scenario::EstadoConectando,
+        Scenario::EstadoAguardandoAceite,
+        Scenario::EstadoConexaoRecusada,
+        Scenario::EstadoConexaoNinguem,
         Scenario::EstadoInversaoRecusada,
         Scenario::Visualizador,
         Scenario::VisualizadorEscuro,
@@ -269,6 +287,10 @@ impl Scenario {
             Scenario::EstadoPermissoesMac => "estado-permissoes-mac",
             Scenario::EstadoReconectando => "estado-reconectando",
             Scenario::EstadoAcordando => "estado-acordando",
+            Scenario::EstadoConectando => "estado-conectando",
+            Scenario::EstadoAguardandoAceite => "estado-aguardando-aceite",
+            Scenario::EstadoConexaoRecusada => "estado-conexao-recusada",
+            Scenario::EstadoConexaoNinguem => "estado-conexao-ninguem",
             Scenario::EstadoInversaoRecusada => "estado-inversao-recusada",
             Scenario::Visualizador => "visualizador",
             Scenario::VisualizadorEscuro => "visualizador-escuro",
@@ -312,6 +334,10 @@ impl Scenario {
             Scenario::EstadoPermissoesMac => "11. Erros e estados: permissões no Mac",
             Scenario::EstadoReconectando => "11. Erros e estados: Reconectando",
             Scenario::EstadoAcordando => "11. Erros e estados: Acordando",
+            Scenario::EstadoConectando => "new: Conectando, before the other computer answers (R-UI-13)",
+            Scenario::EstadoAguardandoAceite => "new: Esperando o computador aceitar, with the seconds left (R-UI-13)",
+            Scenario::EstadoConexaoRecusada => "new: Não deu para conectar, o outro computador recusou (R-UI-13)",
+            Scenario::EstadoConexaoNinguem => "new: Não deu para conectar, ninguém no outro computador (R-UI-13)",
             Scenario::EstadoInversaoRecusada => "11. Erros e estados: inversão recusada",
             Scenario::Visualizador => "5. Visualizador",
             Scenario::VisualizadorEscuro => "5. Visualizador escuro",
@@ -471,6 +497,24 @@ impl Scenario {
                     state: SessionState::Waking { remaining_s: 36 },
                 }),
             ],
+            Scenario::EstadoConectando => vec![mac(), Activate(ControlId::Control)],
+            Scenario::EstadoAguardandoAceite => vec![mac(), Event(Self::entry_prompted()), Ticks(6)],
+            Scenario::EstadoConexaoRecusada | Scenario::EstadoConexaoNinguem => {
+                let why = if self == Scenario::EstadoConexaoRecusada {
+                    ConnectWhy::Declined
+                } else {
+                    ConnectWhy::NobodyPresent
+                };
+                vec![
+                    mac(),
+                    Event(Self::entry_prompted()),
+                    Event(UiEvent::Session {
+                        session_id: ENTRY,
+                        device_id: MAC.into(),
+                        state: SessionState::NotOpened { why },
+                    }),
+                ]
+            }
             Scenario::EstadoInversaoRecusada => vec![
                 mac(),
                 Event(Self::viewer_session(12)),
@@ -602,6 +646,11 @@ impl Scenario {
         }
     }
 
+    /// The service's word that the other computer shows the request, with its 20 seconds.
+    fn entry_prompted() -> UiEvent {
+        UiEvent::Session { session_id: ENTRY, device_id: MAC.into(), state: SessionState::Prompted { remaining_s: 20 } }
+    }
+
     /// Replays the world and the script on `state`.
     pub fn apply_to(self, state: &mut UiState) {
         state.set_clock(Clock { now_ms: NOW_MS, utc_offset_min: 0 });
@@ -667,6 +716,8 @@ struct World {
     devices: Vec<DeviceView>,
     settings: Settings,
     next_session: u64,
+    /// The entries the user cancelled: their scheduled news does not arrive.
+    cancelled: Arc<Mutex<Vec<u64>>>,
 }
 
 struct Shared {
@@ -687,6 +738,17 @@ impl Shared {
         std::thread::spawn(move || {
             std::thread::sleep(delay);
             me.push(e);
+        });
+    }
+
+    /// Like [`Shared::later`], unless `entry` was cancelled by then.
+    fn later_unless(self: &Arc<Self>, delay: Duration, e: UiEvent, entry: u64, cancelled: &Arc<Mutex<Vec<u64>>>) {
+        let (me, cancelled) = (Arc::clone(self), Arc::clone(cancelled));
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            if cancelled.lock().is_ok_and(|c| !c.contains(&entry)) {
+                me.push(e);
+            }
         });
     }
 }
@@ -726,7 +788,12 @@ impl MockBackend {
     pub fn new(waker: Arc<dyn UiWaker>) -> MockBackend {
         MockBackend {
             shared: Arc::new(Shared { events: Mutex::new(VecDeque::new()), waker }),
-            world: Arc::new(Mutex::new(World { devices: devices(), settings: settings(), next_session: 10 })),
+            world: Arc::new(Mutex::new(World {
+                devices: devices(),
+                settings: settings(),
+                next_session: 10,
+                cancelled: Arc::new(Mutex::new(Vec::new())),
+            })),
             inflight: Arc::new(InFlight::new()),
             faults: Arc::new(Mutex::new(Faults::default())),
             executed: Arc::new(AtomicUsize::new(0)),
@@ -892,46 +959,51 @@ impl World {
                 Ok(Reply::Done)
             }
             Command::Connect { device_id, .. } => {
-                let asleep = matches!(self.device(&device_id)?.status, DeviceStatus::Asleep);
+                self.device(&device_id)?;
                 self.next_session += 1;
-                let id = self.next_session;
-                sh.later(
-                    ms(10),
-                    UiEvent::Session { session_id: id, device_id: device_id.clone(), state: SessionState::Connecting },
-                );
-                let active = UiEvent::Session {
-                    session_id: id,
-                    device_id: device_id.clone(),
-                    state: SessionState::Active {
-                        since_ms: NOW_MS,
-                        role: Role::Viewer,
-                        granted: perms(&[
-                            Permission::View,
-                            Permission::Control,
-                            Permission::Audio,
-                            Permission::Files,
-                            Permission::Clipboard,
-                        ]),
+                let session = self.next_session;
+                let entry = ENTRY_BIT | session;
+                let cancelled = Arc::clone(&self.cancelled);
+                let say =
+                    |state: SessionState| UiEvent::Session { session_id: entry, device_id: device_id.clone(), state };
+                sh.later_unless(ms(10), say(SessionState::Connecting), entry, &cancelled);
+                sh.later_unless(ms(300), say(SessionState::Prompted { remaining_s: 20 }), entry, &cancelled);
+                // The other computer accepted: the session's own Active first, then the entry's normal end.
+                sh.later_unless(
+                    ms(900),
+                    UiEvent::Session {
+                        session_id: session,
+                        device_id: device_id.clone(),
+                        state: SessionState::Active {
+                            since_ms: NOW_MS,
+                            role: Role::Viewer,
+                            granted: perms(&[
+                                Permission::View,
+                                Permission::Control,
+                                Permission::Audio,
+                                Permission::Files,
+                                Permission::Clipboard,
+                            ]),
+                        },
                     },
-                };
-                if asleep {
-                    sh.later(
-                        ms(30),
-                        UiEvent::Session { session_id: id, device_id, state: SessionState::Waking { remaining_s: 60 } },
-                    );
-                    sh.later(ms(2500), active);
-                } else {
-                    sh.later(ms(500), active);
-                }
-                Ok(Reply::SessionId(id))
+                    entry,
+                    &cancelled,
+                );
+                sh.later_unless(ms(920), say(SessionState::Ended { reason: None }), entry, &cancelled);
+                Ok(Reply::SessionId(entry))
             }
             Command::Disconnect { session_id } => {
+                if session_id & ENTRY_BIT != 0
+                    && let Ok(mut c) = self.cancelled.lock()
+                {
+                    c.push(session_id);
+                }
                 sh.later(
                     ms(20),
                     UiEvent::Session {
                         session_id,
                         device_id: String::new(),
-                        state: SessionState::Ended { reason: Some(ApiCode::NotFound) },
+                        state: SessionState::Ended { reason: None },
                     },
                 );
                 Ok(Reply::Done)
@@ -1030,6 +1102,10 @@ mod tests {
             (Scenario::EstadoPermissoesMac, Screen::Devices, &[Main]),
             (Scenario::EstadoReconectando, Screen::Devices, &[Main, Viewer]),
             (Scenario::EstadoAcordando, Screen::Devices, &[Main]),
+            (Scenario::EstadoConectando, Screen::Devices, &[Main]),
+            (Scenario::EstadoAguardandoAceite, Screen::Devices, &[Main]),
+            (Scenario::EstadoConexaoRecusada, Screen::Devices, &[Main]),
+            (Scenario::EstadoConexaoNinguem, Screen::Devices, &[Main]),
             (Scenario::EstadoInversaoRecusada, Screen::Devices, &[Main, Viewer]),
             (Scenario::Visualizador, Screen::Devices, &[Main, Viewer]),
             (Scenario::VisualizadorEscuro, Screen::Devices, &[Main, Viewer]),
@@ -1312,8 +1388,95 @@ mod tests {
     #[test]
     fn r_ui_7_a_refused_admin_prompt_or_a_slow_connect_have_their_own_limits() {
         assert_eq!(Command::Elevate { action: ElevatedAction::OpenAdminTerminal { session_id: 1 } }.timeout_s(), 120);
-        assert_eq!(Command::Connect { device_id: "x".into(), intent: Intent::View, unattended: false }.timeout_s(), 20);
+        // Connect and Wake answer at once with the entry's id: the wait is told by notifications, so 5 s is for the
+        // reply and the interface's own 60 s safety net (`CONNECT_GIVE_UP_S`) is for news that never comes.
+        assert_eq!(Command::Connect { device_id: "x".into(), intent: Intent::View, unattended: false }.timeout_s(), 5);
+        assert_eq!(Command::Wake { device_id: "x".into() }.timeout_s(), 5);
+        assert_eq!(crate::tokens::layout::CONNECT_GIVE_UP_S, 60);
         assert_eq!(Command::ListDevices.timeout_s(), 5);
+    }
+
+    #[test]
+    fn the_connect_scenarios_show_their_cards() {
+        use crate::state::{WaitIcon, WaitPhase};
+        let card = |sc: Scenario| {
+            let s = sc.prepared_state();
+            let card = s.wait_card(MAC).unwrap_or_else(|| panic!("{} has a card", sc.name()));
+            let name = s.device_by_id(MAC).unwrap().name.clone();
+            (card, name)
+        };
+        let (c, name) = card(Scenario::EstadoConectando);
+        assert_eq!((c.phase, c.icon), (WaitPhase::Connecting, WaitIcon::Clock));
+        assert_eq!(c.title, format!("Conectando ao {name}"));
+        // The click's card has no id yet, and the only button is Cancelar.
+        let s = Scenario::EstadoConectando.prepared_state();
+        assert_eq!(s.connect_flow(MAC).unwrap().entry, 0);
+        assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::ConnectCancel));
+
+        let (c, name) = card(Scenario::EstadoAguardandoAceite);
+        assert_eq!(c.phase, WaitPhase::Prompted);
+        assert_eq!(c.title, format!("Esperando o {name} aceitar"));
+        assert_eq!(c.bar.unwrap().text.as_deref(), Some("0:14"));
+
+        let (c, name) = card(Scenario::EstadoConexaoRecusada);
+        assert_eq!((c.phase, c.icon), (WaitPhase::Ended, WaitIcon::ShieldAlert));
+        assert_eq!(c.body, format!("O {name} recusou."));
+
+        let (c, name) = card(Scenario::EstadoConexaoNinguem);
+        assert_eq!(c.body, format!("Não há ninguém no {name} agora."));
+        assert!(c.buttons.iter().any(|b| b.id == ControlId::ConnectRetry));
+        for sc in [
+            Scenario::EstadoConectando,
+            Scenario::EstadoAguardandoAceite,
+            Scenario::EstadoConexaoRecusada,
+            Scenario::EstadoConexaoNinguem,
+        ] {
+            assert!(Scenario::ALL.contains(&sc) && Scenario::from_name(sc.name()) == Some(sc));
+            assert!(sc.name().starts_with("estado-") && !sc.board().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_mock_connect_answers_at_once_then_reports_the_wait_and_the_session_before_the_entry_ends() {
+        let b = MockBackend::new(Arc::new(NoWake));
+        let t = b.send(Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false });
+        let events = wait_for(&b, 5);
+        let entry = match &events[0] {
+            UiEvent::Reply { ticket, result: Ok(Reply::SessionId(id)) } if *ticket == t => *id,
+            other => panic!("the reply comes first: {other:?}"),
+        };
+        assert!(entry & (1 << 63) != 0, "an entry id has bit 63 set");
+        let states: Vec<(u64, &SessionState)> = events[1..]
+            .iter()
+            .map(|e| match e {
+                UiEvent::Session { session_id, state, .. } => (*session_id, state),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(states.len(), 4, "{states:?}");
+        assert_eq!(states[0], (entry, &SessionState::Connecting));
+        assert_eq!(states[1], (entry, &SessionState::Prompted { remaining_s: 20 }));
+        assert!(matches!(states[2], (id, SessionState::Active { role: Role::Viewer, .. }) if id != entry));
+        assert_eq!(states[3], (entry, &SessionState::Ended { reason: None }));
+    }
+
+    #[test]
+    fn a_cancelled_mock_connect_opens_no_session() {
+        let b = MockBackend::new(Arc::new(NoWake));
+        b.send(Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false });
+        let events = wait_for(&b, 1);
+        let UiEvent::Reply { result: Ok(Reply::SessionId(entry)), .. } = &events[0] else { panic!("{events:?}") };
+        b.send(Command::Disconnect { session_id: *entry });
+        std::thread::sleep(Duration::from_millis(1300));
+        let later = b.drain();
+        assert!(
+            !later.iter().any(|e| matches!(e, UiEvent::Session { state: SessionState::Active { .. }, .. })),
+            "{later:?}"
+        );
+        assert!(later.iter().any(|e| matches!(
+            e,
+            UiEvent::Session { session_id, state: SessionState::Ended { reason: None }, .. } if session_id == entry
+        )));
     }
 
     #[test]

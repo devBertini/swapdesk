@@ -1,6 +1,6 @@
 //! The accessibility tree of the sidebar and the address field (F-FIND-03, UI Automation patterns).
 
-use accesskit::{Action, AriaCurrent, Node, Role, TreeUpdate};
+use accesskit::{Action, AriaCurrent, Live, Node, Role, TreeUpdate};
 
 use crate::a11y::{build_tree, node_id};
 use crate::api::{ApiCode, ApiError, Command, Ticket, UiEvent};
@@ -88,4 +88,61 @@ fn a_refused_address_shows_why_and_only_a_bare_ipv4_is_sent() {
     let e = s.error().expect("the refusal is shown").clone();
     let text = s.error_text(&e);
     assert!(text.contains("Recusado") && text.contains("rede local"), "{text}");
+}
+
+#[test]
+fn the_wait_card_is_a_polite_live_region_and_the_countdown_is_not() {
+    let live_nodes = |tree: &TreeUpdate| -> Vec<accesskit::NodeId> {
+        tree.nodes.iter().filter(|(_, n)| n.live().is_some_and(|l| l != Live::Off)).map(|(i, _)| *i).collect()
+    };
+    let state = Scenario::EstadoAguardandoAceite.prepared_state();
+    let tree = build_tree(&state, WindowKind::Main, &|_| None, Some(ControlId::ConnectCancel));
+    assert!(crate::a11y::validate(&tree).is_empty(), "{}", crate::a11y::dump(&tree));
+    let card = state.wait_card(crate::mock::MAC).unwrap();
+
+    // One polite region: the card's title and body, nothing else.
+    let live = live_nodes(&tree);
+    assert_eq!(live.len(), 1, "{}", crate::a11y::dump(&tree));
+    let region = &tree.nodes.iter().find(|(i, _)| *i == live[0]).unwrap().1;
+    assert_eq!((region.role(), region.live()), (Role::Status, Some(Live::Polite)));
+    let texts: Vec<(Role, String)> = region
+        .children()
+        .iter()
+        .map(|c| {
+            let n = &tree.nodes.iter().find(|(i, _)| i == c).unwrap().1;
+            (n.role(), n.label().unwrap_or_default().to_owned())
+        })
+        .collect();
+    assert_eq!(texts, vec![(Role::Heading, card.title.clone()), (Role::Label, card.body.clone())]);
+
+    // The countdown is a progress node outside the region, with the seconds as its value.
+    let progress: Vec<_> = tree.nodes.iter().filter(|(_, n)| n.role() == Role::ProgressIndicator).collect();
+    assert_eq!(progress.len(), 1);
+    let (pid, p) = progress[0];
+    assert_eq!(p.label(), Some("O pedido expira em 14 s"));
+    assert_eq!(p.value(), Some("14"));
+    assert!(!region.children().contains(pid), "the countdown is never announced each second");
+
+    // The cancel button takes the focus and can be clicked.
+    assert_eq!(tree.focus, node_id(ControlId::ConnectCancel));
+    let cancel = node_of(&tree, ControlId::ConnectCancel);
+    assert_eq!((cancel.role(), cancel.label()), (Role::Button, Some("Cancelar")));
+    assert!(cancel.supports_action(Action::Click));
+
+    // Connecting has the region too, and no progress node (no deadline to read yet); ended says why in the region.
+    let tree = build_tree(&Scenario::EstadoConectando.prepared_state(), WindowKind::Main, &|_| None, None);
+    assert_eq!(live_nodes(&tree).len(), 1);
+    assert!(!tree.nodes.iter().any(|(_, n)| n.role() == Role::ProgressIndicator));
+    let ended = Scenario::EstadoConexaoRecusada.prepared_state();
+    let tree = build_tree(&ended, WindowKind::Main, &|_| None, None);
+    assert_eq!(live_nodes(&tree).len(), 1);
+    let dump = crate::a11y::dump(&tree);
+    assert!(dump.contains("recusou.") && dump.contains("Não deu para conectar"), "{dump}");
+    for id in [ControlId::ConnectClose, ControlId::ConnectRetry] {
+        assert!(node_of(&tree, id).supports_action(Action::Click));
+    }
+
+    // Everything else is quiet: no live region on the normal page.
+    let tree = build_tree(&Scenario::Dispositivos.prepared_state(), WindowKind::Main, &|_| None, None);
+    assert!(live_nodes(&tree).is_empty());
 }
