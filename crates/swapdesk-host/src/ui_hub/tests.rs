@@ -511,12 +511,17 @@ fn the_production_shape_refuses_loopback_ports_and_off_link_addresses() {
     let mut ui = m.client(info(false));
     let add = |ui: &mut Client, text: &str| ui.call(UiOp::AddByAddress { ipv4: text.into() });
     assert_eq!(add(&mut ui, "127.0.0.1").unwrap_err(), ApiCode::Refused, "loopback");
-    assert_eq!(add(&mut ui, "127.0.0.1:47830").unwrap_err(), ApiCode::Invalid, "a port is a development option");
+    assert_eq!(add(&mut ui, "127.0.0.1:47830").unwrap_err(), ApiCode::Refused, "loopback, with a port or without");
+    assert_eq!(add(&mut ui, "192.168.1.50:banana").unwrap_err(), ApiCode::Invalid, "a port is a number");
+    assert_eq!(add(&mut ui, "192.168.1.50:70000").unwrap_err(), ApiCode::Invalid, "a port fits 16 bits");
     assert_eq!(add(&mut ui, "192.168.1.20").unwrap_err(), ApiCode::Refused, "this machine's own address");
     assert_eq!(add(&mut ui, "10.9.9.9").unwrap_err(), ApiCode::Refused, "off-link");
     assert_eq!(add(&mut ui, "192.168.1.50 ").map(|_| ()).err(), None, "on-link, surrounding space ignored");
     let ReplyBody::Devices(list) = ui.call(UiOp::ListDevices).unwrap() else { panic!() };
     assert_eq!(list.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["addr:192.168.1.50"]);
+    // A Swapdesk on another session port (an account's own port, a development instance) is named with it.
+    assert_eq!(device_of(add(&mut ui, "192.168.1.50:47830")).id, "addr:192.168.1.50:47830");
+    assert_eq!(add(&mut ui, "10.9.9.9:47830").unwrap_err(), ApiCode::Refused, "off-link, whatever the port");
     drop(ui);
     m.finish();
 }

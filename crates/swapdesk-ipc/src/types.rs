@@ -10,8 +10,8 @@ type CResult<T> = Result<T, CodecError>;
 
 /// Longest `device_id`, device name, OS version and peer name (C5 maximum).
 pub const MAX_NAME: usize = 64;
-/// Longest dotted IPv4 text.
-pub const MAX_IPV4: usize = 15;
+/// A typed address: an IPv4 literal, optionally followed by `:port` ("255.255.255.255:65535").
+pub const MAX_IPV4: usize = 21;
 /// Longest address text (IPv6 with scope fits).
 pub const MAX_ADDRESS: usize = 45;
 /// Longest network label.

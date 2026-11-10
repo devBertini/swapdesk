@@ -265,13 +265,13 @@ impl Hub {
 
     // ---------- devices ----------
 
-    /// F-FIND-03: an IPv4 literal on-link; off-link, loopback and this machine's own addresses are refused. In
-    /// development mode `a.b.c.d:port` also names another instance on this PC (its session port).
+    /// F-FIND-03: an IPv4 literal on-link; off-link, loopback and this machine's own addresses are refused.
+    /// `a.b.c.d:port` names a Swapdesk that listens on another session port (its pairing port is the next one); in
+    /// development mode that can also be another instance on this PC.
     fn add_by_address(&self, text: &str) -> Result<swapdesk_ipc::DeviceView, ApiCode> {
         let text = text.trim();
         let (ip_text, port) = match text.split_once(':') {
-            Some((ip, port)) if self.allow_loopback() => (ip, Some(port.parse::<u16>().map_err(|_| ApiCode::Invalid)?)),
-            Some(_) => return Err(ApiCode::Invalid),
+            Some((ip, port)) => (ip, Some(port.parse::<u16>().map_err(|_| ApiCode::Invalid)?)),
             None => (text, None),
         };
         let ip: Ipv4Addr = ip_text.parse().map_err(|_| ApiCode::Invalid)?;
