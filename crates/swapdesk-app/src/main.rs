@@ -5,6 +5,8 @@
 //!   `SwapdeskService`, or `--service-pid <pid>` in development; `--instance <n>` adds the suffix `-<n>` to the pipe
 //!   name). When the service cannot be reached the UI shows its service-down state.
 //!
+//! - `--elevated <ticket>`: only the elevated instance that confirms one action with the service, then exit.
+//!
 //! A GUI subsystem program: nothing is printed, a failure is a message box.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -31,6 +33,12 @@ fn main() {
     };
     if options.help {
         return message_box(&usage());
+    }
+    // The elevated instance is only that: no window, no viewer pipeline, no preferences, no autostart, no startup
+    // commands, no panic record. Its exit code says how the confirmation ended (ELEVATION.md 3.5).
+    if let Some(ticket) = &options.elevated {
+        let code = swapdesk_app::elevate::run_instance(&options, ticket, swapdesk_app::elevate::confirm_without_window);
+        std::process::exit(i32::from(code));
     }
     let language = system_language();
     let waker = Arc::new(Waker::new());
@@ -97,7 +105,10 @@ fn main() {
 fn usage() -> String {
     let names: Vec<&str> = swapdesk_ui::mock::Scenario::ALL.iter().map(|s| s.name()).collect();
     let dev = if swapdesk_app::cli::DEV_FLAGS { " [--service-pid <pid>] [--instance <n>]" } else { "" };
-    format!("Swapdesk{dev}\nSwapdesk --mock <scenario>\n\nScenarios: {}", names.join(", "))
+    format!(
+        "Swapdesk{dev}\nSwapdesk --elevated <ticket>{dev}\nSwapdesk --mock <scenario>\n\nScenarios: {}",
+        names.join(", ")
+    )
 }
 
 #[cfg(not(windows))]

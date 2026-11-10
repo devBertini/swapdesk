@@ -14,12 +14,13 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use swapdesk_sys_win::pipe::{PipeConn, connect as connect_pipe, session_of_pid, ui_pipe_name};
+use swapdesk_sys_win::pipe::{PipeConn, PipeError, connect as connect_pipe, session_of_pid, ui_pipe_name};
 use swapdesk_sys_win::service_pid;
 use swapdesk_ui::UiWaker;
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
 
 use crate::cli::Options;
+use crate::elevate::WinElevator;
 
 /// The name the SCM knows the service by.
 pub const SERVICE_NAME: &str = "SwapdeskService";
@@ -36,6 +37,8 @@ pub enum ConnectError {
     Session(String),
     /// The pipe could not be opened or its server is not the expected process.
     Pipe(String),
+    /// The system refused this process the pipe (access denied): its security descriptor does not list it.
+    Refused(String),
     /// The handshake failed or timed out.
     Handshake(String),
 }
@@ -46,6 +49,7 @@ impl core::fmt::Display for ConnectError {
             ConnectError::NoService(e) => write!(f, "service: {e}"),
             ConnectError::Session(e) => write!(f, "session: {e}"),
             ConnectError::Pipe(e) => write!(f, "pipe: {e}"),
+            ConnectError::Refused(e) => write!(f, "pipe refused: {e}"),
             ConnectError::Handshake(e) => write!(f, "handshake: {e}"),
         }
     }
@@ -71,9 +75,14 @@ pub fn expected_server_pid(options: &Options) -> Result<u32, ConnectError> {
 pub fn open_pipe(options: &Options) -> Result<PipeConn, ConnectError> {
     let pid = expected_server_pid(options)?;
     let session = session_of_pid(std::process::id()).map_err(|e| ConnectError::Session(e.to_string()))?;
-    connect_pipe(&pipe_name(session, options.instance), pid, PIPE_TIMEOUT)
-        .map_err(|e| ConnectError::Pipe(e.to_string()))
+    connect_pipe(&pipe_name(session, options.instance), pid, PIPE_TIMEOUT).map_err(|e| match &e {
+        PipeError::Os(os) if os.os_code == Some(ERROR_ACCESS_DENIED) => ConnectError::Refused(e.to_string()),
+        _ => ConnectError::Pipe(e.to_string()),
+    })
 }
+
+/// `ERROR_ACCESS_DENIED`, which `CreateFileW` reports for a pipe whose descriptor does not list the caller.
+const ERROR_ACCESS_DENIED: i64 = 5;
 
 /// Opens the pipe, runs the handshake and starts the backend, with `sink` receiving the viewer media.
 pub fn connect(
@@ -95,6 +104,8 @@ pub fn connect(
         Ok(Ok(backend)) => {
             // The clipboard sync of the viewer role reads and writes this user's clipboard (C2.4 0x60 to 0x62).
             backend.set_clipboard(swapdesk_input_win::clipboard::WinClipboard::new());
+            // "Continuar" of the administrator confirmation starts the elevated instance through UAC (ELEVATION.md 3.5).
+            backend.set_elevator(Arc::new(WinElevator::new(options)));
             Ok(Arc::new(backend))
         }
         Ok(Err(e)) => Err(ConnectError::Handshake(e.to_string())),
