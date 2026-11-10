@@ -232,9 +232,12 @@ pub struct ViewerConfig {
     /// The session stays open at least this long after it went active (media keeps being counted).
     pub hold: Duration,
     /// Keyboard proof: after the pointer moves, wait for this file (the orchestrator writes it once a text editor has
-    /// the focus on the host), then type [`TYPED_WORD`] with physical keys and save with Cmd+S (Ctrl+S toward Windows
-    /// is the host's own matter: this proof is toward the Mac). `None`: no keys.
+    /// the focus on the host), then type [`TYPED_WORD`] with physical keys and save with Cmd+S, or Ctrl+S when
+    /// [`ViewerConfig::save_with_ctrl`] is set. `None`: no keys.
     pub type_after: Option<PathBuf>,
+    /// The host is a Windows machine: the save chord of the keyboard proof is Ctrl+S (Cmd+S there is Win+S, which
+    /// opens the search).
+    pub save_with_ctrl: bool,
     /// Copy and paste proof ([`crate::clip`]): after the keys, text and an image each way through this clipboard and
     /// the files in this folder. `None`: no clipboard steps.
     pub clip: Option<ClipStep>,
@@ -262,6 +265,7 @@ impl ViewerConfig {
             send_input: true,
             hold: Duration::ZERO,
             type_after: None,
+            save_with_ctrl: false,
             clip: None,
             host_up: None,
         }
@@ -558,7 +562,7 @@ fn script_media(
     // 4. Pointer: a few small moves around where the host's pointer is now, at most one second of them.
     let pointer = if cfg.send_input { pointer_moves(backend, shared, session_id, cfg, log, report) } else { Ok(()) };
     let pointer = pointer.and_then(|()| match &cfg.type_after {
-        Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, log),
+        Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, cfg.save_with_ctrl, log),
         None => Ok(()),
     });
     if let Some(step) = &cfg.clip {
@@ -753,18 +757,19 @@ fn letter_usage(c: char) -> Option<u16> {
     c.is_ascii_lowercase().then(|| 4 + (c as u16 - u16::from(b'a')))
 }
 
-/// The keyboard proof: waits for `ready`, types [`TYPED_WORD`] key by key, then Cmd+S.
+/// The keyboard proof: waits for `ready`, types [`TYPED_WORD`] key by key, then Cmd+S (Ctrl+S with `ctrl`).
 fn type_word(
     backend: &ServiceBackend,
     session_id: u64,
     ready: &std::path::Path,
     timeout: Duration,
+    ctrl: bool,
     log: &dyn Fn(&str),
 ) -> Result<(), String> {
     const GAP: Duration = Duration::from_millis(40);
-    const LEFT_GUI: u16 = 0xE3;
-    const GUI_BIT: u8 = 0x08;
     const S: u16 = 22;
+    // The modifier's usage and its bit in the modifiers byte: left Ctrl or left GUI (Cmd).
+    let (modifier, bit, chord) = if ctrl { (0xE0u16, 0x01u8, "Ctrl+S") } else { (0xE3u16, 0x08u8, "Cmd+S") };
     log("VIEWER_NEED_TYPE");
     wait_file(ready, "a text editor focused on the host", timeout)?;
     let key =
@@ -776,13 +781,11 @@ fn type_word(
         backend.viewer_input(session_id, vec![key(usage, false, 0)]);
         std::thread::sleep(GAP);
     }
-    for (usage, down, modifiers) in
-        [(LEFT_GUI, true, GUI_BIT), (S, true, GUI_BIT), (S, false, GUI_BIT), (LEFT_GUI, false, 0)]
-    {
+    for (usage, down, modifiers) in [(modifier, true, bit), (S, true, bit), (S, false, bit), (modifier, false, 0)] {
         backend.viewer_input(session_id, vec![key(usage, down, modifiers)]);
         std::thread::sleep(GAP);
     }
-    log(&format!("TYPED {} letter keys, then Cmd+S", TYPED_WORD.len()));
+    log(&format!("TYPED {} letter keys, then {chord}", TYPED_WORD.len()));
     Ok(())
 }
 

@@ -195,7 +195,15 @@ pub fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    match run(&host_addr, PathBuf::from(peer_code), PathBuf::from(go), PathBuf::from(anchor), value(&args, "--clip")) {
+    let type_after = value(&args, "--type").map(PathBuf::from);
+    match run(
+        &host_addr,
+        PathBuf::from(peer_code),
+        PathBuf::from(go),
+        PathBuf::from(anchor),
+        value(&args, "--clip"),
+        type_after,
+    ) {
         Ok(()) => {
             println!("VIEWER_RESULT PASS");
             ExitCode::SUCCESS
@@ -213,6 +221,7 @@ fn run(
     go: PathBuf,
     anchor: PathBuf,
     clip_dir: Option<String>,
+    type_after: Option<PathBuf>,
 ) -> Result<(), String> {
     let scratch = Scratch::new()?;
     let trace: Arc<dyn TraceSink> = Arc::new(StderrTrace);
@@ -283,6 +292,14 @@ fn run(
     .map_err(|e| format!("hub handshake: {e}"))?;
 
     let mut cfg = ViewerConfig::new(host_addr, peer_code, go, anchor);
+    // `--type <file>`: the keyboard proof toward the Windows host. Once the orchestrator wrote `<file>` (its text box
+    // has the focus there), the word is typed with physical keys; the chord after it is Ctrl+S.
+    // The orchestrator's text box needs a click of the person at the host before it has the focus: a longer wait.
+    if type_after.is_some() {
+        cfg.anchor_timeout = std::time::Duration::from_secs(75);
+    }
+    cfg.type_after = type_after;
+    cfg.save_with_ctrl = true;
     // `--clip <dir>`: the copy and paste proof through this user's pasteboard; the orchestrator works the host's
     // clipboard and meets this side through the files in `<dir>`.
     if let Some(dir) = clip_dir {
