@@ -1,0 +1,27 @@
+# name	family	what
+txt_windows_idle	dns-sd	TXT record of _swapdesk._udp
+txt_windows_pairing	dns-sd	TXT record of _swapdesk._udp
+txt_macos_idle	dns-sd	TXT record of _swapdesk._udp
+txt_macos_pairing	dns-sd	TXT record of _swapdesk._udp
+txt_name_multibyte	dns-sd	TXT record of _swapdesk._udp
+txt_name_64_bytes	dns-sd	TXT record of _swapdesk._udp
+txt_name_one_byte	dns-sd	TXT record of _swapdesk._udp
+txt_fingerprint_all_digits	dns-sd	TXT record of _swapdesk._udp
+wol_magic_packet_laa	wake-on-lan	magic packet
+wol_magic_packet_typical	wake-on-lan	magic packet
+wol_magic_packet_ascending	wake-on-lan	magic packet
+wol_magic_packet_zero	wake-on-lan	magic packet
+wol_magic_packet_broadcast	wake-on-lan	magic packet
+wol_broadcast_prefix_24	wake-on-lan	broadcast address, prefix 24
+wol_broadcast_prefix_16	wake-on-lan	broadcast address, prefix 16
+wol_broadcast_prefix_25	wake-on-lan	broadcast address, prefix 25
+wol_broadcast_prefix_30	wake-on-lan	broadcast address, prefix 30
+wol_broadcast_prefix_8	wake-on-lan	broadcast address, prefix 8
+wol_broadcast_prefix_32	wake-on-lan	broadcast address, prefix 32
+const_service_type	constant	constant, 21 byte(s)
+const_mdns_port	constant	constant, 2 byte(s)
+const_wol_port	constant	constant, 2 byte(s)
+const_magic_packet_len	constant	constant, 8 byte(s)
+const_max_entries	constant	constant, 8 byte(s)
+const_max_entry_bytes	constant	constant, 8 byte(s)
+const_max_name_bytes	constant	constant, 8 byte(s)

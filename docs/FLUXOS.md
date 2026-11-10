@@ -5,7 +5,7 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 <!-- placar:inicio -->
 | Total | validados | revalidar | sem prova | so em aparelho | quebrados |
 |---|---|---|---|---|---|
-| **59** | **42** (71%) | 0 | 13 | 4 | 0 |
+| **59** | **43** (73%) | 0 | 12 | 4 | 0 |
 
 *Recalculado em 2026-11-10 por `check-flows`. Este placar não é escrito à mão.*
 <!-- placar:fim -->
@@ -90,7 +90,7 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 | F-XCHAT-01 | Chat with read state between Windows and Mac, both session directions |  |  | sem prova | — |
 | F-XNET-01 | Reconnect inside B5 after the Wi-Fi link between two machines drops for 10 s |  |  | sem prova | — |
 | F-XUPG-01 | Upgrade over 1.0 keeps identity, pairings and settings; a 1.0 machine and a newer one hold a session both ways |  |  | sem prova | — |
-| F-NET-02 | Only what the peer's protocol minor knows is sent to it; everything an older minor sends is decoded |  |  | sem prova | — |
+| F-NET-02 | Only what the peer's protocol minor knows is sent to it; everything an older minor sends is decoded | control.rs<br>types.rs<br>media.rs<br>pairing.rs | swapdesk-proto::wire_1_0/every_fixture_decodes_into_its_sample<br>swapdesk-proto::wire_1_0/every_sample_encodes_into_its_fixture_byte_for_byte<br>swapdesk-proto::wire_1_0/every_message_type_of_minor_0_has_a_fixture<br>swapdesk-proto::wire_1_0/every_enum_value_of_minor_0_is_carried_by_a_fixture<br>swapdesk-proto::wire_1_0/a_hello_carries_its_own_minor_and_the_fixture_holds_the_minor_of_1_0<br>swapdesk-proto::wire_1_0/one_flipped_byte_of_any_fixture_fails_the_decode_or_the_encode_check | validado | 2026-11-10 |
 | F-FILE-03 | Free space checked before accepting; names equal by normalization or case never overwrite; missing macOS folder access is said |  |  | sem prova | — |
 | F-VIEW-05 | Still-screen refinement on a Windows host and on a Mac host |  |  | sem prova | — |
 | F-VIEW-06 | Encode at the size the viewer's window shows; frame rate negotiated up to 120 |  |  | sem prova | — |

@@ -1,0 +1,278 @@
+# name	family	what
+msg_hello_windows_view	control	frame type 0x0001
+msg_hello_windows_control	control	frame type 0x0001
+msg_hello_macos_view	control	frame type 0x0001
+msg_hello_macos_control	control	frame type 0x0001
+msg_hello_swap_token	control	frame type 0x0001
+msg_hello_resume	control	frame type 0x0001
+msg_hello_unattended_admin	control	frame type 0x0001
+msg_hello_string_limits	control	frame type 0x0001
+msg_hello_multibyte	control	frame type 0x0001
+msg_hello_empty_strings	control	frame type 0x0001
+msg_hello_ack_windows	control	frame type 0x0002
+msg_hello_ack_macos	control	frame type 0x0002
+msg_hello_ack_string_limits	control	frame type 0x0002
+msg_capabilities_basic	control	frame type 0x0003
+msg_capabilities_empty	control	frame type 0x0003
+msg_capabilities_limits	control	frame type 0x0003
+msg_capabilities_video_main_h264	control	frame type 0x0003
+msg_capabilities_video_high_h264	control	frame type 0x0003
+msg_capabilities_audio_opus48stereo	control	frame type 0x0003
+msg_capabilities_keyboard_ansi	control	frame type 0x0003
+msg_capabilities_keyboard_iso	control	frame type 0x0003
+msg_capabilities_keyboard_jis	control	frame type 0x0003
+msg_capabilities_keyboard_abnt2	control	frame type 0x0003
+msg_capabilities_keyboard_unknown	control	frame type 0x0003
+msg_capabilities_feature_clipboard_images	control	frame type 0x0003
+msg_capabilities_feature_file_resume	control	frame type 0x0003
+msg_capabilities_feature_terminal	control	frame type 0x0003
+msg_capabilities_feature_admin_terminal	control	frame type 0x0003
+msg_capabilities_feature_quick_actions	control	frame type 0x0003
+msg_capabilities_feature_sas	control	frame type 0x0003
+msg_capabilities_feature_unknown_bits	control	frame type 0x0003
+msg_prompt_pending	control	frame type 0x0004
+msg_prompt_pending_max	control	frame type 0x0004
+msg_session_grant_prompted	control	frame type 0x0005
+msg_session_grant_unattended	control	frame type 0x0005
+msg_session_grant_resumed	control	frame type 0x0005
+msg_session_grant_swap	control	frame type 0x0005
+msg_session_grant_max_ids	control	frame type 0x0005
+msg_session_refused_declined	control	frame type 0x0006
+msg_session_refused_timeout	control	frame type 0x0006
+msg_session_refused_nobodypresent	control	frame type 0x0006
+msg_session_refused_notpermitted	control	frame type 0x0006
+msg_session_refused_busy	control	frame type 0x0006
+msg_permissions_changed_empty	control	frame type 0x0007
+msg_permissions_changed_view	control	frame type 0x0007
+msg_permissions_changed_control	control	frame type 0x0007
+msg_permissions_changed_audio	control	frame type 0x0007
+msg_permissions_changed_terminal	control	frame type 0x0007
+msg_permissions_changed_admin_terminal	control	frame type 0x0007
+msg_permissions_changed_files	control	frame type 0x0007
+msg_permissions_changed_clipboard	control	frame type 0x0007
+msg_permissions_changed_unattended	control	frame type 0x0007
+msg_permissions_changed_all	control	frame type 0x0007
+msg_permissions_changed_combined	control	frame type 0x0007
+msg_bye_noerror	control	frame type 0x0008
+msg_bye_protocolviolation	control	frame type 0x0008
+msg_bye_unsupportedversion	control	frame type 0x0008
+msg_bye_unknowndevice	control	frame type 0x0008
+msg_bye_notpermitted	control	frame type 0x0008
+msg_bye_nobodypresent	control	frame type 0x0008
+msg_bye_declined	control	frame type 0x0008
+msg_bye_timeout	control	frame type 0x0008
+msg_bye_busy	control	frame type 0x0008
+msg_bye_pairinglocked	control	frame type 0x0008
+msg_bye_commitmismatch	control	frame type 0x0008
+msg_bye_sasrejected	control	frame type 0x0008
+msg_bye_toolarge	control	frame type 0x0008
+msg_bye_notfound	control	frame type 0x0008
+msg_bye_iofailed	control	frame type 0x0008
+msg_bye_unavailable	control	frame type 0x0008
+msg_bye_swapped	control	frame type 0x0008
+msg_bye_hostshutdown	control	frame type 0x0008
+msg_bye_forgotten	control	frame type 0x0008
+msg_bye_internal	control	frame type 0x0008
+msg_bye_invalidname	control	frame type 0x0008
+msg_bye_alreadypaired	control	frame type 0x0008
+msg_host_state_default_running	control	frame type 0x0009
+msg_host_state_default_paused	control	frame type 0x0009
+msg_host_state_secure_running	control	frame type 0x0009
+msg_host_state_secure_paused	control	frame type 0x0009
+msg_host_state_locked_running	control	frame type 0x0009
+msg_host_state_locked_paused	control	frame type 0x0009
+msg_host_state_loginwindow_running	control	frame type 0x0009
+msg_host_state_loginwindow_paused	control	frame type 0x0009
+msg_consent_pending_terminal	control	frame type 0x000a
+msg_consent_pending_files	control	frame type 0x000a
+msg_display_list_empty	control	frame type 0x0101
+msg_display_list_one	control	frame type 0x0101
+msg_display_list_two	control	frame type 0x0101
+msg_display_list_extremes	control	frame type 0x0101
+msg_display_list_sixteen	control	frame type 0x0101
+msg_select_display	control	frame type 0x0102
+msg_select_display_max	control	frame type 0x0102
+msg_video_settings_auto	control	frame type 0x0103
+msg_video_settings_text	control	frame type 0x0103
+msg_video_settings_motion	control	frame type 0x0103
+msg_video_settings_zero	control	frame type 0x0103
+msg_keyframe_request	control	frame type 0x0104
+msg_keyframe_request_max	control	frame type 0x0104
+msg_receiver_report	control	frame type 0x0105
+msg_receiver_report_max	control	frame type 0x0105
+msg_stream_stats	control	frame type 0x0106
+msg_stream_stats_empty	control	frame type 0x0106
+msg_audio_control_false	control	frame type 0x0107
+msg_host_mute_false	control	frame type 0x0108
+msg_audio_control_true	control	frame type 0x0107
+msg_host_mute_true	control	frame type 0x0108
+msg_send_special_secureattention	control	frame type 0x0109
+msg_swap_request	control	frame type 0x0201
+msg_swap_accept	control	frame type 0x0202
+msg_swap_decline_declined	control	frame type 0x0203
+msg_swap_decline_timeout	control	frame type 0x0203
+msg_swap_decline_nobodypresent	control	frame type 0x0203
+msg_swap_decline_notpermitted	control	frame type 0x0203
+msg_swap_decline_busy	control	frame type 0x0203
+msg_swap_cancel	control	frame type 0x0204
+msg_swap_armed	control	frame type 0x0205
+msg_chat_message	control	frame type 0x0301
+msg_chat_message_multibyte	control	frame type 0x0301
+msg_chat_message_empty	control	frame type 0x0301
+msg_chat_message_long	control	frame type 0x0301
+msg_chat_read	control	frame type 0x0302
+msg_clipboard_sync_false	control	frame type 0x0303
+msg_clipboard_sync_true	control	frame type 0x0303
+msg_clipboard_skipped_concealed	control	frame type 0x0304
+msg_clipboard_skipped_toolarge	control	frame type 0x0304
+msg_clipboard_skipped_unsupported	control	frame type 0x0304
+msg_file_offer	control	frame type 0x0401
+msg_file_offer_dest	control	frame type 0x0401
+msg_file_offer_limits	control	frame type 0x0401
+msg_file_accept	control	frame type 0x0402
+msg_file_accept_resume	control	frame type 0x0402
+msg_file_decline_invalidname	control	frame type 0x0403
+msg_file_decline_declined	control	frame type 0x0403
+msg_file_decline_notpermitted	control	frame type 0x0403
+msg_file_decline_iofailed	control	frame type 0x0403
+msg_file_done	control	frame type 0x0404
+msg_file_verified_false	control	frame type 0x0405
+msg_file_verified_true	control	frame type 0x0405
+msg_file_pause	control	frame type 0x0406
+msg_file_resume	control	frame type 0x0407
+msg_file_cancel	control	frame type 0x0408
+msg_dir_request_home	control	frame type 0x0409
+msg_dir_request_path	control	frame type 0x0409
+msg_dir_listing_empty	control	frame type 0x040a
+msg_dir_listing	control	frame type 0x040a
+msg_file_get	control	frame type 0x040b
+msg_term_open_admin_false	control	frame type 0x0501
+msg_term_open_admin_true	control	frame type 0x0501
+msg_term_opened	control	frame type 0x0502
+msg_term_opened_system	control	frame type 0x0502
+msg_term_resize	control	frame type 0x0503
+msg_term_close	control	frame type 0x0504
+msg_term_exited_none	control	frame type 0x0505
+msg_term_exited_zero	control	frame type 0x0505
+msg_term_exited_signal	control	frame type 0x0505
+msg_term_exited_negative	control	frame type 0x0505
+msg_term_exited_windows_ctrl_c	control	frame type 0x0505
+msg_term_exited_min	control	frame type 0x0505
+msg_quick_action_lock	control	frame type 0x0601
+msg_quick_action_sleep	control	frame type 0x0601
+msg_quick_action_restart	control	frame type 0x0601
+msg_quick_action_taskmonitor	control	frame type 0x0601
+msg_quick_action_result_noerror	control	frame type 0x0602
+msg_quick_action_result_notpermitted	control	frame type 0x0602
+msg_quick_action_result_unavailable	control	frame type 0x0602
+msg_quick_action_result_iofailed	control	frame type 0x0602
+msg_wake_info_empty	control	frame type 0x0603
+msg_wake_info_one	control	frame type 0x0603
+msg_wake_info_eight	control	frame type 0x0603
+msg_pair_hello_windows	pairing	frame type 0x0701
+msg_pair_nonce_windows	pairing	frame type 0x0702
+msg_pair_hello_macos	pairing	frame type 0x0701
+msg_pair_nonce_macos	pairing	frame type 0x0702
+msg_pair_hello_limits	pairing	frame type 0x0701
+msg_pair_nonce_empty_majors	pairing	frame type 0x0702
+msg_pair_reveal	pairing	frame type 0x0703
+msg_pair_confirm_false	pairing	frame type 0x0704
+msg_pair_confirm_true	pairing	frame type 0x0704
+msg_pair_result_ok	pairing	frame type 0x0705
+msg_pair_result_pairinglocked	pairing	frame type 0x0705
+msg_pair_result_busy	pairing	frame type 0x0705
+msg_pair_result_alreadypaired	pairing	frame type 0x0705
+msg_pair_result_notpermitted	pairing	frame type 0x0705
+msg_pair_result_unsupportedversion	pairing	frame type 0x0705
+msg_pair_result_sasrejected	pairing	frame type 0x0705
+msg_pair_result_commitmismatch	pairing	frame type 0x0705
+pairing_commit_preimage	pairing-math	commitment preimage
+pairing_sas_preimage	pairing-math	SAS preimage
+pairing_sas_digits_482913	pairing-math	SAS digest and the six digits
+pairing_sas_digits_leading_zeros	pairing-math	SAS digest and the six digits
+pairing_sas_digits_max	pairing-math	SAS digest and the six digits
+msg_ping	control	frame type 0x0f01
+msg_ping_max	control	frame type 0x0f01
+msg_pong	control	frame type 0x0f02
+msg_pong_max	control	frame type 0x0f02
+msg_error_fatal	control	frame type 0x0fff
+msg_error_not_fatal	control	frame type 0x0fff
+msg_error_max	control	frame type 0x0fff
+framing_header_ping	framing	frame header type 0x0f01
+framing_header_max_len	framing	frame header type 0x040a
+framing_header_empty	framing	frame header type 0x0001
+const_alpn	constant	constant, 10 byte(s)
+const_pair_alpn	constant	constant, 15 byte(s)
+const_commit_label	constant	constant, 18 byte(s)
+const_sas_label	constant	constant, 15 byte(s)
+const_exporter_label	constant	constant, 29 byte(s)
+const_protocol_version	constant	constant, 2 byte(s)
+const_session_port	constant	constant, 2 byte(s)
+const_pairing_port	constant	constant, 2 byte(s)
+const_max_cursor_dimension	constant	constant, 2 byte(s)
+const_max_frame_payload	constant	constant, 8 byte(s)
+const_max_video_payload	constant	constant, 8 byte(s)
+const_max_clipboard_text	constant	constant, 8 byte(s)
+const_max_clipboard_png	constant	constant, 8 byte(s)
+const_max_input_text	constant	constant, 8 byte(s)
+const_max_pair_majors	constant	constant, 8 byte(s)
+const_video_header_len	constant	constant, 8 byte(s)
+const_audio_header_len	constant	constant, 8 byte(s)
+const_cursor_position_len	constant	constant, 8 byte(s)
+const_cursor_shape_header_len	constant	constant, 8 byte(s)
+const_clipboard_header_len	constant	constant, 8 byte(s)
+const_nonce_len	constant	constant, 8 byte(s)
+const_exporter_len	constant	constant, 8 byte(s)
+const_spki_len	constant	constant, 8 byte(s)
+const_sas_modulus	constant	constant, 8 byte(s)
+video_header_flags_000	video	stream kind 0x02, video header
+video_header_flags_001	video	stream kind 0x02, video header
+video_header_flags_010	video	stream kind 0x02, video header
+video_header_flags_011	video	stream kind 0x02, video header
+video_header_flags_100	video	stream kind 0x02, video header
+video_header_flags_101	video	stream kind 0x02, video header
+video_header_flags_110	video	stream kind 0x02, video header
+video_header_flags_111	video	stream kind 0x02, video header
+video_header_empty_payload	video	stream kind 0x02, video header
+video_header_max_payload	video	stream kind 0x02, video header
+video_header_extremes	video	stream kind 0x02, video header
+audio_header_flags_00	audio	datagram kind 0x01, audio header
+audio_header_flags_01	audio	datagram kind 0x01, audio header
+audio_header_flags_10	audio	datagram kind 0x01, audio header
+audio_header_flags_11	audio	datagram kind 0x01, audio header
+audio_header_extremes	audio	datagram kind 0x01, audio header
+cursor_position_visible_false	cursor	datagram kind 0x02, cursor position
+cursor_position_visible_true	cursor	datagram kind 0x02, cursor position
+cursor_position_extremes	cursor	datagram kind 0x02, cursor position
+cursor_shape_2x3	cursor	stream kind 0x03, cursor shape
+cursor_shape_empty	cursor	stream kind 0x03, cursor shape
+cursor_shape_hot_spot_outside	cursor	stream kind 0x03, cursor shape
+clipboard_text	clipboard	stream kind 0x04, clipboard item
+clipboard_text_empty	clipboard	stream kind 0x04, clipboard item
+clipboard_text_nul_and_multibyte	clipboard	stream kind 0x04, clipboard item
+clipboard_png	clipboard	stream kind 0x04, clipboard item
+clipboard_png_empty	clipboard	stream kind 0x04, clipboard item
+file_data_header	file-stream	stream kind 0x05, file data header
+file_data_header_extremes	file-stream	stream kind 0x05, file data header
+terminal_header	terminal-stream	stream kind 0x10, terminal header
+terminal_header_max	terminal-stream	stream kind 0x10, terminal header
+input_key_keyboard	input	stream kind 0x01, 1 record(s)
+input_key_keyboard_up	input	stream kind 0x01, 1 record(s)
+input_key_consumer	input	stream kind 0x01, 1 record(s)
+input_text	input	stream kind 0x01, 1 record(s)
+input_text_multibyte	input	stream kind 0x01, 1 record(s)
+input_text_empty	input	stream kind 0x01, 1 record(s)
+input_text_max	input	stream kind 0x01, 1 record(s)
+input_pointer	input	stream kind 0x01, 1 record(s)
+input_pointer_extremes	input	stream kind 0x01, 1 record(s)
+input_button_left_down	input	stream kind 0x01, 1 record(s)
+input_button_right_down	input	stream kind 0x01, 1 record(s)
+input_button_middle_down	input	stream kind 0x01, 1 record(s)
+input_button_back_down	input	stream kind 0x01, 1 record(s)
+input_button_forward_down	input	stream kind 0x01, 1 record(s)
+input_button_left_up	input	stream kind 0x01, 1 record(s)
+input_wheel	input	stream kind 0x01, 1 record(s)
+input_wheel_extremes	input	stream kind 0x01, 1 record(s)
+input_release_all	input	stream kind 0x01, 1 record(s)
+input_stream_empty	input	stream kind 0x01, 0 record(s)
+input_stream_sequence	input	stream kind 0x01, 7 record(s)
