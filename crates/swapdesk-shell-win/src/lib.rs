@@ -12,6 +12,7 @@ mod dialogs;
 mod files_dialogs;
 mod fullscreen;
 mod gfx;
+mod live_region;
 mod offscreen;
 mod surface;
 mod system;

@@ -176,6 +176,29 @@ impl Shared {
         self.send_commands(followups);
         self.pump_terminal();
         self.refresh(changed);
+        self.apply_focus_request();
+    }
+
+    /// The state asks for the keyboard focus after a service event (a wait card appeared or ended): it goes to that
+    /// control of the main window, once.
+    fn apply_focus_request(&self) {
+        let request = self.state.borrow_mut().take_focus_request();
+        if let (Some(id), Some(main)) = (request, self.window(WindowKind::Main)) {
+            main.focus_control(id, true);
+        }
+    }
+
+    /// Esc in the main window activates the control the state names (Cancelar on a waiting card, Fechar on an ended
+    /// one), as a click on it would. False when Esc means nothing there.
+    pub fn escape(self: &Rc<Self>, from: &Window) -> bool {
+        let target = self.state.borrow().escape_target(from.kind);
+        match target {
+            Some(id) => {
+                self.activate(id, from);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Feeds the open shell's model with the output that arrived (a byte budget a turn, so a burst never holds the
@@ -306,6 +329,7 @@ impl Shared {
     pub fn tick(self: &Rc<Self>) {
         let c = self.state.borrow_mut().tick();
         self.refresh(c);
+        self.apply_focus_request();
     }
 
     /// The banner's minute came: the clock moves, the banner repaints, and `refresh` arms the next minute.

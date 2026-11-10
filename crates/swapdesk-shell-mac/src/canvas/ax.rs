@@ -29,14 +29,18 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityElement, NSAccessibilityFocusedUIElementChangedNotification,
-    NSAccessibilityLayoutChangedNotification, NSAccessibilityPostNotification, NSAccessibilityUnignoredAncestor,
-    NSAccessibilityUnignoredDescendant, NSAccessibilityValueChangedNotification,
+    NSAccessibility, NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
+    NSAccessibilityElement, NSAccessibilityFocusedUIElementChangedNotification,
+    NSAccessibilityLayoutChangedNotification, NSAccessibilityPostNotification,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel,
+    NSAccessibilityUnignoredAncestor, NSAccessibilityUnignoredDescendant, NSAccessibilityValueChangedNotification,
 };
-use objc2_foundation::{NSArray, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use swapdesk_paint::{Rect, input};
 use swapdesk_ui::ControlId;
 use swapdesk_ui::a11y;
+
+use crate::model::{LiveAnnouncer, live_region_text};
 
 use super::CanvasView;
 
@@ -205,6 +209,25 @@ pub(super) struct AxState {
     /// The tree's shape and where each node is; a change is told to the clients.
     shape: Vec<(NodeId, Vec<NodeId>, Option<[i32; 4]>)>,
     focus: Option<ControlId>,
+    /// The live region's text as last synced: a change is announced, a repaint or a countdown tick is not.
+    announcer: LiveAnnouncer,
+}
+
+/// Tells the clients of `element`'s window to read `text` (a polite announcement: it waits for the speech in progress).
+fn post_announcement(element: &AnyObject, text: &str) {
+    // SAFETY: the keys and the notification name are AppKit's immutable constants; the dictionary holds a string and
+    // a number, as the notification documents; `element` is an accessibility element.
+    unsafe {
+        let keys = [NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey];
+        let values: Vec<Retained<AnyObject>> =
+            vec![object(&ns(text)), object(&NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0))];
+        let info = NSDictionary::from_retained_objects(&keys, &values);
+        NSAccessibilityPostNotificationWithUserInfo(
+            element,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
 }
 
 struct Build<'a> {
@@ -392,11 +415,12 @@ impl CanvasView {
             };
             let tree = a11y::build_tree(st, kind, &bounds, focus);
             let ids: Vec<(NodeId, ControlId)> = st.controls(kind).iter().map(|c| (a11y::node_id(c.id), c.id)).collect();
-            (tree, ids)
+            (tree, ids, live_region_text(st, kind))
         });
-        let Some((tree, ids)) = built else { return };
+        let Some((tree, ids, live_text)) = built else { return };
         // No borrow of the elements is held while AppKit is called.
-        let old = std::mem::take(&mut *iv.ax.borrow_mut());
+        let mut old = std::mem::take(&mut *iv.ax.borrow_mut());
+        let announcement = old.announcer.changed(&live_text);
         let parent = self.ax_parent();
         let mut b = Build {
             canvas: self,
@@ -416,9 +440,13 @@ impl CanvasView {
         let moved = old.shape != shape;
         let refocused = old.focus != focus;
         let focused = focus.and_then(|f| controls.iter().find(|(c, _)| *c == f).map(|(_, o)| o.clone()));
-        *iv.ax.borrow_mut() = AxState { stale: false, live: old.live, top, elements, controls, shape, focus };
+        *iv.ax.borrow_mut() =
+            AxState { stale: false, live: old.live, top, elements, controls, shape, focus, announcer: old.announcer };
         if !announce {
             return;
+        }
+        if let Some(text) = &announcement {
+            post_announcement(&parent, text);
         }
         // SAFETY: each object is an accessibility element; the notification names are AppKit's immutable constants.
         unsafe {

@@ -296,9 +296,60 @@ fn the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm: MainThreadMa
     Ok(())
 }
 
+/// A shell on `scenario` over a recording backend.
+fn open_recording(mtm: MainThreadMarker, scenario: Scenario) -> (Rc<Shell>, Arc<Recording>) {
+    let waker = Arc::new(Waker::new());
+    let backend =
+        Arc::new(Recording { inner: Arc::new(MockBackend::new(waker.clone())), sent: std::sync::Mutex::default() });
+    let shell = start(mtm, scenario.prepared_state(), backend.clone(), waker, Vec::new(), ViewerHooks::default());
+    (shell, backend)
+}
+
+fn disconnects(backend: &Recording) -> usize {
+    let sent = backend.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    sent.iter().filter(|c| matches!(c, Command::Disconnect { .. })).count()
+}
+
+/// A connect card of the main window and the keyboard: Esc cancels a waiting card and closes an ended one (a key
+/// event through the window, as a person gives it), a dialog over the window keeps Esc for itself, and a service
+/// event that ends a connect in failure moves the focus to the card's Fechar.
+fn escape_and_focus_serve_the_connect_card(mtm: MainThreadMarker) -> Result<(), String> {
+    use swapdesk_ui::mock::{ENTRY, MAC};
+    use swapdesk_ui::{ConnectWhy, SessionState, UiEvent};
+    let entry = |state: SessionState| UiEvent::Session { session_id: ENTRY, device_id: MAC.into(), state };
+
+    let (shell, backend) = open_recording(mtm, Scenario::Dispositivos);
+    let canvas = shell.main.canvas.clone();
+    shell.state.borrow_mut().apply(entry(SessionState::Prompted { remaining_s: 15 }));
+    shell.drain_backend();
+    ensure!(canvas.paint_now(), "the main window did not paint");
+    ensure!(disconnects(&backend) == 0, "a Disconnect was sent before Esc");
+    ensure!(canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(disconnects(&backend) == 1, "Esc on a waiting card sent {} cancels", disconnects(&backend));
+
+    shell.state.borrow_mut().apply(entry(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    shell.drain_backend();
+    ensure!(canvas.focus() == Some(ControlId::ConnectClose), "focus after the failure is {:?}", canvas.focus());
+    ensure!(canvas.paint_now(), "the main window did not paint the end card");
+    ensure!(canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(shell.state.borrow().wait_card(MAC).is_none(), "Esc did not close the ended card");
+    ensure!(disconnects(&backend) == 1, "closing an ended card sent a command");
+    ensure!(canvas.focus() == Some(ControlId::Control), "focus after Fechar is {:?}", canvas.focus());
+    close(&shell);
+
+    let (shell, backend) = open_recording(mtm, Scenario::PedidoConexao);
+    shell.state.borrow_mut().apply(entry(SessionState::Prompted { remaining_s: 15 }));
+    ensure!(shell.main.canvas.paint_now(), "the main window did not paint the dialog");
+    ensure!(shell.main.canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(disconnects(&backend) == 0, "Esc over a dialog cancelled the wait");
+    close(&shell);
+    Ok(())
+}
+
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
+    escape_and_focus_serve_the_connect_card(mtm)?;
     scenarios_build_their_windows(mtm)?;
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;
     render_slot_lifecycle(mtm)?;

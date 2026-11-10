@@ -351,3 +351,110 @@ fn the_main_window_minimizes_when_a_session_starts_and_not_in_a_mock_run() {
     live.waker.wake();
     assert!(settles_iconic(&live, true), "a new session minimizes the main window again");
 }
+
+/// A backend that records the commands it is sent and delivers the events a test pushes.
+#[derive(Default)]
+struct Recording {
+    events: std::sync::Mutex<Vec<swapdesk_ui::UiEvent>>,
+    commands: std::sync::Mutex<Vec<swapdesk_ui::Command>>,
+}
+
+impl Recording {
+    fn push(&self, e: swapdesk_ui::UiEvent) {
+        self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(e);
+    }
+    fn disconnects(&self) -> usize {
+        let c = self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.iter().filter(|c| matches!(c, swapdesk_ui::Command::Disconnect { .. })).count()
+    }
+}
+
+impl UiBackend for Recording {
+    fn send(&self, command: swapdesk_ui::Command) -> swapdesk_ui::Ticket {
+        self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(command);
+        swapdesk_ui::Ticket(0)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        std::mem::take(&mut *self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+fn entry_event(state: swapdesk_ui::SessionState) -> swapdesk_ui::UiEvent {
+    swapdesk_ui::UiEvent::Session {
+        session_id: swapdesk_ui::mock::ENTRY,
+        device_id: swapdesk_ui::mock::MAC.into(),
+        state,
+    }
+}
+
+fn last_focus() -> Option<ControlId> {
+    *crate::window::LAST_FOCUS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A real shell on `state` with a recording backend.
+fn start_recording(state: swapdesk_ui::UiState) -> (Live, Arc<Recording>) {
+    let backend = Arc::new(Recording::default());
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run(state, backend, w, Vec::new()).expect("shell");
+    });
+    (live, backend)
+}
+
+/// Delivers an event of the service to the shell and waits for it to be handled.
+fn deliver(live: &Live, backend: &Recording, e: swapdesk_ui::UiEvent) {
+    use swapdesk_ui::UiWaker;
+    backend.push(e);
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+}
+
+fn press_escape(live: &Live) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+    // SAFETY: sends to our window from another thread (it blocks until the window thread has answered).
+    unsafe { SendMessageW(live.hwnd(), WM_KEYDOWN, Some(WPARAM(usize::from(VK_ESCAPE.0))), Some(LPARAM(0))) };
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+#[test]
+fn escape_on_the_main_window_cancels_a_waiting_card() {
+    use swapdesk_ui::SessionState;
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    assert_eq!(backend.disconnects(), 0);
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 1, "Esc sent the cancel of the waiting entry");
+}
+
+#[test]
+fn escape_on_the_main_window_closes_an_ended_card() {
+    use swapdesk_ui::{ConnectWhy, SessionState};
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(last_focus(), Some(ControlId::ConnectClose));
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 0, "closing an ended card sends nothing");
+    assert_eq!(last_focus(), Some(ControlId::Control), "Fechar ran: the card is gone and focus is back on the button");
+}
+
+#[test]
+fn escape_over_a_dialog_keeps_its_old_meaning() {
+    use swapdesk_ui::SessionState;
+    let (live, backend) = start_recording(Scenario::PedidoConexao.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 0, "a dialog over the window takes Esc itself: the wait is not cancelled");
+}
+
+#[test]
+fn a_service_event_that_ends_a_connect_in_failure_moves_focus_to_fechar() {
+    use swapdesk_ui::{ConnectWhy, SessionState};
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    // The wait card of a click gets Cancelar from the click's own effect; a news item of the wait asks for nothing.
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    assert_eq!(last_focus(), None, "a wait that goes on takes no focus");
+    deliver(&live, &backend, entry_event(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(last_focus(), Some(ControlId::ConnectClose), "the end card's Fechar takes the focus");
+}

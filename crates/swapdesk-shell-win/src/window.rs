@@ -600,6 +600,10 @@ impl Window {
     }
 
     pub fn focus_control(&self, id: ControlId, visible: bool) {
+        #[cfg(test)]
+        {
+            *LAST_FOCUS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id);
+        }
         {
             let mut ix = self.ix.borrow_mut();
             ix.focus = Some(id);
@@ -638,7 +642,9 @@ impl Window {
 
     fn tree(&self) -> TreeUpdate {
         let focus = self.ix.borrow().focus;
-        a11y::build_tree(&self.shared.state.borrow(), self.kind, &|id| self.bounds_of(id), focus)
+        let mut tree = a11y::build_tree(&self.shared.state.borrow(), self.kind, &|id| self.bounds_of(id), focus);
+        crate::live_region::name_live_regions(&mut tree);
+        tree
     }
 
     /// Hands the current tree to UI Automation (if a client asked for it).
@@ -1215,8 +1221,11 @@ impl Window {
                     }
                     return Some(LRESULT(0));
                 }
-                if key == VK_ESCAPE.0 && self.kind != WindowKind::Main {
-                    return Some(LRESULT(0));
+                if key == VK_ESCAPE.0 {
+                    if self.kind != WindowKind::Main || self.shared.escape(self) {
+                        return Some(LRESULT(0));
+                    }
+                    return None;
                 }
                 None
             }
@@ -1437,6 +1446,10 @@ fn guard_callback<R>(origin: &'static str, body: impl FnOnce() -> R) -> std::res
         crate::system::trace_line(&format!("swapdesk: panic caught in {origin}"));
     })
 }
+
+/// The control the shell focused last (tests read it from another thread).
+#[cfg(test)]
+pub(crate) static LAST_FOCUS: std::sync::Mutex<Option<ControlId>> = std::sync::Mutex::new(None);
 
 /// Test-only hook point: the next message with this id panics once at the start of its handling (0: none).
 #[cfg(test)]

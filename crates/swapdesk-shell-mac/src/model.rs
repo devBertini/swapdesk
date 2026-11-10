@@ -59,3 +59,36 @@ pub fn banner_model(state: &UiState) -> Option<BannerModel> {
     let (who, since) = state.banner_parts(&peer, h);
     Some(BannerModel { title: a11y::window_title(state, WindowKind::Banner), who, since })
 }
+
+// ---------- the live region ----------
+
+/// The text of the window's polite live region (the wait card's title and body), one line per control; empty while
+/// there is no card. A countdown or any control outside the region is not part of it.
+pub fn live_region_text(state: &UiState, kind: WindowKind) -> String {
+    let lines: Vec<String> = state
+        .controls(kind)
+        .into_iter()
+        .filter(|c| c.region == swapdesk_ui::Region::Status)
+        .map(|c| c.label)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.join("\n")
+}
+
+/// Remembers the live region's text as last synced, so a client is told once per change and never for a repaint.
+#[derive(Debug, Default)]
+pub struct LiveAnnouncer {
+    said: String,
+}
+
+impl LiveAnnouncer {
+    /// The text to announce now, if the region holds text that differs from the last one seen. An empty region
+    /// forgets the last text, so a new card of the same words is announced again.
+    pub fn changed(&mut self, text: &str) -> Option<String> {
+        if self.said == text {
+            return None;
+        }
+        self.said = text.to_owned();
+        (!text.is_empty()).then(|| text.to_owned())
+    }
+}

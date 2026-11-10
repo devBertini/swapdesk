@@ -136,3 +136,38 @@ fn every_effect_has_a_handler_of_its_own() {
     assert_eq!(handling(Effect::SaveLog), Handling::SaveLogPanel);
     assert_eq!(handling(Effect::Menu(SelectId::Theme)), Handling::Menu(SelectId::Theme));
 }
+
+#[test]
+fn the_live_region_announces_a_change_of_the_card_once_and_a_tick_of_the_countdown_never() {
+    use swapdesk_ui::ConnectWhy;
+    use swapdesk_ui::mock::{ENTRY, MAC};
+    let mut s = shell_state(Scenario::EstadoAguardandoAceite);
+    let mut announcer = LiveAnnouncer::default();
+    let text = live_region_text(&s, WindowKind::Main);
+    assert!(text.contains("Esperando"), "{text}");
+    assert_eq!(announcer.changed(&text), Some(text.clone()), "the card appearing is announced");
+    assert_eq!(announcer.changed(&text), None, "a repaint of the same card announces nothing");
+    // The countdown is outside the region: ticks change the frame, not the live text.
+    for _ in 0..3 {
+        s.tick();
+        assert_eq!(announcer.changed(&live_region_text(&s, WindowKind::Main)), None, "a tick announces nothing");
+    }
+    s.apply(UiEvent::Session {
+        session_id: ENTRY,
+        device_id: MAC.into(),
+        state: SessionState::NotOpened { why: ConnectWhy::Declined },
+    });
+    let ended = live_region_text(&s, WindowKind::Main);
+    assert_eq!(announcer.changed(&ended), Some(ended.clone()), "the end line is announced once");
+    assert_eq!(announcer.changed(&ended), None);
+    // The card closes: the region is empty and nothing is announced; the same card later is told again.
+    s.activate(ControlId::ConnectClose);
+    assert_eq!(announcer.changed(&live_region_text(&s, WindowKind::Main)), None);
+    assert_eq!(announcer.changed(&ended), Some(ended));
+}
+
+#[test]
+fn a_window_without_a_card_has_no_live_text() {
+    assert_eq!(live_region_text(&shell_state(Scenario::Dispositivos), WindowKind::Main), "");
+    assert_eq!(live_region_text(&shell_state(Scenario::Visualizador), WindowKind::Viewer), "");
+}

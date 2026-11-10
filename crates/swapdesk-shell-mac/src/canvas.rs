@@ -552,10 +552,10 @@ impl CanvasView {
                 true
             }
             KEY_ESCAPE => {
-                // The rename field closes without saving, wherever the keyboard is in the main window; the other
-                // windows swallow the key.
+                // The rename field closes without saving, else a waiting card is cancelled or an ended one closed,
+                // wherever the keyboard is in the main window; the other windows swallow the key.
                 if kind == WindowKind::Main {
-                    crate::shell::cancel_rename();
+                    crate::shell::escape();
                 }
                 true
             }
@@ -881,6 +881,7 @@ fn key_code_of(c: char) -> u16 {
         '0'..='9' => DIGITS[c as usize - '0' as usize],
         '\r' => KEY_RETURN,
         '\t' => KEY_TAB,
+        '\u{1b}' => KEY_ESCAPE,
         ' ' => KEY_SPACE,
         '.' => 47,
         ',' => 43,

@@ -175,7 +175,7 @@ define_class!(
         // forwards it to its delegate, this controller).
         #[unsafe(method(cancelOperation:))]
         fn cancel_operation(&self, _sender: Option<&AnyObject>) {
-            with_shell(|s| s.cancel_rename());
+            with_shell(|s| s.escape());
         }
 
         #[unsafe(method(themeChanged:))]
@@ -270,8 +270,8 @@ pub(crate) fn submit_edit(id: EditId, text: String) {
 }
 
 /// Esc in the main window.
-pub(crate) fn cancel_rename() {
-    with_shell(|s| s.cancel_rename());
+pub(crate) fn escape() {
+    with_shell(|s| s.escape());
 }
 
 /// The main-queue block a canvas posts after a paint: the native text fields follow the frame's edit slots and the
@@ -561,6 +561,7 @@ impl Shell {
         followups.extend(want);
         self.send_commands(followups);
         self.refresh(changed);
+        self.apply_focus_request();
         self.minimize_main_for_session();
     }
 
@@ -745,10 +746,25 @@ impl Shell {
 
     // ----- what AppKit tells the shell -----
 
-    /// Esc: closes the rename field without saving.
-    fn cancel_rename(&self) {
+    /// Esc in the main window. The rename field closes without saving (its old meaning, first); otherwise the control
+    /// the state names (Cancelar on a waiting card, Fechar on an ended one) is activated as a click on it would.
+    fn escape(&self) {
         if self.state.borrow().renaming().is_some() {
             self.activate(ControlId::RenameCancel);
+            return;
+        }
+        let target = self.state.borrow().escape_target(WindowKind::Main);
+        if let Some(id) = target {
+            self.activate_from(WindowKind::Main, id);
+        }
+    }
+
+    /// The state asks for the keyboard focus after an event of the service (a connect ended and its card says why):
+    /// it goes to that control of the main window, once.
+    fn apply_focus_request(&self) {
+        let request = self.state.borrow_mut().take_focus_request();
+        if let Some(id) = request {
+            self.main.canvas.focus_control(id, true);
         }
     }
 
@@ -872,6 +888,7 @@ impl Shell {
     fn tick(&self) {
         let c = self.state.borrow_mut().tick();
         self.refresh(c);
+        self.apply_focus_request();
     }
 
     fn arm_placeholders(&self) {
