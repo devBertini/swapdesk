@@ -9,8 +9,8 @@
 //! - the OS-free half of the pipeline is `swapdesk-app`'s `shared` module (mailbox, feedback, cursor, audio player,
 //!   output side), the same one `Swapdesk.exe` uses.
 //!
-//! Built on every host: [`cli`], [`handoff`], [`layout_state`], [`pipe`], [`prefs`], [`service`], [`trace`] (so the
-//! Windows gate type-checks and tests them). macOS only: [`decode`], [`main_side`], [`pipeline`], [`slot`], [`app`],
+//! Built on every host: [`cli`], [`handoff`], [`layout_state`], [`pipe`], [`prefs`], [`service`], [`trace`] and the
+//! command language of [`ui_script`] (so the Windows gate type-checks and tests them). macOS only: [`decode`], [`main_side`], [`pipeline`], [`slot`], [`app`],
 //! [`selftest`].
 //!
 //! The crate holds the one `unsafe` of this lane (a decoded picture moved to the main thread, [`main_side::MainFrame`])
@@ -23,6 +23,7 @@ pub mod pipe;
 pub mod prefs;
 pub mod service;
 pub mod trace;
+pub mod ui_script;
 
 #[cfg(target_os = "macos")]
 pub mod app;

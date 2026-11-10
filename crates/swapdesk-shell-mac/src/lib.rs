@@ -46,6 +46,8 @@ mod views;
 #[cfg(target_os = "macos")]
 pub use banner_window::set_snapshot_dir;
 #[cfg(target_os = "macos")]
+pub use shell::dev::{dev_click, dev_keys, dev_shot, dev_state, dev_video};
+#[cfg(target_os = "macos")]
 pub use shell::{ViewerHooks, run, run_with_host, selftest, set_shot};
 #[cfg(target_os = "macos")]
 pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};

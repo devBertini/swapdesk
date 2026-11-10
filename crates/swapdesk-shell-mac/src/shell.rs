@@ -1055,8 +1055,7 @@ impl Shell {
     }
 }
 
-// Selecting a pop-up option by `SelectId` is handled in `on_action`; keep the import used for the match arm.
-const _: Option<SelectId> = None;
-
+#[doc(hidden)]
+pub mod dev;
 #[doc(hidden)]
 pub mod selftest;

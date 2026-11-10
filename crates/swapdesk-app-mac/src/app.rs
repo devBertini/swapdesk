@@ -258,6 +258,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if let Some(file) = options.selftest.clone() {
         crate::selftest::schedule(file, Duration::from_secs(2), addrs, Arc::clone(&viewer));
     }
+    // Development: a script on another machine drives the windows (dev-harness builds).
+    if let Some(dir) = &options.ui_script {
+        crate::ui_script::start(dir, Arc::clone(&viewer))?;
+    }
 
     let stop_viewer = Arc::clone(&viewer);
     set_teardown(Box::new(move || {

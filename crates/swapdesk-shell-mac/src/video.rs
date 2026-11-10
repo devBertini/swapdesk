@@ -52,6 +52,8 @@ pub struct VideoIvars {
     input: RefCell<Option<Arc<dyn ViewerInput>>>,
     /// The pointer over the video: the host's shape while the viewer controls, else the system arrow (`None`).
     cursor: RefCell<Option<Retained<NSCursor>>>,
+    /// Mouse events this view received, and how many of them the input lane took (development: `dev_state`).
+    mouse_seen: std::cell::Cell<(u64, u64)>,
 }
 
 /// What the pointer looks like over the video view.
@@ -294,9 +296,20 @@ impl VideoView {
     }
 
     fn mouse(&self, event: &NSEvent, kind: MouseKind) -> bool {
+        let (seen, taken) = self.ivars().mouse_seen.get();
+        self.ivars().mouse_seen.set((seen + 1, taken));
         let Some(input) = self.input() else { return false };
         let p = self.point(event);
-        input.mouse(MouseMsg { kind, x: p.x, y: p.y, modifiers: modifiers_of(event.modifierFlags()) })
+        let took = input.mouse(MouseMsg { kind, x: p.x, y: p.y, modifiers: modifiers_of(event.modifierFlags()) });
+        if took {
+            self.ivars().mouse_seen.set((seen + 1, taken + 1));
+        }
+        took
+    }
+
+    /// Mouse events this view received and how many the input lane took (development).
+    pub fn mouse_seen(&self) -> (u64, u64) {
+        self.ivars().mouse_seen.get()
     }
 
     fn button(&self, event: &NSEvent, button: PointerButton, down: bool) {
