@@ -1,7 +1,7 @@
 # Waiting in the interface
 
-Status: design note, proposed. Nothing here is built yet. The texts in section 5 are proposals: the interface
-languages and their wording are a product decision.
+Status: design note, approved by the owner with its texts (D46). Built: the connect wait (S1 service, S2
+interface state, S3 painter) and rule R-UI-13 in `docs/SPEC.md`. The other slices of section 6 follow.
 
 The request behind it: on the Mac, "Controlar" was pressed; the Windows machine showed the request to accept and
 pick permissions, and the Mac showed nothing at all while it waited. The same must hold for every action, on both

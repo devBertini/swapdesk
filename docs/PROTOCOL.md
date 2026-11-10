@@ -107,7 +107,7 @@ Every stream starts with its **stream kind** (one QUIC varint). Datagrams start 
 ### 5.2 Order of a session
 1. Viewer: `Hello`. Host: `HelloAck`. Both: `Capabilities`.
 2. Host decides (F-SESS-01/02): grants at once when `Hello.requested` holds `UNATTENDED` and the device holds it, when `Hello.resume` or `Hello.swap_token` is valid (6.3, 6.4), or else sends `PromptPending` and waits for its user; then `SessionGrant` or `SessionRefused`.
-3. Nothing but the session and keepalive messages flows before `SessionGrant`; no other stream may be opened (a violation is fatal).
+3. Nothing but the session and keepalive messages flows before `SessionGrant`; no other stream may be opened (a violation is fatal). While it waits for `SessionGrant`, the viewer may end the attempt with `Bye { NO_ERROR }`; the host closes its question and grants nothing (the message and its handling exist since 1.0).
 4. Host: `HostState`, `DisplayList`, `WakeInfo`, then video. Either side ends with `Bye`.
 
 ### 5.3 Messages

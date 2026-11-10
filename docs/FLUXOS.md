@@ -5,7 +5,7 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 <!-- placar:inicio -->
 | Total | validados | revalidar | sem prova | so em aparelho | quebrados |
 |---|---|---|---|---|---|
-| **59** | **43** (73%) | 0 | 12 | 4 | 0 |
+| **60** | **44** (73%) | 0 | 12 | 4 | 0 |
 
 *Recalculado em 2026-11-10 por `check-flows`. Este placar não é escrito à mão.*
 <!-- placar:fim -->
@@ -90,6 +90,7 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 | F-XCHAT-01 | Chat with read state between Windows and Mac, both session directions |  |  | sem prova | — |
 | F-XNET-01 | Reconnect inside B5 after the Wi-Fi link between two machines drops for 10 s |  |  | sem prova | — |
 | F-XUPG-01 | Upgrade over 1.0 keeps identity, pairings and settings; a 1.0 machine and a newer one hold a session both ways |  |  | sem prova | — |
+| F-UI-03 | Every wait is shown (R-UI-13): a connect shows at once that it is connecting, then that it waits to be accepted with the time left and a way to cancel that closes the other side's question, or why it did not open | state.rs<br>interact.rs<br>ops.rs<br>viewer.rs<br>screens_main.rs | swapdesk-host/ui_hub::tests::connect::connect_replies_an_entry_at_once_then_connecting_and_prompted_while_the_host_asks<br>swapdesk-host/ui_hub::tests::connect::an_accepted_connect_sends_the_sessions_active_before_the_entry_ends<br>swapdesk-host/ui_hub::tests::connect::each_refusal_ends_the_entry_with_its_own_why<br>swapdesk-host/ui_hub::tests::connect::cancelling_a_connect_entry_closes_the_hosts_card_and_opens_no_session<br>swapdesk-host/ui_hub::tests::connect::a_ui_that_goes_away_while_its_entry_waits_closes_the_hosts_card<br>swapdesk-host/ui_hub::tests::connect::cancelling_during_the_connect_phase_of_a_wake_opens_no_session<br>swapdesk-ui/state_tests::controlar_shows_the_connect_card_at_once_and_sends_one_connect<br>swapdesk-ui/state_tests::a_second_press_while_waiting_sends_nothing<br>swapdesk-ui/state_tests::the_entry_counts_the_hosts_seconds_down<br>swapdesk-ui/state_tests::cancel_sends_disconnect_for_the_entry<br>swapdesk-ui/state_tests::each_why_reads_its_own_line<br>swapdesk-ui/state_tests::an_accepted_connect_opens_the_viewer_and_the_card_goes<br>swapdesk-ui/state_tests::the_interface_gives_up_after_60_s_without_news<br>swapdesk-ui/state_tests::escape_cancels_the_wait_and_closes_the_end_card | validado | 2026-11-10 |
 | F-NET-02 | Only what the peer's protocol minor knows is sent to it; everything an older minor sends is decoded | control.rs<br>types.rs<br>media.rs<br>pairing.rs | swapdesk-proto::wire_1_0/every_fixture_decodes_into_its_sample<br>swapdesk-proto::wire_1_0/every_sample_encodes_into_its_fixture_byte_for_byte<br>swapdesk-proto::wire_1_0/every_message_type_of_minor_0_has_a_fixture<br>swapdesk-proto::wire_1_0/every_enum_value_of_minor_0_is_carried_by_a_fixture<br>swapdesk-proto::wire_1_0/a_hello_carries_its_own_minor_and_the_fixture_holds_the_minor_of_1_0<br>swapdesk-proto::wire_1_0/one_flipped_byte_of_any_fixture_fails_the_decode_or_the_encode_check | validado | 2026-11-10 |
 | F-FILE-03 | Free space checked before accepting; names equal by normalization or case never overwrite; missing macOS folder access is said |  |  | sem prova | — |
 | F-VIEW-05 | Still-screen refinement on a Windows host and on a Mac host |  |  | sem prova | — |
