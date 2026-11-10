@@ -150,6 +150,12 @@ define_class!(
             with_shell(|s| s.tick());
         }
 
+        // Development (`dev_panel`): looks at the panel that is open and cancels it.
+        #[unsafe(method(devPanelCheck:))]
+        fn dev_panel_check(&self, _t: &AnyObject) {
+            dev::panel_check();
+        }
+
         #[unsafe(method(placeholders:))]
         fn placeholders(&self, _t: &AnyObject) {
             with_shell(|s| s.arm_placeholders());

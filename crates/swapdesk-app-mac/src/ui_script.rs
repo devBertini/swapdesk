@@ -27,12 +27,38 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     State,
-    Click { window: String, control: String },
-    Keys { window: String, text: String },
-    VideoClick { fx: f64, fy: f64 },
-    VideoMove { fx: f64, fy: f64 },
-    VideoKeys { text: String },
-    Shot { window: String, path: PathBuf },
+    Click {
+        window: String,
+        control: String,
+    },
+    Keys {
+        window: String,
+        text: String,
+    },
+    VideoClick {
+        fx: f64,
+        fy: f64,
+    },
+    VideoMove {
+        fx: f64,
+        fy: f64,
+    },
+    VideoKeys {
+        text: String,
+    },
+    Shot {
+        window: String,
+        path: PathBuf,
+    },
+    /// A click on a control that opens a panel which waits for a person: the panel is described and cancelled.
+    Panel {
+        window: String,
+        control: String,
+    },
+    /// The app's login item: `status` reads it, `on` and `off` register and unregister it.
+    LoginItem {
+        action: String,
+    },
     Quit,
 }
 
@@ -104,6 +130,15 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
                 Ok(Cmd::VideoKeys { text: unescape(rest_after(line, 2).ok_or("video keys needs a text")?) })
             }
             other => Err(format!("unknown video action {other:?} (click, move, keys)")),
+        },
+        "panel" => {
+            let window = words.next().filter(|w| !w.is_empty()).ok_or("panel needs a window and a control")?;
+            let control = rest_after(line, 2).ok_or("panel needs a control")?;
+            Ok(Cmd::Panel { window: window.to_owned(), control: control.trim().to_owned() })
+        }
+        "login-item" => match words.next() {
+            Some(action @ ("status" | "on" | "off")) => Ok(Cmd::LoginItem { action: action.to_owned() }),
+            other => Err(format!("unknown login-item action {other:?} (status, on, off)")),
         },
         "shot" => {
             let window = words.next().filter(|w| !w.is_empty()).ok_or("shot needs a window and a file")?;
@@ -237,6 +272,19 @@ mod mac {
             Cmd::VideoMove { fx, fy } => swapdesk_shell_mac::dev_video("move", *fx, *fy, "").map(|()| String::new()),
             Cmd::VideoKeys { text } => swapdesk_shell_mac::dev_video("keys", 0.0, 0.0, text).map(|()| String::new()),
             Cmd::Shot { window, path } => swapdesk_shell_mac::dev_shot(window, path).map(|()| String::new()),
+            Cmd::Panel { window, control } => swapdesk_shell_mac::dev_panel(window, control).map(|t| format!("{t}\n")),
+            // The real calls to the system, for the proof that turns the item off and on and puts it back as it
+            // was. The app itself never touches the login item in a scratch run.
+            Cmd::LoginItem { action } => {
+                let said = match action.as_str() {
+                    "on" => Some(crate::login_item::set(true).1),
+                    "off" => Some(crate::login_item::set(false).1),
+                    _ => None,
+                };
+                let status = crate::login_item::status()
+                    .map_or_else(|| "unavailable".to_owned(), crate::login_item::Status::name);
+                Ok(format!("status={status}\nsaid={}\n", said.unwrap_or_default()))
+            }
             Cmd::Quit => Ok(String::new()),
         }
     }
@@ -258,6 +306,14 @@ mod tests {
             parse("click viewer TbDisconnect\r\n"),
             Ok(Cmd::Click { window: "viewer".into(), control: "TbDisconnect".into() })
         );
+        assert_eq!(
+            parse("panel viewer FilesChoose"),
+            Ok(Cmd::Panel { window: "viewer".into(), control: "FilesChoose".into() })
+        );
+        assert_eq!(parse("login-item status"), Ok(Cmd::LoginItem { action: "status".into() }));
+        assert_eq!(parse("login-item off\n"), Ok(Cmd::LoginItem { action: "off".into() }));
+        assert!(parse("login-item maybe").is_err());
+        assert!(parse("panel viewer").is_err());
         assert_eq!(parse("video click 0.5 0.25"), Ok(Cmd::VideoClick { fx: 0.5, fy: 0.25 }));
         assert_eq!(parse("video move 0 1"), Ok(Cmd::VideoMove { fx: 0.0, fy: 1.0 }));
         assert_eq!(parse("video keys swapdesk"), Ok(Cmd::VideoKeys { text: "swapdesk".into() }));

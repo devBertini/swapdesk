@@ -66,6 +66,64 @@ pub fn dev_click(window: &str, control: &str) -> Result<(), String> {
     })
 }
 
+/// What [`panel_check`] saw, for [`dev_panel`].
+static PANEL_SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The timer of [`dev_panel`], fired inside the open panel's own event loop: describes the panel and cancels it.
+pub(super) fn panel_check() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    let text = match app.modalWindow() {
+        Some(w) => {
+            let class = w.class().name().to_string_lossy().into_owned();
+            let mut text = format!("modal={class} title={}", w.title());
+            match w.downcast_ref::<NSOpenPanel>() {
+                Some(panel) => {
+                    text.push_str(&format!(
+                        " files={} folders={} several={}",
+                        panel.canChooseFiles(),
+                        panel.canChooseDirectories(),
+                        panel.allowsMultipleSelection()
+                    ));
+                    // SAFETY: `cancel:` is the action of the panel's Cancel button; it takes any sender or nil.
+                    let _: () = unsafe { msg_send![panel, cancel: None::<&AnyObject>] };
+                }
+                None => app.abortModal(),
+            }
+            text
+        }
+        None => "modal=none".to_owned(),
+    };
+    *PANEL_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+}
+
+/// A click on a control that opens a panel which waits for a person (the file pickers): the panel is looked at
+/// while it is open, then cancelled, and what it was comes back: `modal=<class> title=<title> files=<bool>
+/// folders=<bool> several=<bool>`. Nothing is chosen and nothing of the panel's content is read.
+pub fn dev_panel(window: &str, control: &str) -> Result<String, String> {
+    *PANEL_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    // The click below does not return while the panel is open, and neither the main queue nor a timer of the
+    // default mode runs inside the panel's event loop: the check is a timer of the common modes.
+    with(|s| {
+        // SAFETY: the target is the controller, which implements `devPanelCheck:` and outlives the timer (the run
+        // loop keeps the timer until it fires once); the mode name is Foundation's immutable constant.
+        unsafe {
+            let timer = NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                1.5,
+                s.target(),
+                sel!(devPanelCheck:),
+                None,
+                false,
+            );
+            objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+        }
+        Ok(())
+    })?;
+    dev_click(window, control)?;
+    let text = PANEL_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    text.ok_or_else(|| format!("{control} opened no panel that waits: the click came back at once"))
+}
+
 /// Key presses to whatever has the keyboard in `window` (a text field after a click on it). `\r` is Return, `\t`
 /// is Tab.
 pub fn dev_keys(window: &str, text: &str) -> Result<(), String> {

@@ -100,8 +100,9 @@ impl BannerWindow {
     }
 
     /// Development proof (`--drive-host`): writes where the panel is and how it floats to `<dir>/banner.log`, then,
-    /// a second later, has `screencapture` take the whole screen and the panel alone (`banner-screen.png`,
-    /// `banner-window.png`). The app already holds the screen recording grant a host needs; nothing is asked.
+    /// a second later, has `screencapture` take the panel alone (`banner-window.png`). Never the whole screen: that
+    /// would be a picture of whatever the person has open. The app already holds the screen recording grant a host
+    /// needs; nothing is asked.
     pub fn snapshot(&self, dir: &std::path::Path) {
         let f = self.panel.frame();
         let line = format!(
@@ -124,11 +125,10 @@ impl BannerWindow {
         let (dir, window) = (dir.to_path_buf(), self.panel.windowNumber());
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
-            let shot = |args: &[String]| std::process::Command::new("/usr/sbin/screencapture").args(args).status();
-            let screen = dir.join("banner-screen.png").to_string_lossy().into_owned();
             let alone = dir.join("banner-window.png").to_string_lossy().into_owned();
-            let _ = shot(&["-x".into(), screen]);
-            let _ = shot(&["-x".into(), format!("-l{window}"), alone]);
+            let _ = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x".to_owned(), format!("-l{window}"), alone])
+                .status();
         });
     }
 }
