@@ -112,7 +112,6 @@ fn a_copy_crosses_both_ways_through_the_helper_and_the_ui_and_the_switch_stops_i
     Machine::pair(&host, &viewer, WITH_CLIPBOARD);
     let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
     viewer_clip.copy_externally(text("copied before the session"), false);
-    host_clip.copy_externally(text("also before"), false);
     let (host_hooks, viewer_hooks) = (Scripted::new(None), Scripted::new(Some(fake_ui(viewer_clip.clone()))));
     assert!(host.core.set_clip_actions(host_hooks.clone()));
     assert!(viewer.core.set_clip_actions(viewer_hooks.clone()));
@@ -125,16 +124,15 @@ fn a_copy_crosses_both_ways_through_the_helper_and_the_ui_and_the_switch_stops_i
     assert!(handle.granted().contains(PermissionSet::CLIPBOARD), "the viewer asked for it and the host's user gave it");
 
     // Viewer to host: the copy is read through the UI's pipe and written through the user helper.
-    let arrived = wait_for("the viewer's copy at the host", || {
+    // What the viewer had copied before the session is offered when the session starts.
+    wait_for("the viewer's earlier copy at the host", || {
+        host_clip.writes().contains(&text("copied before the session")).then_some(())
+    });
+    wait_for("the viewer's copy at the host", || {
         viewer_clip.copy_externally(text("from the viewer"), false);
         pause(300);
-        host_clip.writes().first().cloned()
+        host_clip.writes().contains(&text("from the viewer")).then_some(())
     });
-    assert_eq!(arrived, text("from the viewer"));
-    assert!(
-        !host_clip.writes().contains(&text("copied before the session")),
-        "what was there before the session stays local"
-    );
 
     // Host to viewer: read in the helper, written through the UI's pipe.
     let back = wait_for("the host's copy at the viewer", || {
@@ -143,7 +141,6 @@ fn a_copy_crosses_both_ways_through_the_helper_and_the_ui_and_the_switch_stops_i
         viewer_clip.writes().first().cloned()
     });
     assert_eq!(back, text("from the host"));
-    assert!(!viewer_clip.writes().contains(&text("also before")));
 
     // "Copiar e colar" off at the viewer: nothing it copies goes out, and it can be turned on again.
     assert!(viewer.core.clipboard_sync_on(session));
@@ -252,5 +249,83 @@ fn a_view_only_session_may_not_ask_for_an_action_and_without_a_helper_or_runner_
     drop(handle);
     host.core.shutdown();
     host2.core.shutdown();
+    viewer.core.shutdown();
+}
+
+#[test]
+fn what_the_host_had_copied_before_the_session_is_offered_to_the_viewer_when_it_starts() {
+    let host = Machine::build("host-pc", true, false, WITH_CLIPBOARD, |c| c);
+    let viewer = Machine::build("viewer-pc", true, false, WITH_CLIPBOARD, |c| c);
+    Machine::pair(&host, &viewer, WITH_CLIPBOARD);
+    let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
+    host_clip.copy_externally(text("host copy from before"), false);
+    assert!(host.core.set_clip_actions(Scripted::new(None)));
+    assert!(viewer.core.set_clip_actions(Scripted::new(Some(fake_ui(viewer_clip.clone())))));
+    let _helper = user_helper(&host.core, &host_clip, &FakeActions::new());
+
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    drain(msgs);
+    wait_for("the host's earlier copy at the viewer", || {
+        viewer_clip.writes().contains(&text("host copy from before")).then_some(())
+    });
+    pause(800);
+    assert_eq!(viewer_clip.writes(), vec![text("host copy from before")], "offered once, never echoed back");
+    assert!(host_clip.writes().is_empty(), "nothing was written at the host");
+
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+}
+
+#[test]
+fn a_session_without_the_clipboard_permission_offers_what_was_copied_to_nobody() {
+    let host = Machine::build("host-pc", true, false, PermissionSet::CONTROL, |c| c);
+    let viewer = Machine::build("viewer-pc", true, false, WITH_CLIPBOARD, |c| c);
+    Machine::pair(&host, &viewer, PermissionSet::CONTROL);
+    let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
+    host_clip.copy_externally(text("host copy"), false);
+    viewer_clip.copy_externally(text("viewer copy"), false);
+    host.core.set_clip_actions(Scripted::new(None));
+    viewer.core.set_clip_actions(Scripted::new(Some(fake_ui(viewer_clip.clone()))));
+    let _helper = user_helper(&host.core, &host_clip, &FakeActions::new());
+
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    drain(msgs);
+    assert!(!handle.granted().contains(PermissionSet::CLIPBOARD));
+    pause(1500);
+    assert!(host_clip.writes().is_empty() && viewer_clip.writes().is_empty(), "nothing crossed");
+
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+}
+
+#[test]
+fn turning_the_sync_on_in_a_session_offers_the_current_clipboard_once() {
+    let host = Machine::build("host-pc", true, false, WITH_CLIPBOARD, |c| c);
+    let viewer = Machine::build("viewer-pc", true, false, WITH_CLIPBOARD, |c| c);
+    Machine::pair(&host, &viewer, WITH_CLIPBOARD);
+    let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
+    host.core.set_clip_actions(Scripted::new(None));
+    viewer.core.set_clip_actions(Scripted::new(Some(fake_ui(viewer_clip.clone()))));
+    let _helper = user_helper(&host.core, &host_clip, &FakeActions::new());
+
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    drain(msgs);
+    let session = handle.session_id();
+    viewer.core.set_clipboard_sync(session, false).expect("a live session");
+    pause(600);
+    viewer_clip.copy_externally(text("copied while off"), false);
+    pause(800);
+    assert!(host_clip.writes().is_empty());
+    viewer.core.set_clipboard_sync(session, true).expect("a live session");
+    wait_for("the copy made while off, offered on turning on", || {
+        host_clip.writes().contains(&text("copied while off")).then_some(())
+    });
+    pause(800);
+    assert_eq!(host_clip.writes(), vec![text("copied while off")], "once");
+
+    drop(handle);
+    host.core.shutdown();
     viewer.core.shutdown();
 }
