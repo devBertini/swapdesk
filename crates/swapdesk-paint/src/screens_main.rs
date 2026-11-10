@@ -960,8 +960,7 @@ fn wait_card(f: &mut Frame, a: &Area, y: f32, card: &WaitCard) {
     let t = p.label_in(&card.title, text::H2_STATE, inner, Align::Start);
     let b = p.label_in(&card.body, text::BODY, inner, Align::Start);
     // The countdown row is there for the whole wait, also before the seconds are known, so the card never grows.
-    let widest = p.label("0:00", text::CAPTION);
-    let row_h = card.bar.as_ref().map(|_| widest.h.max(6.0));
+    let row_h = card.bar.as_ref().map(|_| f.countdown_row_h());
     let h = 2.0 * bw + 40.0 + 40.0 + 10.0 + t.h + 10.0 + b.h + 10.0 + row_h.map_or(0.0, |r| r + 10.0) + 40.0;
     f.panel(Rect::new(a.x, y, w, h), pal.surface);
     let (ix, mut iy) = (a.x + bw + 22.0, y + bw + 20.0);
@@ -976,14 +975,8 @@ fn wait_card(f: &mut Frame, a: &Area, y: f32, card: &WaitCard) {
     iy += t.h + 10.0;
     p.draw(&b, ix, iy, pal.soft);
     iy += b.h + 10.0;
-    if let (Some(bar), Some(row_h)) = (&card.bar, row_h) {
-        let track = Rect::new(ix, iy + (row_h - 6.0) / 2.0, inner - widest.w - 8.0, 6.0);
-        p.fill_rrect(track, 3.0, pal.line);
-        p.fill_rrect(Rect::new(track.x, track.y, track.w * bar.fraction.clamp(0.0, 1.0), 6.0), 3.0, pal.link);
-        if let Some(time) = &bar.text {
-            let l = p.label(time, text::CAPTION);
-            p.draw(&l, ix + inner - l.w, iy + (row_h - l.h) / 2.0, pal.soft);
-        }
+    if let Some(bar) = &card.bar {
+        f.countdown_row((ix, iy), inner, bar, [pal.line, pal.link, pal.soft]);
     }
     // Negative on the left, positive on the right (the order rule), on the card's bottom line.
     let list: Vec<(ControlId, String, Kind)> = card
@@ -1410,16 +1403,33 @@ fn pairing(f: &mut Frame) {
     p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), pal.canvas);
     let msg = |f: &Frame, key: MsgKey, arg: &str| f.st.tm(&Msg::new(key).with(arg.to_string()));
     let items: Vec<PairItem> = match &view.state {
-        PairingState::ShowCode { code, peer_name } => vec![
-            PairItem::Title(msg(f, MsgKey::PairTitleWith, peer_name)),
-            PairItem::Body(msg(f, MsgKey::PairCompare, peer_name)),
-            PairItem::Code(code.clone()),
-            PairItem::Body(msg(f, MsgKey::PairWarn, peer_name)),
-            PairItem::Buttons(vec![
-                (ControlId::PairSame, f.t(MsgKey::PairSame), Kind::Primary),
-                (ControlId::PairDifferent, f.t(MsgKey::PairDifferent), Kind::Default),
-            ]),
-        ],
+        PairingState::ShowCode { code, peer_name } => {
+            let mut items = vec![
+                PairItem::Title(msg(f, MsgKey::PairTitleWith, peer_name)),
+                PairItem::Body(msg(f, MsgKey::PairCompare, peer_name)),
+                PairItem::Code(code.clone()),
+            ];
+            match f.st.pair_wait() {
+                // This side said the codes match: the card says what it waits for and keeps the way out.
+                Some(wait) => {
+                    items.push(PairItem::Body(wait.body));
+                    items.push(PairItem::Buttons(
+                        wait.buttons
+                            .iter()
+                            .map(|b| (b.id, b.label.clone(), if b.primary { Kind::Primary } else { Kind::Default }))
+                            .collect(),
+                    ));
+                }
+                None => {
+                    items.push(PairItem::Body(msg(f, MsgKey::PairWarn, peer_name)));
+                    items.push(PairItem::Buttons(vec![
+                        (ControlId::PairSame, f.t(MsgKey::PairSame), Kind::Primary),
+                        (ControlId::PairDifferent, f.t(MsgKey::PairDifferent), Kind::Default),
+                    ]));
+                }
+            }
+            items
+        }
         PairingState::Open { remaining_s } => vec![
             PairItem::Title(f.t(MsgKey::PairThisComputer)),
             PairItem::Body(f.t(MsgKey::PairOpenBody)),
@@ -1496,18 +1506,6 @@ fn pairing(f: &mut Frame) {
             PairItem::Buttons(list) => actions_row(f, x, y, inner, list),
         }
         y += h + GAP;
-    }
-    // Disabled look while "Os códigos são iguais" waits for the service.
-    if f.st
-        .controls(WindowKind::Main)
-        .iter()
-        .any(|c| c.disabled && matches!(c.id, ControlId::PairSame | ControlId::PairDifferent))
-    {
-        for w in f.out.widgets.clone() {
-            if matches!(w.id, ControlId::PairSame | ControlId::PairDifferent) {
-                p.fill_rrect(w.rect, layout::BUTTON_RADIUS, pal.surface.with_alpha(0.55));
-            }
-        }
     }
 }
 

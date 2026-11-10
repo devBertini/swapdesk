@@ -3,7 +3,7 @@
 //! and the video area are).
 
 use swapdesk_ui::tokens::{Color, Palette, TextStyle, layout, palette, text};
-use swapdesk_ui::{ControlId, EditId, UiState};
+use swapdesk_ui::{ControlId, EditId, UiState, WaitBar};
 
 use crate::painter::{Align, Painter, Rect, rrect_path};
 
@@ -127,6 +127,30 @@ impl<'a> Frame<'a> {
         }
         let a = if self.ix.pressed == Some(id) { pressed } else { hover };
         self.p.fill_rrect(rect, radius, base.with_alpha(a));
+    }
+
+    // ----- waits -----
+
+    /// The height of a countdown row: the time's text, never less than the track.
+    pub fn countdown_row_h(&self) -> f32 {
+        self.p.label("0:00", text::CAPTION).h.max(6.0)
+    }
+
+    /// The countdown row of a waiting card at `at`, `w` wide: a 6 px track filled from the left and, when the wait
+    /// has a deadline, the time left at the end. The room for the time is kept also before it is known, so the
+    /// track never changes its width. `colors` are the track, its filled part and the time.
+    pub fn countdown_row(&self, at: (f32, f32), w: f32, bar: &WaitBar, colors: [Color; 3]) {
+        let p = self.p;
+        let [track, fill, ink] = colors;
+        let widest = p.label("0:00", text::CAPTION);
+        let row_h = widest.h.max(6.0);
+        let t = Rect::new(at.0, at.1 + (row_h - 6.0) / 2.0, w - widest.w - 8.0, 6.0);
+        p.fill_rrect(t, 3.0, track);
+        p.fill_rrect(Rect::new(t.x, t.y, t.w * bar.fraction.clamp(0.0, 1.0), 6.0), 3.0, fill);
+        if let Some(time) = &bar.text {
+            let l = p.label(time, text::CAPTION);
+            p.draw(&l, at.0 + w - l.w, at.1 + (row_h - l.h) / 2.0, ink);
+        }
     }
 
     // ----- text -----

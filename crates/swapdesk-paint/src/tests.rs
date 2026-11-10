@@ -174,9 +174,10 @@ fn the_tab_order_is_the_drawn_enabled_focusable_controls_in_the_order_of_the_sta
 
 #[test]
 fn a_disabled_control_is_drawn_but_leaves_the_tab_order() {
-    // Pairing with the code shown: confirming it disables both answers while the service checks.
-    let mut state = Scenario::Pareamento.prepared_state();
-    let kind = WindowKind::Main;
+    // The terminal panel's quick actions: while one waits for the other computer, all four are disabled.
+    let mut state = Scenario::Terminal.prepared_state();
+    let kind = WindowKind::Viewer;
+    let is_action = |id: &ControlId| matches!(id, ControlId::Action(_));
     let order_of = |state: &swapdesk_ui::UiState| {
         let p = Fixed::default();
         let ix = Interaction::default();
@@ -184,17 +185,19 @@ fn a_disabled_control_is_drawn_but_leaves_the_tab_order() {
         (input::tab_order(state, kind, &out.widgets), out.widgets)
     };
     let (before, _) = order_of(&state);
-    assert!(before.contains(&ControlId::PairSame) && before.contains(&ControlId::PairDifferent), "{before:?}");
+    assert_eq!(before.iter().filter(|id| is_action(id)).count(), 4, "{before:?}");
 
-    let _ = state.activate(ControlId::PairSame);
-    let disabled: Vec<_> = state.controls(kind).into_iter().filter(|c| c.disabled).map(|c| c.id).collect();
-    assert_eq!(disabled, [ControlId::PairSame, ControlId::PairDifferent]);
+    let sent = state.activate(ControlId::Action(swapdesk_ui::ActionKind::Lock));
+    state.track(swapdesk_ui::Ticket(1), &sent.commands[0]);
+    let disabled: Vec<_> =
+        state.controls(kind).into_iter().filter(|c| c.disabled && is_action(&c.id)).map(|c| c.id).collect();
+    assert_eq!(disabled.len(), 4);
     let (after, widgets) = order_of(&state);
     for id in disabled {
         assert!(widgets.iter().any(|w| w.id == id), "{id:?} is still drawn");
         assert!(!after.contains(&id), "{id:?} is disabled: Tab skips it");
     }
-    assert_eq!(after.len(), before.len() - 2);
+    assert_eq!(after.iter().filter(|id| is_action(id)).count(), 0);
 }
 
 #[test]

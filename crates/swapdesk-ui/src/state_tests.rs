@@ -2255,3 +2255,201 @@ fn the_login_item_the_system_reports_shows_in_the_switch_and_is_kept() {
         act.commands
     );
 }
+
+// ---------- the other waits (docs/WAITING.md section 4, rows 7, 8, 9, 14, 21, 22) ----------
+
+#[test]
+fn a_hosted_session_that_reconnects_keeps_the_banner_and_opens_no_viewer() {
+    let mut s = base();
+    s.apply(session_event(2, MAC, active(Role::Host, Permissions::NONE.with(Permission::Control))));
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
+    for lost in [SessionState::Reconnecting { attempt: 0 }, SessionState::Paused { desktop: DesktopKind::Locked }] {
+        s.apply(session_event(2, MAC, lost.clone()));
+        assert!(s.viewer_session().is_none(), "no viewer window opens on the host ({lost:?})");
+        assert_eq!(s.host_session().map(|h| h.id), Some(2), "the banner stays ({lost:?})");
+        assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner], "{lost:?}");
+        assert!(!s.controls(WindowKind::Banner).is_empty(), "{lost:?}");
+    }
+    // While it reconnects the banner says so, in the existing text.
+    s.apply(session_event(2, MAC, SessionState::Reconnecting { attempt: 1 }));
+    let h = s.host_session().unwrap().clone();
+    let (who, since) = s.banner_parts("MacBook", &h);
+    assert_eq!(who, "Reconectando ao MacBook");
+    assert!(since.is_empty());
+    assert_eq!(s.banner_text("MacBook", &h), "Reconectando ao MacBook");
+    // Back: the banner is as before.
+    s.apply(session_event(2, MAC, active(Role::Host, Permissions::NONE)));
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
+    // A viewer session that reconnects keeps its window and no banner appears.
+    let mut v = viewer();
+    v.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    assert_eq!(v.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
+    assert!(v.host_session().is_none());
+}
+
+#[test]
+fn reconnecting_counts_the_minute_down() {
+    let mut s = viewer();
+    // Attempt 0 (the loss was just seen): the track alone, nothing counted yet.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 0 }));
+    assert_eq!(s.reconnect_wait(), Some(WaitBar { fraction: 0.0, text: None }));
+    assert!(s.needs_tick());
+    s.tick();
+    s.tick();
+    assert_eq!(s.reconnect_wait().unwrap().text, None, "the minute starts at the first attempt");
+    // The first attempt starts the 60 s.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!((bar.text.as_deref(), bar.fraction), (Some("1:00"), 0.0));
+    for _ in 0..15 {
+        s.tick();
+    }
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:45"));
+    assert!((bar.fraction - 0.25).abs() < 1e-6, "{}", bar.fraction);
+    // A later attempt does not restart it.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 2 }));
+    assert_eq!(s.reconnect_wait().unwrap().text.as_deref(), Some("0:45"));
+    // It stops at zero.
+    for _ in 0..70 {
+        s.tick();
+    }
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!((bar.text.as_deref(), bar.fraction), (Some("0:00"), 1.0));
+    // The accessibility tree reads the time too.
+    assert!(
+        s.controls(WindowKind::Viewer).iter().any(|c| c.role == UiRole::Progress && c.value.as_deref() == Some("0:00"))
+    );
+    // Back, and lost again: a new minute.
+    s.apply(session_event(1, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert_eq!(s.reconnect_wait(), None);
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    assert_eq!(s.reconnect_wait().unwrap().text.as_deref(), Some("1:00"));
+}
+
+#[test]
+fn asking_to_swap_shows_who_is_asked_and_counts_22_s() {
+    let mut s = Scenario::InverterAguardando.prepared_state();
+    assert!(s.swap_requested());
+    let w = s.swap_wait().expect("the card shows while the request waits");
+    assert_eq!(w.session_id, 1);
+    assert_eq!(w.title, "Esperando o Desktop do escritório aceitar a inversão");
+    assert!(w.body.contains("Desktop do escritório") && w.body.contains("20 segundos"), "{}", w.body);
+    // The scenario ran 6 of the 22 seconds.
+    assert_eq!(w.bar.text.as_deref(), Some("0:16"));
+    assert!((w.bar.fraction - 6.0 / 22.0).abs() < 1e-6, "{}", w.bar.fraction);
+    // No button but the toolbar's, whose swap button waits.
+    let ids: Vec<_> = s.controls(WindowKind::Viewer).into_iter().map(|c| (c.id, c.disabled)).collect();
+    assert!(ids.contains(&(ControlId::TbSwap, true)));
+    assert!(!ids.iter().any(|(id, _)| *id == ControlId::SwapDeclinedClose));
+    assert!(s.needs_tick());
+    // It counts to the end and stops there.
+    for _ in 0..30 {
+        s.tick();
+    }
+    let w = s.swap_wait().unwrap();
+    assert_eq!((w.bar.text.as_deref(), w.bar.fraction), (Some("0:00"), 1.0));
+    // The outcome closes it.
+    s.apply(UiEvent::Swap { session_id: 1, event: SwapEvent::Declined { why: SwapWhy::TimedOut } });
+    assert!(s.swap_wait().is_none());
+
+    // A fresh request counts from 22 again.
+    let mut s = Scenario::Inverter.prepared_state();
+    assert!(s.swap_wait().is_none(), "the confirm card is not the wait");
+    s.activate(ControlId::DialogPrimary);
+    assert_eq!(s.swap_wait().unwrap().bar.text.as_deref(), Some("0:22"));
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.role == UiRole::Progress));
+
+    // The host's banner says it in its own line, and the viewer card is not shown there.
+    let mut h = Scenario::Banner.prepared_state();
+    let before = h.banner_text("Desktop", h.host_session().unwrap());
+    assert!(before.contains("controla"), "{before}");
+    h.activate(ControlId::BannerSwap);
+    assert!(h.swap_wait().is_none());
+    let session = h.host_session().unwrap().clone();
+    assert_eq!(h.banner_parts("Desktop", &session).0, "Esperando o Desktop aceitar a inversão");
+    assert_eq!(h.banner_text("Desktop", &session), "Esperando o Desktop aceitar a inversão");
+    assert!(h.needs_tick());
+    h.apply(UiEvent::Swap { session_id: 2, event: SwapEvent::Declined { why: SwapWhy::Declined } });
+    assert!(h.banner_text("Desktop", &session).contains("controla"));
+}
+
+#[test]
+fn after_the_codes_match_the_card_says_it_waits_and_offers_cancel() {
+    let s = Scenario::Pareamento.prepared_state();
+    assert!(s.pair_wait().is_none());
+    let ids = |s: &UiState| s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect::<Vec<_>>();
+    assert!(ids(&s).contains(&ControlId::PairSame) && ids(&s).contains(&ControlId::PairDifferent));
+    let text = labels(&s, WindowKind::Main);
+    assert!(text.contains("Se forem diferentes"), "{text}");
+
+    let s = Scenario::PareamentoConfirmando.prepared_state();
+    let w = s.pair_wait().expect("the card waits");
+    assert_eq!(w.body, "O outro lado precisa confirmar o código. Isso leva alguns segundos.");
+    assert_eq!(
+        w.buttons,
+        vec![WaitButton {
+            id: ControlId::PairCancel,
+            label: "Cancelar".into(),
+            side: ButtonSide::Left,
+            primary: false
+        }]
+    );
+    let text = labels(&s, WindowKind::Main);
+    assert!(text.contains("O outro lado precisa confirmar") && !text.contains("Se forem diferentes"), "{text}");
+    assert!(text.contains("482 913"), "the code stays on screen: {text}");
+    assert_eq!(
+        s.controls(WindowKind::Main).iter().filter(|c| c.role == UiRole::Button).map(|c| c.id).collect::<Vec<_>>(),
+        vec![ControlId::PairCancel]
+    );
+    // Cancel after the confirmation closes the card and tells the service.
+    let mut s = s;
+    let a = s.activate(ControlId::PairCancel);
+    assert_eq!(a.commands, vec![Command::PairCancel { pairing_id: 1 }]);
+    assert!(s.pairing().is_none() && s.pair_wait().is_none());
+    // The other side's answer (Done or Failed) ends the step too.
+    let mut s = Scenario::PareamentoConfirmando.prepared_state();
+    s.apply(UiEvent::Pairing { pairing_id: 1, state: PairingState::Failed { reason: ApiCode::Refused } });
+    assert!(s.pair_wait().is_none());
+}
+
+#[test]
+fn a_pending_action_disables_the_actions_and_says_so() {
+    let mut s = viewer();
+    s.activate(ControlId::TbTerminal);
+    let action_buttons = |s: &UiState| {
+        s.controls(WindowKind::Viewer)
+            .into_iter()
+            .filter(|c| matches!(c.id, ControlId::Action(_)))
+            .map(|c| c.disabled)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(action_buttons(&s), vec![false; 4]);
+    assert!(s.action_wait().is_none() && !s.actions_disabled());
+    let a = s.activate(ControlId::Action(ActionKind::Sleep));
+    assert_eq!(a.commands, vec![Command::RunAction { session_id: 1, action: ActionKind::Sleep }]);
+    s.track(Ticket(40), &a.commands[0]);
+    assert_eq!(action_buttons(&s), vec![true; 4], "every quick action waits");
+    assert!(s.actions_disabled());
+    let w = s.action_wait().expect("the line shows");
+    assert_eq!(w.session_id, 1);
+    assert!(w.line.starts_with("Esperando o ") && w.line.ends_with("executar a ação…"), "{}", w.line);
+    assert!(labels(&s, WindowKind::Viewer).contains("executar a ação"));
+    assert!(s.activate(ControlId::Action(ActionKind::Lock)).commands.is_empty(), "one action at a time");
+    // The answer frees them, a failure included.
+    s.apply(UiEvent::Reply { ticket: Ticket(40), result: Ok(Reply::Done) });
+    assert_eq!(action_buttons(&s), vec![false; 4]);
+    assert!(s.action_wait().is_none());
+    let a = s.activate(ControlId::Action(ActionKind::Lock));
+    s.track(Ticket(41), &a.commands[0]);
+    assert!(s.actions_disabled());
+    s.apply(UiEvent::Reply { ticket: Ticket(41), result: Err(ApiError::new(ApiCode::NotPermitted)) });
+    assert!(!s.actions_disabled() && s.action_wait().is_none());
+    // The interface's own 30 s limit frees them as well.
+    let a = s.activate(ControlId::Action(ActionKind::Lock));
+    s.track(Ticket(42), &a.commands[0]);
+    for _ in 0..30 {
+        s.tick();
+    }
+    assert!(!s.actions_disabled());
+}

@@ -215,6 +215,10 @@ pub enum Scenario {
     Banner,
     Inverter,
     InverterPedido,
+    /// The viewer asked to swap and waits for the other side, with the seconds left (R-UI-13).
+    InverterAguardando,
+    /// This side confirmed the pairing code and waits for the other side (R-UI-13).
+    PareamentoConfirmando,
     /// The last run ended in a panic (D12).
     EstadoFechouInesperado,
     /// The device list is empty after 10 s of discovery (F20).
@@ -226,7 +230,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 37] = [
+    pub const ALL: [Scenario; 39] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -259,6 +263,8 @@ impl Scenario {
         Scenario::Banner,
         Scenario::Inverter,
         Scenario::InverterPedido,
+        Scenario::InverterAguardando,
+        Scenario::PareamentoConfirmando,
         Scenario::EstadoFechouInesperado,
         Scenario::EstadoNenhumComputador,
         Scenario::Carregando,
@@ -301,6 +307,8 @@ impl Scenario {
             Scenario::Banner => "banner",
             Scenario::Inverter => "inverter",
             Scenario::InverterPedido => "inverter-pedido",
+            Scenario::InverterAguardando => "inverter-aguardando",
+            Scenario::PareamentoConfirmando => "pareamento-confirmando",
             Scenario::EstadoFechouInesperado => "estado-fechou-inesperado",
             Scenario::EstadoNenhumComputador => "estado-nenhum-computador",
             Scenario::Carregando => "carregando",
@@ -348,6 +356,12 @@ impl Scenario {
             Scenario::Banner => "6. Sendo controlado",
             Scenario::Inverter => "7. Inverter controle, step 1",
             Scenario::InverterPedido => "7. Inverter controle, step 2",
+            Scenario::InverterAguardando => {
+                "new: Esperando o computador aceitar a inversao, with the seconds left (R-UI-13)"
+            }
+            Scenario::PareamentoConfirmando => {
+                "new: Pareamento, waiting for the other side to confirm the code (R-UI-13)"
+            }
             Scenario::EstadoFechouInesperado => "new: crash notice (D12)",
             Scenario::EstadoNenhumComputador => "new: no computer found card (F20)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
@@ -635,6 +649,22 @@ impl Scenario {
                     session_id: 2,
                     event: SwapEvent::Asked { request_id: 11, by: "Desktop do escritório".into(), remaining_s: 14 },
                 }),
+            ],
+            // The request is sent (no backend in `apply_to`: it stays waiting) and 6 s of the 22 have passed.
+            Scenario::InverterAguardando => vec![
+                Select(DESKTOP),
+                Event(Self::viewer_session_to(DESKTOP, 12)),
+                Activate(ControlId::TbSwap),
+                Activate(ControlId::DialogPrimary),
+                Ticks(6),
+            ],
+            Scenario::PareamentoConfirmando => vec![
+                Select(AIR),
+                Event(UiEvent::Pairing {
+                    pairing_id: 1,
+                    state: PairingState::ShowCode { code: "482 913".into(), peer_name: "MacBook Air".into() },
+                }),
+                Activate(ControlId::PairSame),
             ],
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
             Scenario::EstadoNenhumComputador => vec![Event(UiEvent::DevicesChanged(Vec::new())), Ticks(10)],
@@ -1116,6 +1146,8 @@ mod tests {
             (Scenario::Banner, Screen::Home, &[Main, Banner]),
             (Scenario::Inverter, Screen::Devices, &[Main, Viewer]),
             (Scenario::InverterPedido, Screen::Home, &[Main, Banner]),
+            (Scenario::InverterAguardando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::PareamentoConfirmando, Screen::Pairing, &[Main]),
             (Scenario::EstadoFechouInesperado, Screen::Devices, &[Main]),
             (Scenario::EstadoNenhumComputador, Screen::Home, &[Main]),
             (Scenario::Carregando, Screen::Home, &[Main]),
@@ -1356,7 +1388,10 @@ mod tests {
         let a = s.activate(ControlId::PairSame);
         assert_eq!(a.commands.len(), 1);
         assert!(matches!(s.pairing().unwrap().state, PairingState::ShowCode { .. }), "still showing the code");
-        assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::PairSame && c.disabled));
+        // The two buttons give way to "Cancelar" alone (docs/WAITING.md row 7).
+        let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+        assert!(!ids.contains(&ControlId::PairSame) && !ids.contains(&ControlId::PairDifferent));
+        assert!(ids.contains(&ControlId::PairCancel));
         assert!(s.activate(ControlId::PairSame).commands.is_empty(), "a second press does nothing");
     }
 

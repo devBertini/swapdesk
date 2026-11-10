@@ -4,7 +4,8 @@
 use swapdesk_ui::format;
 use swapdesk_ui::tokens::{Color, fixed, layout, text};
 use swapdesk_ui::{
-    ActionKind, ControlId, DialogKind, DrawerTab, EditId, Msg, MsgKey, SessionState, SwapPhase, TermPhase, WindowKind,
+    ActionKind, ControlId, DialogKind, DrawerTab, EditId, Msg, MsgKey, SessionState, SwapPhase, SwapWait, TermPhase,
+    WindowKind,
 };
 
 use crate::painter::{Align, Rect};
@@ -80,7 +81,9 @@ pub fn paint_viewer(f: &mut Frame) {
     if let SessionState::Reconnecting { attempt } = session.state {
         reconnecting_card(f, video_col, &peer, attempt);
     } else {
-        if matches!(f.st.swap().map(|s| &s.phase), Some(SwapPhase::Declined(_))) {
+        if let Some(wait) = f.st.swap_wait() {
+            swap_wait_card(f, video, &wait);
+        } else if matches!(f.st.swap().map(|s| &s.phase), Some(SwapPhase::Declined(_))) {
             swap_declined_card(f, video, &peer);
         }
         if f.st.session_bar_visible() {
@@ -324,7 +327,10 @@ fn reconnecting_card(f: &mut Frame, col: Rect, peer: &str, attempt: u32) {
         w - 44.0,
         Align::Start,
     );
-    let h = 20.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + 40.0 + 20.0;
+    // The time left of the minute the service keeps trying (R-UI-13): a row of its own, there from the start.
+    let bar = f.st.reconnect_wait();
+    let row_h = bar.as_ref().map(|_| f.countdown_row_h());
+    let h = 20.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + row_h.map_or(0.0, |r| r + 10.0) + 40.0 + 20.0;
     let r = Rect::new(p.snap(col.x + (col.w - w) / 2.0), p.snap(col.y + (col.h - h) / 2.0), w, h);
     p.fill_rrect(r, 12.0, f.pal.remote);
     p.bordered(r, 12.0, fixed::CARD_DARK_BORDER, f.pal.remote);
@@ -334,6 +340,10 @@ fn reconnecting_card(f: &mut Frame, col: Rect, peer: &str, attempt: u32) {
     p.draw(&title, x, y, fixed::CARD_DARK_INK);
     y += title.h + 10.0;
     p.draw(&body, x, y, fixed::CARD_DARK_SOFT);
+    if let Some(bar) = &bar {
+        let colors = [fixed::CARD_DARK_BORDER, fixed::SPINNER, fixed::CARD_DARK_SOFT];
+        f.countdown_row((x, y + body.h + 10.0), w - 44.0, bar, colors);
+    }
     let label = f.t(MsgKey::Disconnect);
     let bw = f.button_width(&label, Kind::Default);
     let br = Rect::new(x, r.bottom() - 20.0 - 40.0, bw, 40.0);
@@ -373,6 +383,29 @@ fn swap_declined_card(f: &mut Frame, video: Rect, peer: &str) {
         &close,
         false,
     );
+}
+
+/// The viewer asked to swap: who is asked, what happens if nobody answers and the time left, in the place and
+/// style of the declined card. No button: an outgoing request cannot be withdrawn.
+fn swap_wait_card(f: &mut Frame, video: Rect, wait: &SwapWait) {
+    let (p, pal) = (f.p, f.pal);
+    let w = 360.0f32.min(video.w - 40.0);
+    let bwid = p.hairline();
+    let inner = w - 44.0 - 2.0 * bwid;
+    let title = p.label_in(&wait.title, text::H2_STATE, inner, Align::Start);
+    let body = p.label_in(&wait.body, text::BODY, inner, Align::Start);
+    let h = 2.0 * bwid + 40.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + f.countdown_row_h();
+    let r = Rect::new(p.snap(video.x + (video.w - w) / 2.0), p.snap(video.y + (video.h - h) / 2.0), w, h);
+    f.panel(r, pal.surface);
+    let (x, mut y) = (r.x + bwid + 22.0, r.y + bwid + 20.0);
+    p.fill_circle((x + 20.0, y + 20.0), 20.0, pal.link_tint);
+    p.svg(icons::SWAP, x + 10.0, y + 10.0, 20.0, 2.0, pal.link);
+    y += 50.0;
+    p.draw(&title, x, y, pal.ink);
+    y += title.h + 10.0;
+    p.draw(&body, x, y, pal.soft);
+    y += body.h + 10.0;
+    f.countdown_row((x, y), inner, &wait.bar, [pal.line, pal.link, pal.soft]);
 }
 
 fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
@@ -534,6 +567,19 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
         let k = if kind == ActionKind::Restart { Kind::Danger } else { Kind::Default };
         f.button(ControlId::Action(kind), r, k, &f.t(key), false);
     }
+    // One action at a time (R-UI-13): while one waits for the other computer the buttons are dimmed and a line
+    // under them says what is waited for.
+    if f.st.actions_disabled() {
+        for w in f.out.widgets.clone() {
+            if matches!(w.id, ControlId::Action(_)) {
+                p.fill_rrect(w.rect, layout::BUTTON_RADIUS, pal.surface.with_alpha(0.55));
+            }
+        }
+    }
+    if let Some(wait) = f.st.action_wait() {
+        let rows = f.st.quick_actions().len().div_ceil(2);
+        f.para(&wait.line, text::CAPTION, x, y + rows as f32 * 48.0, w, pal.soft, Align::Start);
+    }
 }
 
 pub(crate) fn human_size(bytes: u64) -> String {
@@ -630,12 +676,14 @@ pub fn paint_banner(f: &mut Frame) {
     p.fill_circle((18.0 + 5.0, cy), 5.0, pal.link);
     // Bold first part, soft second part, in one line.
     let (who, since) = f.st.banner_parts(&peer, &h);
-    let since = format!(" {since}");
     let who_l = p.label(&who, text::NAME);
-    let since_l = p.label(&since, text::BODY);
     let tx = 18.0 + 10.0 + 14.0;
     p.draw(&who_l, tx, cy - who_l.h / 2.0, pal.ink);
-    p.draw(&since_l, tx + who_l.w, cy - since_l.h / 2.0, pal.soft);
+    // A wait (a swap asked from here, a session reconnecting) is the first part alone.
+    if !since.is_empty() {
+        let since_l = p.label(&format!(" {since}"), text::BODY);
+        p.draw(&since_l, tx + who_l.w, cy - since_l.h / 2.0, pal.soft);
+    }
 
     // Buttons from the end: disconnect (solid red), swap (bordered, icon + label), chat (36 px icon button).
     let btn_h = 36.0;

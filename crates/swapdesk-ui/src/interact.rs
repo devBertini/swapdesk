@@ -779,10 +779,17 @@ impl UiState {
                 s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PairTitleWith).with(peer_name.clone())));
                 s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::PairCompare).with(peer_name.clone())));
                 s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PairCodeLabel).with(code.clone())));
-                s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::PairWarn).with(peer_name.clone())));
-                let waiting = self.pair_confirming;
-                s.add(ControlId::PairSame, UiRole::Button, self.name_of(MsgKey::PairSame)).disabled = waiting;
-                s.add(ControlId::PairDifferent, UiRole::Button, self.name_of(MsgKey::PairDifferent)).disabled = waiting;
+                if let Some(wait) = self.pair_wait() {
+                    // This side confirmed: the warning gives way to what is waited for, and the only way out is "Cancelar".
+                    s.text(UiRole::Text, wait.body);
+                    for b in wait.buttons {
+                        s.button(b.id, b.label);
+                    }
+                } else {
+                    s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::PairWarn).with(peer_name.clone())));
+                    s.add(ControlId::PairSame, UiRole::Button, self.name_of(MsgKey::PairSame));
+                    s.add(ControlId::PairDifferent, UiRole::Button, self.name_of(MsgKey::PairDifferent));
+                }
             }
             PairingState::Done { device_id } => {
                 let who = self.device_by_id(device_id).map(|d| d.name.clone()).or(name).unwrap_or_default();
@@ -987,6 +994,7 @@ impl UiState {
         if let SessionState::Reconnecting { attempt } = &session.state {
             s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer)));
             s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::ReconnectingBody).with(attempt.to_string())));
+            self.bar_progress(&mut s, self.reconnect_wait());
             s.button(ControlId::ReconnectDisconnect, self.name_of(MsgKey::Disconnect));
             return s.v;
         }
@@ -995,6 +1003,11 @@ impl UiState {
             s.text(UiRole::Heading, title);
             s.text(UiRole::Text, body);
             s.button(ControlId::SwapDeclinedClose, self.name_of(MsgKey::Close));
+        }
+        if let Some(w) = self.swap_wait() {
+            s.text(UiRole::Heading, w.title);
+            s.text(UiRole::Text, w.body);
+            self.bar_progress(&mut s, Some(w.bar));
         }
         s.region(Region::Toolbar);
         let screen_label = self.name_of(MsgKey::TbScreen);
@@ -1076,8 +1089,15 @@ impl UiState {
                     if self.admin_terminal_offered() && !self.term_is_admin() {
                         s.button(ControlId::TermAdmin, self.name_of(MsgKey::TermOpenAdmin));
                     }
+                    let waiting = self.actions_disabled();
                     for (kind, key) in self.quick_actions() {
                         s.button(ControlId::Action(kind), self.name_of(key));
+                        if waiting && let Some(c) = s.v.last_mut() {
+                            c.disabled = true;
+                        }
+                    }
+                    if let Some(w) = self.action_wait() {
+                        s.text(UiRole::Text, w.line);
                     }
                 }
                 DrawerTab::Files => self.files_controls(&mut s),
@@ -1097,6 +1117,16 @@ impl UiState {
             }
         }
         s.v
+    }
+
+    /// The countdown row of a waiting card as the accessibility tree reads it: a progress element whose value is the
+    /// time left (nothing when the wait has no deadline to show).
+    fn bar_progress(&self, s: &mut Specs, bar: Option<WaitBar>) {
+        let Some(WaitBar { text: Some(left), .. }) = bar else { return };
+        s.text(UiRole::Progress, left.clone());
+        if let Some(c) = s.v.last_mut() {
+            c.value = Some(left);
+        }
     }
 
     /// The quick action buttons in design order, with the label that fits the peer's system.
@@ -1148,11 +1178,20 @@ impl UiState {
     /// "MacBook do escritório controla este computador há 12 min".
     pub fn banner_text(&self, peer: &str, h: &SessionView) -> String {
         let (who, since) = self.banner_parts(peer, h);
-        format!("{who} {since}")
+        if since.is_empty() { who } else { format!("{who} {since}") }
     }
 
     /// The banner's two parts: who controls (bold) and since when (soft).
+    ///
+    /// While the hosted session reconnects, or this side's swap request waits, the first part says that
+    /// (`ReconnectingTitle`, `SwapWaitingTitle`) and the second is empty.
     pub fn banner_parts(&self, peer: &str, h: &SessionView) -> (String, String) {
+        if matches!(h.state, SessionState::Reconnecting { .. }) {
+            return (self.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer)), String::new());
+        }
+        if self.swap_requested() && self.swap.as_ref().is_some_and(|w| w.session_id == h.id) {
+            return (self.tm(&Msg::new(MsgKey::SwapWaitingTitle).with(peer)), String::new());
+        }
         let (controls, since) = match &h.state {
             SessionState::Active { since_ms, granted, .. } => (granted.has(Permission::Control), *since_ms),
             _ => (true, self.clock.now_ms),
@@ -1481,7 +1520,7 @@ impl UiState {
                     }
                 } else if let Some(h) = self.host_session().map(|h| h.id) {
                     // Waiting for the answer: the banner's button waits too, until the outcome comes back.
-                    self.swap = Some(SwapView { session_id: h, phase: SwapPhase::Requested { request_id: 0 } });
+                    self.begin_swap_request(h);
                     a.commands.push(Command::RequestSwap { session_id: h });
                 }
                 a.changed = Changed::ALL;
@@ -1494,6 +1533,8 @@ impl UiState {
                 self.drawer = None;
                 a.changed = Changed::VIEWER;
             }
+            // One at a time: a press while one waits is not sent (the buttons are disabled and say so).
+            ControlId::Action(_) if self.actions_disabled() => a.changed = Changed::NONE,
             ControlId::Action(kind) => {
                 if let Some(session_id) = self.session_id() {
                     a.commands.push(Command::RunAction { session_id, action: kind });
@@ -1579,6 +1620,12 @@ impl UiState {
         a.commands.push(Command::TermOpen { session_id, admin, cols: 80, rows: 24 });
     }
 
+    /// This side's swap request is on its way: the answer is awaited for [`SWAP_WAIT_S`].
+    fn begin_swap_request(&mut self, session_id: u64) {
+        self.swap = Some(SwapView { session_id, phase: SwapPhase::Requested { request_id: 0 } });
+        self.swap_left_s = SWAP_WAIT_S;
+    }
+
     /// This side asked to swap and the other has not answered yet.
     pub fn swap_requested(&self) -> bool {
         matches!(self.swap.as_ref().map(|s| &s.phase), Some(SwapPhase::Requested { .. }))
@@ -1633,7 +1680,7 @@ impl UiState {
                 if primary {
                     if let Some(session_id) = self.session_id() {
                         a.commands.push(Command::RequestSwap { session_id });
-                        self.swap = Some(SwapView { session_id, phase: SwapPhase::Requested { request_id: 0 } });
+                        self.begin_swap_request(session_id);
                     } else {
                         self.swap = None;
                     }

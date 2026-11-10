@@ -162,6 +162,12 @@ pub enum Fetch {
 /// The delay after which a pending fetch shows placeholders.
 pub const PLACEHOLDER_AFTER_MS: u64 = 100;
 
+/// The minute a lost session keeps reconnecting (the service's `ReconnectPolicy` window).
+pub const RECONNECT_WINDOW_S: u16 = 60;
+
+/// The seconds the asker waits for the other side's answer to a swap request before giving up.
+pub const SWAP_WAIT_S: u16 = 22;
+
 /// The body of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -220,12 +226,18 @@ pub struct SessionView {
     pub age_s: u16,
     /// The user pressed "Cancelar" before the service gave the entry its id: the id is cancelled when it arrives.
     pub(crate) cancel_asked: bool,
+    /// The role of the session's last `Active` state, kept while it is `Paused` or `Reconnecting`: a hosted session
+    /// that reconnects stays the banner's and never opens a viewer window.
+    pub role: Option<Role>,
+    /// Seconds left of the reconnect minute, counted by the interface from the first `Reconnecting` attempt (the
+    /// service sends attempts, not a deadline); `None` outside a reconnect or before its first attempt.
+    pub reconnect_left_s: Option<u16>,
 }
 
 impl SessionView {
     pub(crate) fn new(id: u64, device_id: String, state: SessionState) -> SessionView {
         let countdown_total_s = countdown_of(&state);
-        SessionView {
+        let mut view = SessionView {
             id,
             device_id,
             state,
@@ -236,6 +248,26 @@ impl SessionView {
             countdown_total_s,
             age_s: 0,
             cancel_asked: false,
+            role: None,
+            reconnect_left_s: None,
+        };
+        view.note_state();
+        view
+    }
+
+    /// What the current state says about the role and the reconnect minute.
+    fn note_state(&mut self) {
+        match &self.state {
+            SessionState::Active { role, .. } => {
+                self.role = Some(*role);
+                self.reconnect_left_s = None;
+            }
+            SessionState::Reconnecting { attempt } => {
+                if *attempt >= 1 && self.reconnect_left_s.is_none() {
+                    self.reconnect_left_s = Some(RECONNECT_WINDOW_S);
+                }
+            }
+            _ => self.reconnect_left_s = None,
         }
     }
 
@@ -245,6 +277,25 @@ impl SessionView {
             self.countdown_total_s = countdown_of(&state);
         }
         self.state = state;
+        self.note_state();
+    }
+
+    /// Is this session shown by the viewer window: an active viewer, or one that was and is paused or reconnecting.
+    fn is_viewer(&self) -> bool {
+        match &self.state {
+            SessionState::Active { role, .. } => *role == Role::Viewer,
+            SessionState::Paused { .. } | SessionState::Reconnecting { .. } => self.role != Some(Role::Host),
+            _ => false,
+        }
+    }
+
+    /// Is this session the one that makes this computer a host (the banner).
+    fn is_host(&self) -> bool {
+        match &self.state {
+            SessionState::Active { role, .. } => *role == Role::Host,
+            SessionState::Paused { .. } | SessionState::Reconnecting { .. } => self.role == Some(Role::Host),
+            _ => false,
+        }
     }
 
     /// Is this a connect entry still waiting (not a session)?
@@ -349,6 +400,37 @@ pub struct WaitCard {
     /// `None` on an ended card.
     pub bar: Option<WaitBar>,
     pub buttons: Vec<WaitButton>,
+}
+
+/// What the viewer shows while its own swap request waits for the other side: a card in the place and style of the
+/// "swap declined" card, with the countdown row and no button (there is no way to withdraw a request).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapWait {
+    /// The session the request was made on.
+    pub session_id: u64,
+    /// "Esperando o {peer} aceitar a inversão".
+    pub title: String,
+    /// "Se ninguém responder em 20 segundos, você continua controlando o {peer}."
+    pub body: String,
+    /// The countdown row, from 22 s.
+    pub bar: WaitBar,
+}
+
+/// The pairing card after "Os códigos são iguais": this side confirmed and the other has not yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairWait {
+    /// Replaces the `PairWarn` block under the code.
+    pub body: String,
+    /// Replaces the button row: `PairCancel` alone.
+    pub buttons: Vec<WaitButton>,
+}
+
+/// The line under the quick actions while one of them waits for the other computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionWait {
+    pub session_id: u64,
+    /// "Esperando o {peer} executar a ação…"
+    pub line: String,
 }
 
 /// The seconds a state counts down from, if it counts.
@@ -535,6 +617,8 @@ pub struct UiState {
     pub(crate) fetch: HashMap<DataKind, Fetch>,
     /// "Os códigos são iguais" was sent and the service has not answered: the buttons wait (never optimistic).
     pub(crate) pair_confirming: bool,
+    /// Seconds left of the 22 s the asker waits for an answer to its swap request.
+    pub(crate) swap_left_s: u16,
     /// The crash notice is showing (D12).
     pub(crate) crash_notice: bool,
     /// Seconds the device list has been answered and empty (F20): the "no computer found" card shows at 10.
@@ -604,6 +688,7 @@ impl UiState {
             last_new_device: None,
             fetch: HashMap::new(),
             pair_confirming: false,
+            swap_left_s: 0,
             crash_notice: false,
             empty_s: 0,
             rename: None,
@@ -829,21 +914,93 @@ impl UiState {
 
     /// The session shown in the viewer window, if any.
     pub fn viewer_session(&self) -> Option<&SessionView> {
-        self.sessions.iter().find(|s| match &s.state {
-            SessionState::Active { role, .. } => *role == Role::Viewer,
-            SessionState::Paused { .. } | SessionState::Reconnecting { .. } => true,
-            _ => false,
-        })
+        self.sessions.iter().find(|s| s.is_viewer())
     }
 
     /// The session that makes this computer a host (the banner).
     pub fn host_session(&self) -> Option<&SessionView> {
-        self.sessions.iter().find(|s| matches!(s.state, SessionState::Active { role: Role::Host, .. }))
+        self.sessions.iter().find(|s| s.is_host())
     }
 
     /// A session waking its device (shown in the main area, in place of the device's content).
     pub fn waking_session(&self) -> Option<&SessionView> {
         self.sessions.iter().find(|s| matches!(s.state, SessionState::Waking { .. }))
+    }
+
+    /// The countdown row of the viewer's "Reconectando" card: from [`RECONNECT_WINDOW_S`], counted by the interface
+    /// from the first attempt; the track alone until then. `None` when the viewer session is not reconnecting.
+    pub fn reconnect_wait(&self) -> Option<WaitBar> {
+        let s = self.viewer_session()?;
+        let SessionState::Reconnecting { .. } = s.state else { return None };
+        Some(match s.reconnect_left_s {
+            Some(left) => {
+                let left = left.min(RECONNECT_WINDOW_S);
+                WaitBar {
+                    fraction: f32::from(RECONNECT_WINDOW_S - left) / f32::from(RECONNECT_WINDOW_S),
+                    text: Some(crate::format::countdown(left)),
+                }
+            }
+            None => WaitBar { fraction: 0.0, text: None },
+        })
+    }
+
+    /// The viewer's swap card while its own request waits for the other side; `None` otherwise (also on the host,
+    /// whose banner says it in [`UiState::banner_parts`]).
+    pub fn swap_wait(&self) -> Option<SwapWait> {
+        let SwapView { session_id, phase: SwapPhase::Requested { .. } } = self.swap.as_ref()? else { return None };
+        if self.viewer_session()?.id != *session_id {
+            return None;
+        }
+        let peer = self.swap_peer_name();
+        let left = self.swap_left_s.min(SWAP_WAIT_S);
+        Some(SwapWait {
+            session_id: *session_id,
+            title: self.tm(&Msg::new(MsgKey::SwapWaitingTitle).with(peer.clone())),
+            body: self.tm(&Msg::new(MsgKey::SwapWaitingBody).with(peer)),
+            bar: WaitBar {
+                fraction: f32::from(SWAP_WAIT_S - left) / f32::from(SWAP_WAIT_S),
+                text: Some(crate::format::countdown(left)),
+            },
+        })
+    }
+
+    /// The pairing card's switched content while this side's confirmation waits for the other side's; `None` when
+    /// the card is not in that step.
+    pub fn pair_wait(&self) -> Option<PairWait> {
+        if !self.pair_confirming || !matches!(self.pairing.as_ref()?.state, PairingState::ShowCode { .. }) {
+            return None;
+        }
+        Some(PairWait {
+            body: self.t(MsgKey::PairWaitingBody),
+            buttons: vec![WaitButton {
+                id: ControlId::PairCancel,
+                label: self.t(MsgKey::PairCancel),
+                side: ButtonSide::Left,
+                primary: false,
+            }],
+        })
+    }
+
+    /// A quick action of this session waits for the other computer.
+    fn action_pending(&self, session_id: u64) -> bool {
+        self.pending
+            .values()
+            .any(|p| matches!(p.command, Command::RunAction { session_id: id, .. } if id == session_id))
+    }
+
+    /// While a quick action waits, every quick-action button is disabled (one at a time).
+    pub fn actions_disabled(&self) -> bool {
+        self.viewer_session().is_some_and(|s| self.action_pending(s.id))
+    }
+
+    /// The line under the quick actions while one waits; `None` when none does.
+    pub fn action_wait(&self) -> Option<ActionWait> {
+        let s = self.viewer_session()?;
+        if !self.action_pending(s.id) {
+            return None;
+        }
+        let peer = self.device_by_id(&s.device_id).map(|d| d.name.clone()).unwrap_or_default();
+        Some(ActionWait { session_id: s.id, line: self.tm(&Msg::new(MsgKey::ActionWaiting).with(peer)) })
     }
 
     /// The entry of a device that is waiting (connecting, prompted or waking).
@@ -1151,10 +1308,14 @@ impl UiState {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
             || self.incoming.is_some()
             || matches!(self.swap.as_ref().map(|s| &s.phase), Some(SwapPhase::Asked { .. }))
+            || self.swap_requested()
             || self.sessions.iter().any(|s| {
                 matches!(
                     s.state,
-                    SessionState::Waking { .. } | SessionState::Prompted { .. } | SessionState::Connecting
+                    SessionState::Waking { .. }
+                        | SessionState::Prompted { .. }
+                        | SessionState::Connecting
+                        | SessionState::Reconnecting { .. }
                 )
             })
             || !self.pending.is_empty()
@@ -1417,8 +1578,18 @@ impl UiState {
             *remaining_s -= 1;
             changed = changed.union(Changed::MAIN);
         }
+        if self.swap_requested() && self.swap_left_s > 0 {
+            self.swap_left_s -= 1;
+            changed = changed.union(Changed::ALL);
+        }
         let mut gave_up: Vec<(u64, String)> = Vec::new();
         for s in &mut self.sessions {
+            if let Some(left) = &mut s.reconnect_left_s
+                && *left > 0
+            {
+                *left -= 1;
+                changed = changed.union(Changed::ALL);
+            }
             match &mut s.state {
                 SessionState::Waking { remaining_s } | SessionState::Prompted { remaining_s } if *remaining_s > 0 => {
                     *remaining_s -= 1;
