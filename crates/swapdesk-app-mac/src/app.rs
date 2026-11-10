@@ -148,6 +148,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             swapdesk_shell_mac::set_shot(path.clone());
         }
         let startup = if scenario == Scenario::Carregando { state.startup_commands() } else { Vec::new() };
+        if let Some(file) = options.selftest.clone() {
+            crate::selftest::schedule_mock(file, Duration::from_secs(2));
+        }
         run_with_host(state, backend, waker, startup, ViewerHooks::default());
         return Ok(());
     }

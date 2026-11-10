@@ -95,6 +95,35 @@ fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
+/// The address field takes real key presses; what was typed and the keyboard in the field survive a state change and
+/// a repaint (the device list changed while the person types); Tab then moves the focus to the next control of the
+/// frame's order.
+fn typing_survives_a_repaint_and_tab_moves_on(mtm: MainThreadMarker) -> Result<(), String> {
+    let shell = open(mtm, Scenario::Inicio, ViewerHooks::default());
+    let canvas = &shell.main.canvas;
+    let address = ControlId::Edit(EditId::Address);
+    ensure!(canvas.paint_now(), "the canvas did not paint");
+    canvas.focus_control(address, true);
+    ensure!(canvas.editing() == Some(EditId::Address), "the address field did not take the keyboard");
+    ensure!(canvas.send_keys("192.168.1."), "the keys were not sent");
+    let typed = canvas.edit_text(EditId::Address);
+    ensure!(typed.as_deref() == Some("192.168.1."), "the field holds {typed:?}");
+
+    shell.refresh(Changed::ALL);
+    ensure!(canvas.paint_now(), "the canvas did not paint again");
+    let kept = canvas.edit_text(EditId::Address);
+    ensure!(kept.as_deref() == Some("192.168.1."), "the typed text was lost: {kept:?}");
+    ensure!(canvas.editing() == Some(EditId::Address), "the keyboard left the field");
+
+    let order = swapdesk_paint::input::tab_order(&shell.state.borrow(), WindowKind::Main, &canvas.widgets());
+    let next = swapdesk_paint::input::next_focus(&order, Some(address), false);
+    ensure!(next.is_some() && next != Some(address), "nothing follows the address field in {order:?}");
+    ensure!(canvas.send_keys("\t"), "Tab was not sent");
+    ensure!(canvas.focus() == next, "Tab moved the focus to {:?}, not {next:?}", canvas.focus());
+    close(&shell);
+    Ok(())
+}
+
 /// The render lane is attached once and detached before the window goes.
 fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -132,5 +161,6 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
     scenarios_build_their_windows(mtm)?;
+    typing_survives_a_repaint_and_tab_moves_on(mtm)?;
     render_slot_lifecycle(mtm)
 }

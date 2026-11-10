@@ -1,51 +1,87 @@
 //! The canvas: one flipped `NSView` that paints a window's shared frame (`swapdesk-paint`, D37) with the
-//! CoreGraphics painter and turns the mouse into the shared interaction (hover, press, activate, scroll), as the
-//! Windows window does. The view keeps what the pointer is doing and where the last frame put every control; the
-//! state stays in the shell.
+//! CoreGraphics painter, turns the mouse and the keyboard into the shared interaction (hover, press, activate,
+//! scroll, Tab order) and keeps a native text field over every edit slot the frame reports, as the Windows window
+//! does. The view keeps what the pointer is doing and where the last frame put every control; the state stays in the
+//! shell.
 //!
 //! Apple documentation: `NSView.draw(_:)` and `isFlipped` (developer.apple.com/documentation/appkit/nsview),
 //! `NSGraphicsContext.current` / `cgContext` (developer.apple.com/documentation/appkit/nsgraphicscontext),
 //! `NSTrackingArea` with `inVisibleRect` (developer.apple.com/documentation/appkit/nstrackingarea), the `NSResponder`
-//! mouse methods, `NSEvent.scrollingDeltaY` / `hasPreciseScrollingDeltas`, `NSCursor.set()`,
+//! mouse and key methods, `NSEvent.scrollingDeltaY` / `hasPreciseScrollingDeltas` / `keyCode`, `NSCursor.set()`,
 //! `NSMenu.popUp(positioning:at:in:)` (developer.apple.com/documentation/appkit/nsmenu),
-//! `NSView.bitmapImageRepForCachingDisplay(in:)` / `cacheDisplay(in:to:)` and
-//! `NSBitmapImageRep.representation(using:properties:)`.
+//! `NSView.bitmapImageRepForCachingDisplay(in:)` / `cacheDisplay(in:to:)`,
+//! `NSBitmapImageRep.representation(using:properties:)`, `NSTextField` (`isBordered`, `drawsBackground`,
+//! `focusRingType`, `placeholderAttributedString`, `currentEditor()`) and
+//! `NSControlTextEditingDelegate.control(_:textView:doCommandBy:)`
+//! (developer.apple.com/documentation/appkit/nscontroltexteditingdelegate).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSControlStateValueOn, NSCursor, NSEvent, NSGraphicsContext, NSMenu,
-    NSMenuItem, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSBitmapImageFileType, NSBitmapImageRep, NSControl, NSControlStateValueOn, NSControlTextEditingDelegate, NSCursor,
+    NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem, NSTextField, NSTextFieldDelegate,
+    NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSDictionary, NSObjectProtocol, NSPoint, NSRect, NSString};
-use swapdesk_paint::{Frame, Interaction, Output, Rect, Widget, input, layout_dump};
-use swapdesk_ui::{ControlId, WindowKind};
+use objc2_foundation::{
+    MainThreadMarker, NSAttributedString, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect,
+    NSSize, NSString,
+};
+use swapdesk_paint::{EditSlot, Frame, Interaction, Output, Rect, Widget, input, layout_dump};
+use swapdesk_ui::tokens::{Palette, palette, text};
+use swapdesk_ui::{ControlId, EditId, WindowKind};
 
 use crate::painter::{CgPainter, Fonts};
+use crate::views::color;
 
 /// What one notch of a wheel without precise deltas scrolls, in DIPs per line the system reports.
 const WHEEL_LINE: f32 = 20.0;
+/// The text of an `NSTextFieldCell` starts this far inside its frame.
+const CELL_INSET: f64 = 2.0;
+/// Virtual key codes (`kVK_Tab`, `kVK_Return`, `kVK_ANSI_KeypadEnter`, `kVK_Space`, `kVK_Escape`).
+const KEY_TAB: u16 = 48;
+const KEY_RETURN: u16 = 36;
+const KEY_ENTER: u16 = 76;
+const KEY_SPACE: u16 = 49;
+const KEY_ESCAPE: u16 = 53;
 
 thread_local! {
     /// The embedded face and the laid-out labels, shared by every canvas (main thread only).
     static FONTS: Fonts = Fonts::new();
 }
 
+/// A native text input over an edit slot of the frame.
+#[derive(Clone)]
+struct Field {
+    id: EditId,
+    view: Retained<NSTextField>,
+    /// The height of its one line of text.
+    height: f64,
+}
+
 pub struct CanvasIvars {
     kind: WindowKind,
     ix: RefCell<Interaction>,
-    /// What the last paint registered: the controls, the areas and the scroll range.
+    /// What the last paint registered: the controls, the edit slots, the areas and the scroll range.
     out: RefCell<Output>,
     painted: Cell<bool>,
     /// The option chosen in the menu that is open (see [`CanvasView::pick`]).
     picked: Cell<Option<usize>>,
     /// Development: the first paint writes its layout dump here (`--shot`).
     dump: RefCell<Option<PathBuf>>,
+    /// The native inputs made so far; one whose slot is not drawn is hidden, not removed (it keeps its text).
+    fields: RefCell<Vec<Field>>,
+    /// A placement of the fields is queued on the main queue.
+    placing: Cell<bool>,
+    /// The theme the fields' colours were set for.
+    fields_dark: Cell<Option<bool>>,
 }
 
 define_class!(
@@ -84,6 +120,20 @@ define_class!(
             true
         }
 
+        // The keyboard went to a text field (or another view): the ring of a painted control goes, as after a click.
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            let hide = {
+                let mut ix = self.ivars().ix.borrow_mut();
+                let on_edit = matches!(ix.focus, Some(ControlId::Edit(_)));
+                !on_edit && std::mem::replace(&mut ix.focus_visible, false)
+            };
+            if hide {
+                self.setNeedsDisplay(true);
+            }
+            true
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             self.paint();
@@ -119,8 +169,16 @@ define_class!(
                 ix.focus = hit;
                 ix.focus_visible = false;
             }
+            // A click on the box of a text input (around the native field) puts the keyboard in the field.
+            let field = match hit {
+                Some(ControlId::Edit(e)) => self.field(e),
+                _ => None,
+            };
             if let Some(w) = self.window() {
-                w.makeFirstResponder(Some(self));
+                match &field {
+                    Some(f) => w.makeFirstResponder(Some(f)),
+                    None => w.makeFirstResponder(Some(self)),
+                };
             }
             self.setNeedsDisplay(true);
         }
@@ -161,11 +219,36 @@ define_class!(
             }
         }
 
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if !self.key(event) {
+                // SAFETY: forwards the same event to NSView's implementation.
+                unsafe { msg_send![super(self), keyDown: event] }
+            }
+        }
+
         #[unsafe(method(menuPicked:))]
         fn menu_picked(&self, sender: &NSMenuItem) {
             self.ivars().picked.set(usize::try_from(sender.tag()).ok());
         }
     }
+
+    // SAFETY: the selectors and signatures are the protocol's (the text view is taken as a plain object).
+    unsafe impl NSControlTextEditingDelegate for CanvasView {
+        // Return, Tab, Shift+Tab and Esc typed in a field.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn do_command(&self, control: &NSControl, _text_view: &AnyObject, command: Sel) -> bool {
+            self.field_command(control, command)
+        }
+
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn did_end_editing(&self, notification: &NSNotification) {
+            self.field_left(notification);
+        }
+    }
+
+    // SAFETY: `NSTextFieldDelegate` adds only optional methods, none implemented here.
+    unsafe impl NSTextFieldDelegate for CanvasView {}
 );
 
 impl CanvasView {
@@ -177,6 +260,9 @@ impl CanvasView {
             painted: Cell::new(false),
             picked: Cell::new(None),
             dump: RefCell::new(None),
+            fields: RefCell::default(),
+            placing: Cell::new(false),
+            fields_dark: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<CanvasView> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -223,14 +309,19 @@ impl CanvasView {
         Some(rep)
     }
 
-    /// Paints now, without waiting for the window's next display pass: `true` when the frame was painted.
+    /// Paints now and places the text fields, without waiting for the window's next display pass: `true` when the
+    /// frame was painted.
     pub fn paint_now(&self) -> bool {
         self.ivars().painted.set(false);
-        self.snapshot().is_some() && self.painted()
+        let painted = self.snapshot().is_some() && self.painted();
+        self.place_fields();
+        painted
     }
 
-    /// Development (`--shot`): the view as a PNG at `path`.
+    /// Development (`--shot`): the view with its text fields as a PNG at `path`.
     pub fn save_png(&self, path: &Path) -> bool {
+        // The first pass places the fields the picture must show.
+        self.paint_now();
         let Some(rep) = self.snapshot() else { return false };
         // SAFETY: PNG takes no properties: the dictionary is empty.
         let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) };
@@ -308,8 +399,7 @@ impl CanvasView {
                 // the view is flipped, so its CTM is y-down in points, as the painter expects.
                 let painter = unsafe { CgPainter::new(ctx, fonts, scale, size) };
                 let ix = iv.ix.borrow();
-                // Until the native text fields sit in the edit slots, the frame draws their values itself.
-                let mut frame = Frame::new(&painter, state, &ix, size, true);
+                let mut frame = Frame::new(&painter, state, &ix, size, false);
                 frame.video_under = iv.kind == WindowKind::Viewer;
                 swapdesk_paint::paint(frame, iv.kind)
             })
@@ -327,5 +417,340 @@ impl CanvasView {
         }
         *iv.out.borrow_mut() = out;
         iv.painted.set(true);
+        // The view tree must not change inside `drawRect:`: the fields follow on the next turn of the main queue.
+        if !iv.placing.replace(true) {
+            DispatchQueue::main().exec_async(crate::shell::place_fields);
+        }
     }
+
+    // ----- the keyboard -----
+
+    /// A key the canvas itself takes: `false` leaves it to AppKit.
+    fn key(&self, event: &NSEvent) -> bool {
+        let kind = self.ivars().kind;
+        match event.keyCode() {
+            KEY_TAB => {
+                self.move_focus(event.modifierFlags().contains(NSEventModifierFlags::Shift));
+                true
+            }
+            KEY_RETURN | KEY_ENTER | KEY_SPACE => {
+                let focus = self.ivars().ix.borrow().focus;
+                if let Some(id) = focus.filter(|i| !matches!(i, ControlId::Edit(_))) {
+                    crate::shell::activate_from(kind, id);
+                }
+                true
+            }
+            KEY_ESCAPE => {
+                // The rename field closes without saving, wherever the keyboard is in the window.
+                crate::shell::cancel_rename();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The field that has the keyboard.
+    pub fn editing(&self) -> Option<EditId> {
+        let fields = self.ivars().fields.borrow();
+        fields.iter().find(|f| !f.view.isHidden() && f.view.currentEditor().is_some()).map(|f| f.id)
+    }
+
+    /// Tab and Shift+Tab: the next control of the frame's Tab order takes the focus and shows its ring.
+    fn move_focus(&self, backwards: bool) {
+        let iv = self.ivars();
+        let order = crate::shell::with_state(|st| input::tab_order(st, iv.kind, &iv.out.borrow().widgets));
+        if let Some(next) = input::next_focus(&order.unwrap_or_default(), self.focus(), backwards) {
+            self.focus_control(next, true);
+        }
+    }
+
+    /// Gives control `id` the focus; `visible` shows the ring (keyboard navigation). A text input gets the keyboard
+    /// in its native field, any other control leaves it with the canvas.
+    pub fn focus_control(&self, id: ControlId, visible: bool) {
+        {
+            let mut ix = self.ivars().ix.borrow_mut();
+            ix.focus = Some(id);
+            ix.focus_visible = visible;
+        }
+        let field = match id {
+            ControlId::Edit(e) => self.field(e),
+            _ => None,
+        };
+        if let Some(w) = self.window() {
+            match &field {
+                Some(f) => w.makeFirstResponder(Some(f)),
+                None => w.makeFirstResponder(Some(self)),
+            };
+        }
+        self.setNeedsDisplay(true);
+    }
+
+    /// The control that has the focus: the field being typed in, else the painted control.
+    pub fn focus(&self) -> Option<ControlId> {
+        self.editing().map(ControlId::Edit).or(self.ivars().ix.borrow().focus)
+    }
+
+    fn take_keyboard(&self) {
+        if let Some(w) = self.window() {
+            w.makeFirstResponder(Some(self));
+        }
+    }
+
+    // ----- the native text fields -----
+
+    /// The visible field of input `id`.
+    fn field(&self, id: EditId) -> Option<Retained<NSTextField>> {
+        let fields = self.ivars().fields.borrow();
+        fields.iter().find(|f| f.id == id && !f.view.isHidden()).map(|f| f.view.clone())
+    }
+
+    /// Which input `control` is, when it is one of this canvas's fields.
+    pub fn edit_of(&self, control: &NSControl) -> Option<EditId> {
+        let wanted = std::ptr::from_ref(control).cast::<c_void>();
+        let fields = self.ivars().fields.borrow();
+        fields.iter().find(|f| Retained::as_ptr(&f.view).cast::<c_void>() == wanted).map(|f| f.id)
+    }
+
+    /// What input `id` holds (`None` when it is not on screen).
+    pub fn edit_text(&self, id: EditId) -> Option<String> {
+        self.field(id).map(|f| f.stringValue().to_string())
+    }
+
+    /// Creates, moves, fills and hides the native fields to match the edit slots of the last paint. Never called
+    /// inside `drawRect:`. No borrow of the field list is held across an AppKit call that can call the delegate back.
+    pub fn place_fields(&self) {
+        let iv = self.ivars();
+        iv.placing.set(false);
+        let Some(dark) = crate::shell::with_state(|st| st.dark()) else { return };
+        let pal = palette(dark);
+        let recolour = iv.fields_dark.replace(Some(dark)) != Some(dark);
+        let slots: Vec<EditSlot> = iv.out.borrow().edits.clone();
+        let known: Vec<Field> = iv.fields.borrow().clone();
+        for slot in &slots {
+            let found = known.iter().find(|f| f.id == slot.id).cloned();
+            let created = found.is_none();
+            let field = match found {
+                Some(f) => f,
+                None => {
+                    let Some(f) = self.make_field(slot.id) else { continue };
+                    iv.fields.borrow_mut().push(f.clone());
+                    f
+                }
+            };
+            let view = &field.view;
+            if created || recolour {
+                style_field(view, pal, &slot.placeholder);
+            }
+            // One line of text, centred in the slot; the cell's own inset is taken back so the text starts where the
+            // frame would draw it.
+            let frame = NSRect::new(
+                NSPoint::new(
+                    f64::from(slot.rect.x) - CELL_INSET,
+                    f64::from(slot.rect.y) + (f64::from(slot.rect.h) - field.height) / 2.0,
+                ),
+                NSSize::new(f64::from(slot.rect.w) + 2.0 * CELL_INSET, field.height),
+            );
+            if view.frame() != frame {
+                view.setFrame(frame);
+            }
+            let was_hidden = view.isHidden();
+            if was_hidden {
+                view.setHidden(false);
+            }
+            let value = NSString::from_str(&slot.value);
+            if slot.id == EditId::Rename && (created || was_hidden) {
+                // The rename field opens prefilled, with the keyboard in it and its text selected.
+                view.setStringValue(&value);
+                self.focus_control(ControlId::Edit(EditId::Rename), false);
+                if let Some(editor) = view.currentEditor() {
+                    editor.setSelectedRange(NSRange::new(0, value.length()));
+                }
+            } else if created {
+                view.setStringValue(&value);
+            } else if slot.id != EditId::Rename
+                && view.currentEditor().is_none()
+                && !slot.value.is_empty()
+                && view.stringValue().to_string() != slot.value
+            {
+                // The state's value wins while nobody types; the rename field keeps what was typed.
+                view.setStringValue(&value);
+            }
+        }
+        for field in known.iter().filter(|f| !f.view.isHidden() && !slots.iter().any(|s| s.id == f.id)) {
+            if field.view.currentEditor().is_some() {
+                self.take_keyboard();
+            }
+            field.view.setHidden(true);
+        }
+    }
+
+    /// A borderless, transparent, one-line field in the frame's body type, with this view as its delegate.
+    fn make_field(&self, id: EditId) -> Option<Field> {
+        let view = NSTextField::initWithFrame(NSTextField::alloc(self.mtm()), NSRect::ZERO);
+        view.setBordered(false);
+        view.setBezeled(false);
+        view.setDrawsBackground(false);
+        view.setFocusRingType(NSFocusRingType::None);
+        view.setUsesSingleLineMode(true);
+        if let Some(cell) = view.cell() {
+            cell.setScrollable(true);
+            cell.setWraps(false);
+        }
+        let font = FONTS.with(|fonts| fonts.font(text::BODY.size, text::BODY.weight))?;
+        // SAFETY: a CTFont is toll-free bridged to NSFont; the painter's cache keeps it alive and the field retains it.
+        view.setFont(Some(unsafe { &*font.get().cast::<NSFont>() }));
+        // SAFETY: the delegate is this view, the field's superview, which outlives it; the property is weak.
+        unsafe { view.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        let height = view.fittingSize().height;
+        self.addSubview(&view);
+        Some(Field { id, view, height })
+    }
+
+    /// Return, Tab, Shift+Tab and Esc typed in field `control`: `true` when the canvas handled the command.
+    fn field_command(&self, control: &NSControl, command: Sel) -> bool {
+        let Some(id) = self.edit_of(control) else { return false };
+        if command == sel!(insertNewline:) {
+            crate::shell::submit_edit(id, control.stringValue().to_string());
+            if id == EditId::Chat {
+                control.setStringValue(&NSString::from_str(""));
+            }
+            // The rename field keeps the keyboard: a refused name is corrected in place.
+            if id != EditId::Rename {
+                self.take_keyboard();
+            }
+            true
+        } else if command == sel!(insertTab:) {
+            self.move_focus(false);
+            true
+        } else if command == sel!(insertBacktab:) {
+            self.move_focus(true);
+            true
+        } else if command == sel!(cancelOperation:) {
+            match id {
+                EditId::Rename => crate::shell::activate_from(self.ivars().kind, ControlId::RenameCancel),
+                EditId::Name => {
+                    let name = crate::shell::with_state(|st| st.settings().map(|s| s.name.clone())).flatten();
+                    if let Some(name) = name {
+                        control.setStringValue(&NSString::from_str(&name));
+                    }
+                }
+                EditId::Address | EditId::Chat => {}
+            }
+            self.take_keyboard();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The keyboard left a field: this computer's name is saved when its field is left, as on Windows.
+    fn field_left(&self, notification: &NSNotification) {
+        let Some(object) = notification.object() else { return };
+        let Some(control) = object.downcast_ref::<NSControl>() else { return };
+        if self.edit_of(control) == Some(EditId::Name) {
+            crate::shell::submit_edit(EditId::Name, control.stringValue().to_string());
+        }
+    }
+
+    // ----- development: the capture's field dump and the self-test's input -----
+
+    /// One line per edit slot of the last paint: the slot, and the native field's frame and visibility.
+    pub fn fields_dump(&self) -> String {
+        let iv = self.ivars();
+        let fields = iv.fields.borrow();
+        let mut s = String::new();
+        for slot in &iv.out.borrow().edits {
+            let r = slot.rect;
+            let _ = write!(s, "field {:?} slot {:.2} {:.2} {:.2} {:.2}", slot.id, r.x, r.y, r.w, r.h);
+            let _ = match fields.iter().find(|f| f.id == slot.id) {
+                Some(f) => {
+                    let fr = f.view.frame();
+                    writeln!(
+                        s,
+                        " frame {:.2} {:.2} {:.2} {:.2} {}",
+                        fr.origin.x,
+                        fr.origin.y,
+                        fr.size.width,
+                        fr.size.height,
+                        if f.view.isHidden() { "hidden" } else { "visible" }
+                    )
+                }
+                None => writeln!(s, " missing"),
+            };
+        }
+        s
+    }
+
+    /// A mouse click (down and up) on control `id`, sent through the window as AppKit sends the mouse.
+    pub fn send_click(&self, id: ControlId) -> bool {
+        let (Some(rect), Some(window)) = (self.rect_of(id), self.window()) else { return false };
+        let (x, y) = rect.center();
+        let at = self.convertPoint_toView(NSPoint::new(f64::from(x), f64::from(y)), None);
+        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                at,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            );
+            let Some(event) = event else { return false };
+            window.sendEvent(&event);
+        }
+        true
+    }
+
+    /// Key presses sent through the window to whatever has the keyboard: each character of `text`, in order.
+    pub fn send_keys(&self, text: &str) -> bool {
+        let Some(window) = self.window() else { return false };
+        for c in text.chars() {
+            let code = match c {
+                '\r' => KEY_RETURN,
+                '\t' => KEY_TAB,
+                _ => 0,
+            };
+            let chars = NSString::from_str(&c.to_string());
+            for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    kind,
+                    NSPoint::new(0.0, 0.0),
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    window.windowNumber(),
+                    None,
+                    &chars,
+                    &chars,
+                    false,
+                    code,
+                );
+                let Some(event) = event else { return false };
+                window.sendEvent(&event);
+            }
+        }
+        true
+    }
+}
+
+/// The colours of a field for the palette: ink for the text, soft for the placeholder (in the same face).
+fn style_field(view: &NSTextField, pal: &Palette, placeholder: &str) {
+    view.setTextColor(Some(&color(pal.ink)));
+    let Some(font) = view.font() else { return };
+    let soft = color(pal.soft);
+    // SAFETY: AppKit's attribute name constants are immutable strings; each value has the type its key documents
+    // (NSFont, NSColor).
+    let text = unsafe {
+        let keys = [NSFontAttributeName, NSForegroundColorAttributeName];
+        let values: [&AnyObject; 2] = [font.as_ref(), soft.as_ref()];
+        let attrs = NSDictionary::from_slices(&keys, &values);
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(placeholder),
+            Some(&attrs),
+        )
+    };
+    view.setPlaceholderAttributedString(Some(&text));
 }

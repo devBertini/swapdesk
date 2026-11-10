@@ -26,23 +26,66 @@ use crate::pipeline::MacViewer;
 /// How long the run loop has to reach the check before the watchdog ends the process.
 const WATCHDOG: Duration = Duration::from_secs(30);
 
-/// Queues the check `delay` after the run loop starts.
-pub fn schedule(file: PathBuf, delay: Duration, service_addrs: String, viewer: Arc<MacViewer>) {
-    let watchdog_file = file.clone();
+/// The name the mock self-test types into the rename field.
+const MOCK_NAME: &str = "Mac da sala";
+/// How long the mock backend gets to answer the rename before the report is written.
+const MOCK_ANSWER: Duration = Duration::from_millis(1500);
+
+/// Ends the process with status 3 if the run loop never reaches the check.
+fn watchdog(file: &std::path::Path) {
+    let file = file.with_extension("watchdog");
     std::thread::spawn(move || {
         std::thread::sleep(WATCHDOG);
-        let _ = std::fs::write(watchdog_file.with_extension("watchdog"), "the run loop did not reach the self-test\n");
+        let _ = std::fs::write(file, "the run loop did not reach the self-test\n");
         std::process::exit(3);
     });
+}
+
+/// Writes the report where a reader never sees half of it and asks the app to quit.
+fn finish(file: &std::path::Path, report: String) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let tmp = file.with_extension("tmp");
+    if std::fs::write(&tmp, report).and_then(|()| std::fs::rename(&tmp, file)).is_err() {
+        std::process::exit(4);
+    }
+    NSApplication::sharedApplication(mtm).terminate(None);
+}
+
+/// Queues the check `delay` after the run loop starts.
+pub fn schedule(file: PathBuf, delay: Duration, service_addrs: String, viewer: Arc<MacViewer>) {
+    watchdog(&file);
     let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
     let queued = DispatchQueue::main().after(when, move || {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let report = report(mtm, &service_addrs, &viewer);
-        let tmp = file.with_extension("tmp");
-        if std::fs::write(&tmp, report).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
-            std::process::exit(4);
+        finish(&file, report);
+    });
+    if queued.is_err() {
+        std::process::exit(5);
+    }
+}
+
+/// `Swapdesk --mock <scenario> --selftest <file>`: the interface alone, on the mock backend. `delay` after the run
+/// loop starts, a click on the sidebar, then a paired device renamed through its native text field with real key
+/// events; once the mock backend had time to answer, the report is written: `selftest=ok`, `mode=mock`,
+/// `click.activated`, `field.typed` (the field held exactly the typed name), `rename.ok` (the device carries it and
+/// the field closed).
+pub fn schedule_mock(file: PathBuf, delay: Duration) {
+    watchdog(&file);
+    let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        let click = swapdesk_shell_mac::selftest_click() == Some(true);
+        let typed = swapdesk_shell_mac::selftest_rename_begin(MOCK_NAME) == Some(true);
+        let later = DispatchTime::try_from(MOCK_ANSWER).unwrap_or(DispatchTime::NOW);
+        let queued = DispatchQueue::main().after(later, move || {
+            let renamed = swapdesk_shell_mac::selftest_rename_end(MOCK_NAME) == Some(true);
+            let report =
+                format!("selftest=ok\nmode=mock\nclick.activated={click}\nfield.typed={typed}\nrename.ok={renamed}\n");
+            finish(&file, report);
+        });
+        if queued.is_err() {
+            std::process::exit(5);
         }
-        NSApplication::sharedApplication(mtm).terminate(None);
     });
     if queued.is_err() {
         std::process::exit(5);

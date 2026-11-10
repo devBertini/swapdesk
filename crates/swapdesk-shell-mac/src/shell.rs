@@ -16,12 +16,12 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSControl,
-    NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel,
-    NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSString, NSTimer, ns_string,
+    NSObjectProtocol, NSString, NSTimer, NSUserDefaults, ns_string,
 };
 use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::layout;
@@ -173,10 +173,8 @@ const VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
 
 struct MainWindow {
     window: Retained<NSWindow>,
-    /// The content view: it paints the shared frame and takes the mouse.
+    /// The content view: it paints the shared frame, takes the mouse and the keyboard and holds the text fields.
     canvas: Retained<CanvasView>,
-    /// The native text inputs over the frame's edit slots.
-    fields: RefCell<Vec<(EditId, Retained<NSTextField>)>>,
 }
 
 /// The appearance `SWAPDESK_THEME=dark|light` asks for (development), `None` without it.
@@ -237,6 +235,21 @@ pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
     with_shell(|s| s.activate_from(kind, id));
 }
 
+/// Return in a text field (or the keyboard leaving this computer's name): `text` is what input `id` holds.
+pub(crate) fn submit_edit(id: EditId, text: String) {
+    with_shell(|s| s.submit_edit(id, text));
+}
+
+/// Esc in the main window.
+pub(crate) fn cancel_rename() {
+    with_shell(|s| s.cancel_rename());
+}
+
+/// The main-queue block a canvas posts after a paint: the native text fields follow the frame's edit slots.
+pub(crate) fn place_fields() {
+    with_shell(|s| s.main.canvas.place_fields());
+}
+
 /// The main-queue block the waker posts.
 pub(crate) fn wake_on_main() {
     with_shell(|s| s.drain_backend());
@@ -294,6 +307,12 @@ fn start_with(
 ) -> Rc<Shell> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // The system's font smoothing thickens the stems of text. The painter draws without it
+    // (`CGContextSetShouldSmoothFonts`), and so must the native text fields over the frame, or a typed value looks
+    // bolder than the text around it. CoreGraphics reads `AppleFontSmoothing` from the app's own preferences: a
+    // registered default does not reach it (tried on macOS 27.2), so the value is written there, before any text is
+    // drawn.
+    NSUserDefaults::standardUserDefaults().setInteger_forKey(0, ns_string!("AppleFontSmoothing"));
     let controller = Controller::create(mtm);
 
     // R-UI-10: UI-thread work over 16 ms goes to stderr with its name and duration, nothing else.
@@ -314,7 +333,7 @@ fn start_with(
         backend,
         waker,
         hooks,
-        main: MainWindow { window, canvas, fields: RefCell::new(Vec::new()) },
+        main: MainWindow { window, canvas },
         viewer: RefCell::new(None),
         banner: RefCell::new(None),
         tick_timer: RefCell::new(None),
@@ -363,6 +382,24 @@ pub fn status_item_present() -> bool {
 /// sends the mouse (`sendEvent:`). `Some(true)` when the screen changed, `None` when there was nothing to click.
 pub fn selftest_click() -> Option<bool> {
     with_shell(|s| s.selftest_click()).flatten()
+}
+
+/// Development (`--mock <scenario> --selftest`): opens the first paired device, clicks "Renomear" and types `name`
+/// and Return into the native field with real key events. `Some(true)` when the field held exactly `name` before the
+/// Return; `None` when a step had nothing to act on. The backend answers the rename later: see
+/// [`selftest_rename_end`].
+pub fn selftest_rename_begin(name: &str) -> Option<bool> {
+    with_shell(|s| s.selftest_rename_begin(name)).flatten()
+}
+
+/// Development: after [`selftest_rename_begin`] and the backend's answer, the device carries `name` and the rename
+/// field is closed.
+pub fn selftest_rename_end(name: &str) -> Option<bool> {
+    with_shell(|s| {
+        let state = s.state.borrow();
+        state.selected_device().map(|d| d.name == name && state.renaming().is_none())
+    })
+    .flatten()
 }
 
 fn clear_shell() {
@@ -486,21 +523,14 @@ impl Shell {
 
     fn dispatch(&self, act: Activation) {
         match act.effect {
-            Some(Effect::FocusEdit(e)) => {
-                let fields = self.main.fields.borrow();
-                if let Some((_, f)) = fields.iter().find(|(id, _)| *id == e) {
-                    self.main.window.makeFirstResponder(Some(f));
-                }
-            }
+            Some(Effect::FocusEdit(e)) => self.main.canvas.focus_control(ControlId::Edit(e), true),
             Some(Effect::SaveLog) => self.save_log(),
             // The Mac shell has no crash marker yet (D12 is Windows first): OpenLogs is never produced there.
             // The file panel's pickers (stage 44) are a Windows shell feature for now: the Mac panel is a later stage.
             Some(Effect::PickFiles) | Some(Effect::PickReceiveFolder) => {}
             // "Salvar" of the rename field: the field's text goes through `submit_edit` like Enter does.
             Some(Effect::SubmitEdit(e)) => {
-                let text =
-                    self.main.fields.borrow().iter().find(|(id, _)| *id == e).map(|(_, f)| f.stringValue().to_string());
-                if let Some(text) = text {
+                if let Some(text) = self.main.canvas.edit_text(e) {
                     let again = self.state.borrow_mut().submit_edit(e, text);
                     self.send_commands(again.commands);
                     self.refresh(again.changed);
@@ -515,6 +545,23 @@ impl Shell {
 
     fn activate(&self, id: ControlId) {
         let act = self.state.borrow_mut().activate(id);
+        self.dispatch(act);
+    }
+
+    /// What a text field of a canvas holds goes to the state. An address waiting for its 150 ms goes now. A field can
+    /// lose the keyboard in the middle of the shell's own work on the state: that call is dropped, the field keeps
+    /// its text.
+    fn submit_edit(&self, id: EditId, text: String) {
+        if id == EditId::Address {
+            self.debounce.borrow_mut().flush();
+            if let Some(timer) = self.debounce_timer.borrow_mut().take() {
+                timer.invalidate();
+            }
+        }
+        let act = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.submit_edit(id, text),
+            Err(_) => return,
+        };
         self.dispatch(act);
     }
 
@@ -591,9 +638,6 @@ impl Shell {
                     sender.downcast_ref::<NSTextField>().map(|f| f.stringValue().to_string()).unwrap_or_default();
                 self.debounce.borrow_mut().flush();
                 let act = self.state.borrow_mut().submit_edit(e, text);
-                if e == EditId::Address {
-                    self.clear_field(e);
-                }
                 self.dispatch(act);
             }
             Action::Select(select) => {
@@ -648,19 +692,11 @@ impl Shell {
         }
     }
 
-    fn clear_field(&self, e: EditId) {
-        if let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e) {
-            f.setStringValue(&ns(""));
-        }
-    }
-
     /// A key in a text field: the address field acts 150 ms after the last key (R-UI-4).
     fn text_changed(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
         let Some(field) = obj.downcast_ref::<NSTextField>() else { return };
-        let is_address =
-            self.main.fields.borrow().iter().any(|(id, f)| *id == EditId::Address && std::ptr::eq(&**f, field));
-        if !is_address {
+        if self.main.canvas.edit_of(field) != Some(EditId::Address) {
             return;
         }
         let now = self.started.elapsed().as_millis() as u64;
@@ -906,6 +942,8 @@ impl Shell {
         }
         // The main window's content, painted into a bitmap: it needs no screen, so it comes out with the Mac locked too.
         self.main.canvas.save_png(&path.with_extension("content.png"));
+        // Where each native text field sits against the slot the frame drew for it.
+        let _ = std::fs::write(path.with_extension("fields.txt"), self.main.canvas.fields_dump());
         // A scenario with a session films the viewer window, any other the main window.
         let window = self.viewer.borrow().as_ref().map_or(self.main.window.windowNumber(), |v| v.window.windowNumber());
         let path = path.clone();
@@ -953,23 +991,31 @@ impl Shell {
         }
         let before = self.state.borrow().screen();
         let target = if before == swapdesk_ui::Screen::Settings { ControlId::NavHome } else { ControlId::NavSettings };
-        let (x, y) = canvas.rect_of(target)?.center();
-        let at = canvas.convertPoint_toView(NSPoint::new(f64::from(x), f64::from(y)), None);
-        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
-            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                kind,
-                at,
-                NSEventModifierFlags::empty(),
-                0.0,
-                self.main.window.windowNumber(),
-                None,
-                0,
-                1,
-                1.0,
-            )?;
-            self.main.window.sendEvent(&event);
+        if !canvas.send_click(target) {
+            return None;
         }
         Some(self.state.borrow().screen() != before)
+    }
+
+    /// A click on control `id` of the main window as it is now: the frame is painted first, so the control is where
+    /// the state puts it.
+    fn selftest_press(&self, id: ControlId) -> Option<()> {
+        let canvas = &self.main.canvas;
+        (canvas.paint_now() && canvas.send_click(id)).then_some(())
+    }
+
+    fn selftest_rename_begin(&self, name: &str) -> Option<bool> {
+        let device = self.state.borrow().devices().iter().position(|d| d.paired)?;
+        self.selftest_press(ControlId::Device(u16::try_from(device).ok()?))?;
+        self.selftest_press(ControlId::RenameDevice)?;
+        // The rename field appears with the next paint, prefilled and selected: typing replaces the old name.
+        let canvas = &self.main.canvas;
+        canvas.paint_now();
+        canvas.edit_text(EditId::Rename)?;
+        canvas.send_keys(name);
+        let typed = canvas.edit_text(EditId::Rename)? == name;
+        canvas.send_keys("\r");
+        Some(typed)
     }
 
     /// A request that needs an answer brings the main window up.

@@ -53,7 +53,7 @@ impl Fonts {
     }
 
     /// The face at `size` points and CSS `weight` (the variable font's 'wght' axis).
-    fn font(&self, size: f32, weight: u16) -> Option<std::rc::Rc<Owned>> {
+    pub(crate) fn font(&self, size: f32, weight: u16) -> Option<std::rc::Rc<Owned>> {
         let key = (size.to_bits(), weight);
         if let Some(f) = self.fonts.borrow().get(&key) {
             return f.clone();

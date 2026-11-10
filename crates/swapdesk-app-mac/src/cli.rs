@@ -5,7 +5,8 @@
 //! - `--scratch`: development. The secrets go to a throwaway keychain file and folder in the temp directory, the
 //!   ports are chosen by the system and nothing of the owner's real Swapdesk identity is touched; both are removed at exit.
 //! - `--selftest <file>`: development. Implies `--scratch`. Once the main window is up the app writes what it sees (the
-//!   windows, the service) to `<file>` and quits by itself.
+//!   windows, the service) to `<file>` and quits by itself. With `--mock <scenario>` it checks the interface alone: a
+//!   click, typing in a text field and a rename on the mock backend.
 //! - `--drive-host <dir>`: development, only in a build with the `dev-harness` feature. Implies `--scratch` but keeps
 //!   the real ports (47820/47821): a scripted user pairs with the viewer through code files in `<dir>`, accepts its
 //!   session and quits when it ends (`host.log` in `<dir>` holds the markers and `HOST_RESULT`).
@@ -50,8 +51,7 @@ impl core::fmt::Display for CliError {
     }
 }
 
-pub const USAGE: &str =
-    "Swapdesk [--scratch] [--selftest <file>] [--drive-host <dir>] | Swapdesk --mock <scenario> [--shot <png>]";
+pub const USAGE: &str = "Swapdesk [--scratch] [--selftest <file>] [--drive-host <dir>] | Swapdesk --mock <scenario> [--shot <png>] [--selftest <file>]";
 
 /// Parses the arguments after the program name.
 pub fn parse(args: &[String]) -> Result<Options, CliError> {
