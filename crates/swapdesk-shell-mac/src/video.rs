@@ -13,13 +13,19 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use objc2::rc::Retained;
-use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags, NSImage, NSView};
+use objc2::runtime::AnyObject;
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSCursor, NSEvent, NSEventModifierFlags, NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
+    NSWindowDidResignKeyNotification,
+};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize,
+};
 use objc2_quartz_core::CALayer;
 
-use crate::input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
+use crate::input::{FocusLatch, KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 use crate::model::VideoArea;
 
 /// What the render lane receives when the viewer window is up: the host view and its root layer. The view lives as
@@ -50,6 +56,10 @@ pub trait VideoSlot: Send + Sync {
 #[derive(Default)]
 pub struct VideoIvars {
     input: RefCell<Option<Arc<dyn ViewerInput>>>,
+    /// Whether the view has the keyboard, as the input lane was last told (see `FocusLatch`).
+    focus: std::cell::Cell<FocusLatch>,
+    /// The window whose key notifications this view observes.
+    observed: RefCell<Option<objc2::rc::Weak<NSWindow>>>,
     /// The pointer over the video: the host's shape while the viewer controls, else the system arrow (`None`).
     cursor: RefCell<Option<Retained<NSCursor>>>,
     /// Mouse events this view received, and how many of them the input lane took (development: `dev_state`).
@@ -119,18 +129,30 @@ define_class!(
 
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
-            if let Some(i) = self.input() {
-                i.focus(true);
-            }
+            // The window does not name this view its first responder until this returns.
+            let key = self.window().is_some_and(|w| w.isKeyWindow());
+            self.tell_focus(key, true);
             true
         }
 
         #[unsafe(method(resignFirstResponder))]
         fn resign_first_responder(&self) -> bool {
-            if let Some(i) = self.input() {
-                i.focus(false);
-            }
+            self.tell_focus(false, false);
             true
+        }
+
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn view_did_move_to_window(&self) {
+            // SAFETY: forwards to NSView's implementation.
+            unsafe { msg_send![super(self), viewDidMoveToWindow] }
+            self.observe_window();
+        }
+
+        // `NSWindowDidBecomeKeyNotification` / `NSWindowDidResignKeyNotification` of the view's window: Command+Tab,
+        // a click in another window or app, Spotlight, a system panel. The view stays first responder through them.
+        #[unsafe(method(windowKeyChanged:))]
+        fn window_key_changed(&self, _n: &NSNotification) {
+            self.sync_focus();
         }
 
         #[unsafe(method(keyDown:))]
@@ -255,8 +277,65 @@ impl VideoView {
         view
     }
 
+    /// Hands the view to the input lane (or takes it away). An input attached while the view already has the keyboard
+    /// is told so at once; an input taken away while it had the keyboard is told it lost it (it releases every key on
+    /// the host).
     pub fn set_input(&self, input: Option<Arc<dyn ViewerInput>>) {
+        let mut latch = self.ivars().focus.get();
+        if let (Some(old), Some(focused)) = (self.input(), latch.detach()) {
+            old.focus(focused);
+        }
+        self.ivars().focus.set(latch);
         *self.ivars().input.borrow_mut() = input;
+        self.sync_focus();
+    }
+
+    /// Tells the input lane whether the view has the keyboard, when that changed.
+    fn tell_focus(&self, key_window: bool, first_responder: bool) {
+        let mut latch = self.ivars().focus.get();
+        let change = latch.update(key_window, first_responder);
+        self.ivars().focus.set(latch);
+        if let (Some(focused), Some(input)) = (change, self.input()) {
+            input.focus(focused);
+        }
+    }
+
+    /// Reads the window's state now: key, and this view its first responder.
+    fn sync_focus(&self) {
+        if self.input().is_none() {
+            return;
+        }
+        let (key, first) = match self.window() {
+            Some(w) => {
+                let me: *const NSView = &**self;
+                let first = w.firstResponder().is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r).cast::<NSView>(), me));
+                (w.isKeyWindow(), first)
+            }
+            None => (false, false),
+        };
+        self.tell_focus(key, first);
+    }
+
+    /// Observes the key notifications of the window the view is in now (and no other).
+    fn observe_window(&self) {
+        let center = NSNotificationCenter::defaultCenter();
+        let window = self.window();
+        let observer: &AnyObject = self.as_ref();
+        // SAFETY: the observer is this view and the selector exists on it; the notification names are AppKit's
+        // constants. Since macOS 10.11 the center does not message a deallocated selector-based observer.
+        unsafe {
+            if let Some(old) = self.ivars().observed.borrow_mut().take().and_then(|w| w.load()) {
+                center.removeObserver_name_object(observer, Some(NSWindowDidBecomeKeyNotification), Some(&old));
+                center.removeObserver_name_object(observer, Some(NSWindowDidResignKeyNotification), Some(&old));
+            }
+            if let Some(w) = &window {
+                for name in [NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification] {
+                    center.addObserver_selector_name_object(observer, sel!(windowKeyChanged:), Some(name), Some(w));
+                }
+            }
+        }
+        *self.ivars().observed.borrow_mut() = window.as_deref().map(objc2::rc::Weak::from);
+        self.sync_focus();
     }
 
     fn input(&self) -> Option<Arc<dyn ViewerInput>> {

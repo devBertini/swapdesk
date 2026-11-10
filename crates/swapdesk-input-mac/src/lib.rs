@@ -35,9 +35,9 @@ pub use clipboard::MacClipboard;
 pub use sink::{MacInputSink, can_post, posted_key_presses};
 
 pub use input::{Access, GrabStatus, KeyboardState, MacInput, NoKeyboardState, PointerMap};
-pub use logic::{InputConfig, InputCore, Outcome, ScrollConfig};
+pub use logic::{EventText, InputConfig, InputCore, Layout, Outcome, ScrollConfig, Typed};
 #[cfg(target_os = "macos")]
-pub use platform::{MacGrabber, SystemKeyboardState, access, detect_keyboard_kind, request_access};
+pub use platform::{MacGrabber, MacLayout, SystemKeyboardState, access, detect_keyboard_kind, request_access};
 
 impl InputConfig {
     /// The defaults with the keyboard kind of this Mac (ANSI on other hosts).

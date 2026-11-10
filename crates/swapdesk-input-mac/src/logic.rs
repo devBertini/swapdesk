@@ -9,11 +9,21 @@
 //!   `ReleaseAll` on focus loss leaves nothing pressed on the host (F-INPUT-04);
 //! - the buttons held and the last pointer position, so a button never goes down outside the picture and a position is
 //!   sent only when it changes;
-//! - the fractions of a wheel notch not yet sent, so slow trackpad motion adds up instead of vanishing.
+//! - the fractions of a wheel notch not yet sent, so slow trackpad motion adds up instead of vanishing;
+//! - in text mode, the Option keys not sent yet (`unsent`). Option is the Mac's character modifier: `Option+C` types
+//!   `ç` and `Option+E` is a dead acute on a US-based layout. A Windows host reads a held Alt as the start of a
+//!   shortcut (a character typed under it arrives as `WM_SYSCHAR`, a menu mnemonic, not text) and a lone Alt
+//!   press and release opens the menu bar. So while text mode is in force an Option key goes to the host only when a
+//!   key that goes physically is pressed with it (Option+Left, Option+F4), or as a press and release when it was
+//!   tapped alone; text typed with it goes without it, and an Option already sent is let go before the text.
+//!
+//! Which text a key types comes from a [`Layout`]: on a Mac the system's current keyboard layout, translated with
+//! its dead keys (`UCKeyTranslate`, in `platform`); elsewhere and in tests the characters AppKit put on the event.
 
 use std::collections::{BTreeSet, HashSet};
 
 use swapdesk_keys::mode::{KeyInput, KeyRouter, KeyboardMode, Routed};
+use swapdesk_keys::shortcuts::ViewerOs;
 use swapdesk_keys::swap::swap_event;
 use swapdesk_keys::{KbKind, PAGE_KEYBOARD, modifier};
 use swapdesk_proto::{InputEvent, MouseButton};
@@ -23,6 +33,50 @@ use crate::keymap::{aggregate_of_bit, hid_of_kvk, is_local_escape, is_system_sho
 
 /// Whether a physical key is down right now, by `kVK_*` code (`CGEventSourceKeyState` on a Mac).
 pub type KeyProbe<'a> = &'a dyn Fn(u16) -> bool;
+
+/// The Option keys of the HID modifier byte.
+const OPTION_BITS: u8 = modifier::LALT | modifier::RALT;
+
+/// What the viewer's keyboard layout types for one key press.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Typed {
+    /// The characters, when the press types any (after a dead key: the composed character, or the accent and the
+    /// letter when they do not compose).
+    pub text: Option<String>,
+    /// The press is a dead key: it types nothing now and the next press carries the accent.
+    pub dead: bool,
+}
+
+/// A typed character is as private as the text: `Debug` shows its size only (CONTRACTS.md C2.3).
+impl core::fmt::Debug for Typed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Typed")
+            .field("text", &self.text.as_ref().map(|t| swapdesk_proto::RedactedLen(t.len())))
+            .field("dead", &self.dead)
+            .finish()
+    }
+}
+
+/// The viewer's keyboard layout, as the text router asks it (the Mac's counterpart of the Windows hook's
+/// `ToUnicodeEx`). It keeps the dead-key state between presses.
+pub trait Layout: Send {
+    /// What the press `msg` types. Asked only for a press that may go as text (text mode in force, no Control or
+    /// Command held), once per press and in order, so a dead key and the key after it compose.
+    fn type_key(&mut self, msg: &KeyMsg) -> Typed;
+    /// A press went as a key (a shortcut, a key in physical mode), or the focus changed: a pending dead key is dropped.
+    fn clear_dead_key(&mut self) {}
+}
+
+/// The characters AppKit put on the event (`NSEvent.characters`), with no dead-key knowledge: the layout of tests,
+/// of non-macOS builds, and the fallback when the system layout has no Unicode table.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EventText;
+
+impl Layout for EventText {
+    fn type_key(&mut self, msg: &KeyMsg) -> Typed {
+        Typed { text: typed_text(msg.text.as_deref()).map(str::to_owned), dead: false }
+    }
+}
 
 /// Where a window point falls in the remote display (`Renderer::map_pointer`): `None` outside the picture.
 pub type PointerMapFn<'a> = &'a dyn Fn(i32, i32) -> Option<(u16, u16)>;
@@ -101,6 +155,10 @@ pub struct InputCore {
     router: KeyRouter,
     /// The viewer's HID modifier byte (before the Ctrl/Cmd swap).
     mods: u8,
+    /// Option bits of `mods` the host does not hold (text mode defers them; see the module comment).
+    unsent: u8,
+    /// An unsent Option went down with nothing else held and nothing was pressed since: its release is a tap.
+    option_tap: bool,
     caps: bool,
     /// `kVK_*` of the keys held (taken key-downs without their key-up).
     down: HashSet<u16>,
@@ -132,8 +190,10 @@ impl InputCore {
     pub fn new(config: InputConfig) -> Self {
         Self {
             config,
-            router: KeyRouter::new(config.mode, config.layouts_match),
+            router: KeyRouter::for_os(ViewerOs::MacOs, config.mode, config.layouts_match),
             mods: 0,
+            unsent: 0,
+            option_tap: false,
             caps: false,
             down: HashSet::new(),
             swallowed: HashSet::new(),
@@ -170,8 +230,14 @@ impl InputCore {
         self.finish(InputEvent::Key { usage_page: PAGE_KEYBOARD, usage, down, modifiers: mods, locks: self.locks() })
     }
 
+    /// The modifier byte the host holds: the viewer's, without the Option keys text mode has not sent.
+    fn wire_mods(&self) -> u8 {
+        self.mods & !self.unsent
+    }
+
     /// Brings the modifier byte to `wanted`, one record per key that changed (bit order, each carrying the byte after
-    /// its own change), and returns them.
+    /// its own change), and returns them. In text mode an Option key that goes down is held back (see the module
+    /// comment); its release sends nothing, or a press and release when it was tapped alone.
     fn move_mods_to(&mut self, wanted: u8) -> Vec<InputEvent> {
         let mut events = Vec::new();
         for i in 0..8 {
@@ -180,9 +246,58 @@ impl InputCore {
                 continue;
             }
             let down = wanted & bit != 0;
-            self.mods = if down { self.mods | bit } else { self.mods & !bit };
-            if let Some(usage) = modifier::usage_of(bit) {
-                events.push(self.key_event(usage, down, self.mods));
+            let Some(usage) = modifier::usage_of(bit) else { continue };
+            if down {
+                self.mods |= bit;
+                if bit & OPTION_BITS != 0 && self.router.text_mode() {
+                    if self.unsent == 0 {
+                        self.option_tap = self.down.is_empty();
+                    }
+                    self.unsent |= bit;
+                    continue;
+                }
+                events.push(self.key_event(usage, true, self.wire_mods()));
+            } else if self.unsent & bit != 0 {
+                self.mods &= !bit;
+                self.unsent &= !bit;
+                if self.option_tap {
+                    events.push(self.key_event(usage, true, self.wire_mods() | bit));
+                    events.push(self.key_event(usage, false, self.wire_mods()));
+                }
+            } else {
+                self.mods &= !bit;
+                events.push(self.key_event(usage, false, self.wire_mods()));
+            }
+        }
+        events
+    }
+
+    /// The Option keys held back go to the host now (a key that goes physically is pressed with them).
+    fn flush_options(&mut self) -> Vec<InputEvent> {
+        self.option_tap = false;
+        let mut events = Vec::new();
+        for bit in [modifier::LALT, modifier::RALT] {
+            if self.unsent & bit != 0 {
+                self.unsent &= !bit;
+                if let Some(usage) = modifier::usage_of(bit) {
+                    events.push(self.key_event(usage, true, self.wire_mods()));
+                }
+            }
+        }
+        events
+    }
+
+    /// The Option keys the host holds are let go before text (Alt held on a Windows host turns text into a menu
+    /// mnemonic); they stay held on the viewer, so a later physical key sends them again.
+    fn lift_options(&mut self) -> Vec<InputEvent> {
+        self.option_tap = false;
+        let mut events = Vec::new();
+        for bit in [modifier::LALT, modifier::RALT] {
+            if self.wire_mods() & bit != 0 {
+                self.unsent |= bit;
+                if let Some(usage) = modifier::usage_of(bit) {
+                    events.push(self.key_event(usage, false, self.wire_mods()));
+                }
             }
         }
         events
@@ -239,6 +354,8 @@ impl InputCore {
     /// host (`ReleaseAll`), and nothing is held here. The Caps Lock toggle is a state, not a held key: it stays.
     pub fn release_all(&mut self) -> Vec<InputEvent> {
         self.mods = 0;
+        self.unsent = 0;
+        self.option_tap = false;
         self.down.clear();
         self.swallowed.clear();
         self.buttons.clear();
@@ -258,8 +375,9 @@ impl InputCore {
         self.pointer = None;
     }
 
-    /// A key press or release from the video view.
-    pub fn key(&mut self, msg: &KeyMsg, probe: KeyProbe<'_>) -> Outcome {
+    /// A key press or release from the video view; `layout` says what a press types (asked only when the press may go
+    /// as text).
+    pub fn key(&mut self, msg: &KeyMsg, probe: KeyProbe<'_>, layout: &mut dyn Layout) -> Outcome {
         if msg.down && is_local_escape(msg.key_code, msg.modifiers) {
             return Outcome::passed();
         }
@@ -275,11 +393,28 @@ impl InputCore {
                 events.extend(self.move_mods_to(wanted));
             }
         }
-        events.extend(self.translate(msg.key_code, msg.down, typed_text(msg.text.as_deref())));
+        let typed = if self.wants_text(msg.key_code, msg.down) {
+            layout.type_key(msg)
+        } else {
+            if msg.down {
+                layout.clear_dead_key();
+            }
+            Typed::default()
+        };
+        events.extend(self.translate(msg.key_code, msg.down, &typed));
         Outcome::taken(events)
     }
 
-    fn translate(&mut self, kvk: u16, down: bool, text: Option<&str>) -> Vec<InputEvent> {
+    /// Whether a press may go as text, so the layout is asked what it types: text mode in force, a key with a HID row
+    /// that is no modifier, and no shortcut modifier (Control, Command) held.
+    fn wants_text(&self, kvk: u16, down: bool) -> bool {
+        if !down || !self.router.text_mode() || self.router.is_shortcut(self.mods) {
+            return false;
+        }
+        hid_of_kvk(kvk, self.config.keyboard).is_some_and(|(page, usage)| modifier::bit_of(page, usage).is_none())
+    }
+
+    fn translate(&mut self, kvk: u16, down: bool, typed: &Typed) -> Vec<InputEvent> {
         if down {
             self.down.insert(kvk);
         } else {
@@ -293,14 +428,31 @@ impl InputCore {
             usage_page: page,
             usage,
             down,
-            modifiers: self.mods,
+            // A press is decided on the viewer's real modifiers; a release carries what the host holds.
+            modifiers: if down { self.mods } else { self.wire_mods() },
             locks: self.locks(),
-            text,
-            dead_key: false,
+            text: typed.text.as_deref(),
+            dead_key: typed.dead,
         };
         match self.router.route(&input) {
-            Routed::Physical(e) | Routed::Text(e) => vec![self.finish(e)],
-            Routed::Drop => Vec::new(),
+            Routed::Text(e) => {
+                let mut events = self.lift_options();
+                events.push(self.finish(e));
+                events
+            }
+            Routed::Physical(e) => {
+                // A physical press takes the held-back Option keys with it (its record already carries them).
+                let mut events = if down { self.flush_options() } else { Vec::new() };
+                events.push(self.finish(e));
+                events
+            }
+            Routed::Drop => {
+                if down {
+                    // A dead key: something was pressed under the Option keys, so their release is no tap.
+                    self.option_tap = false;
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -309,7 +461,7 @@ impl InputCore {
     pub fn tap_key(&mut self, kvk: u16, down: bool, flags: Modifiers, probe: KeyProbe<'_>) -> Outcome {
         if !down {
             return if self.swallowed.remove(&kvk) {
-                Outcome::taken(self.translate(kvk, false, None))
+                Outcome::taken(self.translate(kvk, false, &Typed::default()))
             } else {
                 Outcome::passed()
             };
@@ -323,7 +475,7 @@ impl InputCore {
             events.extend(self.move_mods_to(wanted));
         }
         self.swallowed.insert(kvk);
-        events.extend(self.translate(kvk, true, None));
+        events.extend(self.translate(kvk, true, &Typed::default()));
         Outcome::taken(events)
     }
 
@@ -371,6 +523,8 @@ impl InputCore {
                 if down {
                     // A press in the letterbox or outside the picture clicks nothing, and its release is not sent.
                     if let Some(at) = at {
+                        // Option+click is Alt+click on the host: the held-back Option keys go first.
+                        events.extend(self.flush_options());
                         events.extend(self.pointer_event(at));
                         self.buttons.insert(id);
                         events.push(InputEvent::Button { button: wire, down: true });
@@ -466,9 +620,9 @@ mod tests {
     #[test]
     fn a_plain_key_is_a_physical_record_with_the_viewers_state() {
         let mut c = core();
-        let down = c.key(&key(0x00, true, Modifiers::default(), Some("a")), &none);
+        let down = c.key(&key(0x00, true, Modifiers::default(), Some("a")), &none, &mut EventText);
         assert_eq!(down, Outcome { events: vec![k(0x04, true, 0)], taken: true });
-        let up = c.key(&key(0x00, false, Modifiers::default(), None), &none);
+        let up = c.key(&key(0x00, false, Modifiers::default(), None), &none, &mut EventText);
         assert_eq!(up.events, vec![k(0x04, false, 0)]);
         assert!(c.is_idle());
     }
@@ -506,7 +660,7 @@ mod tests {
         let caps = |down| InputEvent::Key { usage_page: 7, usage: 0x39, down, modifiers: 0, locks: 0b011 };
         assert_eq!(on.events, vec![caps(true), caps(false)]);
         // Later records keep the Caps bit.
-        let a = c.key(&key(0x00, true, Modifiers::CAPS_LOCK, Some("A")), &none);
+        let a = c.key(&key(0x00, true, Modifiers::CAPS_LOCK, Some("A")), &none, &mut EventText);
         assert_eq!(
             a.events,
             vec![InputEvent::Key { usage_page: 7, usage: 0x04, down: true, modifiers: 0, locks: 0b011 }]
@@ -520,7 +674,7 @@ mod tests {
     fn a_key_that_arrives_with_modifiers_the_view_missed_brings_them_first() {
         let mut c = core();
         let probe = |kvk: u16| kvk == 0x3B;
-        let out = c.key(&key(0x08, true, Modifiers::CONTROL, Some("\u{3}")), &probe);
+        let out = c.key(&key(0x08, true, Modifiers::CONTROL, Some("\u{3}")), &probe, &mut EventText);
         assert_eq!(out.events, vec![k(0xE0, true, modifier::LCTRL), k(0x06, true, modifier::LCTRL)]);
     }
 
@@ -528,21 +682,21 @@ mod tests {
     fn repeats_go_again_and_the_release_of_an_untaken_press_is_not_ours() {
         let mut c = core();
         let msg = KeyMsg { repeat: true, ..key(0x00, true, Modifiers::default(), Some("a")) };
-        assert_eq!(c.key(&msg, &none).events, vec![k(0x04, true, 0)]);
-        assert_eq!(c.key(&msg, &none).events, vec![k(0x04, true, 0)]);
+        assert_eq!(c.key(&msg, &none, &mut EventText).events, vec![k(0x04, true, 0)]);
+        assert_eq!(c.key(&msg, &none, &mut EventText).events, vec![k(0x04, true, 0)]);
         // Cmd+Q is the viewer's own: neither the press nor its release is taken.
-        assert_eq!(c.key(&key(0x0C, true, CMD, Some("q")), &none), Outcome::passed());
-        assert_eq!(c.key(&key(0x0C, false, CMD, None), &none), Outcome::passed());
+        assert_eq!(c.key(&key(0x0C, true, CMD, Some("q")), &none, &mut EventText), Outcome::passed());
+        assert_eq!(c.key(&key(0x0C, false, CMD, None), &none, &mut EventText), Outcome::passed());
         // An orphan release is not ours either.
-        assert_eq!(c.key(&key(0x01, false, Modifiers::default(), None), &none), Outcome::passed());
+        assert_eq!(c.key(&key(0x01, false, Modifiers::default(), None), &none, &mut EventText), Outcome::passed());
     }
 
     #[test]
     fn a_key_the_tables_do_not_know_is_taken_and_sends_nothing() {
         let mut c = core();
-        let out = c.key(&key(0xA0, true, Modifiers::default(), None), &none);
+        let out = c.key(&key(0xA0, true, Modifiers::default(), None), &none, &mut EventText);
         assert_eq!(out, Outcome { events: vec![], taken: true });
-        let up = c.key(&key(0xA0, false, Modifiers::default(), None), &none);
+        let up = c.key(&key(0xA0, false, Modifiers::default(), None), &none, &mut EventText);
         assert_eq!(up, Outcome { events: vec![], taken: true });
     }
 
@@ -550,40 +704,294 @@ mod tests {
     fn the_iso_swap_applies_to_the_viewers_own_keyboard() {
         let mut c = InputCore::new(InputConfig { keyboard: KbKind::Iso, ..InputConfig::default() });
         // The key left of 1 on an ISO Mac reports 0x0A and is the same HID key as ANSI's 0x32.
-        assert_eq!(c.key(&key(0x0A, true, Modifiers::default(), Some("§")), &none).events, vec![k(0x35, true, 0)]);
+        assert_eq!(
+            c.key(&key(0x0A, true, Modifiers::default(), Some("§")), &none, &mut EventText).events,
+            vec![k(0x35, true, 0)]
+        );
         let mut a = core();
-        assert_eq!(a.key(&key(0x32, true, Modifiers::default(), Some("`")), &none).events, vec![k(0x35, true, 0)]);
+        assert_eq!(
+            a.key(&key(0x32, true, Modifiers::default(), Some("`")), &none, &mut EventText).events,
+            vec![k(0x35, true, 0)]
+        );
     }
 
     #[test]
     fn text_mode_sends_unicode_and_keeps_shortcuts_and_special_keys_physical() {
         let mut c =
             InputCore::new(InputConfig { mode: KeyboardMode::Text, layouts_match: false, ..InputConfig::default() });
-        let out = c.key(&key(0x00, true, Modifiers::default(), Some("ç")), &none);
+        let out = c.key(&key(0x00, true, Modifiers::default(), Some("ç")), &none, &mut EventText);
         assert_eq!(out.events, vec![InputEvent::Text("ç".into())]);
         // Its release has no record.
         assert_eq!(
-            c.key(&key(0x00, false, Modifiers::default(), None), &none),
+            c.key(&key(0x00, false, Modifiers::default(), None), &none, &mut EventText),
             Outcome { events: vec![], taken: true }
         );
         // The arrow key's characters are private-use: a key, not text.
-        let up = c.key(&key(0x7E, true, Modifiers::FUNCTION, Some("\u{F700}")), &none);
+        let up = c.key(&key(0x7E, true, Modifiers::FUNCTION, Some("\u{F700}")), &none, &mut EventText);
         assert_eq!(up.events, vec![k(0x52, true, 0)]);
         // Shortcuts stay physical even with text on the key.
         let probe = |kvk: u16| kvk == 0x37;
-        let copy = c.key(&key(0x08, true, CMD, Some("c")), &probe);
+        let copy = c.key(&key(0x08, true, CMD, Some("c")), &probe, &mut EventText);
         assert_eq!(copy.events, vec![k(0xE3, true, modifier::LGUI), k(0x06, true, modifier::LGUI)]);
-        // Right Option alone is AltGr-like: text (Cmd is let go first).
+        // Right Option is the Mac's character modifier: text, and no Alt reaches the host (Cmd is let go first).
         c.modifiers_changed(Modifiers::default(), &none);
         let ropt = |kvk: u16| kvk == 0x3D;
-        let at = c.key(&key(0x13, true, Modifiers::OPTION, Some("@")), &ropt);
-        assert_eq!(at.events, vec![k(0xE6, true, modifier::RALT), InputEvent::Text("@".into())]);
+        let at = c.key(&key(0x13, true, Modifiers::OPTION, Some("@")), &ropt, &mut EventText);
+        assert_eq!(at.events, vec![InputEvent::Text("@".into())]);
+    }
+
+    /// The dead keys of "Brazilian - Pro" (the owner's Mac layout, US-based): ' is a dead acute, Shift+` a dead tilde,
+    /// and Option+E a dead acute as on every US-based Mac layout. What `UCKeyTranslate` answers for them (proven against
+    /// the real layout in `tests/mac_layout.rs`), as a script.
+    #[derive(Default)]
+    struct FakePro {
+        accent: Option<char>,
+        asked: Vec<u16>,
+        cleared: u32,
+    }
+
+    impl Layout for FakePro {
+        fn type_key(&mut self, msg: &KeyMsg) -> Typed {
+            self.asked.push(msg.key_code);
+            let shift = msg.modifiers.contains(Modifiers::SHIFT);
+            let option = msg.modifiers.contains(Modifiers::OPTION);
+            let dead = match (msg.key_code, shift, option) {
+                (0x27, false, false) => Some('\''),
+                (0x32, true, false) => Some('~'),
+                (0x0E, false, true) => Some('\''),
+                _ => None,
+            };
+            if let (Some(d), None) = (dead, self.accent) {
+                self.accent = Some(d);
+                return Typed { text: None, dead: true };
+            }
+            let base = match (msg.key_code, option) {
+                (0x00, _) => 'a',
+                (0x0E, _) => 'e',
+                (0x08, false) => 'c',
+                (0x08, true) => 'ç',
+                (0x31, _) => ' ',
+                (0x11, _) => 't',
+                (0x27, _) => '\'',
+                _ => '?',
+            };
+            let text = match (self.accent.take(), base) {
+                (None, b) => b.to_string(),
+                (Some('\''), 'a') => "á".into(),
+                (Some('\''), 'e') => "é".into(),
+                (Some('\''), 'c') => "ç".into(),
+                (Some('~'), 'a') => "ã".into(),
+                (Some(acc), ' ') => acc.to_string(),
+                (Some(acc), b) => format!("{acc}{b}"),
+            };
+            Typed { text: Some(text), dead: false }
+        }
+
+        fn clear_dead_key(&mut self) {
+            self.accent = None;
+            self.cleared += 1;
+        }
+    }
+
+    fn auto_to_windows() -> InputCore {
+        InputCore::new(InputConfig { mode: KeyboardMode::Auto, layouts_match: false, ..InputConfig::default() })
+    }
+
+    fn type_keys(c: &mut InputCore, layout: &mut FakePro, keys: &[(u16, Modifiers)]) -> Vec<InputEvent> {
+        let mut events = Vec::new();
+        for &(kvk, mods) in keys {
+            events.extend(c.key(&key(kvk, true, mods, None), &none, layout).events);
+            events.extend(c.key(&key(kvk, false, mods, None), &none, layout).events);
+        }
+        events
+    }
+
+    /// The owner's report: on "Brazilian - Pro" á, é, ã and ç are a dead key then the letter. AppKit gives the dead
+    /// key's press no characters (NSEvent.characters: "an empty string for dead keys"), and the press used to go to the
+    /// Windows host as the physical ' key. Now it sends nothing, its release neither, and the letter carries the
+    /// composed character.
+    #[test]
+    fn a_dead_key_press_sends_nothing_in_text_mode() {
+        let mut c = auto_to_windows();
+        let mut pro = FakePro::default();
+        let plain = Modifiers::default();
+        let text = |t: &str| InputEvent::Text(t.into());
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, plain), (0x00, plain)]), vec![text("á")]);
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, plain), (0x0E, plain)]), vec![text("é")]);
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, plain), (0x08, plain)]), vec![text("ç")]);
+        // ' then space is the apostrophe itself; ' then a letter it does not compose with types both.
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, plain), (0x31, plain)]), vec![text("'")]);
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, plain), (0x11, plain)]), vec![text("'t")]);
+        // Shift+` is a dead tilde: Shift goes to the host as a key, the tilde waits, Shift is let go, then ã.
+        let lshift = |kvk: u16| kvk == 0x38;
+        let mut events = c.modifiers_changed(Modifiers::SHIFT, &lshift).events;
+        events.extend(c.key(&key(0x32, true, Modifiers::SHIFT, None), &lshift, &mut pro).events);
+        events.extend(c.key(&key(0x32, false, Modifiers::SHIFT, None), &lshift, &mut pro).events);
+        events.extend(c.modifiers_changed(Modifiers::default(), &none).events);
+        events.extend(type_keys(&mut c, &mut pro, &[(0x00, plain)]));
+        assert_eq!(
+            events,
+            vec![k(0xE1, true, modifier::LSHIFT), k(0xE1, false, 0), text("ã")],
+            "no ` or ~ key reached the host"
+        );
+        assert!(c.is_idle(), "no key is left held on either side");
+    }
+
+    #[test]
+    fn a_shortcut_or_a_key_with_no_text_drops_a_pending_dead_key_and_the_layout_is_not_asked() {
+        let mut c = auto_to_windows();
+        let mut pro = FakePro::default();
+        let cmd = |kvk: u16| kvk == 0x37;
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x27, Modifiers::default())]), vec![]);
+        c.modifiers_changed(CMD, &cmd);
+        let copy = c.key(&key(0x08, true, CMD, Some("c")), &cmd, &mut pro);
+        assert_eq!(copy.events, vec![k(0x06, true, modifier::LGUI)], "Cmd+C stays a physical shortcut");
+        assert_eq!(pro.asked, vec![0x27], "the layout is not asked for a shortcut");
+        assert_eq!(pro.cleared, 1, "the pending accent is dropped");
+        c.key(&key(0x08, false, CMD, None), &cmd, &mut pro);
+        c.modifiers_changed(Modifiers::default(), &none);
+        assert_eq!(type_keys(&mut c, &mut pro, &[(0x00, Modifiers::default())]), vec![InputEvent::Text("a".into())]);
+    }
+
+    /// Copy and paste toward a Windows host in text mode: Control+C and Command+V stay physical keys with their
+    /// modifier (never text, the layout is not asked), and with "Trocar Ctrl e Cmd no Mac" Command+C arrives as Ctrl+C.
+    #[test]
+    fn copy_and_paste_shortcuts_stay_physical_in_text_mode_and_follow_the_swap() {
+        let mut c = auto_to_windows();
+        let mut pro = FakePro::default();
+        let ctrl = |kvk: u16| kvk == 0x3B;
+        let mut events = c.modifiers_changed(Modifiers::CONTROL, &ctrl).events;
+        events.extend(c.key(&key(0x08, true, Modifiers::CONTROL, Some("\u{3}")), &ctrl, &mut pro).events);
+        assert_eq!(events, vec![k(0xE0, true, modifier::LCTRL), k(0x06, true, modifier::LCTRL)]);
+        c.key(&key(0x08, false, Modifiers::CONTROL, None), &ctrl, &mut pro);
+        c.modifiers_changed(Modifiers::default(), &none);
+        let cmd = |kvk: u16| kvk == 0x37;
+        let mut events = c.modifiers_changed(CMD, &cmd).events;
+        events.extend(c.key(&key(0x09, true, CMD, Some("v")), &cmd, &mut pro).events);
+        assert_eq!(
+            events,
+            vec![k(0xE3, true, modifier::LGUI), k(0x19, true, modifier::LGUI)],
+            "Win+V without the swap"
+        );
+        assert!(pro.asked.is_empty(), "no shortcut asked the layout");
+
+        let mut s = InputCore::new(InputConfig { swap_ctrl_cmd: true, ..auto_to_windows().config() });
+        let mut events = s.modifiers_changed(CMD, &cmd).events;
+        events.extend(s.key(&key(0x08, true, CMD, Some("c")), &cmd, &mut pro).events);
+        assert_eq!(events, vec![k(0xE0, true, modifier::LCTRL), k(0x06, true, modifier::LCTRL)], "Ctrl+C on the host");
+    }
+
+    #[test]
+    fn losing_the_keyboard_with_command_and_option_held_leaves_nothing_held_on_the_host() {
+        for mode in [KeyboardMode::Physical, KeyboardMode::Auto] {
+            let mut c = InputCore::new(InputConfig { mode, layouts_match: false, ..InputConfig::default() });
+            let probe = |kvk: u16| kvk == 0x37 || kvk == 0x3A;
+            c.modifiers_changed(CMD.union(Modifiers::OPTION), &probe);
+            // Command+Option+Left went to the host (Option with it), then the window lost the keyboard.
+            c.key(&key(0x7B, true, CMD.union(Modifiers::OPTION), None), &probe, &mut EventText);
+            assert!(!c.is_idle());
+            assert_eq!(c.release_all(), vec![InputEvent::ReleaseAll], "{mode:?}");
+            assert!(c.is_idle() && c.modifiers() == 0, "{mode:?}");
+            // Back with nothing held: the releases AppKit sends to the window now are not ours, and nothing is sent.
+            assert_eq!(c.modifiers_changed(Modifiers::default(), &none).events, vec![], "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn physical_mode_never_asks_the_layout_and_sends_the_dead_key_as_a_key() {
+        let mut c = core();
+        let mut pro = FakePro::default();
+        let events = type_keys(&mut c, &mut pro, &[(0x27, Modifiers::default()), (0x00, Modifiers::default())]);
+        assert_eq!(events, vec![k(0x34, true, 0), k(0x34, false, 0), k(0x04, true, 0), k(0x04, false, 0)]);
+        assert!(pro.asked.is_empty());
+    }
+
+    /// Left Option + C types ç on a US-based Mac layout, and Option+E then E types é: Option is the Mac's character
+    /// modifier, not a shortcut, and the host never sees an Alt (held, it turns text into a menu mnemonic on Windows;
+    /// pressed and released alone, it opens the menu bar).
+    #[test]
+    fn option_text_is_text_with_no_alt_on_the_host() {
+        let mut c = auto_to_windows();
+        let mut pro = FakePro::default();
+        let lopt = |kvk: u16| kvk == 0x3A;
+        let mut events = c.modifiers_changed(Modifiers::OPTION, &lopt).events;
+        events.extend(c.key(&key(0x08, true, Modifiers::OPTION, Some("ç")), &lopt, &mut EventText).events);
+        events.extend(c.key(&key(0x08, false, Modifiers::OPTION, None), &lopt, &mut EventText).events);
+        events.extend(c.modifiers_changed(Modifiers::default(), &none).events);
+        assert_eq!(events, vec![InputEvent::Text("ç".into())]);
+        // Option+E (dead), Option let go, then E.
+        let mut events = c.modifiers_changed(Modifiers::OPTION, &lopt).events;
+        events.extend(c.key(&key(0x0E, true, Modifiers::OPTION, None), &lopt, &mut pro).events);
+        events.extend(c.key(&key(0x0E, false, Modifiers::OPTION, None), &lopt, &mut pro).events);
+        events.extend(c.modifiers_changed(Modifiers::default(), &none).events);
+        events.extend(type_keys(&mut c, &mut pro, &[(0x0E, Modifiers::default())]));
+        assert_eq!(events, vec![InputEvent::Text("é".into())]);
+        assert!(c.is_idle());
+    }
+
+    #[test]
+    fn option_goes_to_the_host_with_a_physical_key_and_is_let_go_before_text() {
+        let mut c = auto_to_windows();
+        let lopt = |kvk: u16| kvk == 0x3A;
+        assert_eq!(c.modifiers_changed(Modifiers::OPTION, &lopt).events, vec![], "held back");
+        // Option+Left (word left on the host's Alt+Left): Alt goes first, then the arrow with the byte.
+        let left = c.key(&key(0x7B, true, Modifiers::OPTION.union(Modifiers::FUNCTION), None), &lopt, &mut EventText);
+        assert_eq!(left.events, vec![k(0xE2, true, modifier::LALT), k(0x50, true, modifier::LALT)]);
+        c.key(&key(0x7B, false, Modifiers::OPTION, None), &lopt, &mut EventText);
+        // Still holding Option, C types ç: the host's Alt is let go first (after the arrow, so no menu opens).
+        let cedilla = c.key(&key(0x08, true, Modifiers::OPTION, Some("ç")), &lopt, &mut EventText);
+        assert_eq!(cedilla.events, vec![k(0xE2, false, 0), InputEvent::Text("ç".into())]);
+        c.key(&key(0x08, false, Modifiers::OPTION, None), &lopt, &mut EventText);
+        // Option let go: the host holds no Alt, nothing to send.
+        assert_eq!(c.modifiers_changed(Modifiers::default(), &none).events, vec![]);
+        assert!(c.is_idle());
+    }
+
+    #[test]
+    fn option_tapped_alone_is_a_press_and_release_and_option_click_carries_alt() {
+        let mut c = auto_to_windows();
+        let lopt = |kvk: u16| kvk == 0x3A;
+        c.modifiers_changed(Modifiers::OPTION, &lopt);
+        assert_eq!(
+            c.modifiers_changed(Modifiers::default(), &none).events,
+            vec![k(0xE2, true, modifier::LALT), k(0xE2, false, 0)]
+        );
+        // Option+click: Alt goes down before the button, and up when Option is let go.
+        c.modifiers_changed(Modifiers::OPTION, &lopt);
+        let click = c.mouse(
+            mouse(MouseKind::Button { button: PointerButton::Left, down: true }, 100.0, 100.0),
+            Some(&identity_map),
+            2.0,
+        );
+        assert_eq!(click.events[0], k(0xE2, true, modifier::LALT));
+        assert_eq!(click.events.last(), Some(&InputEvent::Button { button: MouseButton::Left, down: true }));
+        assert_eq!(c.modifiers_changed(Modifiers::default(), &none).events, vec![k(0xE2, false, 0)]);
+        // Another modifier pressed under a held-back Option does not carry Alt in its byte.
+        c.modifiers_changed(Modifiers::OPTION, &lopt);
+        let lshift = |kvk: u16| kvk == 0x38 || kvk == 0x3A;
+        let shift = c.modifiers_changed(Modifiers::OPTION.union(Modifiers::SHIFT), &lshift);
+        assert_eq!(shift.events, vec![k(0xE1, true, modifier::LSHIFT)]);
+    }
+
+    #[test]
+    fn physical_mode_sends_option_at_once_as_before() {
+        let mut c = core();
+        let lopt = |kvk: u16| kvk == 0x3A;
+        assert_eq!(c.modifiers_changed(Modifiers::OPTION, &lopt).events, vec![k(0xE2, true, modifier::LALT)]);
+        let o = c.key(&key(0x08, true, Modifiers::OPTION, Some("ç")), &lopt, &mut EventText);
+        assert_eq!(o.events, vec![k(0x06, true, modifier::LALT)]);
+    }
+
+    #[test]
+    fn debug_of_typed_text_shows_its_size_only() {
+        let shown = format!("{:?}", Typed { text: Some("senha".into()), dead: false });
+        assert!(!shown.contains("senha") && shown.contains("<redacted 5 bytes>"), "{shown}");
     }
 
     #[test]
     fn physical_mode_ignores_the_text() {
         let mut c = core();
-        let out = c.key(&key(0x00, true, Modifiers::default(), Some("ç")), &none);
+        let out = c.key(&key(0x00, true, Modifiers::default(), Some("ç")), &none, &mut EventText);
         assert_eq!(out.events, vec![k(0x04, true, 0)]);
     }
 
@@ -594,7 +1002,7 @@ mod tests {
         let out = c.modifiers_changed(CMD, &cmd);
         // The viewer's left Cmd is sent as left Ctrl, and the byte follows.
         assert_eq!(out.events, vec![k(0xE0, true, modifier::LCTRL)]);
-        let copy = c.key(&key(0x08, true, CMD, Some("c")), &cmd);
+        let copy = c.key(&key(0x08, true, CMD, Some("c")), &cmd, &mut EventText);
         assert_eq!(copy.events, vec![k(0x06, true, modifier::LCTRL)]);
         // Mac Ctrl becomes Win.
         let ctrl = |kvk: u16| kvk == 0x3B;
@@ -605,7 +1013,7 @@ mod tests {
     #[test]
     fn the_num_lock_bit_follows_the_config() {
         let mut c = InputCore::new(InputConfig { num_lock: false, ..InputConfig::default() });
-        let out = c.key(&key(0x00, true, Modifiers::default(), None), &none);
+        let out = c.key(&key(0x00, true, Modifiers::default(), None), &none, &mut EventText);
         assert_eq!(
             out.events,
             vec![InputEvent::Key { usage_page: 7, usage: 0x04, down: true, modifiers: 0, locks: 0 }]
@@ -619,7 +1027,7 @@ mod tests {
         let mut c = core();
         let probe = |kvk: u16| kvk == 0x37;
         c.modifiers_changed(CMD, &probe);
-        c.key(&key(0x00, true, CMD, Some("a")), &probe);
+        c.key(&key(0x00, true, CMD, Some("a")), &probe, &mut EventText);
         c.mouse(
             mouse(MouseKind::Button { button: PointerButton::Left, down: true }, 100.0, 100.0),
             Some(&identity_map),
@@ -630,7 +1038,7 @@ mod tests {
         assert!(c.is_idle());
         assert_eq!(c.modifiers(), 0);
         // The releases that follow in AppKit (the key up, the button up) are not ours any more.
-        assert_eq!(c.key(&key(0x00, false, Modifiers::default(), None), &none), Outcome::passed());
+        assert_eq!(c.key(&key(0x00, false, Modifiers::default(), None), &none, &mut EventText), Outcome::passed());
         let up = c.mouse(
             mouse(MouseKind::Button { button: PointerButton::Left, down: false }, 100.0, 100.0),
             Some(&identity_map),

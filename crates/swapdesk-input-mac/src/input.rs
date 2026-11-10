@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use swapdesk_proto::InputEvent;
 use swapdesk_shell_mac::{KeyMsg, Modifiers, MouseMsg, ViewerInput};
 
-use crate::logic::{InputConfig, InputCore, KeyProbe, Outcome};
+use crate::logic::{EventText, InputConfig, InputCore, KeyProbe, Layout, Outcome};
 
 /// Where a point of the video view falls in the remote display, in the pixels of the window (`Renderer::map_pointer`):
 /// `None` outside the picture. Called with the input lock held, so it must not call back into [`MacInput`].
@@ -78,6 +78,8 @@ struct Port {
 
 pub(crate) struct State {
     core: InputCore,
+    /// What a key press types (with its dead-key state); asked on the main thread, from `ViewerInput::key`.
+    layout: Box<dyn Layout>,
     port: Option<Port>,
     focused: bool,
     map: Option<PointerMap>,
@@ -144,20 +146,30 @@ pub struct MacInput {
 }
 
 impl MacInput {
-    /// With the OS keyboard state on macOS, without it elsewhere (modifiers then stand for their left key).
+    /// With the OS keyboard state and the current keyboard layout on macOS, without them elsewhere (modifiers then
+    /// stand for their left key, and the text is the event's own characters).
     pub fn new(config: InputConfig) -> Self {
         #[cfg(target_os = "macos")]
-        let keyboard: Box<dyn KeyboardState> = Box::new(crate::platform::SystemKeyboardState);
+        let (keyboard, layout): (Box<dyn KeyboardState>, Box<dyn Layout>) =
+            (Box::new(crate::platform::SystemKeyboardState), Box::new(crate::platform::MacLayout::current()));
         #[cfg(not(target_os = "macos"))]
-        let keyboard: Box<dyn KeyboardState> = Box::new(NoKeyboardState);
-        Self::with_keyboard_state(config, keyboard)
+        let (keyboard, layout): (Box<dyn KeyboardState>, Box<dyn Layout>) =
+            (Box::new(NoKeyboardState), Box::new(EventText));
+        Self::with_parts(config, keyboard, layout)
     }
 
+    /// With a given keyboard state; the text is the event's own characters ([`EventText`]).
     pub fn with_keyboard_state(config: InputConfig, keyboard: Box<dyn KeyboardState>) -> Self {
+        Self::with_parts(config, keyboard, Box::new(EventText))
+    }
+
+    /// With a given keyboard state and layout.
+    pub fn with_parts(config: InputConfig, keyboard: Box<dyn KeyboardState>, layout: Box<dyn Layout>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
                     core: InputCore::new(config),
+                    layout,
                     port: None,
                     focused: false,
                     map: None,
@@ -217,6 +229,7 @@ impl MacInput {
             let events = st.core.release_all();
             st.deliver(events);
         }
+        st.layout.clear_dead_key();
         st.port = None;
     }
 
@@ -265,6 +278,8 @@ impl ViewerInput for MacInput {
     fn focus(&self, focused: bool) {
         let mut st = self.lock();
         st.focused = focused;
+        // An accent waiting for its letter does not survive a focus change.
+        st.layout.clear_dead_key();
         if st.port.is_none() {
             return;
         }
@@ -289,7 +304,8 @@ impl ViewerInput for MacInput {
             return false;
         }
         let probe: KeyProbe<'_> = &|k: u16| self.inner.keyboard.key_down(k);
-        let outcome = st.core.key(msg, probe);
+        let state = &mut *st;
+        let outcome = state.core.key(msg, probe, state.layout.as_mut());
         st.apply(outcome)
     }
 

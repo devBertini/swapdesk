@@ -19,7 +19,7 @@ pub mod launch;
 pub mod locale;
 pub mod model;
 
-pub use input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
+pub use input::{FocusLatch, KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 pub use locale::{language_from_tags, language_override, theme_override};
 pub use model::{BannerModel, VideoArea, appearance_name, banner_model, viewer_title};
 

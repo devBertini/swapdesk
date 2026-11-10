@@ -34,9 +34,11 @@ use objc2_core_graphics::{
 use swapdesk_keys::KbKind;
 use swapdesk_platform::{ErrorKind, InputGrabber, OsGrant, PlatformError, Result};
 use swapdesk_proto::InputEvent;
-use swapdesk_shell_mac::Modifiers;
+use swapdesk_shell_mac::{KeyMsg, Modifiers};
 
 use crate::input::{Access, GrabStatus, KeyboardState, MacInput};
+use crate::keymap::carbon_modifier_state;
+use crate::logic::{EventText, Layout, Typed};
 
 // ---------------------------------------------------------------- keyboard state
 
@@ -97,6 +99,194 @@ pub fn detect_keyboard_kind() -> KbKind {
         KEYBOARD_ISO => KbKind::Iso,
         KEYBOARD_JIS => KbKind::Jis,
         _ => KbKind::Ansi,
+    }
+}
+
+// ---------------------------------------------------------------- keyboard layout text
+
+// Apple sources (the macOS 27.2 SDK on the MacBook, read 2026-11-10):
+// - `UCKeyTranslate` and `kUCKeyActionDown` 0 / `kUCKeyActionAutoKey` 2 in `CarbonCore/UnicodeUtilities.h`: the dead-key
+//   state is "a pointer to an unsigned 32-bit value, initialized to zero" that the function keeps between calls; with
+//   no translate option a dead key returns no characters and sets that state, and the next key returns the composed
+//   character.
+// - `TISCopyCurrentKeyboardLayoutInputSource`, `TISCreateInputSourceList`, `TISGetInputSourceProperty`,
+//   `kTISPropertyUnicodeKeyLayoutData` (a `CFData` of the `uchr` table) and `kTISPropertyInputSourceID` in
+//   `HIToolbox/TextInputSources.h`: "TextInputSources API is not thread safe. If you are a UI application, you must
+//   call TextInputSources API on the main thread" (the video view's `ViewerInput::key` is called there; a test process
+//   is not a UI application and calls it from one thread).
+// - `LMGetKbdType` ("Not thread safe") in `HIToolbox/Events.h`: the keyboard type `UCKeyTranslate` takes.
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> *mut c_void;
+    fn TISCreateInputSourceList(properties: *const c_void, include_all_installed: u8) -> *const c_void;
+    fn TISGetInputSourceProperty(source: *const c_void, key: *const c_void) -> *const c_void;
+    static kTISPropertyUnicodeKeyLayoutData: &'static CFString;
+    static kTISPropertyInputSourceID: &'static CFString;
+    fn LMGetKbdType() -> u8;
+    #[allow(clippy::too_many_arguments)]
+    fn UCKeyTranslate(
+        layout: *const c_void,
+        virtual_key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        key_translate_options: u32,
+        dead_key_state: *mut u32,
+        max_string_length: usize,
+        actual_string_length: *mut usize,
+        unicode_string: *mut u16,
+    ) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRetain(cf: *const c_void) -> *const c_void;
+    fn CFRelease(cf: *const c_void);
+    fn CFArrayGetCount(array: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+    fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+}
+
+const UC_KEY_ACTION_DOWN: u16 = 0;
+const UC_KEY_ACTION_AUTO_KEY: u16 = 2;
+
+/// One retained `TISInputSourceRef`, released on drop.
+struct InputSource(NonNull<c_void>);
+
+// SAFETY: a Core Foundation object's retain count is thread safe, and the Text Input Sources calls made through this
+// handle happen behind `MacInput`'s mutex, one thread at a time (the main thread in the app).
+unsafe impl Send for InputSource {}
+
+impl Drop for InputSource {
+    fn drop(&mut self) {
+        // SAFETY: the pointer is a CF object this handle owns one retain of.
+        unsafe { CFRelease(self.0.as_ptr()) }
+    }
+}
+
+impl InputSource {
+    /// The keyboard layout in use now (the layout an input method types with, when one is selected).
+    fn current() -> Option<Self> {
+        // SAFETY: a plain "Copy" call: it returns a +1 reference or NULL.
+        NonNull::new(unsafe { TISCopyCurrentKeyboardLayoutInputSource() }).map(Self)
+    }
+
+    /// An installed keyboard layout by its id (`com.apple.keylayout.Brazilian-Pro`), selected or not.
+    fn named(id: &str) -> Option<Self> {
+        // SAFETY: the key is the framework's own constant, alive for the process.
+        let key: &CFString = unsafe { kTISPropertyInputSourceID };
+        let value = CFString::from_str(id);
+        let filter: CFRetained<CFDictionary<CFString, CFString>> = CFDictionary::from_slices(&[key], &[&*value]);
+        // SAFETY: `filter` is a valid dictionary for the call; the result is a +1 array or NULL.
+        let list = unsafe { TISCreateInputSourceList(std::ptr::from_ref(&*filter).cast(), 1) };
+        if list.is_null() {
+            return None;
+        }
+        // SAFETY: `list` is a valid CFArray of input sources; the element is retained before the array is released.
+        unsafe {
+            let found = if CFArrayGetCount(list) > 0 {
+                let source = CFArrayGetValueAtIndex(list, 0);
+                NonNull::new(CFRetain(source).cast_mut()).map(Self)
+            } else {
+                None
+            };
+            CFRelease(list);
+            found
+        }
+    }
+
+    /// `UCKeyTranslate` of one key press with this layout's Unicode table, keeping `dead_state` between calls.
+    /// `None` when the source has no Unicode table or the call fails.
+    fn translate(&self, kvk: u16, auto_key: bool, flags: Modifiers, dead_state: &mut u32) -> Option<String> {
+        // SAFETY: a property read on a live source; the CFData it returns belongs to the source, which `self` keeps
+        // alive for the whole function.
+        let data = unsafe {
+            let key: &CFString = kTISPropertyUnicodeKeyLayoutData;
+            TISGetInputSourceProperty(self.0.as_ptr(), std::ptr::from_ref(key).cast())
+        };
+        if data.is_null() {
+            return None;
+        }
+        // SAFETY: `data` is a live CFData (see above).
+        let layout = unsafe { CFDataGetBytePtr(data) };
+        if layout.is_null() {
+            return None;
+        }
+        // SAFETY: a lookup of the keyboard type in Carbon's low memory; called from one thread at a time.
+        let keyboard_type = u32::from(unsafe { LMGetKbdType() });
+        let mut buf = [0u16; 16];
+        let mut len = 0usize;
+        let action = if auto_key { UC_KEY_ACTION_AUTO_KEY } else { UC_KEY_ACTION_DOWN };
+        // SAFETY: `layout` points to the `uchr` table the source owns; the state, length and buffer are valid for the
+        // sizes given.
+        let status = unsafe {
+            UCKeyTranslate(
+                layout.cast(),
+                kvk,
+                action,
+                carbon_modifier_state(flags),
+                keyboard_type,
+                0,
+                dead_state,
+                buf.len(),
+                &mut len,
+                buf.as_mut_ptr(),
+            )
+        };
+        if status != 0 {
+            *dead_state = 0;
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len.min(buf.len())]))
+    }
+}
+
+/// What a key press types on this Mac: the keyboard layout's own table through `UCKeyTranslate`, with its dead keys
+/// (the state is kept here between presses, so `'` then `a` is `á` on "Brazilian - Pro" and Option+E then E is `é`
+/// on a US layout). A source with no Unicode table falls back to the event's characters.
+pub struct MacLayout {
+    /// `None`: the layout selected at each press.
+    fixed: Option<InputSource>,
+    dead_state: u32,
+}
+
+impl MacLayout {
+    /// Follows the layout the user selects.
+    pub fn current() -> Self {
+        Self { fixed: None, dead_state: 0 }
+    }
+
+    /// One installed layout by its input source id, whatever is selected (tests). `None` when it is not installed.
+    pub fn named(id: &str) -> Option<Self> {
+        InputSource::named(id).map(|s| Self { fixed: Some(s), dead_state: 0 })
+    }
+}
+
+impl Layout for MacLayout {
+    fn type_key(&mut self, msg: &KeyMsg) -> Typed {
+        let current;
+        let source = match &self.fixed {
+            Some(s) => Some(s),
+            None => {
+                current = InputSource::current();
+                current.as_ref()
+            }
+        };
+        let Some(text) =
+            source.and_then(|s| s.translate(msg.key_code, msg.repeat, msg.modifiers, &mut self.dead_state))
+        else {
+            self.dead_state = 0;
+            return EventText.type_key(msg);
+        };
+        if text.is_empty() {
+            return Typed { text: None, dead: self.dead_state != 0 };
+        }
+        Typed { text: Some(text), dead: false }
+    }
+
+    fn clear_dead_key(&mut self) {
+        self.dead_state = 0;
     }
 }
 
