@@ -16,28 +16,29 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSImage,
-    NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSString, NSTimer, NSUserDefaults, ns_string,
+    NSObjectProtocol, NSString, NSTimer, NSURL, NSUserDefaults, ns_string,
 };
 use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
-    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, SelectId, Theme, UiBackend, UiState, WindowKind,
+    Activation, Changed, Command, ControlId, EditId, MsgKey, SelectId, Theme, UiBackend, UiState, WindowKind,
 };
 
+use crate::appkit::*;
 use crate::banner_window::BannerWindow;
 use crate::canvas::CanvasView;
+use crate::effects::{Handling, handling};
 use crate::input::ViewerInput;
 use crate::model::*;
 use crate::system::{Waker, local_clock, system_dark};
 use crate::video::VideoSlot;
 use crate::viewer_window::ViewerWindow;
-use crate::views::*;
 
 /// Receives a line the shell wants in the trace log.
 pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
@@ -51,6 +52,34 @@ pub struct ViewerHooks {
     pub input: Option<Arc<dyn ViewerInput>>,
     /// Told what the shell decided on its own at launch (login-item launch, status item), for the app's trace log.
     pub note: Option<LaunchNote>,
+    /// The folder of the app's logs, which "open the logs" shows in the Finder; none in a mock run.
+    pub logs_dir: Option<std::path::PathBuf>,
+}
+
+/// The open panel of "Escolher arquivos": any number of files, no folder.
+fn files_panel(mtm: MainThreadMarker, title: &str) -> Retained<NSOpenPanel> {
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setTitle(Some(&ns(title)));
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(true);
+    panel
+}
+
+/// The open panel of the folder to receive files into: one folder, which the person may create there.
+fn folder_panel(mtm: MainThreadMarker, title: &str) -> Retained<NSOpenPanel> {
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setTitle(Some(&ns(title)));
+    panel.setCanChooseFiles(false);
+    panel.setCanChooseDirectories(true);
+    panel.setCanCreateDirectories(true);
+    panel.setAllowsMultipleSelection(false);
+    panel
+}
+
+/// What the person chose in an open panel, as paths.
+fn paths_of(panel: &NSOpenPanel) -> Vec<std::path::PathBuf> {
+    panel.URLs().to_vec().iter().filter_map(|u| u.path()).map(|p| std::path::PathBuf::from(p.to_string())).collect()
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -527,25 +556,84 @@ impl Shell {
     }
 
     fn dispatch(&self, act: Activation) {
-        match act.effect {
-            Some(Effect::FocusEdit(e)) => self.main.canvas.focus_control(ControlId::Edit(e), true),
-            Some(Effect::SaveLog) => self.save_log(),
-            // The Mac shell has no crash marker yet (D12 is Windows first): OpenLogs is never produced there.
-            // The file panel's pickers (stage 44) are a Windows shell feature for now: the Mac panel is a later stage.
-            Some(Effect::PickFiles) | Some(Effect::PickReceiveFolder) => {}
-            // "Salvar" of the rename field: the field's text goes through `submit_edit` like Enter does.
-            Some(Effect::SubmitEdit(e)) => {
-                if let Some(text) = self.main.canvas.edit_text(e) {
+        self.dispatch_from(WindowKind::Main, act);
+    }
+
+    /// Sends what an activation asks of the backend, repaints what it changed and runs its effect, if it has one.
+    /// `kind` is the window the activation came from. A menu or a panel waits for the person: it opens last, with
+    /// the activation already dispatched and no borrow of the state held.
+    fn dispatch_from(&self, kind: WindowKind, act: Activation) {
+        let effect = act.effect.map(handling);
+        if let Some(h) = effect.filter(|h| !h.waits_for_a_person()) {
+            self.run(kind, h);
+        }
+        self.send_commands(act.commands);
+        self.refresh(act.changed);
+        if let Some(h) = effect.filter(|h| h.waits_for_a_person()) {
+            self.run(kind, h);
+        }
+    }
+
+    /// Does what an effect asks for (see `effects.rs`: one arm per handler, no catch-all).
+    fn run(&self, kind: WindowKind, handling: Handling) {
+        let canvas = self.canvas(kind).unwrap_or_else(|| self.main.canvas.clone());
+        match handling {
+            Handling::Focus(e) => canvas.focus_control(ControlId::Edit(e), true),
+            // The button beside a text input ("Salvar" of the rename field, "Enviar" of the chat): the field's text
+            // goes through `submit_edit` like Return does.
+            Handling::Submit(e) => {
+                if let Some(text) = canvas.edit_text(e) {
                     let again = self.state.borrow_mut().submit_edit(e, text);
+                    if e == EditId::Chat {
+                        canvas.clear_edit(e);
+                    }
                     self.send_commands(again.commands);
                     self.refresh(again.changed);
                 }
             }
-            // A select's menu opens in `activate_from`, which knows the canvas the click came from.
-            Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
+            Handling::OpenLogsFolder => self.open_logs(),
+            Handling::Menu(select) => self.pick(kind, select),
+            Handling::SaveLogPanel => self.save_log(),
+            Handling::ChooseFiles => {
+                let title = self.state.borrow().t(MsgKey::ChooseFiles);
+                let panel = files_panel(self.mtm, &title);
+                if panel.runModal() == NSModalResponseOK {
+                    self.files_chosen(paths_of(&panel));
+                }
+            }
+            Handling::ChooseFolder => {
+                let title = self.state.borrow().t(MsgKey::FilesPickFolder);
+                let panel = folder_panel(self.mtm, &title);
+                if panel.runModal() == NSModalResponseOK
+                    && let Some(dir) = paths_of(&panel).into_iter().next()
+                {
+                    self.folder_chosen(dir);
+                }
+            }
         }
-        self.send_commands(act.commands);
-        self.refresh(act.changed);
+    }
+
+    /// The files the person chose to send go to the state, which starts the transfer.
+    fn files_chosen(&self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let act = self.state.borrow_mut().send_files(paths);
+        self.dispatch_from(WindowKind::Viewer, act);
+    }
+
+    /// The folder the person chose to receive files into goes to the state.
+    fn folder_chosen(&self, dir: std::path::PathBuf) {
+        let act = self.state.borrow_mut().set_receive_dir(dir);
+        self.dispatch_from(WindowKind::Viewer, act);
+    }
+
+    /// The folder of the app's logs, shown in the Finder.
+    fn open_logs(&self) {
+        if let Some(dir) = &self.hooks.logs_dir {
+            let url = NSURL::fileURLWithPath_isDirectory(&ns(&dir.to_string_lossy()), true);
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
     }
 
     fn activate(&self, id: ControlId) {
@@ -574,14 +662,7 @@ impl Shell {
     /// activation was dispatched, with no borrow of the state held.
     fn activate_from(&self, kind: WindowKind, id: ControlId) {
         let act = self.state.borrow_mut().activate(id);
-        let select = match act.effect {
-            Some(Effect::Menu(select)) => Some(select),
-            _ => None,
-        };
-        self.dispatch(act);
-        if let Some(select) = select {
-            self.pick(kind, select);
-        }
+        self.dispatch_from(kind, act);
     }
 
     /// The canvas of window `kind`, while that window exists.
@@ -622,7 +703,7 @@ impl Shell {
         let Some(canvas) = self.canvas(kind) else { return };
         if let Some(index) = canvas.pick(&options, ControlId::Select(select)) {
             let act = self.state.borrow_mut().choose(select, index);
-            self.dispatch(act);
+            self.dispatch_from(kind, act);
         }
     }
 
@@ -831,9 +912,9 @@ impl Shell {
         }
         if changed.hits(WindowKind::Viewer)
             && let Some(v) = self.viewer.borrow().as_ref()
-            && let Some(model) = viewer_model(&self.state.borrow())
+            && let Some(title) = viewer_title(&self.state.borrow())
         {
-            v.window.setTitle(&ns(&model.title));
+            v.window.setTitle(&ns(&title));
             v.canvas.setNeedsDisplay(true);
         }
         self.attention();
@@ -868,12 +949,12 @@ impl Shell {
     }
 
     fn sync_viewer(&self) {
-        let model = viewer_model(&self.state.borrow());
+        let title = viewer_title(&self.state.borrow());
         let exists = self.viewer.borrow().is_some();
-        match (model, exists) {
-            (Some(m), false) => {
+        match (title, exists) {
+            (Some(title), false) => {
                 let delegate = ProtocolObject::from_ref(&*self.controller);
-                let v = ViewerWindow::create(self.mtm, delegate, &m.title);
+                let v = ViewerWindow::create(self.mtm, delegate, &title);
                 if let Some(shot) = SHOT.get() {
                     v.canvas.set_dump(shot.with_extension("viewer.layout.txt"));
                 }

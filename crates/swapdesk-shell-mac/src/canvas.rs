@@ -38,8 +38,8 @@ use swapdesk_paint::{EditSlot, Frame, Interaction, Output, Rect, Widget, input, 
 use swapdesk_ui::tokens::{Palette, palette, text};
 use swapdesk_ui::{ControlId, EditId, WindowKind};
 
+use crate::appkit::color;
 use crate::painter::{CgPainter, Fonts};
-use crate::views::color;
 
 mod ax;
 
@@ -634,6 +634,13 @@ impl CanvasView {
         let wanted = std::ptr::from_ref(control).cast::<c_void>();
         let fields = self.ivars().fields.borrow();
         fields.iter().find(|f| Retained::as_ptr(&f.view).cast::<c_void>() == wanted).map(|f| f.id)
+    }
+
+    /// Empties input `id` (the chat line, once it was sent).
+    pub fn clear_edit(&self, id: EditId) {
+        if let Some(f) = self.field(id) {
+            f.setStringValue(&NSString::from_str(""));
+        }
     }
 
     /// What input `id` holds (`None` when it is not on screen).

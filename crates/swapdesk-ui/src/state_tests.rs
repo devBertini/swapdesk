@@ -1670,3 +1670,29 @@ fn pairing_texts_never_point_at_a_time_the_screen_does_not_show() {
     assert!(texts.iter().any(|t| t.starts_with("Este computador ainda não está pareado")), "{texts:?}");
     assert!(!texts.iter().any(|t| t.contains("desse tempo") || t.contains("tempo abaixo")), "{texts:?}");
 }
+
+#[test]
+fn the_login_item_the_system_reports_shows_in_the_switch_and_is_kept() {
+    let mem = MemPrefs::default();
+    let mut s = UiState::new(Language::PtBr, false);
+    s.load_prefs(Box::new(mem.clone()));
+    // Before the settings arrive: the shell found the login item registered.
+    s.set_open_at_login(true);
+    let saved = UserPrefs::decode(&mem.read().unwrap().expect("written")).expect("a valid record");
+    assert!(saved.open_at_login);
+    // The service answers its default (off) for the per-user field; the switch stays on.
+    let from_service = Settings { open_at_login: false, ..base().settings().unwrap().clone() };
+    s.apply(UiEvent::SettingsChanged(from_service));
+    assert!(s.settings().unwrap().open_at_login);
+    // With the settings already there, the switch follows at once.
+    s.set_open_at_login(false);
+    assert!(!s.settings().unwrap().open_at_login);
+    assert!(!UserPrefs::decode(&mem.read().unwrap().unwrap()).unwrap().open_at_login);
+    // The person turns it on in the window: the command carries it, for the shell to act on.
+    let act = s.activate(ControlId::OpenAtLogin);
+    assert!(
+        matches!(act.commands.as_slice(), [Command::SetSettings { settings }] if settings.open_at_login),
+        "{:?}",
+        act.commands
+    );
+}

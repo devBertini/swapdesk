@@ -39,7 +39,7 @@ features = [
     "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
     "NSPanel", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
     "NSStackView", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
-    "NSView", "NSVisualEffectView", "NSWindow", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
+    "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]

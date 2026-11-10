@@ -965,6 +965,19 @@ impl UiState {
         crate::prefs::save(&**store, &p);
     }
 
+    /// What the system itself says about opening at login (macOS: the login item is registered or not). The switch
+    /// shows it and the per-user record keeps it, like a change made in the window; the service's copy never wins
+    /// over it.
+    pub fn set_open_at_login(&mut self, on: bool) {
+        if let Some(p) = &mut self.ui {
+            p.open_at_login = on;
+        }
+        if let Some(s) = &mut self.settings {
+            s.open_at_login = on;
+        }
+        self.write_prefs();
+    }
+
     pub fn set_theme(&mut self, theme: Theme) -> Changed {
         let before = self.dark();
         self.theme = theme;

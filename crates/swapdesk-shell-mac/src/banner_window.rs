@@ -18,9 +18,9 @@ use objc2_app_kit::{
 use objc2_foundation::MainThreadMarker;
 use swapdesk_ui::WindowKind;
 
+use crate::appkit::{frame, ns};
 use crate::canvas::CanvasView;
 use crate::model::BannerModel;
-use crate::views::{frame, ns};
 
 /// Below the menu bar, as the Windows banner sits below the top edge.
 const TOP_GAP: f64 = 12.0;

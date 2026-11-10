@@ -55,7 +55,7 @@ fn painted_all(shell: &Shell, canvas: &CanvasView, kind: WindowKind, scenario: &
 fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
-        let expected_viewer = viewer_model(&state);
+        let expected_viewer = viewer_title(&state);
         let shell = open(mtm, sc, ViewerHooks::default());
 
         ensure!(shell.main.canvas.paint_now(), "{}: the main window's canvas did not paint", sc.name());
@@ -162,11 +162,91 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
+/// The mock backend, keeping every command the shell sends.
+struct Recording {
+    inner: Arc<MockBackend>,
+    sent: std::sync::Mutex<Vec<Command>>,
+}
+
+impl UiBackend for Recording {
+    fn send(&self, command: Command) -> swapdesk_ui::Ticket {
+        self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(command.clone());
+        self.inner.send(command)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        self.inner.drain()
+    }
+}
+
+/// The two pickers of the files panel: "Escolher arquivos" opens a panel for any number of files and no folder, the
+/// receive folder one for a single folder that may be created there; the files chosen leave as one `FilesSend` of
+/// the viewer session, the folder chosen becomes the receive folder. (The panels are not shown: they wait for a
+/// person.) Opening the logs with no logs folder, as in a mock run, does nothing.
+fn the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm: MainThreadMarker) -> Result<(), String> {
+    let files = files_panel(mtm, "Escolher arquivos");
+    ensure!(
+        files.canChooseFiles() && !files.canChooseDirectories() && files.allowsMultipleSelection(),
+        "the files panel takes files {}, folders {}, several {}",
+        files.canChooseFiles(),
+        files.canChooseDirectories(),
+        files.allowsMultipleSelection()
+    );
+    let folder = folder_panel(mtm, "Escolher a pasta");
+    ensure!(
+        !folder.canChooseFiles()
+            && folder.canChooseDirectories()
+            && !folder.allowsMultipleSelection()
+            && folder.canCreateDirectories(),
+        "the folder panel takes files {}, folders {}, several {}, new folders {}",
+        folder.canChooseFiles(),
+        folder.canChooseDirectories(),
+        folder.allowsMultipleSelection(),
+        folder.canCreateDirectories()
+    );
+
+    let state = Scenario::Arquivos.prepared_state();
+    let waker = Arc::new(Waker::new());
+    let backend =
+        Arc::new(Recording { inner: Arc::new(MockBackend::new(waker.clone())), sent: std::sync::Mutex::default() });
+    let shell = start(mtm, state, backend.clone(), waker, Vec::new(), ViewerHooks::default());
+    let session = shell.state.borrow().viewer_session().map(|s| s.id).ok_or("the scenario has no viewer session")?;
+
+    let dir = std::path::PathBuf::from("/tmp/swapdesk-recebidos");
+    shell.folder_chosen(dir.clone());
+    ensure!(
+        shell.state.borrow().receive_dir() == Some(dir.as_path()),
+        "the receive folder is {:?}",
+        shell.state.borrow().receive_dir()
+    );
+
+    let chosen = vec![std::path::PathBuf::from("/tmp/relatório.pdf"), std::path::PathBuf::from("/tmp/fotos.zip")];
+    shell.files_chosen(Vec::new());
+    shell.files_chosen(chosen.clone());
+    let sends: Vec<Command> = backend
+        .sent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|c| matches!(c, Command::FilesSend { .. }))
+        .cloned()
+        .collect();
+    ensure!(
+        matches!(sends.as_slice(), [Command::FilesSend { session_id, local_paths, .. }]
+            if *session_id == session && *local_paths == chosen),
+        "the files chosen left as {sends:?}"
+    );
+
+    shell.run(WindowKind::Main, Handling::OpenLogsFolder);
+    close(&shell);
+    Ok(())
+}
+
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
     scenarios_build_their_windows(mtm)?;
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;
     render_slot_lifecycle(mtm)?;
+    the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm)?;
     super::ax_checks::run(mtm)
 }

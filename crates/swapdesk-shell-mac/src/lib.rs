@@ -2,8 +2,9 @@
 //! and wires OS events to it; it holds no state and no text of its own.
 //!
 //! Layers:
-//! - pure Rust, built and tested on every platform: [`model`] (state to what each window shows), [`input`] (the events
-//!   of the video view and the trait the input lane implements), [`locale`];
+//! - pure Rust, built and tested on every platform: [`model`] (what the shell takes from the state besides the
+//!   painted frame), [`effects`] (the handler of each effect the state asks for), [`input`] (the events of the video
+//!   view and the trait the input lane implements), [`locale`];
 //! - macOS only (`cfg(target_os = "macos")`): the windows, controls, timers, accessibility and theme following.
 //!
 //! The slots for the other lanes: [`ViewerInput`] (input lane, pure) and `VideoSlot` (render lane, macOS only), given
@@ -12,6 +13,7 @@
 //! Apple documentation read for this crate (docs.rs objc2 0.6 / objc2-app-kit 0.3 and developer.apple.com): see the
 //! header of each macOS module.
 
+pub mod effects;
 pub mod input;
 pub mod launch;
 pub mod locale;
@@ -19,8 +21,10 @@ pub mod model;
 
 pub use input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 pub use locale::{language_from_tags, language_override, theme_override};
-pub use model::{BannerModel, MainModel, VideoArea, ViewerModel, banner_model, main_model, viewer_model};
+pub use model::{BannerModel, VideoArea, appearance_name, banner_model, viewer_title};
 
+#[cfg(target_os = "macos")]
+mod appkit;
 #[cfg(target_os = "macos")]
 mod banner_window;
 #[cfg(target_os = "macos")]
@@ -37,11 +41,6 @@ mod system;
 mod video;
 #[cfg(target_os = "macos")]
 mod viewer_window;
-// The main window is painted by the canvas: its AppKit builders stay unused until M1.6 removes this module with the
-// viewer's and the banner's.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-mod views;
 
 #[cfg(target_os = "macos")]
 pub use banner_window::set_snapshot_dir;

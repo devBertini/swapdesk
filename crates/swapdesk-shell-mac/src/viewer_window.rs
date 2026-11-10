@@ -17,10 +17,10 @@ use objc2_app_kit::{
 use objc2_foundation::MainThreadMarker;
 use swapdesk_ui::WindowKind;
 
+use crate::appkit::{PaintedView, frame, ns, size, view_of};
 use crate::canvas::CanvasView;
 use crate::model::VideoArea;
 use crate::video::{VideoSurface, VideoView};
-use crate::views::{PaintedView, frame, ns, size, view_of};
 
 pub struct ViewerWindow {
     pub window: Retained<NSWindow>,

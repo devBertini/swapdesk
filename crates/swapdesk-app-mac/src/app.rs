@@ -176,11 +176,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // C5.1: the per-user settings (ui.bin under ~/Library/Application Support/Swapdesk) are read before the first
     // paint. A scratch run (self-test, host drive) never touches the user's file.
     let prefs_trace = Arc::clone(&trace);
+    // No record yet: this is the first start of Swapdesk for this user.
+    let mut first_run = false;
     if !options.use_scratch()
         && let Some(home) = std::env::var_os("HOME")
     {
         swapdesk_ui::prefs::set_note_hook(move |line| prefs_trace.log(Level::Info, "app", format_args!("{line}")));
         let dir = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        first_run = !dir.join(swapdesk_ui::prefs::FILE_NAME).exists();
         state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
     }
 
@@ -226,16 +229,36 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let addrs = service.local_addrs().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
     trace.log(Level::Info, "app", format_args!("Swapdesk.app started (scratch: {})", options.use_scratch()));
 
-    // D32: the app hosts from inside its own process, so it must come back after a login. A normal run only.
-    if options.registers_login_item() {
-        let (level, line) = crate::login_item::register();
-        trace.log(level, "app", format_args!("{line}"));
+    // D32: the app hosts from inside its own process, so it must come back after a login: the first start registers
+    // it as a login item. After that the switch "Abrir ao ligar" and the login item say the same thing
+    // (`login_switch`). A normal run only.
+    let follows_login_item = options.registers_login_item();
+    if follows_login_item {
+        use crate::login_item::Status;
+        use crate::login_switch::{AtStart, at_start};
+        let enabled = crate::login_item::status() == Some(Status::Enabled);
+        let wanted = state.user_prefs().open_at_login;
+        if at_start(first_run, enabled, wanted) == AtStart::Register {
+            let (level, line) = crate::login_item::register();
+            trace.log(level, "app", format_args!("{line}"));
+        }
+        let now = crate::login_item::status();
+        trace.log(
+            Level::Info,
+            "app",
+            format_args!(
+                "login item at start: {} (first run {first_run}, switch was {wanted})",
+                now.map_or_else(|| "unavailable".to_owned(), Status::name)
+            ),
+        );
+        state.set_open_at_login(now == Some(Status::Enabled));
     }
     let note_trace = Arc::clone(&trace);
     let hooks = ViewerHooks {
         video: Some(Arc::new(MacVideoSlot::new(&viewer))),
         input: Some(Arc::new(viewer.input())),
         note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
+        logs_dir: Some(store.dir().to_path_buf()),
     };
     // The host drive owns the backend's events: the window gets a backend that says nothing.
     let observing: Arc<dyn UiBackend> = match &options.drive_host {
@@ -252,6 +275,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
             window
         }
         None => Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer))),
+    };
+    // The switch "Abrir ao ligar" flipped in the window: the login item follows, off the UI thread.
+    let observing: Arc<dyn UiBackend> = if follows_login_item {
+        let switch_trace = Arc::clone(&trace);
+        let on = state.user_prefs().open_at_login;
+        Arc::new(crate::login_switch::Following::new(
+            observing,
+            on,
+            Box::new(move |on| {
+                let trace = Arc::clone(&switch_trace);
+                std::thread::spawn(move || {
+                    let (level, line) = crate::login_item::set(on);
+                    trace.log(level, "app", format_args!("{line}"));
+                });
+            }),
+        ))
+    } else {
+        observing
     };
     let startup = if options.drive_host.is_some() { Vec::new() } else { state.startup_commands() };
 
