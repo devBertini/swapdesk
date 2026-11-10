@@ -7,7 +7,7 @@
 //! (`NSControlTextDidChangeNotification`), `NSDistributedNotificationCenter` with `AppleInterfaceThemeChangedNotification`
 //! (the notification the system posts when the appearance changes), `NSSavePanel`, `NSWindowDelegate`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -15,17 +15,16 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK,
-    NSSavePanel, NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSControl,
+    NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel,
+    NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSRange, NSString, NSTimer, ns_string,
+    NSObjectProtocol, NSPoint, NSString, NSTimer, ns_string,
 };
 use swapdesk_ui::debounce::Debouncer;
-use swapdesk_ui::tokens::{layout, palette};
+use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
     Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, Theme, UiBackend,
@@ -33,6 +32,7 @@ use swapdesk_ui::{
 };
 
 use crate::banner_window::BannerWindow;
+use crate::canvas::CanvasView;
 use crate::input::ViewerInput;
 use crate::model::*;
 use crate::system::{Waker, local_clock, system_dark};
@@ -173,12 +173,10 @@ const VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
 
 struct MainWindow {
     window: Retained<NSWindow>,
-    actions: RefCell<Vec<Action>>,
+    /// The content view: it paints the shared frame and takes the mouse.
+    canvas: Retained<CanvasView>,
+    /// The native text inputs over the frame's edit slots.
     fields: RefCell<Vec<(EditId, Retained<NSTextField>)>>,
-    last: RefCell<Option<MainModel>>,
-    /// The content view is being replaced: AppKit ends the old field's editing (`textDidEndEditing`, an action) in
-    /// the middle of `setContentView`, and that action is the old view's, not the person's.
-    rebuilding: Cell<bool>,
 }
 
 /// The appearance `SWAPDESK_THEME=dark|light` asks for (development), `None` without it.
@@ -224,6 +222,19 @@ thread_local! {
 fn with_shell<R>(f: impl FnOnce(&Rc<Shell>) -> R) -> Option<R> {
     let shell = SHELL.with(|s| s.borrow().clone())?;
     Some(f(&shell))
+}
+
+/// Reads the UI state for a paint. `None` when there is no shell, or while the shell itself is changing the state
+/// (it marks the canvases dirty when it is done, so the paint comes again).
+pub(crate) fn with_state<R>(f: impl FnOnce(&UiState) -> R) -> Option<R> {
+    let shell = SHELL.with(|s| s.borrow().clone())?;
+    let state = shell.state.try_borrow().ok()?;
+    Some(f(&state))
+}
+
+/// A click on control `id` of the canvas of window `kind`.
+pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
+    with_shell(|s| s.activate_from(kind, id));
 }
 
 /// The main-queue block the waker posts.
@@ -292,7 +303,10 @@ fn start_with(
     // This toolbar has the quality select and the view-only switch: the state lists them.
     state.set_viewer_extras(true);
     install_menus(mtm, &app, &state);
-    let window = make_main_window(mtm, &controller, &state.t(swapdesk_ui::MsgKey::AppName));
+    let (window, canvas) = make_main_window(mtm, &controller, &state.t(swapdesk_ui::MsgKey::AppName));
+    if let Some(shot) = SHOT.get() {
+        canvas.set_dump(shot.with_extension("layout.txt"));
+    }
     let shell = Rc::new(Shell {
         mtm,
         controller: controller.clone(),
@@ -300,13 +314,7 @@ fn start_with(
         backend,
         waker,
         hooks,
-        main: MainWindow {
-            window,
-            actions: RefCell::new(Vec::new()),
-            fields: RefCell::new(Vec::new()),
-            last: RefCell::new(None),
-            rebuilding: Cell::new(false),
-        },
+        main: MainWindow { window, canvas, fields: RefCell::new(Vec::new()) },
         viewer: RefCell::new(None),
         banner: RefCell::new(None),
         tick_timer: RefCell::new(None),
@@ -351,11 +359,21 @@ pub fn status_item_present() -> bool {
     with_shell(|s| s.status_item.borrow().as_ref().is_some_and(|i| i.isVisible())).unwrap_or(false)
 }
 
+/// Development (`--selftest`): a real click on a sidebar entry of the main window, sent through the window as AppKit
+/// sends the mouse (`sendEvent:`). `Some(true)` when the screen changed, `None` when there was nothing to click.
+pub fn selftest_click() -> Option<bool> {
+    with_shell(|s| s.selftest_click()).flatten()
+}
+
 fn clear_shell() {
     SHELL.with(|s| *s.borrow_mut() = None);
 }
 
-fn make_main_window(mtm: MainThreadMarker, controller: &Controller, title: &str) -> Retained<NSWindow> {
+fn make_main_window(
+    mtm: MainThreadMarker,
+    controller: &Controller,
+    title: &str,
+) -> (Retained<NSWindow>, Retained<CanvasView>) {
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
@@ -375,8 +393,15 @@ fn make_main_window(mtm: MainThreadMarker, controller: &Controller, title: &str)
     window.setTitle(&ns(title));
     window.setContentMinSize(size(f64::from(layout::MIN_W), f64::from(layout::MIN_H)));
     window.setDelegate(Some(ProtocolObject::from_ref(controller)));
+    // The content view follows the window's size; the shell marks it dirty on a resize.
+    let canvas = CanvasView::create(
+        mtm,
+        frame(0.0, 0.0, f64::from(layout::DESIGN_W), f64::from(layout::DESIGN_H)),
+        WindowKind::Main,
+    );
+    window.setContentView(Some(&canvas));
     window.center();
-    window
+    (window, canvas)
 }
 
 /// The application menu (quit) and the edit menu (so Cmd+V works in the address field).
@@ -481,6 +506,7 @@ impl Shell {
                     self.refresh(again.changed);
                 }
             }
+            // A select's menu opens in `activate_from`, which knows the canvas the click came from.
             Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
         }
         self.send_commands(act.commands);
@@ -490,6 +516,41 @@ impl Shell {
     fn activate(&self, id: ControlId) {
         let act = self.state.borrow_mut().activate(id);
         self.dispatch(act);
+    }
+
+    /// A click on a painted control. A select answers with its menu, which waits for the person: it opens after the
+    /// activation was dispatched, with no borrow of the state held.
+    fn activate_from(&self, kind: WindowKind, id: ControlId) {
+        let act = self.state.borrow_mut().activate(id);
+        let select = match act.effect {
+            Some(Effect::Menu(select)) => Some(select),
+            _ => None,
+        };
+        self.dispatch(act);
+        if let Some(select) = select {
+            self.pick(kind, select);
+        }
+    }
+
+    /// The canvas of window `kind`, where one paints it (the viewer and the banner come in M1.4).
+    fn canvas(&self, kind: WindowKind) -> Option<Retained<CanvasView>> {
+        match kind {
+            WindowKind::Main => Some(self.main.canvas.clone()),
+            WindowKind::Viewer | WindowKind::Banner => None,
+        }
+    }
+
+    /// The menu of a select under its control; the choice goes back through `UiState::choose`.
+    fn pick(&self, kind: WindowKind, select: SelectId) {
+        let options = self.state.borrow().select_options(select);
+        if options.is_empty() {
+            return;
+        }
+        let Some(canvas) = self.canvas(kind) else { return };
+        if let Some(index) = canvas.pick(&options, ControlId::Select(select)) {
+            let act = self.state.borrow_mut().choose(select, index);
+            self.dispatch(act);
+        }
     }
 
     /// "Where to save the log" waits for a person, so it runs outside the slow-work guard.
@@ -508,14 +569,12 @@ impl Shell {
     // ----- what AppKit tells the shell -----
 
     fn on_action(&self, sender: &AnyObject) {
-        if self.main.rebuilding.get() {
-            return;
-        }
         let Some(control) = sender.downcast_ref::<NSControl>() else { return };
         let tag = control.tag();
         let (idx, parity) = ((tag / WINDOWS) as usize, tag % WINDOWS);
         let action = match parity {
-            PARITY_MAIN => self.main.actions.borrow().get(idx).copied(),
+            // The main window is painted: its controls are not AppKit controls.
+            PARITY_MAIN => None,
             PARITY_VIEWER => self.viewer.borrow().as_ref().and_then(|v| v.actions.borrow().get(idx).copied()),
             _ => self.banner.borrow().as_ref().and_then(|b| b.actions.borrow().get(idx).copied()),
         };
@@ -599,16 +658,11 @@ impl Shell {
     fn text_changed(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
         let Some(field) = obj.downcast_ref::<NSTextField>() else { return };
-        let Some(Action::Edit(EditId::Address)) = self
-            .main
-            .actions
-            .borrow()
-            .get((field.tag() / WINDOWS) as usize)
-            .copied()
-            .filter(|_| field.tag() % WINDOWS == PARITY_MAIN)
-        else {
+        let is_address =
+            self.main.fields.borrow().iter().any(|(id, f)| *id == EditId::Address && std::ptr::eq(&**f, field));
+        if !is_address {
             return;
-        };
+        }
         let now = self.started.elapsed().as_millis() as u64;
         self.debounce.borrow_mut().input(&field.stringValue().to_string(), now);
         self.set_timer(&self.debounce_timer, 0.15, false, sel!(debounced:));
@@ -707,6 +761,9 @@ impl Shell {
 
     fn resized(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
+        if std::ptr::eq(&*self.main.window as *const NSWindow as *const AnyObject, &*obj as *const AnyObject) {
+            self.main.canvas.setNeedsDisplay(true);
+        }
         let is_viewer = self.viewer.borrow().as_ref().is_some_and(|v| {
             std::ptr::eq(&*v.window as *const NSWindow as *const AnyObject, &*obj as *const AnyObject)
         });
@@ -763,8 +820,8 @@ impl Shell {
 
     // ----- drawing -----
 
-    /// Windows follow the state (a viewer exists while a session does); then what changed is rebuilt, and only when
-    /// its model differs from the last one drawn.
+    /// Windows follow the state (a viewer exists while a session does); then what changed is painted again (the main
+    /// window) or rebuilt when its model differs from the last one drawn (the viewer and the banner).
     fn refresh(&self, changed: Changed) {
         let changed = changed.union(self.sync_appearance());
         if changed.is_none() {
@@ -776,7 +833,7 @@ impl Shell {
             self.sync_banner();
         }
         if changed.hits(WindowKind::Main) || changed.hits(WindowKind::Banner) {
-            self.rebuild_main();
+            self.main.canvas.setNeedsDisplay(true);
             self.take_shot();
         }
         if changed.hits(WindowKind::Viewer)
@@ -847,6 +904,8 @@ impl Shell {
         if SHOT_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        // The main window's content, painted into a bitmap: it needs no screen, so it comes out with the Mac locked too.
+        self.main.canvas.save_png(&path.with_extension("content.png"));
         // A scenario with a session films the viewer window, any other the main window.
         let window = self.viewer.borrow().as_ref().map_or(self.main.window.windowNumber(), |v| v.window.windowNumber());
         let path = path.clone();
@@ -887,131 +946,30 @@ impl Shell {
         });
     }
 
-    fn rebuild_main(&self) {
-        let model = main_model(&self.state.borrow());
-        if self.main.last.borrow().as_ref() == Some(&model) {
-            return;
+    fn selftest_click(&self) -> Option<bool> {
+        let canvas = &self.main.canvas;
+        if !canvas.painted() && !canvas.paint_now() {
+            return None;
         }
-        let mtm = self.mtm;
-        let pal = palette(model.dark);
-        let win = &self.main.window;
-        let bounds = win
-            .contentView()
-            .map_or(frame(0.0, 0.0, f64::from(layout::DESIGN_W), f64::from(layout::DESIGN_H)), |v| v.bounds());
-        let (w, h) = (bounds.size.width, bounds.size.height);
-
-        // Keep what the person is typing across the rebuild.
-        let values: Vec<(EditId, String)> =
-            self.main.fields.borrow().iter().map(|(e, f)| (*e, f.stringValue().to_string())).collect();
-        let focused = self
-            .main
-            .fields
-            .borrow()
-            .iter()
-            .find(|(_, f)| {
-                f.currentEditor().is_some_and(|ed| {
-                    win.firstResponder().is_some_and(|r| {
-                        std::ptr::eq(&*r as *const _ as *const AnyObject, &*ed as *const _ as *const AnyObject)
-                    })
-                })
-            })
-            .map(|(e, _)| *e);
-
-        let mut actions = Vec::new();
-        let mut fields = Vec::new();
-        let mut ctx =
-            Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: PARITY_MAIN, fields: &mut fields };
-        let root = PaintedView::create(mtm, bounds, Some(pal.canvas));
-        root.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-
-        match &model.layout {
-            MainLayout::Browse { sidebar: sb, content } => {
-                let side = sidebar(&mut ctx, sb, h);
-                root.addSubview(&side);
-                let cw = w - f64::from(layout::SIDEBAR_W);
-                let mut views: Vec<Retained<NSView>> = Vec::new();
-                if let Some(s) = &model.strip {
-                    views.push(strip(&mut ctx, s, 560.0));
-                }
-                // The home's cards use the width of the window (up to 920); every other page keeps its 560 column.
-                let wide = content.iter().any(|b| matches!(b, Block::Cards(_)));
-                let body_w = if wide { (cw - 64.0).clamp(560.0, 920.0) } else { 560.0 };
-                let body = blocks_stack(&mut ctx, content, body_w, &values);
-                views.push(view_of(&body));
-                let col = vstack(&ctx, &views, 16.0);
-                let inner = fit(&col);
-                let doc = PaintedView::create(mtm, frame(0.0, 0.0, cw, inner.height + 64.0), None);
-                doc.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-                col.setFrameOrigin(NSPoint::new(32.0, 32.0));
-                doc.addSubview(&col);
-                let scroll = NSScrollView::initWithFrame(
-                    NSScrollView::alloc(mtm),
-                    frame(f64::from(layout::SIDEBAR_W), 0.0, cw, h),
-                );
-                scroll.setHasVerticalScroller(true);
-                scroll.setDrawsBackground(false);
-                scroll.setDocumentView(Some(&doc));
-                scroll.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-                );
-                root.addSubview(&scroll);
-            }
-            MainLayout::Card { blocks } => {
-                let mut views: Vec<Retained<NSView>> = Vec::new();
-                if let Some(s) = &model.strip {
-                    views.push(strip(&mut ctx, s, layout::DIALOG_W as f64 - 64.0));
-                }
-                let stack = blocks_stack(&mut ctx, blocks, f64::from(layout::DIALOG_W) - 64.0, &values);
-                views.push(view_of(&stack));
-                let col = vstack(&ctx, &views, 16.0);
-                let inner = fit(&col);
-                let card = NSBox::new(mtm);
-                card.setBoxType(NSBoxType::Custom);
-                card.setTitlePosition(NSTitlePosition::NoTitle);
-                card.setBorderWidth(1.0);
-                card.setBorderColor(&color(pal.line));
-                card.setCornerRadius(f64::from(layout::DIALOG_RADIUS));
-                card.setFillColor(&color(pal.surface));
-                card.setContentViewMargins(size(32.0, 28.0));
-                card.setContentView(Some(&view_of(&col)));
-                let cw = f64::from(layout::DIALOG_W).max(inner.width + 64.0);
-                let ch = inner.height + 56.0;
-                card.setFrame(frame((w - cw) / 2.0, ((h - ch) / 2.0).max(24.0), cw, ch));
-                card.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin,
-                );
-                root.addSubview(&card);
-            }
+        let before = self.state.borrow().screen();
+        let target = if before == swapdesk_ui::Screen::Settings { ControlId::NavHome } else { ControlId::NavSettings };
+        let (x, y) = canvas.rect_of(target)?.center();
+        let at = canvas.convertPoint_toView(NSPoint::new(f64::from(x), f64::from(y)), None);
+        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                at,
+                NSEventModifierFlags::empty(),
+                0.0,
+                self.main.window.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            )?;
+            self.main.window.sendEvent(&event);
         }
-        win.setTitle(&ns(&model.title));
-        // No borrow of the shell's cells is held across `setContentView`: it calls back into `on_action`.
-        self.main.rebuilding.set(true);
-        win.setContentView(Some(&view_of(&root)));
-        self.main.rebuilding.set(false);
-        *self.main.actions.borrow_mut() = actions;
-        *self.main.fields.borrow_mut() = fields;
-
-        // The rename field opens with the keyboard in it and its text selected.
-        let rename_opened = model.has_field(EditId::Rename)
-            && !self.main.last.borrow().as_ref().is_some_and(|m| m.has_field(EditId::Rename));
-        if rename_opened && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == EditId::Rename) {
-            win.makeFirstResponder(Some(f));
-            if let Some(ed) = f.currentEditor() {
-                let len = f.stringValue().length();
-                ed.setSelectedRange(NSRange::new(0, len));
-            }
-        } else if let Some(e) = focused
-            && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e)
-        {
-            win.makeFirstResponder(Some(f));
-            if let Some(ed) = f.currentEditor() {
-                let len = f.stringValue().length();
-                ed.setSelectedRange(NSRange::new(len, 0));
-            }
-        }
-        *self.main.last.borrow_mut() = Some(model);
+        Some(self.state.borrow().screen() != before)
     }
 
     /// A request that needs an answer brings the main window up.

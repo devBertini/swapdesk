@@ -24,6 +24,8 @@ pub use model::{BannerModel, MainModel, VideoArea, ViewerModel, banner_model, ma
 #[cfg(target_os = "macos")]
 mod banner_window;
 #[cfg(target_os = "macos")]
+mod canvas;
+#[cfg(target_os = "macos")]
 mod cg;
 #[cfg(target_os = "macos")]
 pub mod painter;
@@ -35,7 +37,10 @@ mod system;
 mod video;
 #[cfg(target_os = "macos")]
 mod viewer_window;
+// The main window is painted by the canvas: its AppKit builders stay unused until M1.6 removes this module with the
+// viewer's and the banner's.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 mod views;
 
 #[cfg(target_os = "macos")]
@@ -43,7 +48,7 @@ pub use banner_window::set_snapshot_dir;
 #[cfg(target_os = "macos")]
 pub use shell::{ViewerHooks, run, run_with_host, selftest, set_shot};
 #[cfg(target_os = "macos")]
-pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};
+pub use shell::{close_main_window, main_window_visible, reopen_main_window, selftest_click, status_item_present};
 #[cfg(target_os = "macos")]
 pub use system::{Waker, system_dark, system_language};
 #[cfg(target_os = "macos")]

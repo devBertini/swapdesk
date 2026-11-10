@@ -50,21 +50,24 @@ fn close(shell: &Rc<Shell>) {
     clear_shell();
 }
 
-/// Every scenario of the mock backend builds its windows, every control of the model carries its accessible name, and
-/// a viewer window exists exactly while a viewer session does.
-fn scenarios_build_with_accessible_names(mtm: MainThreadMarker) -> Result<(), String> {
+/// Every scenario of the mock backend builds its windows: the main window's canvas paints every control the state
+/// lists, every tool of the viewer carries its accessible name, and a viewer window exists exactly while a viewer
+/// session does.
+fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
-        let expected_main = main_model(&state).control_labels();
         let expected_viewer = viewer_model(&state);
         let shell = open(mtm, sc, ViewerHooks::default());
 
-        let names = found(&shell.main.window);
-        for (id, label) in &expected_main {
+        ensure!(shell.main.canvas.paint_now(), "{}: the main window's canvas did not paint", sc.name());
+        let widgets = shell.main.canvas.widgets();
+        for c in shell.state.borrow().controls(WindowKind::Main) {
             ensure!(
-                names.contains(label),
-                "{}: {id:?} '{label}' has no accessible element in the main window ({names:?})",
-                sc.name()
+                !c.id.focusable() || widgets.iter().any(|w| w.id == c.id),
+                "{}: {:?} '{}' was not painted in the main window",
+                sc.name(),
+                c.id,
+                c.label
             );
         }
         match expected_viewer {
@@ -125,41 +128,9 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
-/// A rebuild while the person types in the address field (the device list changed): AppKit ends the old field's
-/// editing inside `setContentView` and sends its action; the shell must neither panic on its own borrows nor act on
-/// it, and the typed text and the focus survive.
-fn rebuild_while_typing_in_the_address_field(mtm: MainThreadMarker) -> Result<(), String> {
-    for sc in Scenario::ALL {
-        let shell = open(mtm, sc, ViewerHooks::default());
-        let field = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
-        let Some(field) = field else {
-            close(&shell);
-            continue;
-        };
-        shell.main.window.makeKeyAndOrderFront(None);
-        field.setStringValue(&ns("192.168.1."));
-        shell.main.window.makeFirstResponder(Some(&field));
-        ensure!(field.currentEditor().is_some(), "{sc:?}: the address field did not take the focus");
-        *shell.main.last.borrow_mut() = None;
-        shell.rebuild_main();
-        let after = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
-        let after = after.ok_or_else(|| format!("{sc:?}: no address field after the rebuild"))?;
-        ensure!(
-            after.stringValue().to_string() == "192.168.1.",
-            "{sc:?}: the typed text was lost: {:?}",
-            after.stringValue().to_string()
-        );
-        ensure!(after.currentEditor().is_some(), "{sc:?}: the focus was lost");
-        close(&shell);
-        return Ok(());
-    }
-    Err("no scenario shows the address field".into())
-}
-
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
-    scenarios_build_with_accessible_names(mtm)?;
-    rebuild_while_typing_in_the_address_field(mtm)?;
+    scenarios_build_their_windows(mtm)?;
     render_slot_lifecycle(mtm)
 }

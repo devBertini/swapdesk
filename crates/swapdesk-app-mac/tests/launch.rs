@@ -76,6 +76,7 @@ fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_windo
         "the main window is not on screen: {report}"
     );
     assert!(value(&report, "service_addrs").is_some_and(|a| a.contains(':')), "the service does not listen: {report}");
+    assert_eq!(value(&report, "click.activated"), Some("true"), "a click on the sidebar changes the screen: {report}");
     assert_eq!(value(&report, "pipeline.attached"), Some("false"), "no session, no video view: {report}");
     assert_eq!(value(&report, "pipeline.input_session"), Some("0"), "{report}");
 

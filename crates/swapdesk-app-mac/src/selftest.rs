@@ -8,7 +8,7 @@
 //! Lines: `selftest=ok`, `pid`, `windows` (count), `window.<n>=<title>|visible=<bool>`, `service_addrs`,
 //! `status_item`, `main_window.visible`, `main_window.after_close.visible` (closing the window only hides
 //! it), `main_window.after_reopen.visible` (the Dock-icon reopen), `pipeline.attached` (the viewer window's video view exists: false without a session), `pipeline.input_session`,
-//! `activation_policy`.
+//! `activation_policy`, `click.activated` (a mouse click sent to a sidebar entry of the main window changed the screen).
 //!
 //! Apple documentation: `NSApplication.windows`, `NSWindow.isVisible` / `title`, `NSApplication.terminate(_:)`,
 //! `NSApplication.activationPolicy()` (developer.apple.com/documentation/appkit/nsapplication).
@@ -62,6 +62,8 @@ fn report(mtm: MainThreadMarker, service_addrs: &str, viewer: &MacViewer) -> Str
     // D32: closing the main window only hides it, the status item stays, and a Dock-icon click shows it again.
     out.push_str(&format!("status_item={}\n", swapdesk_shell_mac::status_item_present()));
     out.push_str(&format!("main_window.visible={:?}\n", swapdesk_shell_mac::main_window_visible()));
+    // The painted main window takes the mouse: a click on a sidebar entry opens its screen.
+    out.push_str(&format!("click.activated={}\n", swapdesk_shell_mac::selftest_click() == Some(true)));
     swapdesk_shell_mac::close_main_window();
     out.push_str(&format!("main_window.after_close.visible={:?}\n", swapdesk_shell_mac::main_window_visible()));
     swapdesk_shell_mac::reopen_main_window();
