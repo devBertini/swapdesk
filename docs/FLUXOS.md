@@ -5,9 +5,9 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 <!-- placar:inicio -->
 | Total | validados | revalidar | sem prova | so em aparelho | quebrados |
 |---|---|---|---|---|---|
-| **43** | **39** (91%) | 0 | 0 | 4 | 0 |
+| **58** | **40** (69%) | 0 | 14 | 4 | 0 |
 
-*Recalculado em 2026-11-09 por `scripts/check_flows.py`. Este placar não é escrito à mão.*
+*Recalculado em 2026-11-09 por `check-flows`. Este placar não é escrito à mão.*
 <!-- placar:fim -->
 
 ## Find and pair (M1)
@@ -77,3 +77,23 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 | F-SYS-01 | Windows per-machine installer and clean uninstall: service, firewall rules, SAS policy restored, helpers only from a protected folder |  | device:the per-machine installer and uninstall need an elevated install on a real PC | so em aparelho | — |
 | F-SYS-02 | macOS daemon and agent registration, daemon self-check, LoginWindow plist, clean removal |  | device:the macOS daemon and agent registration need a Mac and a Login Items approval | so em aparelho | — |
 | F-SYS-03 | A service panic ends only its session (unwind); helpers, agents and the UI abort and helpers and agents are restarted | actor.rs<br>helper_link.rs<br>helpers.rs | swapdesk-session::flows/a_panic_in_a_handler_ends_only_its_session_and_frees_the_host<br>swapdesk-session/host::tests::f13_a_panic_right_after_the_commit_does_not_leave_the_host_busy<br>swapdesk-host/helper_tests::a_failing_encoder_factory_is_a_fault_and_the_loop_goes_on<br>swapdesk-host/service::tests::a_helper_that_disappears_is_reported_and_can_be_replaced | validado | 2026-11-09 |
+
+## One interface, between machines, video (1.1: M1 to M5)
+
+| ID | Fluxo | Entrada | Prova | Status | Validado em |
+|---|---|---|---|---|---|
+| F-UI-02 | One interface on both systems: the Mac windows paint the shared screens, take mouse and keyboard, hold native text fields and expose the shared accessibility tree |  |  | sem prova | — |
+| F-XCLIP-01 | Clipboard text and images between Windows and Mac, both session directions |  | manual:2026-11-09:harness | validado | 2026-11-09 |
+| F-XFILE-01 | Files between Windows and Mac: whole, same name, cancel, resume, both session directions |  |  | sem prova | — |
+| F-XTERM-01 | Terminal as the host's user and quick actions between Windows and Mac, both session directions |  |  | sem prova | — |
+| F-XSWAP-01 | Swap between Windows and Mac inside B4 with the pinned keys, from either direction |  |  | sem prova | — |
+| F-XCHAT-01 | Chat with read state between Windows and Mac, both session directions |  |  | sem prova | — |
+| F-XNET-01 | Reconnect inside B5 after the Wi-Fi link between two machines drops for 10 s |  |  | sem prova | — |
+| F-XUPG-01 | Upgrade over 1.0 keeps identity, pairings and settings; a 1.0 machine and a newer one hold a session both ways |  |  | sem prova | — |
+| F-NET-02 | Only what the peer's protocol minor knows is sent to it; everything an older minor sends is decoded |  |  | sem prova | — |
+| F-FILE-03 | Free space checked before accepting; names equal by normalization or case never overwrite; missing macOS folder access is said |  |  | sem prova | — |
+| F-VIEW-05 | Still-screen refinement on a Windows host and on a Mac host |  |  | sem prova | — |
+| F-VIEW-06 | Encode at the size the viewer's window shows; frame rate negotiated up to 120 |  |  | sem prova | — |
+| F-VIEW-07 | HEVC when both sides have hardware for it and know it, H.264 otherwise |  |  | sem prova | — |
+| F-VIEW-08 | A lost graphics device is created again without ending the session |  |  | sem prova | — |
+| F-VIEW-09 | Bitrate reaches the ceiling within 8 s on a clean link and settles under loss and jitter |  |  | sem prova | — |

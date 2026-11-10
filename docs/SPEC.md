@@ -59,6 +59,21 @@ Roles: the **viewer** controls, the **host** is controlled. Both machines can be
 | F-SYS-01 | Windows install and uninstall | When the installer runs, it shall install per machine under `%ProgramFiles%` (never per user), register the service, add the firewall rules (Private and Domain, LocalSubnet), and set `SoftwareSASGeneration` after saving its old value; the service shall refuse to start helpers from a user-writable path. Uninstall shall remove all of it, restore the value, delete only the files it knows, and leave nothing behind. |
 | F-SYS-02 | macOS install | When the app first runs, it shall register the daemon and the Aqua agent through `SMAppService`, guide the approval, and, when unattended access is turned on, have the daemon write the LoginWindow agent plist; at start the daemon shall check that its bundle is root-owned and validly signed; turning unattended off and uninstalling shall remove them. |
 | F-SYS-03 | Fault isolation | When a panic happens in the service or daemon while it handles one session, Swapdesk shall end that session only, log it, and keep the other sessions and the network up (unwind build, D15). When a helper, an agent or the UI panics, it shall abort; the service/daemon restarts helpers and agents, and sessions survive a helper restart. |
+| F-UI-02 | One interface on both systems (D37) | When a screen is drawn on Windows or macOS, Swapdesk shall paint it from the same shared screens, so layout, spacing, type, colours, texts and behaviour are the same on both and only the window chrome is the system's own. On macOS the windows shall take clicks, scrolling and the keyboard on the painted controls, place native text fields in the slots the screens report, and expose every drawn control to VoiceOver from the shared accessibility tree; every effect a screen asks for (file and folder pickers, menus, logs, open at login) shall do on macOS what it does on Windows. |
+| F-XCLIP-01 | Clipboard between Windows and Mac | When `CLIPBOARD` is granted and sync is on in a session between a Windows machine and a Mac, text and images copied on either side shall be available on the other, in both session directions. |
+| F-XFILE-01 | Files between Windows and Mac | When `FILES` is granted in a session between a Windows machine and a Mac, a file sent either way shall arrive whole under the same name, cancel when asked and resume after a dropped link, in both session directions. |
+| F-XTERM-01 | Terminal and quick actions between Windows and Mac | When `TERMINAL` is granted in a session between a Windows machine and a Mac, the viewer shall open the host's shell as the host's logged-in user, resize it and close it, and with `CONTROL` run a quick action, in both session directions. |
+| F-XSWAP-01 | Swap between Windows and Mac | When a swap is accepted in a session between a Windows machine and a Mac, Swapdesk shall open the reverse session with the pinned keys inside budget B4, with no new pairing, starting from either direction. |
+| F-XCHAT-01 | Chat between Windows and Mac | When either side sends a chat message in a session between a Windows machine and a Mac, the other shall show it with its read state, in both session directions. |
+| F-XNET-01 | Reconnect between machines | When the Wi-Fi link between two machines drops for 10 s during a session and returns, the viewer shall show the first frame again inside budget B5 without a new prompt. |
+| F-XUPG-01 | Upgrade from 1.0 and mixed versions | When a newer version is installed over 1.0, Swapdesk shall keep the device identity, the paired devices with their grants and the settings. When one machine runs 1.0 and the other a newer 1.x, a session with screen, mouse and keyboard shall work in both directions. |
+| F-NET-02 | Wire compatibility inside a major | When a peer announced protocol minor N, Swapdesk shall send it only message types and enum values that exist in minor N, and shall decode everything a peer of an older minor sends (PROTOCOL.md section 1). |
+| F-FILE-03 | Free space and names across systems | When a file is offered and the receiving folder's volume has less free space than the file needs, the receiver shall decline it and say why, before writing anything. When a name differs from an existing one only by Unicode normalization or by letter case on a file system that treats them as equal, the receiver shall save it under a new name and never overwrite. When macOS has not granted access to the receiving folder, the Mac shall say so and show where to grant it. |
+| F-VIEW-05 | Still-screen refinement | When the host's picture has not changed for 400 ms (GUESS), the host shall send one refined frame so that still text is sharp, and nothing more until the picture changes; on a Windows host and on a Mac host. |
+| F-VIEW-06 | Scale to the window and negotiated frame rate | When the quality is Automática or Movimento fluido and the viewer's window shows the picture smaller than the host's display, the host shall encode at the size shown and follow the window when it changes; Texto nítido and 1:1 shall stay at the native size. When both sides support more than 60 frames per second, Movimento fluido shall run at the lower of the two displays' refresh rates, up to 120. |
+| F-VIEW-07 | HEVC with H.264 as the fallback | When both machines have a hardware HEVC encoder and decoder and both speak a protocol minor that knows HEVC, the session shall use HEVC; otherwise it shall use H.264, and the overlay shall name the codec in use (D39). |
+| F-VIEW-08 | Lost graphics device | When the viewer's graphics device is lost (driver reset, adapter removed), the viewer shall create it again, ask for a keyframe and show the picture without ending the session. |
+| F-VIEW-09 | Bitrate ramp | When a session starts on a link without loss, the bitrate shall reach the session's ceiling within 8 s (GUESS); at 1% loss and 20 ms of jitter it shall settle without oscillating. |
 
 ## Responsiveness rules (every screen)
 
@@ -80,7 +95,7 @@ From the owner's performance study (`~/Documents/Projetos/DESEMPENHO-WEB.md`, D2
 
 ## Later
 
-Privacy screen (host blanked), session recording, H.264 4:4:4 and a "text" preset beyond 4:2:0, several viewers on one host, IPv6 for QUIC, Win-Win and Mac-Mac across two machines (unverified in v1: one machine of each), a direct NVENC path, HEVC/AV1, file sync of whole folders, printing, remote microphone, access beyond the LAN as a mode the user turns on (D36: not designed; LAN-only stays the default and 1.x enforces it), a Windows code-signing certificate, multi-monitor "all displays" view, touch and pen input, sound for chat, elevated-window control in prompted sessions.
+Privacy screen (host blanked), session recording, 4:4:4 chroma, AV1, several viewers on one host, IPv6 for QUIC, Mac-Mac across two machines (unverified: one Mac), file sync of whole folders, printing, remote microphone, access beyond the LAN as a mode the user turns on (D36: not designed; LAN-only stays the default and 1.x enforces it), a Windows code-signing certificate, multi-monitor "all displays" view, touch and pen input, sound for chat, elevated-window control in prompted sessions.
 
 ## Look
 
@@ -107,6 +122,8 @@ Approved round 2 (`docs/DECISIONS.md`, 2026-11-07): one shell (device sidebar + 
 | B6 | Idle host CPU | ≤ 1% of total CPU (all cores) for service + helpers, no session, 10 min mean | the process CPU counters, this PC |
 | B7 | UI memory, idle | ≤ 30 MB private working set for `Swapdesk.exe` on this PC, window open on Dispositivos, no session, 10 s after start (28 MB measured on the sample, research/ui.md); the Mac is measured in stage 23 (UNPROVEN) | `Win32_PerfRawData_PerfProc_Process.WorkingSetPrivate` (Task Manager's "Memory" column), the method of research/ui.md |
 | B8 | UI idle CPU | ≤ 30 ms of CPU time over 30 s, window open, no session (0 ms measured on the sample; the margin is a GUESS) | `TotalProcessorTime` over 30 s, same method |
+| B9 | Viewer memory during a session | flat after warm-up; the allowed growth per hour is set from the first end-to-end measurement (UNPROVEN) | private working set of the viewer sampled over the long measurement and the soak |
+| B10 | Host CPU during a 1080p60 session | set from the first end-to-end measurement (UNPROVEN) | the process CPU counters of service and helpers over the long measurement |
 
 ## Threats
 
@@ -186,3 +203,16 @@ Risk: risky = security boundary, crypto, privilege, concurrency across processes
 | M6 | 26, 27: unattended | F-UNAT-01, F-UNAT-02 | risky |
 | M7 | 28, 29, 30: review, fuzzing, soak | all budgets and threats | risky |
 | M8 | 31, 32, 33: installers, README | F-SYS-01, F-SYS-02 | normal (33: small) |
+
+## Slices of 1.1 and 1.2 (D38)
+
+Milestone tags are those of the maintainers' plan. 1.1 is M1 to M5; 1.2 is M6.
+
+| Milestone | Slices | Flows | Risk |
+|---|---|---|---|
+| M1 | Shared input logic; the Mac main window, text fields, viewer and banner over the shared screens; Mac accessibility; Mac effects, old screens removed | F-UI-02, F-XCLIP-01 | normal |
+| M2 | End-to-end measurement and `docs/PERFORMANCE.md`; fewer copies on the frame path; bitrate ramp; wider CI; fuzz targets; 1.0 wire fixtures | F-VIEW-09, F-NET-02, B1 to B3, B6, B9, B10 | risky (frame path, wire fixtures) |
+| M3 | Parity matrix; files; terminal grid on the shared painter; terminal and quick actions; swap; chat and reconnect; lost graphics device | F-XFILE-01, F-FILE-03, F-XTERM-01, F-XSWAP-01, F-XCHAT-01, F-XNET-01, F-VIEW-08 | risky (files, terminal, swap) |
+| M4 | Mac still-screen refinement; latency tail; scale to the window and frame rate; HEVC (protocol, Windows, Mac) | F-VIEW-05, F-VIEW-06, F-VIEW-07 | risky (protocol) |
+| M5 | Review; upgrade and mixed versions; second Windows machine in a VM; long runs; public documents; code signing; demo loop; release 1.1.0 | F-XUPG-01, every budget | risky (review, upgrade) |
+| M6 | Windows installer; unattended on Windows and on the Mac; display switching; tray, menu bar and first run; texts and accessibility; release 1.2.0 | F-SYS-01, F-UNAT-01, F-UNAT-02, F-VIEW-02, F-UI-01 | risky (unattended, installer) |
