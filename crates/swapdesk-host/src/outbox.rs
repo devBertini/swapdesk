@@ -88,7 +88,11 @@ struct Inner {
     limits: Limits,
     dropped: AtomicU64,
     skipped: AtomicU64,
+    /// The pipe is over: nothing more is queued and the writer discards what it takes.
     closed: AtomicBool,
+    /// [`Outbox::finish`] was called: nothing more is queued, what is queued still goes out, and the reader ends once
+    /// the queue is empty. Set and read with the state locked, so no message is queued behind the reader's end.
+    finished: AtomicBool,
 }
 
 impl Inner {
@@ -189,6 +193,7 @@ impl Outbox {
             dropped: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         });
         (Self { inner: Arc::clone(&inner) }, OutboxReader { inner })
     }
@@ -212,11 +217,11 @@ impl Outbox {
     /// Queues a media message without waiting and without counting a refusal as a drop: `Full` hands the message back
     /// (no room, or a control sender waits) for a caller that keeps it to try again, as the cursor shape does.
     pub fn try_send_media(&self, msg: Message) -> TryControl {
+        let w = weight(&msg);
+        let mut st = self.inner.state();
         if self.is_closed() {
             return TryControl::Closed;
         }
-        let w = weight(&msg);
-        let mut st = self.inner.state();
         if self.inner.waiting.load(Ordering::SeqCst) > 0 || !self.fits(&st, w) {
             return TryControl::Full(msg);
         }
@@ -227,11 +232,11 @@ impl Outbox {
     /// Queues a media message without waiting. `false` when it was dropped (queue full or a control sender waiting,
     /// counted) or the pipe is closed.
     pub fn send_media(&self, msg: Message) -> bool {
+        let w = weight(&msg);
+        let mut st = self.inner.state();
         if self.is_closed() {
             return false;
         }
-        let w = weight(&msg);
-        let mut st = self.inner.state();
         if self.inner.waiting.load(Ordering::SeqCst) > 0 || !self.fits(&st, w) {
             drop(st);
             self.inner.dropped.fetch_add(1, Ordering::Relaxed);
@@ -263,11 +268,11 @@ impl Outbox {
 
     /// Queues a control message without waiting: `Full` hands the message back.
     pub fn try_send_control(&self, msg: Message) -> TryControl {
+        let w = weight(&msg);
+        let mut st = self.inner.state();
         if self.is_closed() {
             return TryControl::Closed;
         }
-        let w = weight(&msg);
-        let mut st = self.inner.state();
         if self.fits(&st, w) {
             self.push(&mut st, msg, w);
             TryControl::Sent
@@ -314,6 +319,19 @@ impl Outbox {
         self.inner.wake_room();
     }
 
+    /// Ends the queue while the pipe still works (the side that consumed what the pipe's reader read is gone, or the
+    /// owner stops): later sends return `false` and every sender that waits for room is released, as after
+    /// [`close`](Self::close), but what is queued still goes out. The reader then ends, whatever handles are left, so
+    /// the writer thread returns and lets go of the pipe's write half: the other end reads the end of its pipe.
+    pub fn finish(&self) {
+        {
+            let _st = self.inner.state();
+            self.inner.finished.store(true, Ordering::Release);
+        }
+        self.inner.filled.notify_all();
+        self.inner.wake_room();
+    }
+
     /// Media messages dropped because the queue was full.
     pub fn dropped(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
@@ -325,9 +343,10 @@ impl Outbox {
         (st.queue.len(), st.bytes)
     }
 
-    /// True once the pipe is closed (the reading side ended or the writer met an I/O error): nothing more can be sent.
+    /// True once the pipe is closed (the reading side ended or the writer met an I/O error) or the queue was finished:
+    /// nothing more can be sent.
     pub fn is_closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Acquire)
+        self.inner.closed.load(Ordering::Acquire) || self.inner.finished.load(Ordering::Acquire)
     }
 }
 
@@ -338,7 +357,13 @@ impl OutboxReader {
         Some(msg)
     }
 
-    /// The next message, waiting for one; `None` once the queue is empty and every [`Outbox`] is gone.
+    /// Nothing more will be queued: every [`Outbox`] is gone, or the queue was finished.
+    fn over(&self, st: &State) -> bool {
+        st.senders == 0 || self.inner.finished.load(Ordering::Acquire)
+    }
+
+    /// The next message, waiting for one; `None` once the queue is empty and every [`Outbox`] is gone or the queue was
+    /// finished.
     pub fn recv(&self) -> Option<Message> {
         let mut st = self.inner.state();
         loop {
@@ -347,7 +372,7 @@ impl OutboxReader {
                 self.inner.wake_room();
                 return Some(m);
             }
-            if st.senders == 0 {
+            if self.over(&st) {
                 return None;
             }
             st = self.inner.filled.wait(st).unwrap_or_else(PoisonError::into_inner);
@@ -374,7 +399,7 @@ impl OutboxReader {
                 return Some(m);
             }
             let left = end.checked_duration_since(Instant::now())?;
-            if st.senders == 0 {
+            if self.over(&st) {
                 return None;
             }
             st = self.inner.filled.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0;
@@ -387,8 +412,9 @@ impl OutboxReader {
     }
 }
 
-/// Runs the writer thread: it writes every queued message in order and ends when every [`Outbox`] clone is gone.
-/// After an I/O error it keeps draining (so no sender blocks) and discards.
+/// Runs the writer thread: it writes every queued message in order and ends when every [`Outbox`] clone is gone or
+/// the queue was finished ([`Outbox::finish`]), dropping the pipe's write half. After an I/O error it keeps draining
+/// (so no sender blocks) and discards.
 pub fn spawn_writer<W: Write + Send + 'static>(
     outbox: &Outbox,
     reader: OutboxReader,
@@ -581,5 +607,56 @@ mod tests {
         assert_eq!(outbox.queued(), (0, 0));
         drop(outbox);
         assert!(rx.recv().is_none(), "no handle left and nothing queued");
+    }
+
+    #[test]
+    fn finishing_sends_what_is_queued_takes_nothing_more_and_ends_the_reader_with_handles_left() {
+        let (outbox, rx) = Outbox::new(1);
+        assert!(outbox.send_control(Message::Shutdown));
+        let blocked = outbox.clone();
+        let t = std::thread::spawn(move || blocked.send_control(Message::StopAudio));
+        std::thread::sleep(Duration::from_millis(100));
+        outbox.finish();
+        assert!(!t.join().unwrap(), "a sender that waited for room is released");
+        assert!(outbox.is_closed());
+        assert!(!outbox.send_control(Message::StopAudio));
+        assert!(!outbox.send_media(video(0)));
+        assert!(matches!(outbox.try_send_control(Message::StopAudio), TryControl::Closed));
+        assert!(matches!(outbox.try_send_media(video(1)), TryControl::Closed));
+        assert_eq!(outbox.dropped(), 0, "a refusal after the end is not a dropped frame");
+        // Unlike `close`, the queue is kept: the message goes out, then the reader ends although a handle is alive.
+        assert_eq!(rx.recv(), Some(Message::Shutdown));
+        assert!(rx.recv().is_none());
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_none());
+        drop(outbox);
+    }
+
+    #[test]
+    fn a_finished_queue_ends_its_writer_thread_which_lets_go_of_the_pipe() {
+        let (pipe_tx, pipe_rx) = mpsc::channel::<Vec<u8>>();
+        struct Pipe(mpsc::Sender<Vec<u8>>);
+        impl Write for Pipe {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.send(buf.to_vec()).map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (outbox, rx) = Outbox::new(4);
+        let writer = spawn_writer(&outbox, rx, FrameWriter::new(Pipe(pipe_tx))).unwrap();
+        assert!(outbox.send_control(Message::Shutdown));
+        outbox.finish();
+        let report = writer.join().unwrap();
+        assert!(report.io_error.is_none());
+        // The handle is still alive; the pipe's other end has the message and then its end.
+        let mut bytes = 0;
+        while let Ok(chunk) = pipe_rx.recv_timeout(Duration::from_secs(5)) {
+            bytes += chunk.len();
+        }
+        assert!(bytes > 0, "the queued message was written before the end");
+        assert!(matches!(pipe_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)), "the write half was dropped");
+        drop(outbox);
     }
 }

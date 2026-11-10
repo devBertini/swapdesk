@@ -74,7 +74,7 @@ Every connection starts with `Hello` from the client and `HelloAck` from the ser
 | 0x26 | `StartAudio` | service→helper | `exclude_pid: u32` (0 = none) |
 | 0x27 | `StopAudio` | service→helper | — |
 | 0x28 | `SetAudioMuted` | service→helper | `muted: bool` |
-| 0x29 | `Shutdown` | service→helper | — |
+| 0x29 | `Shutdown` | service→helper | —; a service that stops sends it and then ends its writing side once what was queued is written, so a helper that missed it reads the end of its pipe |
 | 0x30 | `Displays` | helper→service | `DisplayList`; sent at the start and again whenever the list changed (the helper lists the displays again when a video starts and when a capture cannot open or reacquire its display) |
 | 0x31 | `VideoFrame` | helper→service | `VideoHeader` (32 B, PROTOCOL 7.1), payload bytes |
 | 0x32 | `CursorPos` | helper→service | `CursorPosition` |

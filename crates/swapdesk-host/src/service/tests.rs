@@ -2,9 +2,10 @@
 //! writing each other into the trust stores, the host with real `run_helper` loops over in-memory pipes (the C7
 //! synthetic sources) behind a spy that records what the service sent them.
 
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ use super::{
 };
 use crate::helper::{HelperDeps, run_helper};
 use crate::helper_tests::Passthrough;
-use crate::testpipe::{End, duplex_blocking};
+use crate::testpipe::{End, PipeWriter, duplex_blocking};
 
 mod clip_actions;
 mod extras;
@@ -206,6 +207,21 @@ impl TestHelper {
 
     /// As `spawn`, with `tune` given the helper's dependencies first (the terminal proxy's spawner, for instance).
     fn spawn_with(core: &ServiceCore, role: IpcRole, tune: impl FnOnce(TestDeps) -> TestDeps) -> Self {
+        Self::spawn_inner(core, role, tune, None)
+    }
+
+    /// As `spawn`, with everything the helper says after its `Hello` (its display list first) kept from the service
+    /// while `held` is shut.
+    fn spawn_held(core: &ServiceCore, role: IpcRole, held: Arc<Gate>) -> Self {
+        Self::spawn_inner(core, role, |deps| deps, Some(held))
+    }
+
+    fn spawn_inner(
+        core: &ServiceCore,
+        role: IpcRole,
+        tune: impl FnOnce(TestDeps) -> TestDeps,
+        held: Option<Arc<Gate>>,
+    ) -> Self {
         let sink = RecordingInputSink::new();
         let (core_end, spy_core): (End, End) = duplex_blocking();
         let (spy_helper, helper_end): (End, End) = duplex_blocking();
@@ -226,11 +242,16 @@ impl TestHelper {
                 }
             });
         }
-        // helper -> service, untouched.
+        // helper -> service, untouched (after the `Hello`, only once `held` lets it through).
         {
             let (mut reader, mut writer) = (FrameReader::new(spy_helper.reader), FrameWriter::new(spy_core.writer));
             std::thread::spawn(move || {
+                let mut hello = true;
                 while let Ok(Some(msg)) = reader.read_message() {
+                    if let Some(gate) = held.as_ref().filter(|_| !hello) {
+                        gate.pass();
+                    }
+                    hello = false;
                     if writer.write_message(&msg).is_err() {
                         break;
                     }
@@ -356,6 +377,15 @@ impl Rig {
         Machine::pair(&host, &viewer, ALL);
         let system = TestHelper::spawn(&host.core, IpcRole::HelperSystem);
         let user = TestHelper::spawn(&host.core, IpcRole::HelperUser);
+        // A helper says its display list right after its handshake, and the service registers it on another thread:
+        // a session opened in between starts with an empty list (the test below forces that order). The rig's
+        // sessions open on helpers that are settled, as a machine's do.
+        wait_for("the helpers' display lists", || {
+            [HelperKind::System, HelperKind::User]
+                .into_iter()
+                .all(|kind| host.core.helper(kind).is_some_and(|h| !h.displays().is_empty()))
+                .then_some(())
+        });
         Self { host, viewer, system, user }
     }
 
@@ -506,6 +536,40 @@ fn two_cores_relay_video_input_and_audio_and_end_cleanly() {
     rig.finish();
 }
 
+/// Stage 54: a session can open before the media helper's display list is registered (the helper has just attached).
+/// Its first `DisplayList` is then empty and no video is asked for; the list and the video follow once the helper's
+/// list arrives.
+#[test]
+fn a_session_opened_before_the_media_helpers_display_list_gets_the_list_and_the_video_once_it_comes() {
+    let host = Machine::new("host-pc", true, false);
+    let viewer = Machine::new("viewer-pc", true, false);
+    Machine::pair(&host, &viewer, ALL);
+    let held = Gate::new(false);
+    let mut system = TestHelper::spawn_held(&host.core, IpcRole::HelperSystem, Arc::clone(&held));
+    let mut user = TestHelper::spawn(&host.core, IpcRole::HelperUser);
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    let mut seen = Seen::new(msgs);
+    let displays = |o: &ViewerOut| match o {
+        ViewerOut::Displays { list, .. } => Some(list.displays.len()),
+        _ => None,
+    };
+
+    assert_eq!(seen.next("the session's first DisplayList", displays), 0, "the helper's list is not there yet");
+    assert!(!seen.any_within(Duration::from_millis(300), is_video), "no display, no video");
+    assert_eq!(system.count(|m| matches!(m, Ipc::StartVideo { .. })), 0);
+
+    held.set(true);
+    assert_eq!(seen.next("the helper's DisplayList", displays), 1, "the list reaches the viewer once it comes");
+    let (first, _) = seen.video();
+    assert!(first.keyframe && first.config, "the video starts with a keyframe: {first:?}");
+    assert_eq!(system.count(|m| matches!(m, Ipc::StartVideo { display: 0, .. })), 1);
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+    system.join();
+    user.join();
+}
+
 #[test]
 fn revoking_view_pauses_and_stops_video_and_restoring_it_resumes_with_a_keyframe() {
     let rig = Rig::new();
@@ -556,6 +620,104 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     assert!(host.core.helper(HelperKind::User).is_some());
     host.core.shutdown();
     again.join();
+}
+
+/// A place a thread waits at while the test keeps it shut.
+struct Gate {
+    open: Mutex<bool>,
+    changed: Condvar,
+    waiting: AtomicUsize,
+}
+
+impl Gate {
+    fn new(open: bool) -> Arc<Self> {
+        Arc::new(Self { open: Mutex::new(open), changed: Condvar::new(), waiting: AtomicUsize::new(0) })
+    }
+
+    fn pass(&self) {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let mut open = lock(&self.open);
+        while !*open {
+            open = self.changed.wait(open).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        drop(open);
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn set(&self, open: bool) {
+        *lock(&self.open) = open;
+        self.changed.notify_all();
+    }
+
+    fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+}
+
+/// The service's write half of a helper pipe that takes no byte while its gate is shut, as a pipe whose other end
+/// does not read.
+struct HeldWriter {
+    inner: PipeWriter,
+    gate: Arc<Gate>,
+}
+
+impl Write for HeldWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.gate.pass();
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Stage 54: the core's `Shutdown` waited in the queue behind a message the pipe was slow to take; the runtime went
+/// away; the helper then said something, the service's reader thread found nobody listening and closed the queue,
+/// which discarded the `Shutdown`. The writer thread lived on with the link, so the helper read neither `Shutdown` nor
+/// the end of its pipe and never ended.
+#[test]
+fn a_core_that_stops_while_a_helpers_pipe_is_slow_still_tells_that_helper_to_stop() {
+    let host = Machine::new("host-pc", true, false);
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let gate = Gate::new(true);
+    let (speak_tx, speak_rx) = std::sync::mpsc::channel::<()>();
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 1).expect("client handshake");
+        // A helper may speak at any moment: this one does when the test says so.
+        let _ = speak_rx.recv();
+        let _ = writer.write_message(&Ipc::SasRequest);
+        let how = loop {
+            match reader.read_message() {
+                Ok(Some(Ipc::Shutdown)) => break "Shutdown",
+                Ok(Some(_)) => {}
+                Ok(None) => break "the end of its pipe",
+                Err(_) => break "a broken pipe",
+            }
+        };
+        let _ = ended_tx.send(how);
+    });
+    let writer = HeldWriter { inner: core_end.writer, gate: Arc::clone(&gate) };
+    let kind = host.core.attach_helper(IpcRole::HelperUser, core_end.reader, writer).expect("attach");
+    let link = host.core.helper(kind).expect("attached");
+
+    // The pipe stops taking bytes: the service's writer thread waits in the middle of a message.
+    gate.set(false);
+    assert!(link.send_now(Ipc::ReleaseAll));
+    wait_for("the writer thread to wait on the pipe", || (gate.waiting() > 0).then_some(()));
+    // The core stops: its `Shutdown` is queued behind the message the pipe holds, and the runtime goes away.
+    host.core.shutdown();
+    // The helper speaks to a core that no longer listens: the service's reader thread ends on it.
+    speak_tx.send(()).expect("the helper waits to speak");
+    wait_for("the link to stop taking messages", || (!link.is_alive()).then_some(()));
+    drop(link);
+
+    gate.set(true);
+    let how = ended_rx.recv_timeout(WAIT).expect("the helper reads `Shutdown` or the end of its pipe");
+    assert_eq!(how, "Shutdown", "what the core queued before it stopped still reaches the helper");
 }
 
 #[test]

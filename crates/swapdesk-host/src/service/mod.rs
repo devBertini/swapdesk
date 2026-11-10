@@ -904,7 +904,7 @@ impl ServiceCore {
         self.host.shutdown();
         for kind in [HelperKind::System, HelperKind::User] {
             if let Some(h) = self.shared.helper(kind) {
-                h.send_now(Ipc::Shutdown);
+                h.stop();
             }
         }
         // The sessions say their `Bye` on their own tasks: give them a moment before the runtime goes.

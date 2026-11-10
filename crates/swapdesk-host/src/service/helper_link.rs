@@ -192,6 +192,14 @@ impl HelperLink {
     pub fn send_blocking(&self, msg: Message) -> bool {
         self.outbox.send_control(msg)
     }
+
+    /// The core stops: tells the helper to shut down and ends the link's writing side. What is queued still goes
+    /// out, nothing more is taken, and the writer thread then lets go of the pipe, so a helper that missed the
+    /// `Shutdown` (a full queue) reads the end of its pipe instead.
+    pub(crate) fn stop(&self) {
+        self.send_now(Message::Shutdown);
+        self.outbox.finish();
+    }
 }
 
 /// The helper's pipe after the handshake: the link, the events and the writer thread to join.
@@ -250,11 +258,12 @@ fn read_loop<R: Read>(
     rpc: &Rpc,
     fs: &Pending,
 ) {
-    let error = loop {
+    // `Some`: the pipe ended, with its error if it had one. `None`: the pipe still works and nobody listens.
+    let ended = loop {
         let msg = match reader.read_message() {
             Ok(Some(m)) => m,
-            Ok(None) => break None,
-            Err(e) => break Some(e.to_string()),
+            Ok(None) => break Some(None),
+            Err(e) => break Some(Some(e.to_string())),
         };
         let event = match msg {
             Message::Displays(list) => HelperEvent::Displays(list),
@@ -280,20 +289,26 @@ fn read_loop<R: Read>(
                 fs.complete(req, result);
                 continue;
             }
-            Message::Bye { .. } => break None,
-            other => break Some(format!("unexpected message {:#x} from a helper", other.type_code())),
+            Message::Bye { .. } => break Some(None),
+            other => break Some(Some(format!("unexpected message {:#x} from a helper", other.type_code()))),
         };
         if tx.blocking_send(event).is_err() {
             // Nobody listens any more (the core is shutting down).
             break None;
         }
     };
-    // Whatever ended the pipe, nothing can be written to it from now on either, and the disk calls in flight fail
-    // (the read handles of that helper died with it).
-    outbox.close();
+    match &ended {
+        // Whatever ended the pipe, nothing can be written to it from now on either.
+        Some(_) => outbox.close(),
+        // The pipe still works: what the core queued as it stopped (its `Shutdown`) goes out, then the writer thread
+        // ends and the helper reads the end of its pipe. Closing here would discard that `Shutdown` and leave the
+        // writer alive with the link, so a helper could wait for ever on a pipe that says nothing.
+        None => outbox.finish(),
+    }
+    // The disk calls in flight fail (the read handles of that helper died with it).
     rpc.close();
     fs.close();
-    let _ = tx.blocking_send(HelperEvent::Gone { error });
+    let _ = tx.blocking_send(HelperEvent::Gone { error: ended.flatten() });
 }
 
 #[cfg(test)]
