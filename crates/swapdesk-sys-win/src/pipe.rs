@@ -429,7 +429,8 @@ impl PipeConn {
     }
 
     /// Server side, C2.3: impersonates the client at the identification level, reads the token's user SID,
-    /// whether it is elevated and whether Administrators is an **enabled** group in it, then reverts.
+    /// whether it is elevated, whether Administrators is an **enabled** group in it and whether Administrators is in it
+    /// at all (a filtered administrator token holds it deny-only), then reverts.
     ///
     /// Call it after reading at least the client's first message: the page says `ImpersonateNamedPipeClient` uses "the
     /// last message read from the pipe". (Observed on Windows 11 10.0.26300: the call also succeeds right after connect,
@@ -461,11 +462,27 @@ impl PipeConn {
         let token = OwnedHandle(token);
         let user_sid = token_user_sid(token.0)?;
         let elevated = token_is_elevated(token.0)?;
-        let administrators_enabled = token_groups(token.0)?.iter().any(|(sid, attrs)| {
-            sid == ADMINISTRATORS_SID && attrs & SE_GROUP_ENABLED != 0 && attrs & SE_GROUP_USE_FOR_DENY_ONLY == 0
-        });
-        Ok(ClientIdentity { user_sid, elevated, administrators_enabled })
+        let groups = token_groups(token.0)?;
+        Ok(ClientIdentity {
+            user_sid,
+            elevated,
+            administrators_enabled: administrators_enabled(&groups),
+            administrators_present: administrators_present(&groups),
+        })
     }
+}
+
+/// The Administrators SID is among `groups` (`(sid, attributes)` as `token_groups` gives them) and enabled, not "deny
+/// only".
+pub(crate) fn administrators_enabled(groups: &[(String, u32)]) -> bool {
+    groups.iter().any(|(sid, attrs)| {
+        sid == ADMINISTRATORS_SID && attrs & SE_GROUP_ENABLED != 0 && attrs & SE_GROUP_USE_FOR_DENY_ONLY == 0
+    })
+}
+
+/// The Administrators SID is among `groups` with any attributes: a filtered administrator token holds it deny-only.
+pub(crate) fn administrators_present(groups: &[(String, u32)]) -> bool {
+    groups.iter().any(|(sid, _)| sid == ADMINISTRATORS_SID)
 }
 
 /// Who a pipe client is, from its impersonated token.
@@ -477,6 +494,9 @@ pub struct ClientIdentity {
     pub elevated: bool,
     /// The Administrators SID is in the token and enabled (not "deny only", as in a filtered token).
     pub administrators_enabled: bool,
+    /// The Administrators SID is in the token with any attributes, enabled or deny-only: the account is an administrator
+    /// account, whether or not this token is the elevated one.
+    pub administrators_present: bool,
 }
 
 impl ClientIdentity {

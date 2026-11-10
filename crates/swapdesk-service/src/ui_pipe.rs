@@ -3,8 +3,11 @@
 //! one thread accepting, one thread per connection.
 //!
 //! A connection is checked in this order, and refused with `Bye` at the first failure: its process is in the pipe's
-//! session; its first message is `Hello` with role UI; its impersonation token's user is the session's user; the
-//! connection is **admin** only when that token is elevated with Administrators enabled.
+//! session; its first message is `Hello` with role UI or Elevator; its impersonation token's user is the session's
+//! user; the connection is **admin** only when that token is elevated with Administrators enabled, and may ask for an
+//! elevation (`can_elevate`) when the token holds the Administrators group, enabled or deny-only. A UI goes to the
+//! hub's serve loop; an Elevator goes to the hub's restricted loop, which answers one `ElevationDescribe` and one
+//! `ElevationConfirm` (docs/ELEVATION.md).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -197,7 +200,7 @@ impl UiPipes {
         let Ok((mut reader_half, writer_half)) = conn.split() else { return refuse("pipe split") };
         reader_half.set_read_timeout(Some(HELLO_WITHIN));
         let (mut reader, mut writer) = (FrameReader::new(reader_half), FrameWriter::new(writer_half));
-        // 2. `Hello` first (the impersonation of the last message read needs a read), role UI.
+        // 2. `Hello` first (the impersonation of the last message read needs a read), role UI or Elevator.
         let hello = match Handshake::server(&mut reader, &mut writer, session) {
             Ok(h) => h,
             Err(e) => return refuse(&format!("handshake: {e}")),
@@ -205,9 +208,9 @@ impl UiPipes {
         let bye = |writer: &mut FrameWriter<_>, code| {
             let _ = writer.write_message(&swapdesk_ipc::Message::Bye { code });
         };
-        if hello.role != IpcRole::Ui {
+        if hello.role != IpcRole::Ui && hello.role != IpcRole::Elevator {
             bye(&mut writer, ErrorCode::NotPermitted);
-            return refuse("its role is not UI");
+            return refuse("its role is not UI or Elevator");
         }
         // 3. The token's user is the session's user; 4. admin only for an elevated token with Administrators enabled.
         let who = match for_identity.identify_client() {
@@ -238,7 +241,7 @@ impl UiPipes {
             session_id: session,
             user: UserRef { id: who.user_sid.clone(), name },
             admin: who.is_admin(),
-            can_elevate: false,
+            can_elevate: who.administrators_present,
         };
         // Back to blocking reads: the UI is quiet between requests.
         let mut reader_half = reader.into_inner();
@@ -246,13 +249,19 @@ impl UiPipes {
         let reader = FrameReader::new(reader_half);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         lock(&self.open).push((id, for_cancel));
-        // A UI that stops reading its messages is cut by the hub: cancelling the pipe's I/O unblocks the hub's reader and
-        // writer, `serve` ends and the pipe closes, so the UI sees the end of the pipe and reconnects.
+        // Cancelling the pipe's I/O unblocks the thread that reads it. A UI that stops reading its messages is cut by the
+        // hub this way: `serve` ends and the pipe closes, so the UI sees the end of the pipe and reconnects. The
+        // elevator loop does it when it ends, so its reading thread ends with it.
         let for_cut = Mutex::new(for_cut);
-        let end = self.hub.serve_cancellable(reader, writer, info, Arc::new(move || lock(&for_cut).cancel_io()));
+        let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || lock(&for_cut).cancel_io());
+        let (what, end) = if hello.role == IpcRole::Elevator {
+            ("an elevator", self.hub.serve_elevator_cancellable(reader, writer, info, cancel))
+        } else {
+            ("a UI", self.hub.serve_cancellable(reader, writer, info, cancel))
+        };
         lock(&self.open).retain(|(i, _)| *i != id);
         if let Err(e) = end {
-            self.log(Level::Debug, format_args!("a UI connection ended: {e}"));
+            self.log(Level::Debug, format_args!("{what} connection ended: {e}"));
         }
     }
 
@@ -272,8 +281,20 @@ impl UiPipes {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
 
-    use super::OpenSessions;
+    use swapdesk_capture_win::QpcClock;
+    use swapdesk_host::ui_hub::{DevOptions, HubParams, MachineSettings, NoHooks, NoPresence};
+    use swapdesk_ipc::{ApiCode, ElevAction, ElevationTicket, Message, ReplyBody, UiOp};
+    use swapdesk_platform::{NetInterface, NetInterfaces, SecretStore};
+    use swapdesk_proto::Os;
+    use swapdesk_sys_win::{ClientIdentity, PipeReader, PipeWriter, connect, session_of_pid};
+    use swapdesk_trust::{Identity, MemoryAudit, SystemWallClock, TrustHandle};
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(10);
 
     /// The SID lookup of a session, scripted: it fails until the user has logged on.
     struct Sids {
@@ -290,6 +311,228 @@ mod tests {
                 Err(format!("no user token for session {session}"))
             }
         }
+    }
+
+    // ---------- a development-shape pipe on this PC ----------
+
+    struct MemorySecrets(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl SecretStore for MemorySecrets {
+        fn load(&self, name: &str) -> swapdesk_platform::Result<Option<Vec<u8>>> {
+            Ok(lock(&self.0).get(name).cloned())
+        }
+        fn store(&self, name: &str, bytes: &[u8]) -> swapdesk_platform::Result<()> {
+            lock(&self.0).insert(name.to_string(), bytes.to_vec());
+            Ok(())
+        }
+        fn delete(&self, name: &str) -> swapdesk_platform::Result<()> {
+            lock(&self.0).remove(name);
+            Ok(())
+        }
+    }
+
+    struct NoInterfaces;
+
+    impl NetInterfaces for NoInterfaces {
+        fn list(&self) -> swapdesk_platform::Result<Vec<NetInterface>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Keeps what the pipes log, so a refusal can be told from a silence.
+    #[derive(Default)]
+    struct Lines(Mutex<Vec<String>>);
+
+    impl TraceSink for Lines {
+        fn log(&self, _level: Level, _target: &'static str, what: core::fmt::Arguments<'_>) {
+            lock(&self.0).push(what.to_string());
+        }
+    }
+
+    impl Lines {
+        fn has(&self, part: &str) -> bool {
+            lock(&self.0).iter().any(|l| l.contains(part))
+        }
+    }
+
+    fn own_pid() -> u32 {
+        std::process::id()
+    }
+
+    /// A number no other pipe of this process has used.
+    fn unique() -> u32 {
+        static N: AtomicU32 = AtomicU32::new(0);
+        N.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn own_session() -> u32 {
+        session_of_pid(own_pid()).expect("this process's session")
+    }
+
+    /// A real hub with in-memory stores behind the pipe of this process's own session, in the shape `--console` makes:
+    /// the current user owns the pipe and is its one client.
+    struct DevPipe {
+        pipes: Arc<UiPipes>,
+        lines: Arc<Lines>,
+        name: String,
+    }
+
+    impl DevPipe {
+        fn new() -> Self {
+            let suffix = format!("-t{}n{}", own_pid(), unique());
+            let secrets = Arc::new(MemorySecrets(Mutex::new(HashMap::new())));
+            let trust = TrustHandle::open(secrets.clone()).expect("trust");
+            let lines = Arc::new(Lines::default());
+            let hub = UiHub::new(HubParams {
+                os: Os::Windows,
+                os_version: "Windows".into(),
+                identity: Arc::new(Identity::generate(0).expect("identity")),
+                trust,
+                secrets,
+                settings: MachineSettings::new("test pc"),
+                interfaces: Arc::new(NoInterfaces),
+                presence: Arc::new(NoPresence),
+                audit: Arc::new(MemoryAudit::new()),
+                clock: Arc::new(QpcClock),
+                wall: Arc::new(SystemWallClock),
+                trace: lines.clone(),
+                hooks: Arc::new(NoHooks),
+                dev: Some(DevOptions::default()),
+            });
+            let session = own_session();
+            hub.set_console_session(Some(session));
+            let pipes = UiPipes::new(hub, lines.clone(), Mode::Dev, suffix.clone(), Arc::new(AtomicBool::new(false)));
+            pipes.ensure(session);
+            Self { pipes, lines, name: format!("{}{suffix}", swapdesk_sys_win::ui_pipe_name(session)) }
+        }
+
+        fn client(&self, role: IpcRole) -> Client {
+            Client::open(&self.name, role)
+        }
+    }
+
+    impl Drop for DevPipe {
+        fn drop(&mut self) {
+            self.pipes.stop_all();
+            self.pipes.hub.shutdown();
+        }
+    }
+
+    /// The client end: connects as the service's own client does, then says `Hello` as `role`. Reads give up after
+    /// [`WAIT`], so a service that stays silent fails the test instead of hanging it.
+    struct Client {
+        reader: FrameReader<PipeReader>,
+        writer: FrameWriter<PipeWriter>,
+    }
+
+    impl Client {
+        fn open(pipe: &str, role: IpcRole) -> Self {
+            let conn = connect(pipe, own_pid(), WAIT).expect("the pipe opens");
+            let (mut reader_half, writer_half) = conn.split().expect("split");
+            reader_half.set_read_timeout(Some(WAIT));
+            let (mut reader, mut writer) = (FrameReader::new(reader_half), FrameWriter::new(writer_half));
+            Handshake::client(&mut reader, &mut writer, role, own_pid()).expect("the handshake is answered");
+            Self { reader, writer }
+        }
+
+        fn send(&mut self, req: u32, op: UiOp) {
+            self.writer.write_message(&Message::UiRequest { req, op }).expect("write");
+        }
+
+        /// The next message that is not a notification, `None` at the end of the pipe.
+        fn next(&mut self) -> Option<Message> {
+            loop {
+                match self.reader.read_message().expect("a message or the end of the pipe") {
+                    Some(Message::UiNotify(_)) => {}
+                    other => return other,
+                }
+            }
+        }
+
+        /// The reply to request `req`: `Ok` with its body, or the `ApiCode` it failed with.
+        fn reply(&mut self, req: u32, op: u16) -> Result<ReplyBody, ApiCode> {
+            match self.next() {
+                Some(Message::UiReply { req: r, status, body }) if r == req => {
+                    match swapdesk_ipc::status_code(status).expect("a status") {
+                        Some(code) => Err(code),
+                        None => Ok(ReplyBody::decode(op, &body.0).expect("the body decodes")),
+                    }
+                }
+                other => panic!("not the reply to request {req}: {other:?}"),
+            }
+        }
+
+        /// The service ends the pipe with `Bye(code)` and nothing after it.
+        fn expect_bye_and_end(&mut self, code: ErrorCode) {
+            match self.next() {
+                Some(Message::Bye { code: got }) => assert_eq!(got, code),
+                other => panic!("expected Bye({code:?}), got {other:?}"),
+            }
+            assert!(self.next().is_none(), "the pipe ends after the Bye");
+        }
+    }
+
+    /// What the pipe's identification says about this very process, through a pipe of the same shape.
+    fn own_identity() -> ClientIdentity {
+        use std::io::{Read, Write};
+        let name = format!("t-self-{}-{}", own_pid(), unique());
+        let spec = PipeSpec { name: name.clone(), acl: PipeAcl::dev().expect("acl"), max_instances: 1 };
+        let mut listener = PipeListener::bind(spec).expect("bind");
+        let client = std::thread::spawn(move || {
+            let mut c = connect(&name, own_pid(), WAIT).expect("connect");
+            c.write_all(b"hello").expect("write");
+            c
+        });
+        let mut server = listener.accept(Some(WAIT)).expect("accept");
+        server.read_exact(&mut [0u8; 5]).expect("read");
+        let who = server.identify_client().expect("identify");
+        drop(client.join().expect("client"));
+        who
+    }
+
+    #[test]
+    fn an_elevator_hello_is_served_by_the_restricted_loop_and_another_role_is_refused() {
+        let dev = DevPipe::new();
+        let me = own_identity();
+
+        // An elevator is answered by the restricted loop: `ElevationDescribe` for a ticket nobody opened is `NeedsAdmin`
+        // when this process is not elevated (the approver check comes first), else `NotFound`. A UI connection would be
+        // told `NotPermitted` for this op, so the answer shows which loop served it.
+        let mut elevator = dev.client(IpcRole::Elevator);
+        elevator.send(1, UiOp::ElevationDescribe { ticket: ElevationTicket([7; 16]) });
+        let want = if me.is_admin() { ApiCode::NotFound } else { ApiCode::NeedsAdmin };
+        assert_eq!(elevator.reply(1, 36).unwrap_err(), want);
+
+        // Anything else is a protocol violation: the loop answers `Bye` and the pipe closes, where the UI loop would
+        // answer the op.
+        let mut elevator = dev.client(IpcRole::Elevator);
+        elevator.send(1, UiOp::GetThisDevice);
+        elevator.expect_bye_and_end(ErrorCode::ProtocolViolation);
+
+        // A helper's role on the UI pipe is refused with `Bye(NotPermitted)`, as before.
+        for role in [IpcRole::HelperUser, IpcRole::HelperSystem] {
+            let mut helper = dev.client(role);
+            helper.expect_bye_and_end(ErrorCode::NotPermitted);
+        }
+        assert!(dev.lines.has("its role is not UI or Elevator"), "the refusal is logged");
+
+        // A UI still goes to the UI loop: the op the elevator loop serves is answered `NotPermitted` there.
+        let mut ui = dev.client(IpcRole::Ui);
+        ui.send(1, UiOp::ElevationDescribe { ticket: ElevationTicket([7; 16]) });
+        assert_eq!(ui.reply(1, 36).unwrap_err(), ApiCode::NotPermitted);
+    }
+
+    #[test]
+    fn a_ui_connection_may_ask_for_a_ticket_exactly_when_its_token_holds_administrators() {
+        let dev = DevPipe::new();
+        let me = own_identity();
+        // A well-formed device that is not paired: past the `can_elevate` gate the answer is `NotFound`; at the gate
+        // it is `NotPermitted`. (A ticket itself needs a paired device, which the hub's own tests make.)
+        let action = ElevAction::SetGrants { device_id: "ab".repeat(16), grants: 0 };
+        let mut ui = dev.client(IpcRole::Ui);
+        ui.send(1, UiOp::ElevationBegin { action });
+        let want = if me.administrators_present { ApiCode::NotFound } else { ApiCode::NotPermitted };
+        assert_eq!(ui.reply(1, 35).unwrap_err(), want, "administrators present: {}", me.administrators_present);
     }
 
     #[test]
