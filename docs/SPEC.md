@@ -74,6 +74,7 @@ Roles: the **viewer** controls, the **host** is controlled. Both machines can be
 | F-VIEW-07 | HEVC with H.264 as the fallback | When both machines have a hardware HEVC encoder and decoder and both speak a protocol minor that knows HEVC, the session shall use HEVC; otherwise it shall use H.264, and the overlay shall name the codec in use (D39). |
 | F-VIEW-08 | Lost graphics device | When the viewer's graphics device is lost (driver reset, adapter removed), the viewer shall create it again, ask for a keyframe and show the picture without ending the session. |
 | F-VIEW-09 | Bitrate ramp | When a session starts on a link without loss, the bitrate shall reach the session's ceiling within 8 s (GUESS); at 1% loss and 20 ms of jitter it shall settle without oscillating. |
+| F-VIEW-10 | Monitors changed on the host | When the host's monitors change while its service runs (one plugged in or unplugged, the lid closed, another primary), a session started afterwards shall show the picture of a display that exists and its pointer shall land on that display, without restarting the service. |
 
 ## Responsiveness rules (every screen)
 
