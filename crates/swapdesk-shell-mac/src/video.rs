@@ -6,7 +6,7 @@
 //!
 //! Apple documentation: `NSView` / `NSResponder` event methods (developer.apple.com/documentation/appkit/nsresponder),
 //! `NSEvent` (developer.apple.com/documentation/appkit/nsevent: `keyCode`, `characters`, `modifierFlags`,
-//! `isARepeat`, `locationInWindow`, `buttonNumber`, `scrollingDeltaX`, `hasPreciseScrollingDeltas`),
+//! `isARepeat`, `locationInWindow`, `buttonNumber`, `scrollingDeltaX`, `hasPreciseScrollingDeltas`, `phase`),
 //! `NSView.performKeyEquivalent(with:)`, `NSView.isFlipped`; objc2 `define_class!` (docs.rs/objc2/0.6.5/objc2/macro.define_class.html).
 
 use std::cell::RefCell;
@@ -16,7 +16,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
+    NSCursor, NSEvent, NSEventModifierFlags, NSEventPhase, NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
     NSWindowDidResignKeyNotification,
 };
 use objc2_core_graphics::CGImage;
@@ -236,9 +236,17 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            // A trackpad gesture starts with `MayBegin` (fingers down) or `Began`; momentum and legacy wheel events
+            // have the phase `None` (NSEvent.phase).
+            let starts = event.phase().intersects(NSEventPhase::MayBegin | NSEventPhase::Began);
             self.mouse(
                 event,
-                MouseKind::Scroll { dx: event.scrollingDeltaX(), dy: event.scrollingDeltaY(), precise: event.hasPreciseScrollingDeltas() },
+                MouseKind::Scroll {
+                    dx: event.scrollingDeltaX(),
+                    dy: event.scrollingDeltaY(),
+                    precise: event.hasPreciseScrollingDeltas(),
+                    starts,
+                },
             );
         }
     }

@@ -10,6 +10,7 @@
 //! - the buttons held and the last pointer position, so a button never goes down outside the picture and a position is
 //!   sent only when it changes;
 //! - the fractions of a wheel notch not yet sent, so slow trackpad motion adds up instead of vanishing;
+//! - the axis of the trackpad gesture in progress, so the fingers' sideways jitter never reaches the host.
 //! - in text mode, the Option keys not sent yet (`unsent`). Option is the Mac's character modifier: `Option+C` types
 //!   `ç` and `Option+E` is a dead acute on a US-based layout. A Windows host reads a held Alt as the start of a
 //!   shortcut (a character typed under it arrives as `WM_SYSCHAR`, a menu mnemonic, not text) and a lone Alt
@@ -90,6 +91,40 @@ pub struct ScrollConfig {
     pub notches_per_line: f64,
 }
 
+/// With precise (trackpad) deltas, the smaller axis is sent only when it is at least this share of the larger one
+/// (about 27 degrees off the axis); below it, it is finger jitter (see `InputCore::on_rail`).
+const RAIL_RATIO: f64 = 0.5;
+/// Points of motion, on either axis, after which a trackpad gesture's axis is decided.
+const RAIL_DECIDE: f64 = 3.0;
+
+/// The axis a trackpad gesture scrolls along (precise deltas only).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Rail {
+    /// No gesture start seen (a device that reports no phases): each event is judged alone.
+    PerEvent,
+    /// A gesture started; its motion so far in points, until one axis reaches [`RAIL_DECIDE`].
+    Undecided {
+        x: f64,
+        y: f64,
+    },
+    Vertical,
+    Horizontal,
+    /// A deliberate diagonal: both axes go.
+    Free,
+}
+
+impl Rail {
+    fn of(x: f64, y: f64) -> Rail {
+        if x < y * RAIL_RATIO {
+            Rail::Vertical
+        } else if y < x * RAIL_RATIO {
+            Rail::Horizontal
+        } else {
+            Rail::Free
+        }
+    }
+}
+
 impl Default for ScrollConfig {
     fn default() -> Self {
         Self { pixels_per_notch: 40.0, notches_per_line: 1.0 }
@@ -168,6 +203,8 @@ pub struct InputCore {
     pointer: Option<(u16, u16)>,
     /// Wheel units (1/120 notch) not sent yet, x then y.
     wheel_rest: (f64, f64),
+    /// The axis of the trackpad gesture in progress.
+    rail: Rail,
 }
 
 fn wire_button(button: PointerButton) -> Option<MouseButton> {
@@ -200,6 +237,7 @@ impl InputCore {
             buttons: BTreeSet::new(),
             pointer: None,
             wheel_rest: (0.0, 0.0),
+            rail: Rail::PerEvent,
         }
     }
 
@@ -375,6 +413,15 @@ impl InputCore {
         self.pointer = None;
     }
 
+    /// A wheel record was not delivered (the consumer was behind): its units go back into the remainder, so the next
+    /// scroll event in the same direction carries them instead of losing them. Capped at one record's range per axis.
+    pub fn refund_wheel(&mut self, dx: i16, dy: i16) {
+        let cap = f64::from(i16::MAX);
+        // The remainder is kept before the horizontal sign flip of `wheel_units`.
+        self.wheel_rest.0 = (self.wheel_rest.0 - f64::from(dx)).clamp(-cap, cap);
+        self.wheel_rest.1 = (self.wheel_rest.1 + f64::from(dy)).clamp(-cap, cap);
+    }
+
     /// A key press or release from the video view; `layout` says what a press types (asked only when the press may go
     /// as text).
     pub fn key(&mut self, msg: &KeyMsg, probe: KeyProbe<'_>, layout: &mut dyn Layout) -> Outcome {
@@ -536,7 +583,9 @@ impl InputCore {
                     events.push(InputEvent::Button { button: wire, down: false });
                 }
             }
-            MouseKind::Scroll { dx, dy, precise } => {
+            MouseKind::Scroll { dx, dy, precise, starts } => {
+                // Out of the picture too: a gesture's axis comes from all of its motion.
+                let (dx, dy) = if precise { self.on_rail(dx, dy, starts) } else { (dx, dy) };
                 if let Some(at) = at {
                     let (ux, uy) = self.wheel_units(dx, dy, precise);
                     if ux != 0 || uy != 0 {
@@ -547,6 +596,47 @@ impl InputCore {
             }
         }
         Outcome::taken(events)
+    }
+
+    /// The trackpad deltas of one scroll event kept on the gesture's axis.
+    ///
+    /// A swipe along one axis also reports a little motion of both signs on the other. Sent, it reaches the host as
+    /// tiny wheel records of alternating sign all along the swipe, and an app that counts notches with one accumulator
+    /// for both wheels (Windows Terminal in VT mouse mode or alternate scroll clears it on an event of the other sign)
+    /// never reaches a notch: the scroll sticks. So a gesture keeps to the axis its first [`RAIL_DECIDE`] points
+    /// took (both axes for a diagonal, the minor one at least [`RAIL_RATIO`] of the major), through its momentum, and
+    /// the other axis is dropped with its remainder. Without gesture phases each event is judged alone.
+    fn on_rail(&mut self, dx: f64, dy: f64, starts: bool) -> (f64, f64) {
+        if starts {
+            self.rail = Rail::Undecided { x: 0.0, y: 0.0 };
+        }
+        let size = |v: f64| if v.is_finite() { v.abs() } else { 0.0 };
+        let (ax, ay) = (size(dx), size(dy));
+        let axis = match self.rail {
+            Rail::PerEvent => Rail::of(ax, ay),
+            Rail::Undecided { x, y } => {
+                let (x, y) = (x + ax, y + ay);
+                if x.max(y) >= RAIL_DECIDE {
+                    self.rail = Rail::of(x, y);
+                    self.rail
+                } else {
+                    self.rail = Rail::Undecided { x, y };
+                    Rail::of(ax, ay)
+                }
+            }
+            decided => decided,
+        };
+        match axis {
+            Rail::Vertical => {
+                self.wheel_rest.0 = 0.0;
+                (0.0, dy)
+            }
+            Rail::Horizontal => {
+                self.wheel_rest.1 = 0.0;
+                (dx, 0.0)
+            }
+            _ => (dx, dy),
+        }
     }
 
     /// Wheel units (1/120 notch) of one scroll event, with the remainder carried to the next.
@@ -570,11 +660,12 @@ impl InputCore {
                 *rest = 0.0;
             }
             *rest += delta * per_unit;
-            let whole = rest.trunc();
-            *rest -= whole;
-            clamp_i16(whole)
+            // What one record cannot carry stays for the next (at most one more record's worth).
+            let whole = clamp_i16(rest.trunc());
+            *rest = (*rest - f64::from(whole)).clamp(f64::from(i16::MIN), f64::from(i16::MAX));
+            whole
         };
-        let x = -take(&mut self.wheel_rest.0, dx);
+        let x = take(&mut self.wheel_rest.0, dx).saturating_neg();
         let y = take(&mut self.wheel_rest.1, dy);
         (x, y)
     }
@@ -1212,20 +1303,20 @@ mod tests {
         let mut c = core();
         // One line of wheel = one notch = 120 units; positive dy keeps its sign, dx flips.
         let out = c.mouse(
-            mouse(MouseKind::Scroll { dx: 0.0, dy: 1.0, precise: false }, 100.0, 100.0),
+            mouse(MouseKind::Scroll { dx: 0.0, dy: 1.0, precise: false, starts: false }, 100.0, 100.0),
             Some(&identity_map),
             2.0,
         );
         assert_eq!(out.events[1], InputEvent::Wheel { dx: 0, dy: 120 });
         let out = c.mouse(
-            mouse(MouseKind::Scroll { dx: 2.0, dy: -3.0, precise: false }, 100.0, 100.0),
+            mouse(MouseKind::Scroll { dx: 2.0, dy: -3.0, precise: false, starts: false }, 100.0, 100.0),
             Some(&identity_map),
             2.0,
         );
         assert_eq!(out.events, vec![InputEvent::Wheel { dx: -240, dy: -360 }]);
         // Trackpad: 40 points make a notch, so 10 points are 30 units.
         let out = c.mouse(
-            mouse(MouseKind::Scroll { dx: 0.0, dy: 10.0, precise: true }, 100.0, 100.0),
+            mouse(MouseKind::Scroll { dx: 0.0, dy: 10.0, precise: true, starts: false }, 100.0, 100.0),
             Some(&identity_map),
             2.0,
         );
@@ -1235,7 +1326,11 @@ mod tests {
     #[test]
     fn small_trackpad_deltas_add_up_and_a_turn_around_drops_the_remainder() {
         let scroll = |c: &mut InputCore, dy: f64| {
-            c.mouse(mouse(MouseKind::Scroll { dx: 0.0, dy, precise: true }, 100.0, 100.0), Some(&identity_map), 2.0)
+            c.mouse(
+                mouse(MouseKind::Scroll { dx: 0.0, dy, precise: true, starts: false }, 100.0, 100.0),
+                Some(&identity_map),
+                2.0,
+            )
         };
         // 0.1 point = 0.3 unit: nothing for three events, the fourth crosses one whole unit.
         let mut c = core();
@@ -1251,11 +1346,134 @@ mod tests {
         assert!(back.events.contains(&InputEvent::Wheel { dx: 0, dy: -1 }), "{:?}", back.events);
     }
 
+    /// A two-finger swipe down on a trackpad as `scrollWheel:` reports it (natural scrolling: the content goes up, so
+    /// `scrollingDeltaY` is negative), in points: 40 events of 1 to 6 points over about half a second, then 25
+    /// momentum events that fade out. The fingers never move straight: `scrollingDeltaX` carries a little sideways
+    /// jitter of both signs, under a point (the momentum keeps some here too, the worst case).
+    fn swipe_down() -> Vec<(f64, f64)> {
+        const JITTER: [f64; 8] = [0.4, -0.3, 0.0, 0.6, -0.5, 0.2, -0.7, 0.0];
+        let mut events = Vec::new();
+        for i in 0..40 {
+            let dy = 1.0 + 5.0 * (std::f64::consts::PI * f64::from(i) / 39.0).sin();
+            events.push((JITTER[i as usize % 8], -dy));
+        }
+        let mut dy = 6.0;
+        for i in 0..25 {
+            events.push((JITTER[(i + 3) % 8] * 0.5, -dy));
+            dy *= 0.85;
+        }
+        events
+    }
+
+    /// The wheel records of trackpad events; with `gesture`, the first one starts a touch gesture (`NSEvent.phase`
+    /// `Began`) and the rest are its changes and momentum, else the device reports no phases.
+    fn wheels(c: &mut InputCore, events: &[(f64, f64)], gesture: bool) -> Vec<(i16, i16)> {
+        let mut wire = Vec::new();
+        for (i, &(dx, dy)) in events.iter().enumerate() {
+            let starts = gesture && i == 0;
+            let out = c.mouse(
+                mouse(MouseKind::Scroll { dx, dy, precise: true, starts }, 100.0, 100.0),
+                Some(&identity_map),
+                2.0,
+            );
+            for e in out.events {
+                if let InputEvent::Wheel { dx, dy } = e {
+                    wire.push((dx, dy));
+                }
+            }
+        }
+        wire
+    }
+
+    /// The lines Windows Terminal scrolls in VT mouse mode or alternate scroll for the wheel records the host injects
+    /// (microsoft/terminal `src/terminal/input/mouseInput.cpp`, `TerminalInput::HandleMouse`, read 2026-11-10): one
+    /// accumulator serves the vertical and the horizontal wheel; an event whose sign differs from it clears it; a line
+    /// goes out when it reaches a notch (120), and then it is cleared. The host injects each record's vertical part,
+    /// then its horizontal part (`swapdesk-input-win` `wheel_inputs`). Returns (vertical lines, horizontal lines).
+    fn terminal_lines(wire: &[(i16, i16)]) -> (i32, i32) {
+        let (mut acc, mut lines) = (0i32, (0i32, 0i32));
+        let mut feed = |delta: i32, vertical: bool| {
+            if delta.signum() != acc.signum() {
+                acc = 0;
+            }
+            acc += delta;
+            if acc.abs() >= 120 {
+                acc = 0;
+                if vertical { lines.0 += delta.signum() } else { lines.1 += delta.signum() }
+            }
+        };
+        for &(dx, dy) in wire {
+            if dy != 0 {
+                feed(i32::from(dy), true);
+            }
+            if dx != 0 {
+                feed(i32::from(dx), false);
+            }
+        }
+        lines
+    }
+
+    fn sum(wire: &[(i16, i16)]) -> (i32, i32) {
+        wire.iter().fold((0, 0), |a, w| (a.0 + i32::from(w.0), a.1 + i32::from(w.1)))
+    }
+
+    #[test]
+    fn a_vertical_trackpad_swipe_reaches_the_wire_whole_and_without_a_sideways_wheel() {
+        let swipe = swipe_down();
+        let total: f64 = swipe.iter().map(|(_, dy)| dy * 3.0).sum();
+        let wire = wheels(&mut core(), &swipe, true);
+        let sideways: Vec<i16> = wire.iter().map(|w| w.0).filter(|dx| *dx != 0).collect();
+        assert_eq!(sideways, Vec::<i16>::new(), "the jitter of the fingers went out as a horizontal wheel");
+        let sent = f64::from(sum(&wire).1);
+        assert!((sent - total).abs() < 1.0, "sent {sent} units of {total}: only the last fraction may stay behind");
+        // The same swipe drawn without jitter gives the same records.
+        let straight: Vec<(f64, f64)> = swipe.iter().map(|(_, dy)| (0.0, *dy)).collect();
+        assert_eq!(wire, wheels(&mut core(), &straight, true));
+    }
+
+    #[test]
+    fn windows_terminal_scrolls_every_line_of_a_jittery_swipe() {
+        let swipe = swipe_down();
+        let straight: Vec<(f64, f64)> = swipe.iter().map(|(_, dy)| (0.0, *dy)).collect();
+        let want = terminal_lines(&wheels(&mut core(), &straight, true));
+        // About 207 points are 621 units: five whole notches down.
+        assert_eq!(want, (-5, 0), "the straight swipe");
+        assert_eq!(terminal_lines(&wheels(&mut core(), &swipe, true)), want, "lines lost to the sideways jitter");
+    }
+
+    #[test]
+    fn a_gesture_keeps_its_axis_to_the_end_and_the_next_gesture_picks_its_own() {
+        let mut c = core();
+        // Down, then a slow wobble as wide as the motion: still the vertical wheel only.
+        let mut down = vec![(0.2, -2.0), (-0.3, -2.0)];
+        down.extend([(0.8, -1.0), (-0.8, -1.0), (0.8, -1.0)]);
+        let wire = wheels(&mut c, &down, true);
+        assert_eq!(sum(&wire), (0, -21));
+        // A new gesture to the right: the horizontal wheel only (dx flips: content to the left is `dx > 0`).
+        let wire = wheels(&mut c, &[(-3.0, 0.4), (-3.0, -0.4), (-3.0, 0.4)], true);
+        assert_eq!(sum(&wire), (27, 0));
+        // A diagonal gesture: both, as long as it lasts.
+        let wire = wheels(&mut c, &[(2.0, 2.0), (2.0, 1.5), (0.1, 2.0)], true);
+        assert_eq!(sum(&wire), (-12, 16));
+    }
+
+    #[test]
+    fn without_gesture_phases_each_event_keeps_to_its_own_axis() {
+        // A deliberate diagonal: both axes go.
+        let wire = wheels(&mut core(), &[(4.0, 3.0); 10], false);
+        assert_eq!(sum(&wire), (-120, 90), "dx flips, dy keeps its sign");
+        // A sideways swipe with vertical jitter: only the horizontal wheel goes.
+        let side: Vec<(f64, f64)> = (0..20).map(|i| (5.0, if i % 2 == 0 { 0.6 } else { -0.4 })).collect();
+        let wire = wheels(&mut core(), &side, false);
+        assert!(wire.iter().all(|w| w.1 == 0), "{wire:?}");
+        assert_eq!(sum(&wire).0, -300);
+    }
+
     #[test]
     fn scrolling_outside_the_picture_sends_nothing() {
         let mut c = core();
         let out = c.mouse(
-            mouse(MouseKind::Scroll { dx: 0.0, dy: 5.0, precise: false }, 5000.0, 0.0),
+            mouse(MouseKind::Scroll { dx: 0.0, dy: 5.0, precise: false, starts: false }, 5000.0, 0.0),
             Some(&identity_map),
             2.0,
         );
@@ -1271,7 +1489,7 @@ mod tests {
             let _ = c.mouse(mouse(MouseKind::Move, x, y), Some(&identity_map), s);
         }
         let _ = c.mouse(
-            mouse(MouseKind::Scroll { dx: f64::NAN, dy: f64::INFINITY, precise: true }, 1.0, 1.0),
+            mouse(MouseKind::Scroll { dx: f64::NAN, dy: f64::INFINITY, precise: true, starts: true }, 1.0, 1.0),
             Some(&identity_map),
             1.0,
         );

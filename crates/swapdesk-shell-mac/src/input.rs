@@ -58,10 +58,13 @@ pub enum MouseKind {
         button: PointerButton,
     },
     /// `precise` is true for trackpads (pixel deltas); a wheel gives lines. Positive `dy` scrolls content up (away).
+    /// `starts` marks the start of a touch gesture (`NSEvent.phase` is `MayBegin` or `Began`); the momentum events
+    /// after it and a plain wheel's events have it false.
     Scroll {
         dx: f64,
         dy: f64,
         precise: bool,
+        starts: bool,
     },
 }
 

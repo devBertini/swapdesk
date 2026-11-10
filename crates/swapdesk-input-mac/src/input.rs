@@ -107,12 +107,21 @@ impl State {
             if port.lost {
                 if port.tx.try_send(InputEvent::ReleaseAll).is_err() {
                     self.dropped += 1;
+                    // As below: a lost position is sent again, a lost scroll rides on the next one.
+                    match event {
+                        InputEvent::Pointer { .. } => self.core.forget_pointer(),
+                        InputEvent::Wheel { dx, dy } => self.core.refund_wheel(dx, dy),
+                        _ => {}
+                    }
                     continue;
                 }
                 port.lost = false;
             }
             let pointer = matches!(event, InputEvent::Pointer { .. });
-            let wheel = matches!(event, InputEvent::Wheel { .. });
+            let wheel = match event {
+                InputEvent::Wheel { dx, dy } => Some((dx, dy)),
+                _ => None,
+            };
             let sent = match port.tx.try_send(event) {
                 Ok(()) | Err(TrySendError::Disconnected(_)) => Sent::Yes,
                 Err(TrySendError::Full(_)) => Sent::Full,
@@ -122,7 +131,10 @@ impl State {
                 if pointer {
                     // A position is idempotent: the next move or click sends its own.
                     self.core.forget_pointer();
-                } else if !wheel {
+                } else if let Some((dx, dy)) = wheel {
+                    // The scroll is not lost: the next scroll event in the same direction carries it.
+                    self.core.refund_wheel(dx, dy);
+                } else {
                     // A key or button record was lost: let the host release everything and forget what we held, so
                     // both sides agree again.
                     port.lost = true;
@@ -488,6 +500,43 @@ mod tests {
             Ok(InputEvent::Pointer { display: 0, x: 1200, y: 600 }),
             "the lost position is sent at the next event"
         );
+    }
+
+    #[test]
+    fn a_wheel_record_the_full_queue_refused_goes_out_with_the_next_scroll() {
+        let (input, rx, _fake) = rig(InputConfig::default(), 2);
+        input.focus(true);
+        input.set_pointer_map(Some(Arc::new(map)));
+        let scroll = |dy: f64| MouseMsg {
+            kind: MouseKind::Scroll { dx: 0.0, dy, precise: true, starts: false },
+            x: 10.0,
+            y: 10.0,
+            modifiers: Modifiers::default(),
+        };
+        // The position and the first 30 units fill the queue of two; the next 30 are refused.
+        input.mouse(scroll(10.0));
+        input.mouse(scroll(10.0));
+        assert_eq!(input.dropped_events(), 1);
+        assert!(matches!(rx.try_recv(), Ok(InputEvent::Pointer { .. })));
+        assert_eq!(rx.try_recv(), Ok(InputEvent::Wheel { dx: 0, dy: 30 }));
+        // Room again: the refused units ride on the next record.
+        input.mouse(scroll(10.0));
+        assert_eq!(rx.try_recv(), Ok(InputEvent::Wheel { dx: 0, dy: 60 }), "30 refused + 30 new");
+        // A key record lost on the full queue still costs a ReleaseAll; a wheel record that waits behind it is kept.
+        input.key(&key(0x00, true, Modifiers::default()));
+        input.key(&key(0x01, true, Modifiers::default()));
+        input.key(&key(0x02, true, Modifiers::default()));
+        input.mouse(scroll(-10.0));
+        input.mouse(scroll(-10.0));
+        drain(&rx);
+        input.mouse(scroll(-10.0));
+        // The queue of two takes the ReleaseAll and the position lost with the first scroll; the wheel waits again.
+        let got = drain(&rx);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], InputEvent::ReleaseAll);
+        assert!(matches!(got[1], InputEvent::Pointer { .. }), "the position lost with the first scroll goes again");
+        input.mouse(scroll(-10.0));
+        assert_eq!(drain(&rx), vec![InputEvent::Wheel { dx: 0, dy: -120 }], "four scrolls of 30, none lost");
     }
 
     #[test]
