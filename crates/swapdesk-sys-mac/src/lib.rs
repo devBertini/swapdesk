@@ -14,6 +14,8 @@ pub mod admin;
 pub mod http;
 #[cfg(target_os = "macos")]
 pub mod pty;
+#[cfg(target_os = "macos")]
+pub mod update_mac;
 
 /// The uid of this process's user, as the user reference of the Mac app (C5.1: "macOS uid + name").
 #[cfg(target_os = "macos")]

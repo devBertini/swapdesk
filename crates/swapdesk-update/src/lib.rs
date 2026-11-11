@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod package;
 pub mod policy;
 mod version;
+pub mod watch;
 
 pub use manifest::{Apply, Channel, FileEntry, Manifest};
 pub use package::{Entry, Package};
