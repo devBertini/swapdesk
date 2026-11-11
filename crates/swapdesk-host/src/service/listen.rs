@@ -39,6 +39,10 @@ pub(crate) struct Listeners {
     /// The port is one exclusive socket on the wildcard address (ACCOUNTS.md 5.5): never closed by a network change,
     /// and "not receiving" stops it taking connections instead.
     wildcard: std::sync::atomic::AtomicBool,
+    /// A second handle of the wildcard socket (ACCOUNTS.md 6, review of S3/S4 L7): while the account receives
+    /// nothing the endpoint is moved to a socket nobody reaches, so the slot answers no datagram (quinn would answer an
+    /// Initial with a stateless reset), and this handle keeps the port held.
+    held: Mutex<Option<std::net::UdpSocket>>,
 }
 
 /// What a network change does to the listeners: which listening addresses close, which approved addresses open.
@@ -76,6 +80,7 @@ impl Listeners {
             list: Mutex::new(Vec::new()),
             receiving: std::sync::atomic::AtomicBool::new(true),
             wildcard: std::sync::atomic::AtomicBool::new(false),
+            held: Mutex::new(None),
         }
     }
 
@@ -105,9 +110,34 @@ impl Listeners {
         } else {
             None
         };
+        let held = lock(&self.held);
+        // `rebind` registers the socket with the core's runtime: callers are often outside it (the hub's threads).
+        let _runtime = self.shared.rt.enter();
         for l in lock(&self.list).iter().filter(|l| l.local.ip().is_unspecified()) {
             l.endpoint.set_server_config(config.clone());
+            // Receiving: the endpoint reads the slot's port again; not: it reads a socket nobody reaches. quinn keeps
+            // reading the socket a rebind replaced (until traffic comes on the new one), so it moves twice: the slot's
+            // socket then leaves quinn, and the held handle alone keeps the port.
+            if held.is_none() {
+                continue;
+            }
+            let moves = if on { 1 } else { 2 };
+            for _ in 0..moves {
+                let socket = if on {
+                    held.as_ref().map_or_else(|| Err(std::io::Error::other("no held socket")), |h| h.try_clone())
+                } else {
+                    std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                };
+                if let Err(e) = socket.and_then(|s| l.endpoint.rebind(s)) {
+                    self.shared.log(Level::Warn, format_args!("the session endpoint could not move: {e}"));
+                }
+            }
         }
+    }
+
+    /// The second handle of the wildcard socket, held for the life of the core (see `held`).
+    pub fn set_held(&self, socket: std::net::UdpSocket) {
+        *lock(&self.held) = Some(socket);
     }
 
     pub fn set_wildcard(&self, on: bool) {

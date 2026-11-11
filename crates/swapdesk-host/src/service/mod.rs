@@ -649,12 +649,14 @@ impl ServiceCore {
         // One endpoint per approved interface address (PROTOCOL.md 1), and the development addresses.
         // (socket, is a development address)
         let mut sockets = Vec::new();
+        let mut held_wildcard = None;
         // With a wildcard binder: one exclusive socket on 0.0.0.0, held from the start (ACCOUNTS.md 5.5). A port another
         // program holds fails the start, so the machine can give the account another slot.
         if let Some(binder) = &cfg.wildcard {
             let at = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.session_port);
             let socket = binder(cfg.session_port).map_err(|e| ServiceError::Bind { addr: at, error: e.to_string() })?;
             socket.set_ttl(swapdesk_lan::socket::QUIC_TTL).map_err(ServiceError::Runtime)?;
+            held_wildcard = Some(socket.try_clone().map_err(ServiceError::Runtime)?);
             sockets.push((socket, true));
         }
         // An account that receives no connections listens on no approved address (ACCOUNTS.md 6).
@@ -709,6 +711,9 @@ impl ServiceCore {
             Arc::clone(&shared),
         ));
         listeners.set_wildcard(cfg.wildcard.is_some());
+        if let Some(held) = held_wildcard {
+            listeners.set_held(held);
+        }
         for (endpoint, extra) in endpoints {
             listeners.adopt(endpoint, extra).map_err(ServiceError::Runtime)?;
         }

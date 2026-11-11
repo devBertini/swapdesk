@@ -215,6 +215,8 @@ D13 asked the logged-in user before an unattended session opened the terminal or
 
 ### 5.5 Port squatting between local accounts
 
+- **As built (review of S3/S4, 11/11):** the session port is held exclusively on the wildcard address from the start (S3). An account that receives nothing keeps that socket but its endpoint reads a socket nobody reaches, so the slot answers no datagram and a LAN probe cannot count the accounts (quinn would answer an Initial with a stateless reset; `a_slot_that_receives_nothing_answers_no_datagram`). The pairing port is bound per approved address while pairing is open; when another program holds it, pairing does not open at all (`Busy`, the trace names the port) instead of opening on what is left, so a peer's "Parear" never reaches that program (`pairing_does_not_open_when_its_port_is_held_by_another_program`). Not built: holding the pairing port, and slot 0's ports before any account exists, from the start.
+
 - **The gap.** The service binds each approved address with a plain `UdpSocket::bind` (`swapdesk-lan` `socket.rs`). Microsoft's socket security page (16, fact 8) says, for binds made under two different user accounts:
   - A socket bound first on the wildcard address makes a later bind of the same port on a specific address fail (`WSAEACCES`).
   - A wildcard bind by another user **after** the service's specific bind succeeds, and takes the port on every other address.

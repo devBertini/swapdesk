@@ -172,9 +172,22 @@ impl Hub {
         let list = self.p.interfaces.list().unwrap_or_default();
         *lock(&self.pairing.nets) = list.clone();
         let mut sockets = Vec::new();
+        // Review of S3/S4, M6 (ACCOUNTS.md 5.5): a pairing port another program holds would hand the peer's "Parear"
+        // to that program. Pairing then does not open at all.
+        let mut held = false;
+        let is_held = |e: &std::io::Error| {
+            matches!(e.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied)
+        };
         for (addr, socket) in bind_quic_all_approved(&list, port) {
             match socket {
                 Ok(s) => sockets.push(s),
+                Err(e) if is_held(&e) => {
+                    held = true;
+                    self.log(
+                        Level::Warn,
+                        format_args!("the pairing port {port} is held by another program on {}", addr.addr),
+                    );
+                }
                 Err(e) => self.log(
                     Level::Warn,
                     format_args!("cannot open the pairing endpoint on {} ({}): {e}", addr.addr, addr.if_name),
@@ -195,11 +208,16 @@ impl Hub {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
+                        held |= is_held(&e);
                         self.log(Level::Warn, format_args!("cannot open the pairing endpoint on {addr}: {e}"));
                         break;
                     }
                 }
             }
+        }
+        if held {
+            self.log(Level::Warn, format_args!("pairing does not open: its port {port} is held by another program"));
+            return Err(ApiCode::Busy);
         }
         if sockets.is_empty() {
             return Err(ApiCode::Refused);

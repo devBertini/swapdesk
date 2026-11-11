@@ -1426,3 +1426,20 @@ fn an_elevation_is_written_to_the_activity_as_elevated_control() {
     m.finish();
     other.finish();
 }
+
+/// Review of S3/S4, M6 (ACCOUNTS.md 5.5): when another program holds the account's pairing port, pairing does not
+/// open (a peer's "Parear" would reach that program), and it says so instead of opening on what is left.
+#[test]
+fn pairing_does_not_open_when_its_port_is_held_by_another_program() {
+    let free = || std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+    let (session_port, pair_port) = (free(), free());
+    let squatter = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, pair_port)).unwrap();
+    let m = Machine::build_at("sala", FakeNetInterfaces::new(Vec::new()), true, Some((session_port, pair_port)));
+    let mut ui = m.client(info(false));
+    assert_eq!(ui.call(UiOp::PairOpen { device_id: None }).unwrap_err(), ApiCode::Busy);
+    assert!(m.log.lines().iter().any(|l| l.text.contains("held by another program")));
+    drop(squatter);
+    assert!(ui.call(UiOp::PairOpen { device_id: None }).is_ok(), "free again: pairing opens");
+    drop(ui);
+    m.finish();
+}

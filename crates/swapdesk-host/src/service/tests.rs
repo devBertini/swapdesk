@@ -1012,3 +1012,57 @@ fn a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_a
     drop(writer);
     helper.join().expect("helper thread");
 }
+
+/// A QUIC Initial as a LAN probe sends it: a long header of version 1, 8-byte connection ids, padded to 1200 bytes.
+fn probe_initial() -> Vec<u8> {
+    let mut p = vec![0xC0, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 0];
+    // Length (2-byte varint) covering the rest, then a packet number and padding.
+    let rest = 1200 - p.len() - 2;
+    p.extend([0x40 | ((rest >> 8) as u8), rest as u8]);
+    p.resize(1200, 0);
+    p
+}
+
+/// The same with a version nobody speaks: a QUIC server answers it with Version Negotiation.
+fn probe_unknown_version() -> Vec<u8> {
+    let mut p = probe_initial();
+    p[1..5].copy_from_slice(&[0x0a, 0x1a, 0x2a, 0x3a]);
+    p
+}
+
+/// Whether anything answers `probe` sent to `port` on loopback within `limit`.
+fn answers_a_probe(port: u16, probe: &[u8], limit: Duration) -> bool {
+    let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.set_read_timeout(Some(limit)).unwrap();
+    s.send_to(probe, (std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    let mut buf = [0u8; 2048];
+    s.recv_from(&mut buf).is_ok()
+}
+
+/// Review of S3/S4, L7 (ACCOUNTS.md 6): an account that receives nothing keeps its slot's port held but answers no
+/// datagram on it, so a LAN probe cannot count the accounts; receiving again, the endpoint takes the port back.
+#[test]
+fn a_slot_that_receives_nothing_answers_no_datagram() {
+    let port = {
+        let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let host = Machine::build("host-pc", false, false, ALL, |mut cfg| {
+        cfg.session_port = port;
+        cfg.receiving = false;
+        cfg.wildcard = Some(Arc::new(|p| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, p))));
+        cfg
+    });
+    assert!(
+        !answers_a_probe(port, &probe_initial(), Duration::from_millis(800)),
+        "a slot that receives nothing is silent"
+    );
+    assert!(!answers_a_probe(port, &probe_unknown_version(), Duration::from_millis(500)));
+    assert!(std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err(), "and its port stays held");
+    host.core.set_receiving(true);
+    assert!(
+        answers_a_probe(port, &probe_unknown_version(), Duration::from_secs(2)),
+        "receiving: the endpoint reads the port again (Version Negotiation)"
+    );
+    host.core.shutdown();
+}
