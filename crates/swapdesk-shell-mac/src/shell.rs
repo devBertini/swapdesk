@@ -563,11 +563,12 @@ impl Shell {
         self.refresh(changed);
         self.apply_focus_request();
         self.minimize_main_for_session();
+        self.restore_main_after_session();
     }
 
     /// A session of this Mac just came up (either role): the main window goes to the Dock, once per session, unless
     /// it is already minimized or hidden. Only in a real run (it has the video slot): a mock run keeps its window.
-    /// Nothing brings the window back when the session ends.
+    /// The window comes back when that session ends (`restore_main_after_session`).
     fn minimize_main_for_session(&self) {
         if self.hooks.video.is_none() || !self.state.borrow_mut().take_minimize_request() {
             return;
@@ -575,6 +576,18 @@ impl Shell {
         let window = &self.main.window;
         if window.isVisible() && !window.isMiniaturized() {
             window.miniaturize(None);
+        }
+    }
+
+    /// The last session that minimized the main window ended: the window comes back from the Dock, if it is still
+    /// there (one the user already brought back is left as it is). Only in a real run, like the minimize.
+    fn restore_main_after_session(&self) {
+        if self.hooks.video.is_none() || !self.state.borrow_mut().take_restore_request() {
+            return;
+        }
+        let window = &self.main.window;
+        if window.isMiniaturized() {
+            window.deminiaturize(None);
         }
     }
 

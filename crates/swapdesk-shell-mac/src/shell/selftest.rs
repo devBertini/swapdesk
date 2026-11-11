@@ -217,7 +217,14 @@ fn a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm: MainThrea
     shell.state.borrow_mut().apply(session(host_id + 100, active(Role::Host)));
     shell.minimize_main_for_session();
     ensure!(settles_miniaturized(&shell, true), "a new session did not minimize the main window");
-    shell.main.window.deminiaturize(None);
+
+    // Owner, 11/11: it comes back when the sessions that hid it end, not while one still goes on.
+    shell.state.borrow_mut().apply(session(host_id + 100, SessionState::Ended { reason: None }));
+    shell.restore_main_after_session();
+    ensure!(settles_miniaturized(&shell, true), "the main window came back while a session still went on");
+    shell.state.borrow_mut().apply(session(host_id, SessionState::Ended { reason: None }));
+    shell.restore_main_after_session();
+    ensure!(settles_miniaturized(&shell, false), "the main window did not come back when the last session ended");
     close(&shell);
     Ok(())
 }

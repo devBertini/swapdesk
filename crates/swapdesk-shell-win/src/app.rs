@@ -480,6 +480,7 @@ impl Shared {
         }
         self.attention();
         self.minimize_main_for_session();
+        self.restore_main_after_session();
         self.close_for_update();
         self.sync_timers();
     }
@@ -514,6 +515,21 @@ impl Shared {
         unsafe {
             if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
                 let _ = ShowWindow(h, SW_MINIMIZE);
+            }
+        }
+    }
+
+    /// The last session that minimized the main window ended: the window comes back, if it is still minimized (one the
+    /// user already brought back is left as it is). Only in a real run, like the minimize.
+    fn restore_main_after_session(&self) {
+        if !self.minimize_on_session || !self.state.borrow_mut().take_restore_request() {
+            return;
+        }
+        let Some(h) = self.main_hwnd() else { return };
+        // SAFETY: our window.
+        unsafe {
+            if IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
             }
         }
     }

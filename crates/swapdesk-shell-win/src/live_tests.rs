@@ -355,6 +355,15 @@ fn the_main_window_minimizes_when_a_session_starts_and_not_in_a_mock_run() {
     backend.push(session(2, active(Role::Viewer)));
     live.waker.wake();
     assert!(settles_iconic(&live, true), "a new session minimizes the main window again");
+
+    // Owner, 11/11: the window comes back when the sessions that hid it end, not while one still goes on.
+    backend.push(session(2, SessionState::Ended { reason: None }));
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(iconic(&live), "session 1 still goes on");
+    backend.push(session(1, SessionState::Ended { reason: None }));
+    live.waker.wake();
+    assert!(settles_iconic(&live, false), "the last session ended: the main window is restored");
 }
 
 /// A backend that records the commands it is sent and delivers the events a test pushes.

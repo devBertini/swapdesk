@@ -238,6 +238,48 @@ fn remembering_unattended_is_a_separate_admin_checked_grant() {
     assert_eq!(s.activate(ControlId::Decline).commands.len(), 1);
 }
 
+/// The owner's defect of 11/11: a Mac paired again (nothing stored for it), the request card accepted with control
+/// and "entrar sem perguntar" ticked; the stored grant was the old store plus Unattended, so View alone, and every
+/// later entry without a prompt could only watch. What is remembered is what this card permitted, plus Unattended.
+#[test]
+fn remembering_unattended_stores_what_the_card_permitted_not_the_old_store() {
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE;
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::Allow(Permission::Terminal));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::Accept);
+    let Command::AnswerIncoming { decision: Decision::Accept { grants: accepted }, .. } = &a.commands[0] else {
+        panic!("{:?}", a.commands)
+    };
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert_eq!(*grants, accepted.with(Permission::Unattended), "the card's grants and Unattended");
+    assert!(grants.has(Permission::Control));
+
+    // "Só deixar ver" with the box ticked remembers watching without a prompt, nothing more.
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE;
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::ViewOnlyAccept);
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert_eq!(*grants, Permissions::NONE.with(Permission::Unattended));
+
+    // What the store held besides (the administrator terminal, granted before) stays.
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE.with(Permission::AdminTerminal);
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::Accept);
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert!(
+        grants.has(Permission::AdminTerminal) && grants.has(Permission::Control) && grants.has(Permission::Unattended)
+    );
+}
+
 #[test]
 fn incoming_requests_close_by_event_and_countdown() {
     let mut s = Scenario::PedidoConexao.prepared_state();
@@ -1294,6 +1336,39 @@ fn a_new_session_asks_again() {
     s.apply(session_event(4, MAC, active(Role::Host, Permissions::NONE)));
     assert!(s.take_minimize_request(), "the session a swap creates is a new one");
     assert!(!s.take_minimize_request());
+}
+
+/// Owner, 11/11: the main window minimized at a session's start comes back when that session ends.
+#[test]
+fn the_end_of_the_session_that_minimized_the_window_asks_once_to_restore_it() {
+    for role in [Role::Viewer, Role::Host] {
+        let mut s = base();
+        s.apply(session_event(3, MAC, active(role, Permissions::NONE)));
+        assert!(s.take_minimize_request());
+        assert!(!s.take_restore_request(), "not while the session goes on ({role:?})");
+        s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
+        assert!(!s.take_restore_request(), "a pause is no end ({role:?})");
+        s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+        assert!(s.take_restore_request(), "the session ended ({role:?})");
+        assert!(!s.take_restore_request(), "asked once ({role:?})");
+    }
+}
+
+#[test]
+fn the_window_comes_back_only_when_no_session_is_left_and_never_for_one_that_did_not_hide_it() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(4, AIR, active(Role::Host, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(!s.take_restore_request(), "the other session still goes on");
+    s.apply(session_event(4, AIR, SessionState::Ended { reason: Some(ApiCode::Timeout) }));
+    assert!(s.take_restore_request(), "the last one ended");
+    // A session that never started minimized nothing, so its end restores nothing.
+    s.apply(session_event(5, MAC, SessionState::Prompted { remaining_s: 30 }));
+    s.apply(session_event(5, MAC, SessionState::Ended { reason: Some(ApiCode::Refused) }));
+    assert!(!s.take_minimize_request() && !s.take_restore_request());
 }
 
 #[test]

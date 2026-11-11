@@ -1472,14 +1472,19 @@ impl UiState {
                             grants: i.allow.without(Permission::Unattended).without(Permission::AdminTerminal),
                         },
                     };
-                    a.commands.push(Command::AnswerIncoming { request_id, decision });
+                    a.commands.push(Command::AnswerIncoming { request_id, decision: decision.clone() });
                     if i.remember_unattended && id != ControlId::Decline {
                         // The next-time grant is a permission change: the service asks for an administrator (D7).
+                        // An entry without a prompt gets what is stored, so what is stored is what this card
+                        // permitted (watching only for "Só deixar ver"), with what the store already held besides
+                        // (a device paired again holds nothing: the old store alone gave it View and nothing else).
                         let device = &i.request.device;
-                        let grants = self
-                            .device_by_id(&device.id)
-                            .map_or(device.grants_here, |d| d.grants_here)
-                            .with(Permission::Unattended);
+                        let permitted = match &decision {
+                            Decision::Accept { grants } => *grants,
+                            _ => Permissions::NONE.with(Permission::View),
+                        };
+                        let stored = self.device_by_id(&device.id).map_or(device.grants_here, |d| d.grants_here);
+                        let grants = Permissions(stored.0 | permitted.0).with(Permission::Unattended);
                         a.commands.push(Command::SetGrants { device_id: device.id.clone(), grants });
                     }
                 }

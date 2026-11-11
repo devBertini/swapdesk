@@ -646,6 +646,8 @@ pub struct UiState {
     pub(crate) displays_asked: Option<u64>,
     /// The sessions whose first `Active` state already asked the shell to minimize the main window.
     minimize_asked: Vec<u64>,
+    /// Of those, the ones that have not ended yet: when the last of them ends, the main window comes back.
+    restore_after: Vec<u64>,
     /// The shell composes a real remote picture in the viewer window (a real run, not a mock scenario or a capture).
     live_picture: bool,
     pub(crate) error: Option<ApiError>,
@@ -739,6 +741,7 @@ impl UiState {
             focus_request: None,
             displays_asked: None,
             minimize_asked: Vec::new(),
+            restore_after: Vec::new(),
             live_picture: false,
             error: None,
             pending: HashMap::new(),
@@ -1309,10 +1312,31 @@ impl UiState {
         for s in &self.sessions {
             if matches!(s.state, SessionState::Active { .. }) && !self.minimize_asked.contains(&s.id) {
                 self.minimize_asked.push(s.id);
+                self.restore_after.push(s.id);
                 asked = true;
             }
         }
         asked
+    }
+
+    /// True once when the last session that minimized the main window has ended and no other session of this
+    /// computer is still going (owner, 11/11: the window comes back at the end of the session that hid it). The shell
+    /// then restores the main window if it is still minimized; a window the user already brought back is left as it
+    /// is. A shell that never shows a real session (a mock run) does not call it.
+    pub fn take_restore_request(&mut self) -> bool {
+        let ended = |s: &SessionState| matches!(s, SessionState::Ended { .. } | SessionState::NotOpened { .. });
+        let live = |id: u64, sessions: &[SessionView]| sessions.iter().any(|s| s.id == id && !ended(&s.state));
+        let before = self.restore_after.len();
+        let sessions = &self.sessions;
+        self.restore_after.retain(|id| live(*id, sessions));
+        before > self.restore_after.len()
+            && self.restore_after.is_empty()
+            && !self.sessions.iter().any(|s| {
+                matches!(
+                    s.state,
+                    SessionState::Active { .. } | SessionState::Paused { .. } | SessionState::Reconnecting { .. }
+                )
+            })
     }
 
     /// Which windows exist now.
