@@ -956,40 +956,57 @@ fn state_card(
 }
 
 /// The card a device's page shows in place of its content while a wake or a connect waits, or after a connect that
-/// did not open: an icon, what is waited for and on whom, the time left when there is a limit, and the way out.
+/// did not open: an icon, what is waited for and on whom, the time left when there is a limit, and the way out. It
+/// stands alone in the page, so it is centred in the room under the header, with its own content centred, and wide
+/// enough to be read at a glance.
 fn wait_card(f: &mut Frame, a: &Area, y: f32, card: &WaitCard) {
+    const PAD: f32 = 32.0;
+    const ICON: f32 = 40.0;
     let (p, pal) = (f.p, f.pal);
     let bw = p.hairline();
-    let w = (a.cw - 40.0) / 3.0;
-    let inner = w - 44.0 - 2.0 * bw;
-    let t = p.label_in(&card.title, text::H2_STATE, inner, Align::Start);
-    let b = p.label_in(&card.body, text::BODY, inner, Align::Start);
+    let w = 480.0f32.min(a.cw);
+    let inner = w - 2.0 * PAD - 2.0 * bw;
+    let t = p.label_in(&card.title, text::H1_DIALOG, inner, Align::Center);
+    let b = p.label_in(&card.body, text::BODY, inner, Align::Center);
     // The countdown row is there for the whole wait, also before the seconds are known, so the card never grows.
     let row_h = card.bar.as_ref().map(|_| f.countdown_row_h());
-    let h = 2.0 * bw + 40.0 + 40.0 + 10.0 + t.h + 10.0 + b.h + 10.0 + row_h.map_or(0.0, |r| r + 10.0) + 40.0;
-    f.panel(Rect::new(a.x, y, w, h), pal.surface);
-    let (ix, mut iy) = (a.x + bw + 22.0, y + bw + 20.0);
+    let h = 2.0 * bw + PAD + ICON + 20.0 + t.h + 12.0 + b.h + row_h.map_or(0.0, |r| 20.0 + r) + 28.0 + 40.0 + PAD;
+    // Centred in what the header leaves of the page; a short window keeps it under the header.
+    let room = f.h - 40.0 - y;
+    let r = Rect::new(p.snap(a.x + (a.cw - w) / 2.0), p.snap(y + ((room - h) / 2.0).max(0.0)), w, h);
+    f.panel(r, pal.surface);
+    let (ix, mut iy) = (r.x + bw + PAD, r.y + bw + PAD);
     let (tint, ink, icon) = match card.icon {
         WaitIcon::Power => (pal.link_tint, pal.link, icons::POWER),
         WaitIcon::Clock => (pal.link_tint, pal.link, icons::CLOCK),
         WaitIcon::ShieldAlert => (pal.danger_tint, pal.danger, icons::SHIELD_ALERT),
     };
-    f.icon_circle(ix, iy, tint, ink, icon);
-    iy += 50.0;
+    f.icon_circle(ix + (inner - ICON) / 2.0, iy, tint, ink, icon);
+    iy += ICON + 20.0;
     p.draw(&t, ix, iy, pal.ink);
-    iy += t.h + 10.0;
+    iy += t.h + 12.0;
     p.draw(&b, ix, iy, pal.soft);
-    iy += b.h + 10.0;
+    iy += b.h;
     if let Some(bar) = &card.bar {
-        f.countdown_row((ix, iy), inner, bar, [pal.line, pal.link, pal.soft]);
+        f.countdown_row((ix, iy + 20.0), inner, bar, [pal.line, pal.link, pal.soft]);
     }
-    // Negative on the left, positive on the right (the order rule), on the card's bottom line.
-    let list: Vec<(ControlId, String, Kind)> = card
+    // The buttons as one centred group on the card's bottom line: negative on the left, positive on the right (the
+    // order rule).
+    let mut list: Vec<(ControlId, String, Kind)> = card
         .buttons
         .iter()
         .map(|b| (b.id, b.label.clone(), if b.primary { Kind::Primary } else { Kind::Default }))
         .collect();
-    actions_row(f, ix, y + h - bw - 20.0 - 40.0, inner, &list);
+    list.sort_by_key(|b| b.2 == Kind::Primary);
+    let widths: Vec<f32> = list.iter().map(|(_, label, kind)| f.button_width(label, *kind)).collect();
+    let gap = 12.0;
+    let total = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
+    let mut bx = p.snap(ix + (inner - total) / 2.0);
+    let by = r.bottom() - bw - PAD - 40.0;
+    for ((id, label, kind), bwid) in list.iter().zip(&widths) {
+        f.button(*id, Rect::new(bx, by, *bwid, layout::BUTTON_H), *kind, label, false);
+        bx += bwid + gap;
+    }
 }
 
 /// The error strip: floats over the bottom of the content so nothing moves when it appears.
