@@ -199,7 +199,7 @@ mod tests {
         let started = std::time::Instant::now();
         let outcome = mac::check_administrator_silently();
         // A prompt waits for a person for minutes; the silent path answers in seconds, and how many depends on what
-        // else is asking the security daemon (4.8 s alone and 16 s beside the keychain tests, 11/11/2026). The bound
+        // else is asking the security daemon (4.8 s alone and 16 s beside the keychain tests, 10/11/2026). The bound
         // sits between the two.
         assert!(started.elapsed() < std::time::Duration::from_secs(60), "it must not wait for anybody");
         assert!(

@@ -391,7 +391,7 @@ fn host_free(p: &Pair) {
     }
 }
 
-/// The owner's defect of 11/11: "Entrar sem perguntar" was granted and approved, and the next "Controlar" asked the
+/// The owner's defect of 10/11: "Entrar sem perguntar" was granted and approved, and the next "Controlar" asked the
 /// host again. The viewer never asked for the entry; now it does toward a host of 1.1, and the host lets it in at
 /// once, without the machine-level bits.
 #[test]
