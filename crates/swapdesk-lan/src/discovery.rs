@@ -101,6 +101,9 @@ fn mdns(e: mdns_sd::Error) -> DiscoveryError {
 
 struct State {
     own: Txt,
+    /// The record is announced (ACCOUNTS.md 6: an account that receives no connections announces nothing; it still
+    /// browses).
+    announced: bool,
     /// The approved addresses the daemon is bound to now (empty: nothing is announced or browsed).
     applied: Vec<ApprovedAddr>,
     /// The daemon of the addresses in `applied`; `None` only when starting a new one failed (the next refresh retries).
@@ -211,6 +214,13 @@ fn own_properties(own: &Txt, minor: u16) -> Result<Vec<(String, String)>, Discov
     Ok(props)
 }
 
+impl State {
+    /// The addresses the record is announced on: none while it is withdrawn.
+    fn announced_on(&self) -> Vec<ApprovedAddr> {
+        if self.announced { self.applied.clone() } else { Vec::new() }
+    }
+}
+
 impl Discovery {
     /// Starts the daemon on the approved interfaces, announces `own` and starts browsing.
     pub fn start(nets: Arc<dyn NetInterfaces>, own: Txt, config: Config) -> Result<Self, DiscoveryError> {
@@ -218,7 +228,7 @@ impl Discovery {
         let d = Self {
             nets,
             config,
-            state: Mutex::new(State { own, applied: Vec::new(), engine: None }),
+            state: Mutex::new(State { own, announced: true, applied: Vec::new(), engine: None }),
             events: Arc::new(Events::default()),
             generation: Arc::new(AtomicU64::new(0)),
             daemons: AtomicU64::new(0),
@@ -253,11 +263,30 @@ impl Discovery {
             return Ok(());
         }
         st.own.pairing = on;
-        let (own, approved) = (st.own.clone(), st.applied.clone());
+        let (own, approved) = (st.own.clone(), st.announced_on());
         match st.engine.as_mut() {
             Some(engine) => engine.register(&own, &approved, self.config.service_port, self.config.minor),
             None => Ok(()),
         }
+    }
+
+    /// Announces the record, or withdraws it (with its goodbye) while browsing goes on.
+    pub fn set_announced(&self, on: bool) -> Result<(), DiscoveryError> {
+        let mut st = lock(&self.state);
+        if st.announced == on {
+            return Ok(());
+        }
+        st.announced = on;
+        let (own, approved) = (st.own.clone(), st.announced_on());
+        match st.engine.as_mut() {
+            Some(engine) => engine.register(&own, &approved, self.config.service_port, self.config.minor),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the record is announced now.
+    pub fn announced(&self) -> bool {
+        lock(&self.state).announced
     }
 
     /// The next event, or `None` after `timeout`.
@@ -283,8 +312,16 @@ impl Discovery {
             // peers' caches (cache-flush), so they see an update, not a departure.
             old.stop(false, Duration::from_secs(1));
         }
-        let engine =
-            Engine::start(&self.config, &st.own, &approved, Arc::clone(&self.nets), &self.events, &self.generation)?;
+        let announce_on = if st.announced { approved.clone() } else { Vec::new() };
+        let engine = Engine::start(
+            &self.config,
+            &st.own,
+            &approved,
+            &announce_on,
+            Arc::clone(&self.nets),
+            &self.events,
+            &self.generation,
+        )?;
         self.daemons.fetch_add(1, Ordering::SeqCst);
         st.engine = Some(engine);
         st.applied = approved;
@@ -313,10 +350,12 @@ fn indexes_of(approved: &[ApprovedAddr]) -> Vec<u32> {
 }
 
 impl Engine {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         config: &Config,
         own: &Txt,
         approved: &[ApprovedAddr],
+        announce_on: &[ApprovedAddr],
         nets: Arc<dyn NetInterfaces>,
         events: &Arc<Events>,
         generation: &Arc<AtomicU64>,
@@ -345,7 +384,7 @@ impl Engine {
             }
         };
         let mut engine = Self { daemon, registered: None, worker: Some(worker), last };
-        if let Err(e) = engine.register(own, approved, config.service_port, config.minor) {
+        if let Err(e) = engine.register(own, announce_on, config.service_port, config.minor) {
             engine.stop(false, Duration::from_secs(1));
             return Err(e);
         }

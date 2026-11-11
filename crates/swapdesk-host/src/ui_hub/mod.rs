@@ -186,6 +186,22 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
+    /// Whether this account receives connections: with a pairing, or while its pairing mode is open (ACCOUNTS.md 6).
+    /// Its endpoint listens and its record is announced exactly then.
+    pub fn wants_to_receive(&self) -> bool {
+        self.mode.is_open() || self.p.trust.read(|s| !s.devices.is_empty())
+    }
+
+    /// Applies [`Hub::wants_to_receive`] to the core and the announcement. Called when the core is bound, after a
+    /// pairing, a forget, and when pairing mode opens or closes.
+    pub fn update_receiving(&self) {
+        let on = self.wants_to_receive();
+        if let Some(core) = self.core() {
+            core.set_receiving(on);
+        }
+        self.p.presence.set_announced(on);
+    }
+
     pub fn log(&self, level: Level, what: core::fmt::Arguments<'_>) {
         self.p.trace.log(level, "ui-hub", what);
     }
@@ -331,6 +347,7 @@ impl UiHub {
         core.set_clip_actions(Arc::new(clip_actions::HubClipActions { hub: Arc::downgrade(&self.hub) }));
         // The core is up: what is on the network now is synced (GRANTS-SYNC.md 4.4).
         self.hub.sync_presence_changed();
+        self.hub.update_receiving();
     }
 
     /// Wake-on-LAN: how the socket of an attempt is made and how long it runs. The default is a UDP socket bound to

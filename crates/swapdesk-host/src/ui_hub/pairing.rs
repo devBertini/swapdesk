@@ -308,6 +308,7 @@ impl Hub {
             id
         };
         self.p.presence.set_pairing(true);
+        self.update_receiving();
         let me = Arc::clone(self);
         rt.spawn(async move { me.watch_pairing_mode(id).await });
         self.notify_pairing(
@@ -372,6 +373,7 @@ impl Hub {
         };
         self.mode.close();
         self.p.presence.set_pairing(false);
+        self.update_receiving();
         self.notify_pairing(owner, Notify::Pairing { pairing_id: id, state });
     }
 
@@ -493,5 +495,6 @@ impl Hub {
             e.close(quinn::VarInt::from_u32(0), b"pairing closed");
         }
         self.p.presence.set_pairing(false);
+        self.update_receiving();
     }
 }

@@ -34,6 +34,8 @@ pub(crate) struct Listeners {
     gate: Arc<Gate>,
     shared: Arc<Shared>,
     list: Mutex<Vec<Listener>>,
+    /// The approved addresses are listened on (an account that receives no connections listens nowhere).
+    receiving: std::sync::atomic::AtomicBool,
 }
 
 /// What a network change does to the listeners: which listening addresses close, which approved addresses open.
@@ -62,7 +64,15 @@ impl Listeners {
         gate: Arc<Gate>,
         shared: Arc<Shared>,
     ) -> Self {
-        Self { port, identity, trust, gate, shared, list: Mutex::new(Vec::new()) }
+        Self {
+            port,
+            identity,
+            trust,
+            gate,
+            shared,
+            list: Mutex::new(Vec::new()),
+            receiving: std::sync::atomic::AtomicBool::new(true),
+        }
     }
 
     /// Starts accepting on `endpoint`.
@@ -73,6 +83,15 @@ impl Listeners {
         Ok(local)
     }
 
+    /// Whether the approved addresses are listened on (an account without pairings does not).
+    pub fn set_receiving(&self, on: bool) {
+        self.receiving.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn receiving(&self) -> bool {
+        self.receiving.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The addresses the session endpoint listens on now.
     pub fn addrs(&self) -> Vec<SocketAddr> {
         lock(&self.list).iter().map(|l| l.local).collect()
@@ -80,7 +99,12 @@ impl Listeners {
 
     /// Follows the approved addresses of `list`. Returns whether anything changed.
     pub fn follow(&self, list: &[NetInterface]) -> bool {
-        let mut approved: Vec<Ipv4Addr> = approved_addrs(list).iter().map(|a| a.addr).collect();
+        // An account that receives no connections listens on no approved address (ACCOUNTS.md 6).
+        let mut approved: Vec<Ipv4Addr> = if self.receiving.load(std::sync::atomic::Ordering::SeqCst) {
+            approved_addrs(list).iter().map(|a| a.addr).collect()
+        } else {
+            Vec::new()
+        };
         approved.dedup();
         let mut listeners = lock(&self.list);
         let listening: Vec<(SocketAddr, bool)> = listeners.iter().map(|l| (l.local, l.extra)).collect();

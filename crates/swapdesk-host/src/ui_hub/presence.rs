@@ -43,6 +43,9 @@ pub trait Presence: Send + Sync {
     fn refresh(&self);
     /// `f` runs (on any thread) whenever the set of peers changes.
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>);
+    /// Announces this account's record, or withdraws it while the others are still browsed (ACCOUNTS.md 6: an
+    /// account that receives no connections announces nothing).
+    fn set_announced(&self, _on: bool) {}
 }
 
 /// No discovery: nobody is ever seen.
@@ -156,6 +159,11 @@ impl Presence for DnsSdPresence {
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.listener) = Some(f);
     }
+
+    fn set_announced(&self, on: bool) {
+        // A failed re-announcement leaves the record as it was: the next network change retries.
+        let _ = self.discovery.set_announced(on);
+    }
 }
 
 impl Drop for DnsSdPresence {
@@ -173,6 +181,8 @@ pub struct FakePresence {
     peers: Mutex<Vec<PresencePeer>>,
     listener: Listener,
     pairing: AtomicBool,
+    /// `Some(on)` once the hub said whether to announce.
+    announced: Mutex<Option<bool>>,
 }
 
 impl FakePresence {
@@ -191,6 +201,11 @@ impl FakePresence {
     pub fn pairing_announced(&self) -> bool {
         self.pairing.load(Ordering::SeqCst)
     }
+
+    /// What the hub last said about announcing the record (`None`: it never said).
+    pub fn announced(&self) -> Option<bool> {
+        *lock(&self.announced)
+    }
 }
 
 impl Presence for FakePresence {
@@ -203,6 +218,9 @@ impl Presence for FakePresence {
     fn refresh(&self) {}
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.listener) = Some(f);
+    }
+    fn set_announced(&self, on: bool) {
+        *lock(&self.announced) = Some(on);
     }
 }
 
@@ -265,5 +283,38 @@ mod found_tests {
         ]);
         let minors: Vec<u16> = fake.peers().iter().map(|p| p.proto_minor).collect();
         assert_eq!(minors, [1, 0]);
+    }
+}
+
+/// The presence of one account on a machine with several: the records of this machine's other accounts are not
+/// peers (ACCOUNTS.md 6, "this machine's other accounts are not listed").
+pub struct FilteredPresence {
+    inner: Arc<dyn Presence>,
+    own: Arc<Mutex<Vec<DeviceId>>>,
+}
+
+impl FilteredPresence {
+    /// `own`: the device IDs of this machine's accounts, kept up to date by the machine as accounts appear.
+    pub fn new(inner: Arc<dyn Presence>, own: Arc<Mutex<Vec<DeviceId>>>) -> Self {
+        Self { inner, own }
+    }
+}
+
+impl Presence for FilteredPresence {
+    fn peers(&self) -> Vec<PresencePeer> {
+        let own = lock(&self.own).clone();
+        self.inner.peers().into_iter().filter(|p| !own.contains(&p.device_id)).collect()
+    }
+    fn set_pairing(&self, on: bool) {
+        self.inner.set_pairing(on);
+    }
+    fn refresh(&self) {
+        self.inner.refresh();
+    }
+    fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        self.inner.set_listener(f);
+    }
+    fn set_announced(&self, on: bool) {
+        self.inner.set_announced(on);
     }
 }

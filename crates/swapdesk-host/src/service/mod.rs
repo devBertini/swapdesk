@@ -613,7 +613,8 @@ impl ServiceCore {
         // One endpoint per approved interface address (PROTOCOL.md 1), and the development addresses.
         // (socket, is a development address)
         let mut sockets = Vec::new();
-        match cfg.interfaces.list() {
+        // An account that receives no connections listens on no approved address (ACCOUNTS.md 6).
+        match cfg.interfaces.list().map(|l| if cfg.receiving { l } else { Vec::new() }) {
             Ok(list) => {
                 for (addr, socket) in bind_quic_all_approved(&list, cfg.session_port) {
                     match socket {
@@ -662,6 +663,7 @@ impl ServiceCore {
             Arc::clone(&gate),
             Arc::clone(&shared),
         ));
+        listeners.set_receiving(cfg.receiving);
         for (endpoint, extra) in endpoints {
             listeners.adopt(endpoint, extra).map_err(ServiceError::Runtime)?;
         }
@@ -720,6 +722,22 @@ impl ServiceCore {
     /// The addresses the session endpoint listens on now.
     pub fn local_addrs(&self) -> Vec<SocketAddr> {
         self.listeners.addrs()
+    }
+
+    /// Whether this account receives connections now (ACCOUNTS.md 6: only with a pairing, or while pairing mode is
+    /// open). Off closes every approved address's endpoint (the sessions on them go on until they end); on listens on
+    /// them again. Returns whether the listening addresses changed.
+    pub fn set_receiving(&self, on: bool) -> bool {
+        if self.listeners.receiving() == on {
+            return false;
+        }
+        self.listeners.set_receiving(on);
+        self.network_changed()
+    }
+
+    /// Whether this account receives connections now.
+    pub fn receiving(&self) -> bool {
+        self.listeners.receiving()
     }
 
     /// The network changed: the session endpoint follows the approved addresses (a new one is listened on, one that

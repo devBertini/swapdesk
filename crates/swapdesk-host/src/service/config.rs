@@ -57,6 +57,9 @@ pub struct ServiceConfig {
     pub proto_minor: u16,
     /// What this core shares with the cores of the machine's other accounts (ACCOUNTS.md 5.6); `None`: its own.
     pub machine: Option<super::MachineShared>,
+    /// Whether it listens on the approved addresses from the start (an account without pairings does not; the hub
+    /// turns it on with `ServiceCore::set_receiving`).
+    pub receiving: bool,
 }
 
 /// The collaborators of a core, the part of the configuration with no sensible default.
@@ -93,6 +96,7 @@ impl ServiceConfig {
             allow_loopback_peers: false,
             proto_minor: swapdesk_proto::PROTO_MINOR,
             machine: None,
+            receiving: true,
             service_actions: None,
         }
     }

@@ -214,6 +214,8 @@ impl Machine {
                 s.devices.push(d);
             })
             .expect("store");
+        // A real pairing goes through the hub, which then listens and announces (ACCOUNTS.md 6).
+        self.hub.hub.update_receiving();
     }
 
     /// Shows `other` on the network at its session address, with a record of 1.0 (no `minor` key).
@@ -1317,4 +1319,26 @@ fn accounts_index_account_settings_and_peer_ports_round_trip() {
     let read = super::store::load_account_settings(&secrets, "Sala", &log);
     assert_eq!(read, AccountSettings::new("Sala"));
     assert!(log.lines().iter().any(|l| l.text.contains("account.bin")));
+}
+
+/// ACCOUNTS.md 6 and 15 S3: an account with no pairing neither listens on the approved addresses nor announces its
+/// record; it does while its pairing mode is open, and from its first pairing until its last one is forgotten.
+#[test]
+fn an_account_without_pairings_neither_listens_nor_announces() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    assert!(!m.core.receiving(), "nothing paired: no listening");
+    assert_eq!(m.presence.announced(), Some(false), "and no record");
+    let mut ui = m.client(info(false));
+    let ReplyBody::PairingId(id) = ui.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    assert!(m.core.receiving() && m.presence.announced() == Some(true), "pairing mode open");
+    assert!(ui.call(UiOp::PairCancel { pairing_id: id }).is_ok());
+    assert!(!m.core.receiving() && m.presence.announced() == Some(false), "pairing mode closed");
+    m.pin(&other, PermissionSet::CONTROL);
+    assert!(m.core.receiving() && m.presence.announced() == Some(true), "a pairing");
+    assert!(ui.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    assert!(!m.core.receiving() && m.presence.announced() == Some(false), "the last pairing forgotten");
+    drop(ui);
+    m.finish();
+    other.finish();
 }

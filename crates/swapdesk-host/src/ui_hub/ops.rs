@@ -401,6 +401,8 @@ impl Hub {
         lock(&self.learned).remove(&id);
         lock(&self.minors).forget(&id);
         lock(&self.peer_writes).forget(&id);
+        // The last pairing gone: this account stops listening and announcing.
+        self.update_receiving();
         self.devices_changed();
         Ok(())
     }

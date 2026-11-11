@@ -237,3 +237,45 @@ fn a_paired_device_typed_by_address_or_seen_by_dns_sd_is_one_entry_on_the_networ
     drop(ui);
     m.finish();
 }
+
+fn record(id: u8, ip: [u8; 4], port: u16) -> PresencePeer {
+    PresencePeer {
+        device_id: [id; 16],
+        name: format!("pc-{id}"),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::from(ip)],
+        session_port: port,
+        pair_port: port + 1,
+        proto_minor: 1,
+    }
+}
+
+/// ACCOUNTS.md 5.2 (guard, green before): two accounts of one computer announce at one address with different ports;
+/// a browser keeps both.
+#[test]
+fn two_records_of_one_address_with_different_ports_both_stay_listed() {
+    let mut map = std::collections::HashMap::new();
+    assert!(super::super::presence::found(&mut map, record(1, [192, 168, 1, 9], 47820)));
+    assert!(super::super::presence::found(&mut map, record(2, [192, 168, 1, 9], 47822)));
+    assert_eq!(map.len(), 2, "both accounts stay listed");
+    // A record at the same address and port is another machine taking the place: the old one goes (1.0 rule).
+    assert!(super::super::presence::found(&mut map, record(3, [192, 168, 1, 9], 47820)));
+    assert_eq!(map.len(), 2);
+    assert!(!map.contains_key(&[1; 16]));
+}
+
+/// ACCOUNTS.md 6: the records of this machine's other accounts are not listed as devices.
+#[test]
+fn this_machines_other_accounts_are_not_listed() {
+    let raw = FakePresence::new();
+    let own = Arc::new(Mutex::new(vec![[2u8; 16]]));
+    use super::super::presence::Presence as _;
+    let filtered = super::super::presence::FilteredPresence::new(raw.clone(), Arc::clone(&own));
+    raw.set(vec![record(1, [192, 168, 1, 9], 47820), record(2, [192, 168, 1, 7], 47822)]);
+    let seen: Vec<_> = filtered.peers().iter().map(|p| p.device_id).collect();
+    assert_eq!(seen, vec![[1u8; 16]], "the other account of this machine is not a peer");
+    // An account that appears later is filtered from then on.
+    own.lock().unwrap().push([1; 16]);
+    assert!(filtered.peers().is_empty());
+}
