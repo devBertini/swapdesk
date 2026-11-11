@@ -375,9 +375,9 @@ An entry that finds the sign-in screen (the restart case) starts paused, and one
   - "Controlar" and "Assistir" both ask under that rule, with no separate control.
   - The host decides: without a stored `UNATTENDED` it prompts, and a prompted grant never holds either bit (D8).
 - **When the authenticated `HelloAck` disagrees** (the hint said 1 or more and the host says 0: a forged record, or a host that went back to 1.0):
-  - The viewer keeps the session as the 1.0 host grants it. If that grant holds `UNATTENDED`, the session shows as elevated from the start, without the button.
+  - The viewer keeps the session as the 1.0 host grants it. If that grant holds `UNATTENDED`, this machine holds that reach until its own confirmation (D56, built 11/11): no input reaches the host's protected desktops and Ctrl+Alt+Del is refused, the session offers "Elevar controle", and its confirmation releases the hold here without sending anything to the 1.0 host (`a_minor_0_host_session_with_unattended_is_held_until_this_machine_confirms`).
   - It records minor 0 for the device, never sends a minor-1 message on that connection, and writes one trace line.
-  - A forged record gains an attacker nothing: the key check still holds.
+  - A forged record gains an attacker no reach this machine did not confirm: the key check still holds, and D56's hold keeps the machine-level reach behind the confirmation of 8.3.
 
 ## 10. The update from 1.0: nobody inherits (owner decision 1)
 

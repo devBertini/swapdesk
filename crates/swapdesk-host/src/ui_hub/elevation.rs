@@ -182,7 +182,7 @@ impl Hub {
                 let granted = handle.granted();
                 let ok = match action {
                     ElevAction::OpenAdminTerminal { .. } => granted.contains(PermissionSet::ADMIN_TERMINAL),
-                    _ => crate::service::viewer_elevation_of(&handle.ctx(), handle.mode()) == 1,
+                    _ => handle.elevation() == 1,
                 };
                 if !ok {
                     return Err(ApiCode::Invalid);

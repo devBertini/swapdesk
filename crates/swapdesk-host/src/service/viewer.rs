@@ -307,6 +307,9 @@ pub(crate) struct Inner {
     chat: Arc<ChatRouter>,
     terms: Arc<ViewerTerms>,
     elevation: Arc<ElevationWait>,
+    /// Where the session's states go (D56: the local release is told like a state from the host).
+    out: mpsc::Sender<ViewerOut>,
+    since_ms: u64,
     swap: SwapHandler,
     wall: Arc<dyn swapdesk_trust::WallClock>,
     clip: Arc<ClipboardHandler<PipeClipboard>>,
@@ -329,6 +332,8 @@ impl Drop for Inner {
 #[derive(Default)]
 pub(crate) struct ElevationWait {
     waiting: Mutex<Option<tokio::sync::oneshot::Sender<Result<(), ErrorCode>>>>,
+    /// D56: this machine confirmed "Elevar controle" for a session a host of minor 0 let in with `UNATTENDED`.
+    released: AtomicBool,
 }
 
 impl ElevationWait {
@@ -336,6 +341,10 @@ impl ElevationWait {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *lock(&self.waiting) = Some(tx);
         rx
+    }
+
+    fn released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
     }
 
     fn answer(&self, result: Result<(), ErrorCode>) {
@@ -386,6 +395,10 @@ impl ViewerHandle {
         let ctx = self.inner.cell.get();
         if !ctx.granted().contains(PermissionSet::CONTROL) {
             return Err(ApplyError::NotPermitted);
+        }
+        // D56: held, nothing goes to a protected desktop of the host (as for a session that is not elevated).
+        if self.machine_level_held() && ctx.desktop_state().desktop != swapdesk_proto::Desktop::Default {
+            return Ok(());
         }
         if ctx.ended().is_some() {
             return Err(ApplyError::Closed);
@@ -449,12 +462,31 @@ impl ViewerHandle {
         self.inner.rt.block_on(async { tokio::time::timeout(limit, ctx.wait_ended()).await }).ok()
     }
 
+    /// D56: the machine-level reach of this session is held until this machine confirms "Elevar controle".
+    pub fn machine_level_held(&self) -> bool {
+        held_by_d56(&self.inner.cell.get(), self.inner.elevation.released())
+    }
+
+    /// Whether the session can be elevated: 0 no, 1 yes ("Elevar controle"), 2 elevated (ACCOUNTS.md 9.3, D56).
+    pub fn elevation(&self) -> u8 {
+        elevation_of(&self.inner.cell.get(), self.inner.mode, self.inner.elevation.released())
+    }
+
     /// "Elevar controle" (ACCOUNTS.md 9.3), after the confirmation on this machine: sends `Elevate` and waits for the
     /// host's answer. `Ok` when the session holds `UNATTENDED` (at once if it already does). `UNSUPPORTED_VERSION`
     /// toward a host of minor 0 (nothing is sent); `NOT_PERMITTED` for a session that entered with a prompt, or the
     /// host's refusal; `TIMEOUT` after [`ELEVATE_WAIT`].
     pub async fn elevate(&self) -> Result<(), ErrorCode> {
         let ctx = self.inner.cell.get();
+        // D56: a host of minor 0 let it in elevated; this machine's confirmation releases the hold, and nothing is
+        // sent (a 1.0 host knows no `Elevate`).
+        if held_by_d56(&ctx, self.inner.elevation.released()) {
+            self.inner.elevation.released.store(true, Ordering::Release);
+            let state = active(&ctx, self.inner.since_ms, self.inner.mode, true);
+            let change = StateChange { session_id: self.inner.session_id, device: self.inner.device, state, end: None };
+            let _ = self.inner.out.send(ViewerOut::State(change)).await;
+            return Ok(());
+        }
         if ctx.granted().contains(PermissionSet::UNATTENDED) {
             return Ok(());
         }
@@ -703,25 +735,34 @@ struct Drive {
     mode: swapdesk_proto::GrantMode,
 }
 
-fn active(ctx: &SessionCtx, since_ms: u64, mode: swapdesk_proto::GrantMode) -> SessionState {
+fn active(ctx: &SessionCtx, since_ms: u64, mode: swapdesk_proto::GrantMode, released: bool) -> SessionState {
     SessionState::Active {
         since_ms,
         role: swapdesk_ipc::Role::Viewer,
         granted: ctx.granted().bits(),
-        elevation: elevation_of(ctx, mode),
+        elevation: elevation_of(ctx, mode, released),
     }
 }
 
 /// ACCOUNTS.md 9.3: 2 elevated (the session holds `UNATTENDED`), 1 available (it entered without a prompt toward a
-/// host of minor 1 or newer), 0 not available.
-pub(crate) fn elevation_of(ctx: &SessionCtx, mode: swapdesk_proto::GrantMode) -> u8 {
-    if ctx.granted().contains(PermissionSet::UNATTENDED) {
+/// host of minor 1 or newer, or it is held by D56), 0 not available.
+pub(crate) fn elevation_of(ctx: &SessionCtx, mode: swapdesk_proto::GrantMode, released: bool) -> u8 {
+    if held_by_d56(ctx, released) {
+        1
+    } else if ctx.granted().contains(PermissionSet::UNATTENDED) {
         2
     } else if mode == swapdesk_proto::GrantMode::Unattended && ctx.peer_minor() >= 1 {
         1
     } else {
         0
     }
+}
+
+/// D56: a host of minor 0 (by its authenticated `HelloAck`: a 1.0 build, or one a forged record made this machine ask)
+/// let the session in with `UNATTENDED`. This machine never confirmed that reach, so it holds it until "Elevar
+/// controle" is confirmed here: no input on the host's protected desktops, no Ctrl+Alt+Del.
+pub(crate) fn held_by_d56(ctx: &SessionCtx, released: bool) -> bool {
+    !released && ctx.peer_minor() == 0 && ctx.granted().contains(PermissionSet::UNATTENDED)
 }
 
 impl Drive {
@@ -762,12 +803,14 @@ impl Drive {
                     if granted.contains(PermissionSet::UNATTENDED) {
                         self.elevation.answer(Ok(()));
                     }
-                    Some(active(&ctx, self.since_ms, self.mode))
+                    Some(active(&ctx, self.since_ms, self.mode, self.elevation.released()))
                 }
-                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, self.mode)),
-                ViewerEvent::HostState { desktop, paused } => {
-                    Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms, self.mode) })
-                }
+                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, self.mode, self.elevation.released())),
+                ViewerEvent::HostState { desktop, paused } => Some(if paused {
+                    SessionState::Paused { desktop }
+                } else {
+                    active(&ctx, self.since_ms, self.mode, self.elevation.released())
+                }),
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
                 ViewerEvent::PromptPending { .. } => None,
                 ViewerEvent::PeerGrants(grants) => {
@@ -830,7 +873,7 @@ impl Drive {
                 let ctx = session.ctx().clone();
                 self.cell.replace(ctx.clone());
                 self.start_datagrams(&ctx);
-                self.emit(active(&ctx, self.since_ms, self.mode), None).await;
+                self.emit(active(&ctx, self.since_ms, self.mode, self.elevation.released()), None).await;
                 Some(session)
             }
             Either::Left(Err(why)) => {
@@ -924,7 +967,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         elevation: Arc::clone(&elevation),
         mode,
     };
-    drive.emit(active(&ctx, since_ms, mode), None).await;
+    drive.emit(active(&ctx, since_ms, mode, false), None).await;
 
     // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
     // the queue is full) the frame is dropped, and so is every P-frame after it until a keyframe, which is asked for.
@@ -1071,6 +1114,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     }
 
     let inner = Inner {
+        out: out_tx.clone(),
+        since_ms,
         session_id,
         mode,
         cell,

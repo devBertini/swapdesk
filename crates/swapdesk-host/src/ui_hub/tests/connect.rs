@@ -668,3 +668,52 @@ fn an_inactive_session_refuses_and_pauses() {
     let _ = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
     p.finish();
 }
+
+/// D56: a host of minor 0 lets the session in with `UNATTENDED`; this machine holds that reach until its own
+/// confirmation: no Ctrl+Alt+Del and no input on the host's protected desktops, the button offered. After
+/// "Elevar controle" (the pass), both go, and nothing was sent to the 1.0 host for it.
+#[test]
+fn a_minor_0_host_session_with_unattended_is_held_until_this_machine_confirms() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+    let mut host = Machine::with_minor("host-pc", 0);
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, stored);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees_minor(&host, false, 1);
+    host.hub.set_console_session(Some(1));
+    let host_ui = host.client(info(false));
+    let viewer_ui = viewer.client(administrator_account());
+    let mut p = Pair { host, viewer, host_ui, viewer_ui };
+    let entry = p.press();
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(p.host.core.host().sessions()[0].granted.contains(PermissionSet::UNATTENDED), "1.0's grant");
+    let injected = |p: &Pair| p.host.helpers.iter().map(|(s, _)| s.events().len()).sum::<usize>();
+    let cad = || UiOp::SendKeys { session_id: session, keys: swapdesk_ipc::SpecialKeys::CtrlAltDel };
+    let keys = || UiOp::SendKeys { session_id: session, keys: swapdesk_ipc::SpecialKeys::AltTab };
+
+    // Held: no Ctrl+Alt+Del, and nothing reaches a protected desktop.
+    assert_eq!(p.viewer_ui.call(cad()).unwrap_err(), ApiCode::NeedsAdmin);
+    p.host.core.host().set_desktop(swapdesk_proto::Desktop::Secure);
+    wait_for("the viewer to hear the secure desktop", || {
+        let h = p.viewer.core.viewer(session)?;
+        (h.ctx().desktop_state().desktop == swapdesk_proto::Desktop::Secure).then_some(())
+    });
+    let before = injected(&p);
+    assert!(p.viewer_ui.call(keys()).is_ok());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(injected(&p), before, "nothing reaches the protected desktop");
+    assert_eq!(p.viewer.core.viewer(session).unwrap().elevation(), 1, "the button is offered");
+
+    // "Elevar controle" with this machine's confirmation: released here.
+    let ticket =
+        ticket_for(&mut p.viewer_ui, swapdesk_ipc::ElevAction::ElevateSession { session_id: session }).unwrap();
+    p.viewer.hub.confirm_elevation(&ticket, &approver(), true).expect("confirmed");
+    assert!(p.viewer_ui.call(UiOp::ElevateSession { session_id: session }).is_ok());
+    assert_eq!(p.viewer.core.viewer(session).unwrap().elevation(), 2);
+    assert!(p.viewer_ui.call(keys()).is_ok());
+    wait_for("the input to reach the protected desktop", || (injected(&p) > before).then_some(()));
+    assert!(p.viewer_ui.call(cad()).is_ok(), "Ctrl+Alt+Del goes now");
+    p.finish();
+}

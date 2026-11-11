@@ -516,6 +516,10 @@ impl Hub {
             if !granted.contains(PermissionSet::UNATTENDED) {
                 return Err(self.api_error(ApiCode::NotPermitted, "SAS without an UNATTENDED session"));
             }
+            // D56: held until this machine confirms "Elevar controle".
+            if v.handle.machine_level_held() {
+                return Err(self.api_error(ApiCode::NeedsAdmin, "SAS in a session this machine has not elevated"));
+            }
             return v
                 .handle
                 .ctx()
