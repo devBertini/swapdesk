@@ -198,7 +198,10 @@ mod tests {
     fn a_check_without_interaction_is_never_approved() {
         let started = std::time::Instant::now();
         let outcome = mac::check_administrator_silently();
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "it must not wait for anybody");
+        // A prompt waits for a person for minutes; the silent path answers in seconds, and how many depends on what
+        // else is asking the security daemon (4.8 s alone and 16 s beside the keychain tests, 11/11/2026). The bound
+        // sits between the two.
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "it must not wait for anybody");
         assert!(
             matches!(outcome, AdminOutcome::NoInteraction | AdminOutcome::Denied),
             "a silent check was answered {outcome:?}"
