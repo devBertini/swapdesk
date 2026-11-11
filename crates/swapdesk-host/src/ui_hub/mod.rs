@@ -574,9 +574,10 @@ impl UiHub {
                 Err(e) => break Err(e),
             }
         };
-        lock(&hub.conns).retain(|c| c.id != conn.id);
-        // Its open ticket and the passes it still held die with it.
+        // Its open ticket and the passes it still held die with it, before it leaves the list: nobody sees a gone
+        // connection whose ticket is still open.
         hub.drop_elevation_of(&conn);
+        lock(&hub.conns).retain(|c| c.id != conn.id);
         // Whoever waits for this UI's clipboard stops waiting.
         conn.clip.close();
         // The calls waiting for this UI's disk fail now (its read handles died with it).

@@ -201,44 +201,82 @@ fn a_connection_that_is_not_elevated_can_neither_describe_nor_confirm() {
     other.finish();
 }
 
+/// ACCOUNTS.md S7 (it was `an_approver_of_another_user_or_session_is_refused`): an administrator of another account
+/// approves in the asking account's Windows session (over its shoulder); an approver of another session, or one that
+/// is not elevated, is refused and makes no pass.
 #[test]
-fn an_approver_of_another_user_or_session_is_refused() {
+fn an_unelevated_or_other_session_approver_is_refused() {
     let (m, other, id) = pair();
     let mut ui = m.client(asker());
     let t = begin(&mut ui, &id, unattended()).expect("a ticket");
 
-    let another_user = ConnInfo { user: user("S-1-5-21-2"), ..approver() };
     let another_session = ConnInfo { session_id: 9, ..approver() };
-    for who in [another_user, another_session] {
-        assert_eq!(m.hub.describe_elevation(&t, &who).unwrap_err(), ApiCode::NotPermitted);
-        assert_eq!(m.hub.confirm_elevation(&t, &who, true).unwrap_err(), ApiCode::NotPermitted);
-    }
+    assert_eq!(m.hub.describe_elevation(&t, &another_session).unwrap_err(), ApiCode::NotPermitted);
+    assert_eq!(m.hub.confirm_elevation(&t, &another_session, true).unwrap_err(), ApiCode::NotPermitted);
+    let not_elevated = ConnInfo { user: user("S-1-5-21-2"), admin: false, ..approver() };
+    assert_eq!(m.hub.confirm_elevation(&t, &not_elevated, true).unwrap_err(), ApiCode::NeedsAdmin);
     assert_eq!(ui.call(grants_op(&id, unattended())).unwrap_err(), ApiCode::NeedsAdmin, "no pass was made");
     assert_eq!(m.trust.read(|s| s.devices[0].grants_here), PermissionSet::CONTROL);
 
-    // Refused answers leave the ticket as it was; the account is compared without case, as the pipe server does.
-    let same_user = ConnInfo { user: user("s-1-5-21-1"), ..approver() };
-    assert!(m.hub.confirm_elevation(&t, &same_user, true).is_ok());
+    // Refused answers leave the ticket as it was: another user of the same session may still approve it.
+    let over_the_shoulder = ConnInfo { user: user("S-1-5-21-2"), ..approver() };
+    assert!(m.hub.confirm_elevation(&t, &over_the_shoulder, true).is_ok());
 
     drop(ui);
     m.finish();
     other.finish();
 }
 
+/// ACCOUNTS.md S7: a standard account's change is confirmed by an administrator of another account in the same
+/// Windows session; the grant lands in the asking account's store, and the log names the administrator.
 #[test]
-fn an_account_that_is_not_an_administrator_gets_no_ticket() {
+fn an_administrator_of_another_account_in_the_same_session_confirms_a_standard_accounts_ticket() {
+    let (m, other, id) = pair();
+    let mut standard = m.client(info(false));
+    let t = begin(&mut standard, &id, unattended()).expect("a standard account gets a ticket");
+    let admin = ConnInfo { user: user("S-1-5-21-500"), admin: true, ..info(false) };
+    m.hub.confirm_elevation(&t, &admin, true).expect("confirmed over the shoulder");
+    assert!(standard.call(grants_op(&id, unattended())).is_ok());
+    assert_eq!(m.trust.read(|s| s.devices[0].grants_here), PermissionSet::UNATTENDED);
+    drop(standard);
+    m.finish();
+    other.finish();
+}
+
+#[test]
+fn the_grant_lands_in_the_asking_accounts_store_with_the_approver_in_the_log() {
+    let (m, other, id) = pair();
+    let mut standard = m.client(info(false));
+    let t = begin(&mut standard, &id, unattended()).expect("a ticket");
+    let admin = ConnInfo { user: user("S-1-5-21-500"), admin: true, ..info(false) };
+    m.hub.confirm_elevation(&t, &admin, true).expect("confirmed");
+    assert!(standard.call(grants_op(&id, unattended())).is_ok());
+    // D13 keeps the asking account as the one who granted the entry; the log names who approved it.
+    assert_eq!(
+        m.trust.read(|s| s.devices[0].unattended_granted_by.clone().map(|u| u.id)),
+        Some("S-1-5-21-1".to_owned())
+    );
+    let by = m.audit.entries().into_iter().find_map(|e| match e.event {
+        AuditEvent::GrantsChanged { by, .. } => Some(by.id),
+        _ => None,
+    });
+    assert_eq!(by.as_deref(), Some("S-1-5-21-500"));
+    drop(standard);
+    m.finish();
+    other.finish();
+}
+
+/// ACCOUNTS.md S7 (it was `an_account_that_is_not_an_administrator_gets_no_ticket`): a standard account gets a
+/// ticket; without a confirmation it still changes nothing.
+#[test]
+fn a_standard_account_gets_a_ticket() {
     let (m, other, id) = pair();
     let mut standard = m.client(info(false));
     assert!(!info(false).can_elevate);
-    assert_eq!(begin(&mut standard, &id, unattended()).unwrap_err(), ApiCode::NotPermitted);
-    assert_eq!(open_tickets(&m), 0);
+    assert!(begin(&mut standard, &id, unattended()).is_ok());
+    assert_eq!(open_tickets(&m), 1);
     assert_eq!(standard.call(grants_op(&id, unattended())).unwrap_err(), ApiCode::NeedsAdmin);
-
-    // An administrator account, filtered or elevated, does get one.
-    let mut filtered = m.client(asker());
-    assert!(begin(&mut filtered, &id, unattended()).is_ok());
-
-    drop((standard, filtered));
+    drop(standard);
     m.finish();
     other.finish();
 }

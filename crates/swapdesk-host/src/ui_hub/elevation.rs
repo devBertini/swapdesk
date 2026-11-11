@@ -53,8 +53,6 @@ struct TicketEntry {
     /// The asking connection.
     conn: u64,
     session: u32,
-    /// The asking connection's user id (the SID), compared without case like the pipe server does.
-    user_id: String,
     action: ElevAction,
     peer_name: String,
     expires: MonoMicros,
@@ -64,6 +62,8 @@ struct TicketEntry {
 /// What an administrator confirmed for a connection: one use of `action`.
 pub(crate) struct Pass {
     action: ElevAction,
+    /// Who approved: the activity log names them (`GrantsChanged.by`).
+    approver: swapdesk_trust::UserRef,
     expires: MonoMicros,
 }
 
@@ -135,14 +135,11 @@ impl Hub {
         );
     }
 
-    /// `ElevationBegin`: a ticket for `action`, for the console's UI of an administrator account. The action is
-    /// checked the way the command it stands for is, so the administrator is never asked about one that would fail.
+    /// `ElevationBegin`: a ticket for `action`, for the console's UI of any account (ACCOUNTS.md S7: a standard
+    /// account's change is approved by an administrator over its shoulder). The action is checked the way the
+    /// command it stands for is, so the administrator is never asked about one that would fail.
     pub(super) fn elevation_begin(&self, conn: &Conn, action: ElevAction) -> Result<ReplyBody, ApiCode> {
         self.require_console(conn, "an elevation ticket for a UI that is not the console's")?;
-        if !conn.info.can_elevate {
-            return Err(self
-                .api_error(ApiCode::NotPermitted, "an elevation ticket for an account that is not an administrator"));
-        }
         let (action, peer_name) = self.checked_action(conn, action)?;
         let now = self.p.clock.now();
         let mut table = lock(&self.elevation);
@@ -159,7 +156,6 @@ impl Hub {
             ticket,
             conn: conn.id,
             session: conn.info.session_id,
-            user_id: conn.info.user.id.clone(),
             action,
             peer_name,
             expires: MonoMicros(now.0.saturating_add(micros(ttl))),
@@ -218,8 +214,9 @@ impl Hub {
     }
 
     /// Runs `then` on the open ticket `ticket` when `approver` may answer for it: an administrator token (`NeedsAdmin`),
-    /// the ticket's user and Windows session (`NotPermitted`), a ticket that is open and not expired and whose asking
-    /// connection is still connected (`NotFound`).
+    /// in the ticket's Windows session (`NotPermitted`), any user of it: an administrator who signs in at the prompt
+    /// over a standard account's shoulder approves for it (ACCOUNTS.md 8.2, S7); a ticket that is open and not
+    /// expired and whose asking connection is still connected (`NotFound`).
     fn with_ticket<T>(
         &self,
         ticket: &ElevationTicket,
@@ -242,8 +239,8 @@ impl Hub {
             .iter_mut()
             .find(|t| tokens_equal(&t.ticket, &ticket.0) && t.state == TicketState::Open)
             .ok_or_else(|| self.api_error(ApiCode::NotFound, "an elevation ticket that is not open"))?;
-        if entry.session != approver.session_id || !entry.user_id.eq_ignore_ascii_case(&approver.user.id) {
-            return Err(self.api_error(ApiCode::NotPermitted, "an elevation approval from another user or session"));
+        if entry.session != approver.session_id {
+            return Err(self.api_error(ApiCode::NotPermitted, "an elevation approval from another session"));
         }
         let asking = conns
             .iter()
@@ -283,6 +280,7 @@ impl Hub {
             }
             passes.push(Pass {
                 action: entry.action.clone(),
+                approver: approver.user.clone(),
                 expires: MonoMicros(now.0.saturating_add(micros(pass_ttl))),
             });
             ("confirmed", entry.action.clone())
@@ -293,17 +291,17 @@ impl Hub {
 
     /// Removes and returns the first unexpired pass of `conn` for exactly `action`: one use.
     pub(super) fn take_pass(&self, conn: &Conn, action: &ElevAction) -> bool {
+        self.take_pass_by(conn, action).is_some()
+    }
+
+    /// Uses up the pass for exactly `action`, if there is one, and says who approved it.
+    pub(super) fn take_pass_by(&self, conn: &Conn, action: &ElevAction) -> Option<swapdesk_trust::UserRef> {
         let now = self.p.clock.now();
         lock(&self.elevation).sweep(now);
         let mut passes = lock(&conn.passes);
         passes.retain(|p| p.expires > now);
-        match passes.iter().position(|p| &p.action == action) {
-            Some(i) => {
-                passes.remove(i);
-                true
-            }
-            None => false,
-        }
+        let i = passes.iter().position(|p| &p.action == action)?;
+        Some(passes.remove(i).approver)
     }
 
     /// The connection ended: its ticket and its passes go with it.

@@ -345,16 +345,21 @@ impl Hub {
         // the added bits are then entry without a prompt.
         let unattended_involved = (old.bits() | new.bits()) & PermissionSet::BIT_UNATTENDED != 0;
         // Short-circuit order matters: a pass is looked at, and used up, only for a change that needs one.
-        if (added & admin_only != 0 || (unattended_involved && added != 0))
-            && !conn.info.admin
-            && !self.take_pass(conn, &ElevAction::SetGrants { device_id: device_id_hex(&id), grants: new.bits() })
-        {
-            return Err(self.api_error(
-                ApiCode::NeedsAdmin,
-                "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
-            ));
+        let mut approver = None;
+        if (added & admin_only != 0 || (unattended_involved && added != 0)) && !conn.info.admin {
+            approver =
+                self.take_pass_by(conn, &ElevAction::SetGrants { device_id: device_id_hex(&id), grants: new.bits() });
+            if approver.is_none() {
+                return Err(self.api_error(
+                    ApiCode::NeedsAdmin,
+                    "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
+                ));
+            }
         }
         let user = conn.info.user.clone();
+        // ACCOUNTS.md 8.2: the log names who approved (an administrator over a standard account's shoulder), the
+        // grant stays the asking account's.
+        let by = approver.unwrap_or_else(|| user.clone());
         self.p
             .trust
             .update(|s| {
@@ -375,7 +380,7 @@ impl Hub {
         self.p.audit.append(AuditEntry {
             time_ms: self.p.wall.unix_ms(),
             device: DeviceRef::Known(id),
-            event: AuditEvent::GrantsChanged { from: old, to: new, by: user },
+            event: AuditEvent::GrantsChanged { from: old, to: new, by },
             duration_s: None,
         });
         if let Some(core) = self.core() {
