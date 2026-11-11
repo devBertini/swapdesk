@@ -12,7 +12,7 @@ use swapdesk_update::manager::{CheckFailure, InstallAsk, InstallFailure, Phase, 
 use super::{Conn, Hub};
 
 /// The hook that hands a verified package to the applier.
-pub type ReadyHook = Box<dyn Fn(std::path::PathBuf, &Version) -> Result<(), String> + Send + Sync>;
+pub type ReadyHook = Box<dyn Fn(std::path::PathBuf, &Version) -> Result<(), InstallFailure> + Send + Sync>;
 
 /// What the updater needs of the machine, given by the service.
 pub struct UpdaterHooks {
@@ -79,6 +79,8 @@ pub fn failure_tag(f: InstallFailure) -> u8 {
         InstallFailure::Mismatch => 5,
         InstallFailure::Disk => 6,
         InstallFailure::Cancelled => 7,
+        InstallFailure::Unwritable => 8,
+        InstallFailure::Translocated => 9,
     }
 }
 
@@ -145,8 +147,8 @@ impl Updater {
                 for hub in lock(&me.hubs).iter().filter_map(Weak::upgrade) {
                     hub.notify(Notify::UpdateRestarting);
                 }
-                if (me.hooks.ready)(path, &version).is_err() {
-                    me.manager.ready_failed();
+                if let Err(why) = (me.hooks.ready)(path, &version) {
+                    me.manager.ready_failed(why);
                     me.changed();
                 }
             }

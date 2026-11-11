@@ -427,6 +427,8 @@ pub fn update_from_wire(v: w::UpdateView) -> a::UpdateInfo {
             4 => F::Download,
             5 => F::Mismatch,
             6 => F::Disk,
+            8 => F::Unwritable,
+            9 => F::Translocated,
             _ => F::Cancelled,
         }),
     };

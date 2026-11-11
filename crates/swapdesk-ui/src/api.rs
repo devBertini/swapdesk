@@ -947,6 +947,10 @@ pub enum UpdateFailure {
     Mismatch,
     Disk,
     Cancelled,
+    /// Mac: only an administrator can replace the app where it is.
+    Unwritable,
+    /// Mac: the app runs from a translocated copy.
+    Translocated,
 }
 
 /// Why the last "Procurar agora" failed.

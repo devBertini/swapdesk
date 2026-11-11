@@ -21,6 +21,7 @@ use swapdesk_sys_mac::update_mac::{
 use swapdesk_trust::{SystemWallClock, WallClock};
 use swapdesk_update::Version;
 use swapdesk_update::apply::{Journal, Outcome};
+use swapdesk_update::manager::InstallFailure;
 
 /// The updater's folder inside the app's support folder.
 pub const FOLDER: &str = "updates";
@@ -74,9 +75,11 @@ pub fn app_updater(support: &Path, live: LiveSessions, trace: Arc<dyn TraceSink>
                     ready_trace.log(Level::Info, "update", format_args!("{new} is in place: the app quits for it"));
                     quit_app();
                 }
-                Err(e) => ready_trace.log(Level::Error, "update", format_args!("the update to {new} did not run: {e}")),
+                Err((_, e)) => {
+                    ready_trace.log(Level::Error, "update", format_args!("the update to {new} did not run: {e}"))
+                }
             }
-            swapped
+            swapped.map_err(|(why, _)| why)
         }),
     };
     let updater = Updater::new(manager, hooks);
@@ -101,8 +104,22 @@ fn refusal(r: &LocationRefusal) -> &'static str {
 }
 
 /// UPDATES.md 7.2 steps 2 to 5: the location, the staged bundle, its signature, the journal, the swap and the watcher.
-/// On an error before the swap nothing changed; after it, the swap is undone.
-fn swap_in(dir: &Path, package: &Path, new: &Version) -> Result<(), String> {
+/// On an error before the swap nothing changed; after it, the swap is undone. The error says what the interface tells.
+fn swap_in(dir: &Path, package: &Path, new: &Version) -> Result<(), (InstallFailure, String)> {
+    if let Some(exe) = std::env::current_exe().ok().as_deref().and_then(bundle_of)
+        && let Err(r) = check_location(&exe)
+    {
+        let why = match r {
+            LocationRefusal::Translocated => InstallFailure::Translocated,
+            LocationRefusal::NotWritable => InstallFailure::Unwritable,
+        };
+        let _ = std::fs::remove_file(package);
+        return Err((why, refusal(&r).to_string()));
+    }
+    swap_in_checked(dir, package, new).map_err(|e| (InstallFailure::Disk, e))
+}
+
+fn swap_in_checked(dir: &Path, package: &Path, new: &Version) -> Result<(), String> {
     let old = running_version();
     let exe = std::env::current_exe().map_err(|e| format!("this app's path: {e}"))?;
     let running = bundle_of(&exe).ok_or("this app does not run from a bundle")?;

@@ -111,6 +111,8 @@ impl UiState {
                     UpdateFailure::Download => MsgKey::UpdErrNetwork,
                     UpdateFailure::Mismatch => MsgKey::UpdErrMismatch,
                     UpdateFailure::Disk => MsgKey::UpdErrDisk,
+                    UpdateFailure::Unwritable => MsgKey::UpdErrMacAdmin,
+                    UpdateFailure::Translocated => MsgKey::UpdErrMacLocation,
                     // Refusals and a cancel are answered where they were asked: no card.
                     _ => return self.idle_card(u),
                 };
@@ -119,7 +121,13 @@ impl UiState {
                 } else {
                     self.t(key)
                 };
-                card(UpdIcon::Warn, text, None, vec![b(UpdAction::Retry, MsgKey::UpdRetry, true)])
+                // Only an administrator can replace the app: the release page, to install it by hand.
+                let way_out = if *f == UpdateFailure::Unwritable {
+                    b(UpdAction::Notes, MsgKey::UpdOpenRelease, true)
+                } else {
+                    b(UpdAction::Retry, MsgKey::UpdRetry, true)
+                };
+                card(UpdIcon::Warn, text, None, vec![way_out])
             }
             _ => return self.idle_card(u),
         })
@@ -284,8 +292,12 @@ impl UiState {
                 }
             }
             UpdAction::Notes => {
-                let version = offered.unwrap_or_else(|| u.running.clone());
-                self.web_page = Some(release_page(&version));
+                // The version on offer, the one just installed, or else the latest release.
+                self.web_page = Some(match offered {
+                    Some(v) => release_page(&v),
+                    None if u.updated => release_page(&u.running),
+                    None => "https://github.com/devBertini/swapdesk/releases/latest".into(),
+                });
                 a.effect = Some(crate::state::Effect::OpenWebPage);
             }
             UpdAction::ByHand => {

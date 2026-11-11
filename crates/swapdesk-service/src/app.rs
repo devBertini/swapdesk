@@ -338,7 +338,8 @@ fn machine_updater(
             if let Err(e) = &ended {
                 ready_trace.log(Level::Error, "update", format_args!("the update to {version} did not run: {e}"));
             }
-            ended
+            // The folder or the applier failed: told as a folder that could not be written.
+            ended.map_err(|_| swapdesk_update::manager::InstallFailure::Disk)
         }),
     };
     Some(swapdesk_host::ui_hub::update::Updater::new(manager, hooks))

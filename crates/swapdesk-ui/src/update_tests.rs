@@ -49,6 +49,15 @@ fn each_failure_has_its_reason_and_a_way_out() {
         let a = s.activate(ControlId::Update(UpdAction::Retry));
         assert_eq!(a.commands, [Command::UpdateCheckNow], "{failure:?}: the way out checks again");
     }
+    // On the Mac, the app's location: an administrator's folder offers the release page, a translocated copy asks
+    // to be moved.
+    let mut s = Scenario::Inicio.prepared_state();
+    s.apply(UiEvent::UpdateChanged(update_with(UpdatePhase::Failed(UpdateFailure::Unwritable))));
+    let card = s.update_card().unwrap();
+    assert!(card.title.starts_with("Só um administrador deste Mac"));
+    assert_eq!(card.buttons[0].1, "Abrir a página da versão");
+    s.apply(UiEvent::UpdateChanged(update_with(UpdatePhase::Failed(UpdateFailure::Translocated))));
+    assert!(s.update_card().unwrap().title.starts_with("Mova o Swapdesk para a pasta Aplicativos"));
     // A rollback says which version did not start and offers the release page and a new try.
     let s = Scenario::AtualizacaoRevertida.prepared_state();
     let card = s.update_card().unwrap();

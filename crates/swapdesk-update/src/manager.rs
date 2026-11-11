@@ -142,6 +142,10 @@ pub enum InstallFailure {
     Disk,
     /// Cancelled ("Cancelar").
     Cancelled,
+    /// Mac: the app's folder is not writable by this user (only an administrator can replace it, UPDATES.md 7.2).
+    Unwritable,
+    /// Mac: the app runs from a translocated copy (move it to Applications).
+    Translocated,
 }
 
 /// Where the manager is.
@@ -453,12 +457,12 @@ impl UpdateManager {
         result
     }
 
-    /// The verified package could not be handed to the applier (staging or the applier's start failed): told as a
-    /// disk failure, and "Tentar de novo" downloads it again.
-    pub fn ready_failed(&self) {
+    /// The verified package could not be handed to the installer, for `why` (a folder that could not be written,
+    /// or on the Mac the app's location); "Tentar de novo" checks and downloads again.
+    pub fn ready_failed(&self, why: InstallFailure) {
         let mut i = lock(&self.inner);
         if matches!(i.phase, Phase::Ready { .. }) {
-            i.phase = Phase::Failed(InstallFailure::Disk);
+            i.phase = Phase::Failed(why);
         }
     }
 
