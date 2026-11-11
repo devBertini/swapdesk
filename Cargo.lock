@@ -1064,6 +1064,7 @@ dependencies = [
  "swapdesk-term",
  "swapdesk-trust",
  "swapdesk-ui",
+ "swapdesk-update",
  "swapdesk-video",
  "tokio",
 ]
@@ -1264,6 +1265,7 @@ dependencies = [
  "swapdesk-secret-win",
  "swapdesk-sys-win",
  "swapdesk-trust",
+ "swapdesk-update",
 ]
 
 [[package]]
@@ -1328,10 +1330,14 @@ dependencies = [
 name = "swapdesk-sys-mac"
 version = "1.0.0"
 dependencies = [
+ "block2",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "objc2-security",
  "swapdesk-platform",
  "swapdesk-proto",
+ "swapdesk-update",
 ]
 
 [[package]]

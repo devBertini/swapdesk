@@ -21,11 +21,23 @@ unimplemented = "warn"
 swapdesk-platform = { path = "../swapdesk-platform" }
 # Only for the `Action` type that the ActionRunner takes (C3); a workspace crate, not a third-party one.
 swapdesk-proto = { path = "../swapdesk-proto" }
+# The updater's `HttpGet` trait and URL policy, which `http` implements with NSURLSession.
+swapdesk-update = { path = "../swapdesk-update" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
+objc2 = { workspace = true }
+block2 = { workspace = true }
 
 # Authorization Services for the administrator confirmation (`admin`): the calls and the right's name only.
 [target.'cfg(target_os = "macos")'.dependencies.objc2-security]
 workspace = true
 features = ["std", "Authorization", "AuthorizationTags"]
+
+# NSURLSession for the updater's HTTPS GET (`http`).
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+workspace = true
+features = [
+    "std", "block2", "NSObject", "NSString", "NSURL", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSURLCache",
+    "NSHTTPCookieStorage", "NSDate", "NSData", "NSDictionary", "NSError", "NSOperation",
+]

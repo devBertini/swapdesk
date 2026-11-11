@@ -3,12 +3,15 @@
 //!
 //! * [`pty::MacPtySpawner`]: the terminal's `PtySpawner`, a login shell of the process's own user on an `openpty` pair.
 //! * [`actions::MacActions`]: the `ActionRunner` of the user scope (lock, sleep, restart, Activity Monitor, keep-awake).
+//! * [`http::MacHttp`]: the updater's HTTPS GET on `NSURLSession` (`docs/UPDATES.md` 5).
 //! * [`admin`]: the administrator confirmation through Authorization Services (`docs/ELEVATION-MAC.md`). Its outcome
 //!   type and status mapping are pure and built on every host; the calls are macOS only.
 
 #[cfg(target_os = "macos")]
 pub mod actions;
 pub mod admin;
+#[cfg(target_os = "macos")]
+pub mod http;
 #[cfg(target_os = "macos")]
 pub mod pty;
 

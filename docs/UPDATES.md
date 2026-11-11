@@ -61,6 +61,7 @@ Schedule: the first check 2 to 10 minutes after the service or app starts (a ran
 - `GET /devBertini/swapdesk/releases/latest/download/swapdesk-update.txt` and `.sig`, the same two requests from every install of every version and system.
 - Headers: `Host`, `Accept: */*`, `User-Agent: Swapdesk` (the REST API requires a user agent, fact 6; the download path does not document one, and a constant one says the least). No version, no system, no cookie (`WINHTTP_DISABLE_COOKIES`; an ephemeral `NSURLSession`, fact 15), no `Authorization`, no query string, no machine or account identifier, no `If-None-Match` (an ETag could act as a cookie).
 - Only after the user's click: the package request, whose file name tells GitHub the system and the new version.
+- As built (U3, 2026-11-11): WinHTTP sends exactly these headers. On the Mac, CFNetwork adds `Connection: keep-alive` and `Accept-Encoding: gzip, deflate`, which identify nobody, and its `Accept-Language` (the user's locale) is sent empty. The body's bound and hash count the decoded bytes. In a test binary the first `NSURLSessionConfiguration` costs about 10 s (CoreFoundation scans the test's folder as its bundle); the app bundle does not pay it (UNPROVEN until measured in the app).
 
 ## 3. What is downloaded
 
