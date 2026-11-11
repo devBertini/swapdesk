@@ -106,6 +106,11 @@ struct Rig {
 }
 
 fn rig() -> Rig {
+    rig_with(None)
+}
+
+/// `present_delay`: every present takes at least this long (a desktop that holds a window's pictures back).
+fn rig_with(present_delay: Option<Duration>) -> Rig {
     let surface = HeadlessSurface::new().expect("headless shell surface");
     let presented = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&presented);
@@ -113,6 +118,7 @@ fn rig() -> Rig {
         on_present: Some(Arc::new(move |e| seen.lock().unwrap().push(*e))),
         audio: false,
         probe: None,
+        present_delay,
     })
     .expect("pipeline");
     let recorder = Arc::new(Recorder::default());
@@ -120,6 +126,17 @@ fn rig() -> Rig {
     pipeline.opened(surface.native(), Rect { x: 0, y: 0, width: SIZE.0, height: SIZE.1 }, 1.0);
     wait_until("the renderer to attach", Duration::from_secs(10), || pipeline.stats().attached);
     Rig { pipeline, recorder, presented, _surface: surface }
+}
+
+/// Feeds the stream's keyframe and waits for its picture. The first decode builds the decoder, which takes many
+/// frame times on a PC whose GPU is busy with other tests: a stream that kept coming meanwhile would overflow the
+/// mailbox, which then asks the host for a new keyframe, and no host answers in a test. A session starts the same
+/// way: the host sends the keyframe, then what follows it.
+fn first_picture(r: &Rig, frames: &[EncodedFrame]) {
+    let e = &frames[0];
+    assert!(e.keyframe, "the stream starts with a keyframe");
+    r.pipeline.video(SESSION, header(0, e), e.annex_b.clone());
+    wait_until("the keyframe's picture", Duration::from_secs(20), || !r.presented.lock().unwrap().is_empty());
 }
 
 fn control_granted() -> UiEvent {
@@ -137,9 +154,9 @@ fn control_granted() -> UiEvent {
 #[test]
 fn encoded_frames_are_decoded_and_presented_with_increasing_ids_and_the_pointer_maps_on_them() {
     let frames = encode(40);
-    assert!(frames.first().is_some_and(|f| f.keyframe), "the stream starts with a keyframe");
     let r = rig();
-    for (n, e) in frames.iter().enumerate() {
+    first_picture(&r, &frames);
+    for (n, e) in frames.iter().enumerate().skip(1) {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
         std::thread::sleep(Duration::from_millis(33));
     }
@@ -159,6 +176,8 @@ fn encoded_frames_are_decoded_and_presented_with_increasing_ids_and_the_pointer_
     assert_eq!(r.pipeline.last_error(), None);
     let stats = r.pipeline.stats();
     assert_eq!(stats.presented as usize, ids.len());
+    assert_eq!(stats.presented + stats.skipped, total as u64, "every frame was decoded: {stats:?}");
+    assert_eq!(stats.lost, 0);
     assert_eq!(stats.decode_errors, 0);
 
     // Pointer: with Control granted, the middle of the window maps to the middle of the 640x360 picture.
@@ -179,11 +198,57 @@ fn encoded_frames_are_decoded_and_presented_with_increasing_ids_and_the_pointer_
     }
 }
 
+/// A screen slower than the stream: each present takes three frame times and more, as on a desktop that holds back
+/// the pictures of a window that is not in front (Windows: 30 a second for a 60 a second stream). Every frame is still decoded (each depends on the one
+/// before), the pictures that are old when they come out are not shown, the newest is, and the host is asked for
+/// nothing: no frame is dropped on the way in, the decoder is never reset, no keyframe is requested.
+#[test]
+fn a_present_slower_than_the_stream_shows_the_newest_picture_and_loses_nothing() {
+    let frames = encode(90);
+    // A frame every 33 ms against presents of 100 ms and more: the proportion is what matters, and these numbers
+    // leave the decoder a whole frame time on a PC whose GPU is busy with other tests (at 16 ms a busy GPU alone
+    // made the decoder fall behind, which is another matter: the mailbox then drops by design).
+    let r = rig_with(Some(Duration::from_millis(100)));
+    // The session is known before the frames come, so a keyframe request would be sent if one were made.
+    r.pipeline.observe_event(&control_granted());
+    first_picture(&r, &frames);
+    for (n, e) in frames.iter().enumerate().skip(1) {
+        r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let last = u32::try_from(frames.len() - 1).unwrap();
+    let t0 = Instant::now();
+    while r.presented.lock().unwrap().last().is_none_or(|e| e.frame_id != last) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the last frame was never presented: {:?}, last error {:?}",
+            r.pipeline.stats(),
+            r.pipeline.last_error()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let stats = r.pipeline.stats();
+    assert_eq!(stats.lost, 0, "no frame was dropped before the decoder: {stats:?}");
+    assert_eq!(stats.decode_errors, 0, "{stats:?}");
+    assert_eq!(stats.keyframe_requests, 0, "the host is asked for nothing: {stats:?}");
+    assert!(r.recorder.keyframes.lock().unwrap().is_empty());
+    assert_eq!(r.pipeline.last_error(), None);
+    // Every frame was decoded: each one is either on the screen or was skipped for a newer one.
+    assert_eq!(stats.presented + stats.skipped, frames.len() as u64, "{stats:?}");
+    assert!(stats.skipped > 0, "the screen was slower than the stream, so pictures were skipped: {stats:?}");
+    let ids: Vec<u32> = r.presented.lock().unwrap().iter().map(|e| e.frame_id).collect();
+    assert!(ids.windows(2).all(|w| w[1] > w[0]), "frame ids must increase: {ids:?}");
+    // What is shown is never far behind: between two pictures on the screen at most the bound of skips.
+    assert!(ids.windows(2).all(|w| w[1] - w[0] <= 6), "a gap longer than the bound: {ids:?}");
+}
+
 #[test]
 fn a_hole_in_the_frame_ids_asks_for_a_keyframe_and_nothing_wrong_is_shown() {
     let frames = encode(30);
     let r = rig();
-    for (n, e) in frames.iter().enumerate().take(10) {
+    first_picture(&r, &frames);
+    for (n, e) in frames.iter().enumerate().take(10).skip(1) {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
         std::thread::sleep(Duration::from_millis(33));
     }
@@ -210,7 +275,8 @@ fn a_hole_in_the_frame_ids_asks_for_a_keyframe_and_nothing_wrong_is_shown() {
 fn the_report_goes_out_once_a_second_with_a_decode_time() {
     let frames = encode(45);
     let r = rig();
-    for (n, e) in frames.iter().enumerate() {
+    first_picture(&r, &frames);
+    for (n, e) in frames.iter().enumerate().skip(1) {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
         std::thread::sleep(Duration::from_millis(33));
     }

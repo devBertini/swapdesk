@@ -70,6 +70,9 @@ pub struct Shared {
     pub lost: AtomicU64,
     pub keyframe_requests: AtomicU64,
     pub decode_errors: AtomicU64,
+    /// Pictures decoded and not shown because a newer frame was already waiting (the screen was slower than the
+    /// stream).
+    pub skipped: AtomicU64,
     /// The renderer is attached.
     pub attached: AtomicBool,
     /// The remote cursor is drawn (its shape is known and the viewer does not control).
@@ -107,7 +110,18 @@ pub struct Worker {
     cursor: CursorTracker,
     /// Polls left for the picture the decoder owes, and the arrival of the frame that fed it.
     owed: Option<(u32, Instant)>,
+    /// Pictures skipped in a row because a newer frame was waiting.
+    skips: u32,
+    /// Tests only: each present takes at least this long.
+    present_delay: Option<Duration>,
 }
+
+/// Most pictures skipped in a row: a stream the decoder cannot keep up with still shows one picture in six.
+const MAX_SKIPS: u32 = 5;
+/// Frames waiting behind a picture that mean the screen is falling behind the stream. One waiting frame is the
+/// ordinary jitter of a stream that is on time (it arrived while the last present waited for the display), and its
+/// picture is shown as before; two are a present that takes longer than a frame lasts.
+const BEHIND: usize = 2;
 
 pub fn spawn(
     mailbox: Arc<Mailbox>,
@@ -115,6 +129,7 @@ pub fn spawn(
     shared: Arc<Shared>,
     observer: Option<PresentObserver>,
     probe: Option<ProbeTap>,
+    present_delay: Option<Duration>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("swapdesk-viewer-decode".into()).spawn(move || {
         let mut w = Worker {
@@ -133,6 +148,8 @@ pub fn spawn(
             feedback: Feedback::new(Instant::now()),
             cursor: CursorTracker::new(),
             owed: None,
+            skips: 0,
+            present_delay,
         };
         w.run();
     })
@@ -304,11 +321,33 @@ impl Worker {
         }
     }
 
+    /// Shows a decoded picture, unless a newer frame is already waiting.
+    ///
+    /// A present can take longer than a frame lasts: a desktop may hold a window's pictures back (Windows shows a
+    /// window that is not in front at 30 a second, and `Present` then waits 33 ms). Every frame must still be
+    /// decoded, each depends on the one before, so the wait must not be paid for each of them: the frames would
+    /// pile up in the mailbox, which then drops them all, resets the decoder and asks the host for a keyframe,
+    /// again and again. So a picture that comes out while the stream is already two frames ahead is not shown: the
+    /// next one is decoded at once and the screen stays within a frame of the newest. Nothing is lost and nothing is
+    /// asked of the host.
+    fn show_newest(&mut self, picture: swapdesk_platform::DecodedFrame, arrived: Instant) {
+        if self.mailbox.queued_frames() >= BEHIND && self.skips < MAX_SKIPS {
+            self.skips += 1;
+            self.shared.skipped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.skips = 0;
+        self.show(picture, arrived);
+    }
+
     /// Presents a decoded picture and publishes what the pointer and the feedback need.
     fn show(&mut self, picture: swapdesk_platform::DecodedFrame, arrived: Instant) {
         let (Some(decoder), Some(renderer)) = (self.decoder.as_ref(), self.renderer.as_mut()) else { return };
         let decode_us = decoder.last_decode_us();
         let (width, height, frame_id, display) = (picture.width, picture.height, picture.frame_id, picture.display.0);
+        if let Some(delay) = self.present_delay {
+            std::thread::sleep(delay);
+        }
         match renderer.present(picture, self.scale) {
             Ok(stats) => {
                 let lag_us = u32::try_from(arrived.elapsed().as_micros()).unwrap_or(u32::MAX);
@@ -369,7 +408,7 @@ impl Worker {
         match decoder.poll() {
             Ok(Some(picture)) => {
                 self.owed = None;
-                self.show(picture, arrived);
+                self.show_newest(picture, arrived);
             }
             Ok(None) => self.owed = if left > 1 { Some((left - 1, arrived)) } else { None },
             Err(e) => {
@@ -394,7 +433,7 @@ impl Worker {
         let owes = decoder.owes_picture();
         self.owed = if owes { Some((OWED_POLLS, f.arrived)) } else { None };
         match result {
-            Ok(Some(picture)) => self.show(picture, f.arrived),
+            Ok(Some(picture)) => self.show_newest(picture, f.arrived),
             Ok(None) => {
                 if decoder.waiting_for_keyframe() {
                     self.request_keyframe(false);

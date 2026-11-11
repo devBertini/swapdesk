@@ -70,11 +70,14 @@ pub struct ViewerOptions {
     pub audio: bool,
     /// Measurements only: pixels of every presented picture (see [`ProbeTap`]). `None` in the application.
     pub probe: Option<ProbeTap>,
+    /// Tests only: every present takes at least this long, as on a desktop that holds back the pictures of a
+    /// window that is not in front. `None` in the application.
+    pub present_delay: Option<Duration>,
 }
 
 impl Default for ViewerOptions {
     fn default() -> Self {
-        Self { on_present: None, audio: true, probe: None }
+        Self { on_present: None, audio: true, probe: None, present_delay: None }
     }
 }
 
@@ -83,6 +86,8 @@ impl Default for ViewerOptions {
 pub struct PipelineStats {
     pub presented: u64,
     pub last_frame_id: Option<u32>,
+    /// Pictures decoded and not shown because a newer frame was already waiting.
+    pub skipped: u64,
     pub lost: u64,
     pub decode_errors: u64,
     pub keyframe_requests: u64,
@@ -170,6 +175,7 @@ impl ViewerPipeline {
             Arc::clone(&shared),
             options.on_present,
             options.probe,
+            options.present_delay,
         )?;
         let (o, s, st) = (Arc::clone(&out), Arc::clone(&input_session), Arc::clone(&stop));
         let input = std::thread::Builder::new()
@@ -232,6 +238,7 @@ impl ViewerPipeline {
             presented: s.presented.load(Ordering::Relaxed),
             last_frame_id: (s.presented.load(Ordering::Relaxed) > 0)
                 .then(|| s.last_frame_id.load(Ordering::Relaxed) as u32),
+            skipped: s.skipped.load(Ordering::Relaxed),
             lost: s.lost.load(Ordering::Relaxed),
             decode_errors: s.decode_errors.load(Ordering::Relaxed),
             keyframe_requests: s.keyframe_requests.load(Ordering::Relaxed),

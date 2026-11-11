@@ -674,6 +674,7 @@ pub fn run(cfg: &RunConfig) -> Result<Fields, String> {
         on_present: None,
         audio: false,
         probe: Some(ProbeTap { rect, on_probe: Arc::new(move |event, probe| probe_record.on_probe(event, probe)) }),
+        present_delay: None,
     })
     .map_err(|e| format!("the viewer pipeline: {e}"))?;
     let underruns = Arc::new(AtomicU32::new(0));
@@ -833,6 +834,8 @@ pub fn run(cfg: &RunConfig) -> Result<Fields, String> {
     // What the viewer's pipeline counted inside the window, and before it (the start of the session).
     let (p0, p1) = window.pipeline;
     f.num("pipeline_lost", (p1.lost - p0.lost) as f64);
+    // Pictures decoded and not shown because the stream was two frames ahead of the screen (a slow present).
+    f.num("pipeline_skipped", (p1.skipped - p0.skipped) as f64);
     f.num("decode_errors", (p1.decode_errors - p0.decode_errors) as f64);
     f.num("keyframe_requests", (p1.keyframe_requests - p0.keyframe_requests) as f64);
     f.num("startup_pipeline_lost", p0.lost as f64);
