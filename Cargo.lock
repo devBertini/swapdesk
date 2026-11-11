@@ -874,6 +874,7 @@ dependencies = [
  "swapdesk-sys-mac",
  "swapdesk-trust",
  "swapdesk-ui",
+ "swapdesk-update",
  "tokio",
 ]
 

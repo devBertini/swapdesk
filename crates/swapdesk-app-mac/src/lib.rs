@@ -47,6 +47,8 @@ pub mod selftest;
 pub mod session_notices;
 #[cfg(target_os = "macos")]
 pub mod slot;
+#[cfg(target_os = "macos")]
+pub mod update;
 
 #[cfg(all(test, target_os = "macos"))]
 mod input_tests;

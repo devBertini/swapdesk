@@ -45,6 +45,8 @@ swapdesk-session = { path = "../swapdesk-session" }
 swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 swapdesk-ui = { path = "../swapdesk-ui" }
+# The updater's manager, package and watcher sequence (UPDATES.md 7).
+swapdesk-update = { path = "../swapdesk-update" }
 tokio.workspace = true
 # Only with the `dev-harness` feature: the scripted host user of `--drive-host`.
 swapdesk-crossdrive = { path = "../swapdesk-crossdrive", optional = true }

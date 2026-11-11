@@ -6,6 +6,12 @@
 #[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The update watcher (UPDATES.md 7.2): the old bundle's binary, started by the app it replaces; no window.
+    if let [flag, pid, old, new, running] = args.as_slice()
+        && flag == "--update-watch"
+    {
+        std::process::exit(swapdesk_app_mac::update::watch(pid, old, new, running));
+    }
     if let Err(e) = swapdesk_app_mac::app::run(&args) {
         eprintln!("Swapdesk could not start: {e}");
         std::process::exit(1);

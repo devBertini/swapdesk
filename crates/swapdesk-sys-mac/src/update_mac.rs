@@ -169,6 +169,9 @@ pub fn swap(a: &Path, b: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The journal's name inside the updater's folder.
+pub const JOURNAL: &str = "journal";
+
 /// The prefix every entry of a Mac package carries.
 pub const BUNDLE_PREFIX: &str = "Swapdesk.app/";
 

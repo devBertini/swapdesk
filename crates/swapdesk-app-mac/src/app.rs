@@ -243,6 +243,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
         // Registered for the whole run of the app.
         std::mem::forget(observer);
     }
+    // UPDATES.md 2.2, 7: the installed app's updater (never a scratch run); a version that started after a swap commits.
+    if !options.use_scratch()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let support = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        let live: crate::update::LiveSessions = Arc::default();
+        let rolled_back = crate::update::at_start(&support, &*trace);
+        if let Some(updater) = crate::update::app_updater(&support, Arc::clone(&live), Arc::clone(&trace)) {
+            let hub = service.hub().clone();
+            let _ = live.set(Box::new(move || hub.live_sessions()));
+            service.hub().set_updater(Arc::clone(&updater));
+            if let Some(v) = rolled_back {
+                updater.rolled_back(&v);
+            }
+        }
+    }
     let user = state.user_prefs();
     viewer.set_user_prefs(user.keyboard_mode, user.swap_ctrl_cmd);
     if options.selftest.is_none() {
