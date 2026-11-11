@@ -13,14 +13,13 @@
 //! * **Viewer role** ([`ViewerFiles`]): one handler per viewer session, bound to the UI connection that owns the
 //!   session after the connection opens; the hub's UI ops drive it.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use swapdesk_files::{Command, DEFAULT_RECEIVE, Event, FilesHandler, FilesSink, Fs, FsCaller, PipeFs};
-use swapdesk_proto::{ErrorCode, ErrorMessage, Feature, FileDecline, GrantMode, Message, PermissionSet, StreamKind};
-use swapdesk_session::{ChannelHandler, HostEvent, IncomingStream, SessionCtx, SessionEnd};
+use swapdesk_proto::{ErrorCode, ErrorMessage, Feature, FileDecline, Message, PermissionSet, StreamKind};
+use swapdesk_session::{ChannelHandler, IncomingStream, SessionCtx, SessionEnd};
 use swapdesk_term::{ConsentFacts, ConsentNeed, consent_need};
 use swapdesk_trust::{DeviceId, TrustHandle};
 
@@ -38,21 +37,17 @@ const MAX_WAITING: usize = 64;
 
 /// What the D13 decision reads from the machine.
 pub(crate) trait ConsentEnv: Send + Sync + 'static {
-    /// The session entered without a prompt. A session the service has not seen start counts as unattended (it asks
-    /// rather than assume).
-    fn unattended(&self, session_id: u64) -> bool;
     /// The account (SID) of the administrator who granted `UNATTENDED` to the device.
     fn granted_by(&self, device: &DeviceId) -> Option<String>;
     /// The account (SID) of the user logged in at the console now.
     fn console_user(&self) -> Option<String>;
 }
 
-/// The machine's file service: the host gate, the per-session modes D13 needs, and the way events reach the UI.
+/// The machine's file service: the host gate and the way events reach the UI.
 pub(crate) struct FilesService {
     hooks: Arc<HooksCell>,
     trust: Arc<TrustHandle>,
     shared: Arc<Shared>,
-    modes: Mutex<HashMap<u64, bool>>,
     /// The host session the handler serves now, for the events it raises (a host serves one session at a time).
     host_session: Arc<AtomicU64>,
     gate: OnceLock<Arc<FilesGate>>,
@@ -60,14 +55,8 @@ pub(crate) struct FilesService {
 
 impl FilesService {
     pub fn new(hooks: Arc<HooksCell>, trust: Arc<TrustHandle>, shared: Arc<Shared>) -> Arc<Self> {
-        let me = Arc::new(Self {
-            hooks,
-            trust,
-            shared,
-            modes: Mutex::new(HashMap::new()),
-            host_session: Arc::new(AtomicU64::new(0)),
-            gate: OnceLock::new(),
-        });
+        let me =
+            Arc::new(Self { hooks, trust, shared, host_session: Arc::new(AtomicU64::new(0)), gate: OnceLock::new() });
         let gate = FilesGate::new(
             me.host_fs(),
             Arc::new(HostSink { session: Arc::clone(&me.host_session), hooks: Arc::clone(&me.hooks) }),
@@ -92,19 +81,6 @@ impl FilesService {
         Arc::new(PipeFs::new(Arc::new(move || shared.helper(HelperKind::User).map(|h| h.fs_caller()))))
     }
 
-    /// Feeds the host events the D13 decision needs.
-    pub fn host_event(&self, event: &HostEvent) {
-        match event {
-            HostEvent::SessionStarted { session_id, mode, .. } => {
-                lock(&self.modes).insert(*session_id, *mode == GrantMode::Unattended);
-            }
-            HostEvent::Ended { session_id, resumable, .. } if !*resumable => {
-                lock(&self.modes).remove(session_id);
-            }
-            _ => {}
-        }
-    }
-
     /// A handler for the viewer session about to open.
     pub fn viewer(&self) -> Arc<ViewerFiles> {
         ViewerFiles::new(Arc::clone(&self.hooks))
@@ -112,10 +88,6 @@ impl FilesService {
 }
 
 impl ConsentEnv for FilesService {
-    fn unattended(&self, session_id: u64) -> bool {
-        lock(&self.modes).get(&session_id).copied().unwrap_or(true)
-    }
-
     fn granted_by(&self, device: &DeviceId) -> Option<String> {
         self.trust.read(|s| s.find_by_id(device).and_then(|d| d.unattended_granted_by.as_ref().map(|u| u.id.clone())))
     }
@@ -217,7 +189,9 @@ async fn decide(env: &dyn ConsentEnv, ctx: &SessionCtx) -> Result<(), ErrorCode>
     let granted_by = ctx.device().and_then(|d| env.granted_by(&d));
     let console_user = env.console_user();
     let facts = ConsentFacts {
-        session_unattended: env.unattended(ctx.session_id()),
+        // How the session entered, kept by the session itself across a resume: a table of this service's own lost
+        // it there (a resume starts the session again with the mode `Resumed`).
+        session_unattended: ctx.entered_unattended(),
         granted_by: granted_by.as_deref(),
         console_user: console_user.as_deref(),
         admin_terminal: false,

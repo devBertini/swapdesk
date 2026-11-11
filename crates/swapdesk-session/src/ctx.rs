@@ -235,6 +235,7 @@ impl SessionCtx {
 
     pub(crate) fn set_peer_minor(&self, minor: u16) {
         self.inner.peer_minor.store(minor, Ordering::SeqCst);
+        self.inner.out.set_peer_minor(minor);
     }
 
     /// True for a host session that entered without a prompt (`GrantMode::Unattended`) and for a resume of one.

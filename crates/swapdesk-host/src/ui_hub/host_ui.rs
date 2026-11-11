@@ -119,12 +119,18 @@ impl HostUi for HubHostUi {
             device: hub.device_view_of(&request.device, &request.name, request.os),
             kind: RequestKind::Session { intent: request.intent },
             // The stored grants, or, for a device that has none yet (just paired), what its user asked for:
-            // ticking every box by hand before "Aceitar" is a dead end. Never UNATTENDED or ADMIN_TERMINAL (D8).
-            // Only the two bits go: the sets UNATTENDED and ADMIN_TERMINAL also hold VIEW and TERMINAL, and masking
+            // ticking every box by hand before "Aceitar" is a dead end. Never UNATTENDED or ADMIN_TERMINAL (D8), and
+            // never the terminal: a viewer asks for it with every connect to a 1.1 host (an entry without a prompt
+            // grants only what was asked), so it says nothing of what its user wants, and one "Aceitar" must not
+            // open a shell.
+            // Only the bits go: the sets UNATTENDED and ADMIN_TERMINAL also hold VIEW and TERMINAL, and masking
             // with them left CONTROL without VIEW, a set the answer's own check refuses as invalid.
             preset: if request.stored.is_empty() {
                 PermissionSet::closure(
-                    request.requested.bits() & !(PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL),
+                    request.requested.bits()
+                        & !(PermissionSet::BIT_UNATTENDED
+                            | PermissionSet::BIT_ADMIN_TERMINAL
+                            | PermissionSet::BIT_TERMINAL),
                 )
                 .bits()
             } else {

@@ -65,11 +65,24 @@ struct Pair {
 
 impl Pair {
     fn new(tag: &str, cut_able: bool) -> Self {
+        Self::build(tag, cut_able, None)
+    }
+
+    /// `unattended_by`: the host lets the viewer's device in without a prompt, granted by the account with this
+    /// id; the viewer then enters that way (an administrator account, a host record of minor 1, through the relay).
+    fn build(tag: &str, cut_able: bool, unattended_by: Option<&str>) -> Self {
         let (home, src, recv) =
             (temp(&format!("{tag}-home")), temp(&format!("{tag}-src")), temp(&format!("{tag}-recv")));
         let mut host = Machine::new("host-pc");
         let viewer = Machine::new("viewer-pc");
-        host.pin(&viewer, ALL | FILES);
+        let stored = if unattended_by.is_some() { ALL | FILES | PermissionSet::UNATTENDED } else { ALL | FILES };
+        host.pin(&viewer, stored);
+        if let Some(sid) = unattended_by {
+            host.trust
+                .update(|s| s.devices.iter_mut().for_each(|d| d.unattended_granted_by = Some(user(sid))))
+                .expect("store");
+        }
+        let minor = if unattended_by.is_some() { swapdesk_proto::PROTO_MINOR } else { 0 };
         viewer.pin(&host, CV);
         host.attach_helper(IpcRole::HelperSystem);
         host.attach_helper_with(IpcRole::HelperUser, |deps| {
@@ -88,9 +101,9 @@ impl Pair {
                 addrs: vec![Ipv4Addr::LOCALHOST],
                 session_port: r.port,
                 pair_port: 0,
-                proto_minor: 0,
+                proto_minor: minor,
             }]),
-            None => viewer.sees(&host, false),
+            None => viewer.sees_minor(&host, false, minor),
         }
         host.sees(&viewer, false);
         host.hub.set_console_session(Some(1));
@@ -99,25 +112,27 @@ impl Pair {
         let host_ui = host.client(info(false));
         let mut viewer_ui = Client::connect_with_disk(
             &viewer.hub,
-            info(false),
+            ConnInfo { can_elevate: unattended_by.is_some(), ..info(false) },
             Some(Arc::new(FsServer::new(Roots::Tokens(Arc::clone(&tokens))))),
         );
         let mut host_ui = host_ui;
         let req =
             viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
-        let incoming = host_ui.notify("IncomingRequest", |n| match n {
-            Notify::IncomingRequest(r) => Some(r.clone()),
-            _ => None,
-        });
-        assert!(
-            host_ui
-                .call(UiOp::AnswerIncoming {
-                    request_id: incoming.request_id,
-                    decision: Decision::Accept,
-                    grants: (ALL | FILES).bits()
-                })
-                .is_ok()
-        );
+        if unattended_by.is_none() {
+            let incoming = host_ui.notify("IncomingRequest", |n| match n {
+                Notify::IncomingRequest(r) => Some(r.clone()),
+                _ => None,
+            });
+            assert!(
+                host_ui
+                    .call(UiOp::AnswerIncoming {
+                        request_id: incoming.request_id,
+                        decision: Decision::Accept,
+                        grants: (ALL | FILES).bits()
+                    })
+                    .is_ok()
+            );
+        }
         let session = viewer_ui.connected(req);
         active_as(&mut viewer_ui, Role::Viewer, &[]);
         active_as(&mut host_ui, Role::Host, &[]);
@@ -463,5 +478,49 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
     state_of(&mut p.viewer_ui, id, "done after Retomar", is_done);
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     p.relay = Some(relay);
+    p.finish();
+}
+
+/// D13 across a lost link (review of the unattended entry, finding 1): a session that entered without a prompt,
+/// granted by one account while another is at the console, has touched no file yet. Its link drops and it resumes.
+/// The first file request after that must still ask the user at the console: a resume is the same session, and
+/// nobody at the host ever accepted it.
+#[test]
+fn after_a_reconnect_the_files_of_another_user_are_still_asked_for() {
+    // The console's interface is the account S-1-5-21-1 (`info`); the grant came from another one.
+    let mut p = Pair::build("d13-resume", true, Some("S-1-5-21-777"));
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+
+    let relay = p.relay.take().expect("a cut-able pair");
+    relay.cut(true);
+    p.viewer_ui.notify("Reconectando", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
+            if *session_id == p.session && *attempt >= 1 =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    p.viewer_ui.clear();
+    relay.cut(false);
+    p.viewer_ui.notify("the session is back", |n| match n {
+        Notify::Session { session_id, state: SessionState::Active { .. }, .. } if *session_id == p.session => Some(()),
+        _ => None,
+    });
+
+    // The first file request of the resumed session: the host asks its console user before anything moves.
+    let pick = p.pick("a.bin", b"hello");
+    assert!(p.send(vec![pick], Some("incoming")).is_ok());
+    let asked = p.host_ui.notify("the consent question", |n| match n {
+        Notify::IncomingRequest(r)
+            if matches!(r.kind, RequestKind::Consent { feature: swapdesk_proto::Feature::Files }) =>
+        {
+            Some(r.request_id)
+        }
+        _ => None,
+    });
+    assert!(!p.home.join("incoming").join("a.bin").exists(), "nothing is written before the answer");
+    assert!(p.host_ui.call(UiOp::AnswerIncoming { request_id: asked, decision: Decision::Decline, grants: 0 }).is_ok());
+    drop(relay);
     p.finish();
 }

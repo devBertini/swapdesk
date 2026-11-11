@@ -1236,3 +1236,88 @@ fn a_viewer_that_the_host_does_not_know_never_gets_a_session_over_the_wire() {
         q.stop();
     });
 }
+
+// ---------- protocol minor 1 in a session ----------
+
+/// A build of minor 1 takes `StoredGrants` after the grant, either way, without acting on it yet, and answers
+/// `Elevate` as a session that may not elevate: a later build that sends them is not cut off by this one.
+#[test]
+fn stored_grants_is_taken_after_the_grant_and_elevate_is_refused_without_ending_the_session() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, registry_one(rec.clone()));
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::CONTROL).await;
+        let host_ctx = lock(&rec.sessions)[0].clone();
+        assert_eq!((host_ctx.peer_minor(), s.ctx().peer_minor()), (PROTO_MINOR, PROTO_MINOR));
+
+        // Viewer to host and host to viewer: nothing happens, the session lives.
+        s.ctx().send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        host_ctx.send(StoredGrants { grants: PermissionSet::CONTROL }).await.unwrap();
+        // The elevation step is not built: a refusal that is not fatal, about this message.
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "the refusal of Elevate", |e| {
+            is_error(e, ErrorCode::NotPermitted, 0x000C, 0)
+        })
+        .await;
+        assert!(s.ctx().ended().is_none() && host_ctx.ended().is_none(), "the session goes on");
+        assert_eq!(host_ctx.granted(), PermissionSet::CONTROL, "nothing was added");
+    });
+}
+
+/// A peer that announced minor 0 cannot have sent a message of minor 1: that is `UNSUPPORTED_VERSION`, fatal.
+#[test]
+fn a_minor_1_message_from_a_peer_that_announced_minor_0_ends_the_session() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (s, task) = mem.open(&who, viewer_config_1_0(PermissionSet::CONTROL)).await;
+        let s = s.unwrap();
+        // The viewer's own send path believes the host's minor (1), so the message leaves; the host knows better.
+        s.ctx().send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::UnsupportedVersion));
+    });
+}
+
+/// The send path keeps PROTOCOL.md 1 by itself: what a 1.0 viewer is sent holds no value of minor 1, whoever
+/// produced it, and no minor-1 type is written to it.
+#[test]
+fn a_minor_0_viewer_is_never_sent_a_minor_1_value_or_type() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, registry_one(rec.clone()));
+        let (old, new) = (Who::new(), Who::new());
+        pin(&mem.trust, &old, PermissionSet::CONTROL);
+        pin(&mem.trust, &new, PermissionSet::CONTROL);
+
+        let (s, _task) = mem.open(&old, viewer_config_1_0(PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        let host_ctx = lock(&rec.sessions).last().unwrap().clone();
+        assert_eq!(host_ctx.peer_minor(), 0);
+        // A type of minor 1 is not written; the next message proves the stream is intact.
+        host_ctx.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "the 1.0 form of the pause", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: true })
+        })
+        .await;
+        assert!(s.ctx().ended().is_none(), "nothing the 1.0 viewer cannot read reached it");
+        s.disconnect().await;
+        eventually(Duration::from_secs(1), "the end", || mem.host.sessions().is_empty()).await;
+
+        // A viewer of minor 1 is told the real state.
+        let (s, _task) = mem.open(&new, viewer_config(PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "the pause of minor 1", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::AccountAway, paused: true })
+        })
+        .await;
+    });
+}

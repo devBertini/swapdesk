@@ -209,7 +209,6 @@ impl Connector {
 struct CoreUi {
     inner: Arc<dyn HostUi>,
     shared: Arc<Shared>,
-    files: Arc<FilesService>,
 }
 
 impl HostUi for CoreUi {
@@ -263,7 +262,6 @@ impl HostUi for CoreUi {
             }
             _ => {}
         }
-        self.files.host_event(&event);
         self.inner.event(event);
     }
 }
@@ -486,8 +484,7 @@ impl ServiceCore {
         let mut host_cfg =
             HostConfig::new(&cfg.name, cfg.os, &cfg.os_version, &cfg.app_version, cfg.capabilities.clone());
         host_cfg.max_live_sessions = 1;
-        let ui =
-            Arc::new(CoreUi { inner: Arc::clone(&cfg.ui), shared: Arc::clone(&shared), files: Arc::clone(&files) });
+        let ui = Arc::new(CoreUi { inner: Arc::clone(&cfg.ui), shared: Arc::clone(&shared) });
         let host = HostService::new(host_cfg, Arc::clone(&cfg.trust), ui, registry, Arc::clone(&cfg.clock));
         let _ = env.host.set(host.clone());
         let _ = host_cell.set(host.clone());
@@ -715,8 +712,8 @@ impl ServiceCore {
     }
 
     /// [`ServiceCore::connect`] with `unattended`: the viewer also asks for `UNATTENDED` (entry without a prompt,
-    /// F-SESS-02). Whether the caller may ask is the caller's check (an administrator connection, D10); the host
-    /// grants it only when the device holds it.
+    /// F-SESS-02). Whether to ask is the caller's rule (the hub asks toward a host of protocol minor 1, for an
+    /// administrator account); the host lets it in only when the device holds `UNATTENDED`.
     pub fn connect_with(
         &self,
         addr: SocketAddr,

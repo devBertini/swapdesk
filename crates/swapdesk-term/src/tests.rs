@@ -301,7 +301,7 @@ fn qa(kind: Action) -> QuickAction {
 }
 
 fn actx(granted: PermissionSet, user_present: bool) -> ActionContext {
-    ActionContext { granted, user_present }
+    ActionContext { granted, user_present, paused: false }
 }
 
 #[test]
@@ -317,6 +317,25 @@ fn quick_actions_run_through_the_runner_and_report_success() {
         assert_eq!(relay.handle(&qa(a), &actx(PermissionSet::CONTROL, true)).result.code, ErrorCode::NoError);
     }
     assert_eq!(fake.ran(), vec![Action::Lock, Action::Sleep, Action::Restart, Action::TaskMonitor]);
+}
+
+/// A paused session (the host at its lock, sign-in or secure desktop, the session without `UNATTENDED`) may not
+/// restart, suspend or lock the computer: its input is dropped there, and so are its actions.
+#[test]
+fn a_paused_session_runs_no_quick_action() {
+    let fake = FakeActions::new();
+    let mut relay = ActionRelay::new(fake.clone());
+    for a in [Action::Restart, Action::Sleep, Action::Lock, Action::TaskMonitor] {
+        for user_present in [true, false] {
+            let ctx = ActionContext { granted: PermissionSet::CONTROL, user_present, paused: true };
+            let done = relay.handle(&qa(a), &ctx);
+            assert_eq!((done.result.code, done.ran), (ErrorCode::Unavailable, false), "{a:?}");
+        }
+    }
+    assert!(fake.ran().is_empty(), "nothing reached the runner");
+    // The same session, back on the user's desktop, runs them.
+    let done = relay.handle(&qa(Action::Restart), &actx(PermissionSet::CONTROL, true));
+    assert_eq!((done.result.code, done.ran), (ErrorCode::NoError, true));
 }
 
 #[test]

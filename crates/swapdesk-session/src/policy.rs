@@ -52,9 +52,10 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | WakeInfo(_) => role == Role::Viewer,
         // The pairing endpoint only.
         PairHello(_) | PairNonce(_) | PairReveal(_) | PairConfirm(_) | PairResult(_) => false,
-        // Minor 1, on the wire but not yet taken by a session: `StoredGrants` opens with the grants sync in a
-        // session and `Elevate` with the unattended entry. Until then a peer that sends one breaks the protocol.
-        StoredGrants(_) | Elevate(_) => false,
+        // Minor 1. What the other side has stored for this device, either way.
+        StoredGrants(_) => true,
+        // Minor 1, viewer to host: the session asks for the machine-level bits.
+        Elevate(_) => role == Role::Host,
         // A grants sync connection only, never inside a session.
         GrantsSync(_) => false,
     }
@@ -230,9 +231,10 @@ pub fn without_revoked(granted: PermissionSet, seen: PermissionSet, now: Permiss
     PermissionSet::closure(bits)
 }
 
-/// A swap (6.3 step 5): the stored grants for that device, never `UNATTENDED` entry; limited to what was requested.
+/// A swap (6.3 step 5): the stored grants for that device, limited to what was requested and never elevated:
+/// neither `UNATTENDED` nor `ADMIN_TERMINAL`, whatever the new viewer's `Hello` asks for.
 pub fn swap_grant(stored: PermissionSet, requested: PermissionSet) -> PermissionSet {
-    without(stored & requested, PermissionSet::BIT_UNATTENDED)
+    without(stored & requested, PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL)
 }
 
 /// A resumed session (6.4): the original grants intersected with the grants still stored, so a per-session addition
@@ -379,8 +381,9 @@ mod tests {
             match m.type_id() {
                 // Pairing messages never travel on a session, nor does the message of a grants sync connection.
                 0x0701..=0x0705 | 0x0801 => assert!(!host && !viewer, "{m:?}"),
-                // Minor 1, not yet taken by a session.
-                0x000B | 0x000C => assert!(!host && !viewer, "{m:?}"),
+                // Minor 1: `StoredGrants` goes both ways, `Elevate` to the host.
+                0x000B => assert!(host && viewer, "{m:?}"),
+                0x000C => assert!(host && !viewer, "{m:?}"),
                 // Viewer to host only.
                 0x0001 | 0x0102..=0x0105 | 0x0107 | 0x0109 | 0x0409 | 0x040B | 0x0501 | 0x0503 | 0x0504 | 0x0601 => {
                     assert!(host && !viewer, "{m:?}")
@@ -598,6 +601,12 @@ mod tests {
         }
         let swap = swap_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES);
         assert!(!swap.contains(PermissionSet::UNATTENDED), "a swap never grants UNATTENDED entry");
+        let elevated = PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        assert_eq!(
+            swap_grant(stored | elevated, elevated),
+            PermissionSet::CONTROL | PermissionSet::TERMINAL,
+            "nor the administrator terminal, even when the new viewer asks for it and it is stored"
+        );
         assert!(swap.contains(PermissionSet::CONTROL) && swap.contains(PermissionSet::FILES));
         assert_eq!(
             resumed_grant(PermissionSet::CONTROL | PermissionSet::FILES, PermissionSet::CONTROL),

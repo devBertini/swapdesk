@@ -622,7 +622,33 @@ impl Actor {
     }
 
     /// A request in a live session: direction was checked; now the permission, the handler and the caps.
+    /// The messages of protocol minor 1 that a session takes after the grant, on either side. `None`: not one of them.
+    fn minor_1_message(&mut self, msg: &Message) -> Option<Option<Finish>> {
+        if !matches!(msg, Message::StoredGrants(_) | Message::Elevate(_)) {
+            return None;
+        }
+        // A peer that announced minor 0 cannot have sent it (PROTOCOL.md 5.3).
+        if self.ctx.peer_minor() < Message::type_min_minor(msg.type_id()) {
+            return Some(Some(Finish::violation(ErrorCode::UnsupportedVersion)));
+        }
+        Some(match msg {
+            // What the other side stored for this device: for display, kept by the grants sync when it is built.
+            // Until then it is taken and dropped, so a later build that sends it is not cut off.
+            Message::StoredGrants(_) => None,
+            // The elevation step is not built: the answer is the one of a session that may not elevate.
+            _ => self.reply(ErrorMessage {
+                code: ErrorCode::NotPermitted,
+                fatal: false,
+                about_type: msg.type_id(),
+                about_id: 0,
+            }),
+        })
+    }
+
     fn host_active(&mut self, msg: Message) -> Option<Finish> {
+        if let Some(done) = self.minor_1_message(&msg) {
+            return done;
+        }
         let type_id = msg.type_id();
         // The handshake does not repeat: a second `Hello` or `Capabilities` is a violation, not a request.
         if policy::is_core_type(type_id) {
@@ -748,6 +774,9 @@ impl Actor {
     }
 
     fn viewer_active(&mut self, msg: Message) -> Option<Finish> {
+        if let Some(done) = self.minor_1_message(&msg) {
+            return done;
+        }
         let Side::Viewer { events, .. } = &self.side else { return None };
         let events = events.clone();
         match msg {

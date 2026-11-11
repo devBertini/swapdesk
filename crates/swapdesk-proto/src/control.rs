@@ -533,6 +533,55 @@ impl Message {
         if carried > of_type { carried } else { of_type }
     }
 
+    /// This message as a peer that announced `minor` may be sent it: unchanged when the peer knows all of it; with
+    /// each newer enum value replaced by the older one that says the same ([`ErrorCode::for_minor`],
+    /// [`Desktop::for_minor`]); `None` when the type itself is newer than the peer, which is then sent nothing.
+    pub fn for_peer(self, minor: u16) -> Option<Self> {
+        if Self::type_min_minor(self.type_id()) > minor {
+            return None;
+        }
+        if self.min_minor() <= minor {
+            return Some(self);
+        }
+        Some(match self {
+            Self::SessionRefused(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::SessionRefused(m)
+            }
+            Self::Bye(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::Bye(m)
+            }
+            Self::HostState(mut m) => {
+                // A desktop the peer does not know reads as locked, and a locked desktop it cannot see is paused.
+                m.paused |= m.desktop.for_minor(minor) != m.desktop;
+                m.desktop = m.desktop.for_minor(minor);
+                Self::HostState(m)
+            }
+            Self::SwapDecline(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::SwapDecline(m)
+            }
+            Self::FileDecline(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::FileDecline(m)
+            }
+            Self::QuickActionResult(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::QuickActionResult(m)
+            }
+            Self::PairResult(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::PairResult(m)
+            }
+            Self::Error(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::Error(m)
+            }
+            other => other,
+        })
+    }
+
     /// The whole frame: `type`, `len`, payload. A payload over [`MAX_FRAME_PAYLOAD`] is an error.
     pub fn encode_frame(&self) -> Result<Vec<u8>> {
         let payload = self.encode_payload()?;

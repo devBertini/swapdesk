@@ -719,3 +719,57 @@ fn every_type_names_the_minor_that_introduced_it() {
     }
     assert_eq!(Message::from(Bye { code: ErrorCode::NoError }).min_minor(), 0);
 }
+
+/// The one mapping the send path applies: a peer of minor 0 gets no minor-1 type, and each minor-1 value in the
+/// form its own minor has for it. A peer of minor 1 gets everything as it is.
+#[test]
+fn no_minor_1_type_or_value_reaches_a_minor_0_peer_in_any_message() {
+    let away = ErrorCode::AccountAway;
+    let carriers: Vec<Message> = vec![
+        SessionRefused { code: away }.into(),
+        Bye { code: away }.into(),
+        SwapDecline { request_id: 7, code: away }.into(),
+        FileDecline { transfer_id: 7, code: away }.into(),
+        QuickActionResult { action_id: 7, code: away }.into(),
+        PairResult { ok: false, code: away }.into(),
+        ErrorMessage { code: away, fatal: true, about_type: 3, about_id: 7 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: false }.into(),
+    ];
+    for m in carriers {
+        assert_eq!(m.clone().for_peer(1), Some(m.clone()), "a peer of minor 1 gets it whole");
+        let old = m.clone().for_peer(0).expect("its type is of 1.0: it is sent, in its 1.0 form");
+        assert_eq!((old.type_id(), old.min_minor()), (m.type_id(), 0), "{m:?} -> {old:?}");
+        assert!(format!("{old:?}").contains(if matches!(m, Message::HostState(_)) {
+            "Locked"
+        } else {
+            "NobodyPresent"
+        }));
+        // What 1.0 can decode: the frame round-trips, and nothing else of the message moved.
+        assert_eq!(Message::decode_frame_exact(&old.encode_frame().unwrap()).unwrap(), old);
+    }
+    // A desktop the old peer cannot be told of is one it must not act on: it reads as locked and paused.
+    let state = Message::from(HostState { desktop: Desktop::AccountAway, paused: false }).for_peer(0);
+    assert_eq!(state, Some(HostState { desktop: Desktop::Locked, paused: true }.into()));
+    // The types of minor 1 are not sent at all.
+    for m in [
+        Message::StoredGrants(StoredGrants { grants: PermissionSet::VIEW }),
+        Message::Elevate(Elevate {}),
+        Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::VIEW }),
+    ] {
+        assert_eq!(m.clone().for_peer(0), None, "{m:?}");
+        assert_eq!(m.clone().for_peer(1), Some(m));
+    }
+    // Every message of 1.0 is untouched for every peer.
+    let mut runner = TestRunner::new(Config { cases: 32, failure_persistence: None, ..Config::default() });
+    for strategy in message_strategies() {
+        runner
+            .run(&strategy, |m| {
+                if m.min_minor() == 0 {
+                    prop_assert_eq!(m.clone().for_peer(0), Some(m.clone()));
+                }
+                prop_assert_eq!(m.clone().for_peer(u16::MAX), Some(m));
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+}

@@ -227,7 +227,11 @@ impl ChannelHandler for ActionsHost {
         let (inner, ctx) = (Arc::clone(&self.inner), ctx.clone());
         // The runner may wait for the helper's pipe (a suspend takes seconds): a blocking thread, never the executor.
         drop(self.inner.shared.rt.spawn_blocking(move || {
-            let facts = ActionContext { granted: ctx.granted(), user_present: inner.ui.somebody_present() };
+            let facts = ActionContext {
+                granted: ctx.granted(),
+                user_present: inner.ui.somebody_present(),
+                paused: ctx.is_paused(),
+            };
             let done = lock(&inner.relay).handle(&req, &facts);
             let ok = done.result.code == ErrorCode::NoError;
             let _ = ctx.try_send(done.result);

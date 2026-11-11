@@ -28,6 +28,11 @@ impl Pair {
     /// `stored`: what the host lets the viewer's device do. `host_record`: the protocol minor of the host's record
     /// as the viewer sees it on the network (`None`: the viewer does not see the host).
     fn build_with(stored: PermissionSet, host_record: Option<u16>) -> Self {
+        Self::build_as(stored, host_record, administrator_account())
+    }
+
+    /// `viewer_account`: the account of the viewer machine whose interface presses the button.
+    fn build_as(stored: PermissionSet, host_record: Option<u16>, viewer_account: ConnInfo) -> Self {
         let mut host = Machine::new("host-pc");
         let viewer = Machine::new("viewer-pc");
         host.pin(&viewer, stored);
@@ -39,7 +44,7 @@ impl Pair {
         }
         host.hub.set_console_session(Some(1));
         let host_ui = host.client(info(false));
-        let viewer_ui = viewer.client(info(false));
+        let viewer_ui = viewer.client(viewer_account);
         Self { host, viewer, host_ui, viewer_ui }
     }
 
@@ -69,6 +74,11 @@ impl Pair {
         viewer.finish();
         host.finish();
     }
+}
+
+/// An administrator account's interface, not elevated: what Swapdesk.exe is when an administrator opens it.
+fn administrator_account() -> ConnInfo {
+    ConnInfo { can_elevate: true, ..info(false) }
 }
 
 /// The next state the UI hears of `entry`.
@@ -455,5 +465,38 @@ fn a_viewer_asks_unattended_only_toward_a_host_known_to_be_minor_1() {
     let second = active_as(&mut p.viewer_ui, Role::Viewer, &[entry, again, first]);
     assert!(p.host_ui.nothing_within(Duration::from_millis(200), is_incoming), "no second question");
     assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: second }).is_ok());
+    p.finish();
+}
+
+/// Until each account of a machine has its own key, the other machine's grant is the machine's: only an
+/// administrator account asks for the entry, so a standard account of the viewer machine is asked about at the
+/// host like any connect (D10).
+#[test]
+fn a_standard_account_of_the_viewer_machine_does_not_ask_for_the_entry() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+    let mut p = Pair::build_as(stored, Some(swapdesk_proto::PROTO_MINOR), info(false));
+    let entry = p.press();
+    let incoming = p.incoming();
+    assert_eq!(incoming.device.id, p.viewer.hex());
+    assert!(p.viewer_ui.nothing_within(Duration::from_millis(200), is_active), "no session before the answer");
+    assert!(p.answer(&incoming, Decision::Decline).is_ok());
+    assert_eq!(not_opened(&mut p.viewer_ui, entry, Duration::from_secs(5)), ConnectWhy::Declined);
+    p.finish();
+}
+
+/// A viewer asks a 1.1 host for the terminal with every connect (an entry without a prompt grants only what was
+/// asked for). On the card of a device with nothing stored that must not tick "Terminal": one "Aceitar" for a
+/// request to watch or control would open a shell.
+#[test]
+fn the_card_of_a_device_with_nothing_stored_never_ticks_the_terminal() {
+    let mut p = Pair::build_with(PermissionSet::EMPTY, Some(swapdesk_proto::PROTO_MINOR));
+    let _entry = p.press();
+    let incoming = p.incoming();
+    let preset = PermissionSet::from_bits(incoming.preset).expect("a valid set");
+    assert!(preset.contains(PermissionSet::CONTROL), "what the viewer's user asked for is ticked: {preset:?}");
+    for bit in [PermissionSet::BIT_TERMINAL, PermissionSet::BIT_ADMIN_TERMINAL, PermissionSet::BIT_UNATTENDED] {
+        assert_eq!(preset.bits() & bit, 0, "{preset:?}");
+    }
+    assert!(p.answer(&incoming, Decision::Decline).is_ok());
     p.finish();
 }

@@ -149,7 +149,7 @@ impl Hub {
 
     fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
         // `unattended` of the op is not read: whether the viewer asks for entry without a prompt follows what it
-        // knows of the host (`open_viewer`), from any account, and the host decides the rest.
+        // knows of the host and of the account that connects (`open_viewer`), and the host decides the rest.
         if let UiOp::Connect { device_id, intent, .. } = op {
             if let Err(code) = self.require_console(conn, "a connect from a UI that is not the console's") {
                 return reply(conn, req, Err(code));
@@ -539,12 +539,16 @@ impl Hub {
         let addr = self.address_of(&id).ok_or(ConnectWhy::Unreachable)?;
         let core = self.core().ok_or(ConnectWhy::Failed)?;
         let rt = self.rt().ok_or(ConnectWhy::Failed)?.clone();
-        // Entry without a prompt is asked for whenever the host is known to be of minor 1 or newer, from any
-        // account: such a host lets a device that holds `UNATTENDED` in without a question and without the
-        // machine-level bits, and prompts every other. A 1.0 host is never asked: it would let the device in at
-        // once with machine-level input, which its own interface never asked for.
+        // Entry without a prompt is asked for whenever the host is known to be of minor 1 or newer: such a host
+        // lets a device that holds `UNATTENDED` in without a question and without the machine-level bits, and
+        // prompts every other. A 1.0 host is never asked: it would let the device in at once with machine-level
+        // input, which its own interface never asked for.
+        //
+        // Only for an administrator account of this machine, for now: the other machine gave its grant to this
+        // machine's one key, which every local account dials with, so without this any account here would walk
+        // into a host that trusted one person (D10). It goes when each account has its own key (D44).
         let hint = self.minor_hint(&id);
-        let unattended = self.known_minor(&id, hint) >= 1;
+        let unattended = (conn.info.admin || conn.info.can_elevate) && self.known_minor(&id, hint) >= 1;
         // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
         // at the host), and an administrator connection also asks for the administrator terminal (D10).
         let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };

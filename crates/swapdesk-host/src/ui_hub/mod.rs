@@ -3,7 +3,7 @@
 //! to it ([`UiHub::serve`], one blocking call per connection, after the server handshake).
 //!
 //! * Requests: every stage-18 `UiOp` (1 to 21) is dispatched here, with the checks of C2.3 (`grants` validated as
-//!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL` and `Connect { unattended }`
+//!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL`
 //!   only on an administrator connection, or after an administrator confirmed exactly that change, see
 //!   `elevation.rs`; no request carries a path).
 //! * Notifications: devices, network, pairing, incoming requests, sessions, displays, stats, alerts and settings go

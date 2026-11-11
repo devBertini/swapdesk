@@ -2,6 +2,8 @@
 //! through an [`Outbox`], so it runs the same over a QUIC bidirectional stream and over the in-memory pair the tests
 //! use with a paused clock.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use quinn::{RecvStream, SendStream};
@@ -46,12 +48,34 @@ enum Out {
 }
 
 /// The write side of the control stream. Cheap to clone.
+///
+/// Every control message of a session leaves through it, so it is where the rule of PROTOCOL.md 1 is kept: a peer
+/// is sent nothing newer than the protocol minor it announced. A value it does not know goes as the older value
+/// that says the same, and a message type it does not know is not sent at all (`Ok`: there is nothing to retry).
 #[derive(Clone)]
-pub struct Outbox(mpsc::Sender<Out>);
+pub struct Outbox {
+    tx: mpsc::Sender<Out>,
+    /// The minor the peer announced; 0 until its `Hello` or `HelloAck`, which is also what 1.0 says.
+    peer_minor: Arc<AtomicU16>,
+}
 
 impl Outbox {
+    fn new(tx: mpsc::Sender<Out>) -> Self {
+        Self { tx, peer_minor: Arc::new(AtomicU16::new(0)) }
+    }
+
+    /// The peer announced `minor`: from now on it may be sent what that minor knows.
+    pub(crate) fn set_peer_minor(&self, minor: u16) {
+        self.peer_minor.store(minor, Ordering::SeqCst);
+    }
+
+    fn for_peer(&self, msg: Message) -> Option<Message> {
+        msg.for_peer(self.peer_minor.load(Ordering::SeqCst))
+    }
+
     pub async fn send(&self, msg: impl Into<Message>) -> Result<(), SendError> {
-        match tokio::time::timeout(SEND_TIMEOUT, self.0.send(Out::Msg(msg.into()))).await {
+        let Some(msg) = self.for_peer(msg.into()) else { return Ok(()) };
+        match tokio::time::timeout(SEND_TIMEOUT, self.tx.send(Out::Msg(msg))).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(SendError::Closed),
             Err(_) => Err(SendError::Stalled),
@@ -59,7 +83,8 @@ impl Outbox {
     }
 
     pub fn try_send(&self, msg: impl Into<Message>) -> Result<(), SendError> {
-        self.0.try_send(Out::Msg(msg.into())).map_err(|e| match e {
+        let Some(msg) = self.for_peer(msg.into()) else { return Ok(()) };
+        self.tx.try_send(Out::Msg(msg)).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => SendError::Stalled,
             mpsc::error::TrySendError::Closed(_) => SendError::Closed,
         })
@@ -68,7 +93,7 @@ impl Outbox {
     /// Waits until everything queued before this call was written (or `limit` passed).
     pub async fn flush(&self, limit: Duration) {
         let (tx, rx) = oneshot::channel();
-        if self.0.send(Out::Flush(tx)).await.is_ok() {
+        if self.tx.send(Out::Flush(tx)).await.is_ok() {
             let _ = tokio::time::timeout(limit, rx).await;
         }
     }
@@ -77,13 +102,13 @@ impl Outbox {
     /// `Bye` or an `Error` is not lost to the connection close that follows.
     pub async fn close(&self, limit: Duration) {
         let (tx, rx) = oneshot::channel();
-        if self.0.send(Out::Close(tx)).await.is_ok() {
+        if self.tx.send(Out::Close(tx)).await.is_ok() {
             let _ = tokio::time::timeout(limit, rx).await;
         }
     }
 
     pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
+        self.tx.is_closed()
     }
 }
 
@@ -115,7 +140,7 @@ pub fn memory_pair() -> (ControlIo, ControlIo) {
                 }
             }
         });
-        Outbox(tx)
+        Outbox::new(tx)
     }
     let (a_in_tx, a_in_rx) = mpsc::channel(QUEUE);
     let (b_in_tx, b_in_rx) = mpsc::channel(QUEUE);
@@ -219,6 +244,6 @@ impl ControlIo {
             }
             let _ = send.finish();
         });
-        Self { out: Outbox(out_tx), rx: in_rx }
+        Self { out: Outbox::new(out_tx), rx: in_rx }
     }
 }
