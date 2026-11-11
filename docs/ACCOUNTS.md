@@ -223,7 +223,7 @@ D13 asked the logged-in user before an unattended session opened the terminal or
   - It is a denial of service only: a squatter receives nothing a peer would accept, because the peer checks the key.
 - **Recommended (GUESS until probed):** at start, before any user signs in, the service binds the two ports of slot 0 (always, even before any account exists) and of every allocated slot on the **wildcard** address with `SO_EXCLUSIVEADDRUSE`. Per the same page, after an exclusive wildcard bind no other account can bind that port on any address.
   - The guard keeps refusing any `Incoming` whose `local_ip()` is not an approved address (PROTOCOL 1), before the handshake. Outgoing packets keep TTL 1.
-  - This replaces "an endpoint per approved address" with "one endpoint per slot port, filtered by the arrival address". That needs `Incoming::local_ip()` on a wildcard socket on Windows: UNPROVEN, so S3 probes it first.
+  - This replaces "an endpoint per approved address" with "one endpoint per slot port, filtered by the arrival address". That needs `Incoming::local_ip()` on a wildcard socket on Windows. Probed 2026-11-11 (`cargo run -p swapdesk-host --example probe_local_ip`): a connection from 127.0.0.1 to a QUIC endpoint on `0.0.0.0` reads `local_ip() = Some(127.0.0.1)`, so the recommended path is open.
   - A pairing port bound but not served answers nothing, as now.
 - **Fallback if the probe fails:** keep the per-address binds, with `SO_EXCLUSIVEADDRUSE`.
   - When a bind fails, the service names the program holding the port (the owning process of the UDP table entry) in its trace log and in the account's Início, and moves the account to the next free slot.
