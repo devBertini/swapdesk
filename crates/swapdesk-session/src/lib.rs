@@ -22,6 +22,7 @@ mod grants_sync;
 pub mod host;
 pub mod link;
 pub mod liveness;
+pub mod machine;
 pub mod policy;
 pub mod registry;
 pub mod resume;
@@ -38,6 +39,7 @@ pub use host::{
 };
 pub use link::{CONTROL_PRIORITY, ControlIo, Inbound, LinkError, Outbox, SendError, memory_pair};
 pub use liveness::{Liveness, LivenessConfig, Verdict};
+pub use machine::MachineHosting;
 pub use policy::{Role, priority_of};
 pub use registry::{ChannelHandler, IncomingStream, RegisterError, Registry};
 pub use resume::{ResumeError, ResumeTable, SwapTokens};

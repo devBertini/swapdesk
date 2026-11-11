@@ -55,6 +55,8 @@ pub struct ServiceConfig {
     pub service_actions: Option<Box<dyn ActionRunner + Send>>,
     /// The protocol minor the session endpoint announces: this build's own. Tests play a host of 1.0 with 0.
     pub proto_minor: u16,
+    /// What this core shares with the cores of the machine's other accounts (ACCOUNTS.md 5.6); `None`: its own.
+    pub machine: Option<super::MachineShared>,
 }
 
 /// The collaborators of a core, the part of the configuration with no sensible default.
@@ -90,6 +92,7 @@ impl ServiceConfig {
             listen_extra: Vec::new(),
             allow_loopback_peers: false,
             proto_minor: swapdesk_proto::PROTO_MINOR,
+            machine: None,
             service_actions: None,
         }
     }

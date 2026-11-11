@@ -57,6 +57,9 @@ pub struct HostConfig {
     /// The protocol minor this host announces in its `HelloAck`: this build's own. A test that plays a host of 1.0
     /// sets 0 (it then takes no grants sync, as a 1.0 host does not).
     pub proto_minor: u16,
+    /// The machine's one hosting reservation, shared with the cores of the other accounts (ACCOUNTS.md 5.6). `None`:
+    /// this core is the machine's only one.
+    pub machine: Option<std::sync::Arc<crate::machine::MachineHosting>>,
 }
 
 impl HostConfig {
@@ -77,6 +80,7 @@ impl HostConfig {
             liveness: LivenessConfig::default(),
             caps: Caps::default(),
             proto_minor: PROTO_MINOR,
+            machine: None,
         }
     }
 }
@@ -539,6 +543,16 @@ impl HostInner {
         lock(&self.table).live.len()
     }
 
+    /// This core's identity for the machine's reservation.
+    fn core_key(&self) -> usize {
+        std::ptr::from_ref(self) as usize
+    }
+
+    /// Another account's core hosts a session now.
+    fn machine_busy(&self) -> bool {
+        self.cfg.machine.as_ref().is_some_and(|m| m.held_by_other(self.core_key()))
+    }
+
     /// The decision for a `Hello` (5.2 step 2). Runs as a task of the session; the state machine commits the result.
     pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
         let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
@@ -577,8 +591,8 @@ impl HostInner {
             }
         }
 
-        // Another session is live: refused before anything is consumed or asked.
-        if self.live_count() >= self.cfg.max_live_sessions {
+        // Another session is live, here or in another account's core: refused before anything is consumed or asked.
+        if self.live_count() >= self.cfg.max_live_sessions || self.machine_busy() {
             return Decision::Refuse(ErrorCode::Busy);
         }
 
@@ -670,6 +684,32 @@ impl HostInner {
         if t.live.len() >= self.cfg.max_live_sessions {
             return Err(ErrorCode::Busy);
         }
+        // The machine's one hosted session: taken before any grant, given back below if this commit fails.
+        let machine = self.cfg.machine.as_ref();
+        if matches!(decision, Decision::Grant { .. } | Decision::Resume { .. })
+            && machine.is_some_and(|m| !m.take(self.core_key()))
+        {
+            return Err(ErrorCode::Busy);
+        }
+        let result = self.commit_granted(&mut t, ctx, device, decision);
+        if result.is_err()
+            && t.live.is_empty()
+            && let Some(m) = machine
+        {
+            m.release(self.core_key());
+        }
+        let committed = result?;
+        t.live.insert(committed.session_id, ctx.clone());
+        Ok(committed)
+    }
+
+    fn commit_granted(
+        &self,
+        t: &mut Table,
+        ctx: &SessionCtx,
+        device: &DeviceId,
+        decision: Decision,
+    ) -> Result<Committed, ErrorCode> {
         let Some(stored_now) = self.trust.read(|s| s.find_by_id(device).map(|d| d.grants_here)) else {
             return Err(ErrorCode::UnknownDevice);
         };
@@ -718,7 +758,6 @@ impl HostInner {
         ctx.set_granted(committed.granted);
         *lock(&ctx.inner.stored_seen) = stored_now;
         *lock(&ctx.inner.own_stored) = Some(stored_now);
-        t.live.insert(committed.session_id, ctx.clone());
         Ok(committed)
     }
 
@@ -734,6 +773,11 @@ impl HostInner {
         {
             let mut t = lock(&self.table);
             t.live.remove(&id);
+            if t.live.is_empty()
+                && let Some(m) = &self.cfg.machine
+            {
+                m.release(self.core_key());
+            }
             if resumable {
                 t.resume.mark_lost(id, now());
             } else {

@@ -356,6 +356,36 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What every account's core of one machine shares (ACCOUNTS.md 5.6): the one hosted session, and the caps before
+/// a handshake (16 in flight, 4 per address), so several accounts never multiply them.
+#[derive(Clone)]
+pub struct MachineShared {
+    pub hosting: Arc<swapdesk_session::MachineHosting>,
+    handshakes: Arc<AtomicUsize>,
+    limits: SessionLimits,
+}
+
+impl MachineShared {
+    pub fn new() -> Self {
+        Self {
+            hosting: swapdesk_session::MachineHosting::new(),
+            handshakes: Arc::new(AtomicUsize::new(0)),
+            limits: SessionLimits::new(),
+        }
+    }
+
+    /// Handshakes in flight now, across the machine.
+    pub fn handshakes_in_flight(&self) -> usize {
+        self.handshakes.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for MachineShared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What the accept loops need to judge an incoming connection.
 struct Gate {
     interfaces: Arc<dyn NetInterfaces>,
@@ -363,8 +393,9 @@ struct Gate {
     trust: Arc<TrustHandle>,
     host: HostService,
     shared: Arc<Shared>,
-    handshakes: AtomicUsize,
-    /// Connections per remote address (PROTOCOL.md 1: 4 at once, `retry()` over the limit).
+    /// Handshakes in flight, shared by the machine's cores.
+    handshakes: Arc<AtomicUsize>,
+    /// Connections per remote address (PROTOCOL.md 1: 4 at once, `retry()` over the limit), shared likewise.
     limits: SessionLimits,
 }
 
@@ -571,6 +602,9 @@ impl ServiceCore {
             HostConfig::new(&cfg.name, cfg.os, &cfg.os_version, &cfg.app_version, cfg.capabilities.clone());
         host_cfg.max_live_sessions = 1;
         host_cfg.proto_minor = cfg.proto_minor;
+        // One machine, one hosted session and one set of handshake caps, whatever the number of accounts.
+        let machine = cfg.machine.clone().unwrap_or_default();
+        host_cfg.machine = Some(Arc::clone(&machine.hosting));
         let ui = Arc::new(CoreUi { inner: Arc::clone(&cfg.ui), shared: Arc::clone(&shared) });
         let host = HostService::new(host_cfg, Arc::clone(&cfg.trust), ui, registry, Arc::clone(&cfg.clock));
         let _ = env.host.set(host.clone());
@@ -618,8 +652,8 @@ impl ServiceCore {
             trust: Arc::clone(&cfg.trust),
             host: host.clone(),
             shared: Arc::clone(&shared),
-            handshakes: AtomicUsize::new(0),
-            limits: SessionLimits::new(),
+            handshakes: Arc::clone(&machine.handshakes),
+            limits: machine.limits.clone(),
         });
         let listeners = Arc::new(listen::Listeners::new(
             cfg.session_port,

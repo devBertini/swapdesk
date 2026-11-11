@@ -1559,3 +1559,55 @@ async fn raw_grant(host: &mut swapdesk_session::ControlIo) {
         .await
         .unwrap();
 }
+
+// ---------- ACCOUNTS.md 5.6: one hosted session per machine, across the accounts' cores ----------
+
+/// Two accounts of one machine, each with a device that holds `UNATTENDED`, at the sign-in screen (nobody present):
+/// both devices enter at once, and exactly one session opens; the other is `BUSY` until it ends.
+#[test]
+fn two_unattended_entries_at_the_sign_in_screen_at_once_admit_exactly_one() {
+    run_paused(async {
+        let machine = swapdesk_session::MachineHosting::new();
+        let account = |m: std::sync::Arc<swapdesk_session::MachineHosting>| {
+            let ui = TestUi::accepting(PermissionSet::CONTROL);
+            ui.set_present(false);
+            Mem::with(ui, Registry::new(), move |c| c.machine = Some(m))
+        };
+        let (a, b) = (account(machine.clone()), account(machine.clone()));
+        let (wa, wb) = (Who::new(), Who::new());
+        let stored = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        pin(&a.trust, &wa, stored);
+        pin(&b.trust, &wb, stored);
+        let asks = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        // Both at once: each open runs as a task of its own.
+        let open = |host: swapdesk_session::HostService, id: swapdesk_trust::DeviceId| {
+            tokio::spawn(async move {
+                let (host_io, viewer_io) = swapdesk_session::memory_pair();
+                let task = tokio::spawn(async move { host.serve_io(host_io, None, id).await });
+                let s = ViewerSession::open_io(viewer_io, None, Some([9; 16]), viewer_config(asks)).await;
+                (s, task)
+            })
+        };
+        let (ta, tb) = (open(a.host.clone(), wa.id), open(b.host.clone(), wb.id));
+        let (sa, sb) = (ta.await.unwrap().0, tb.await.unwrap().0);
+        let opened = [sa.is_ok(), sb.is_ok()];
+        assert_eq!(opened.iter().filter(|o| **o).count(), 1, "exactly one: {opened:?}");
+        let (winner, loser_mem, loser_who) = match (sa, sb) {
+            (Ok(s), Err(e)) => {
+                assert!(matches!(e, OpenError::Refused(ErrorCode::Busy)), "{e:?}");
+                (s, &b, &wb)
+            }
+            (Err(e), Ok(s)) => {
+                assert!(matches!(e, OpenError::Refused(ErrorCode::Busy)), "{e:?}");
+                (s, &a, &wa)
+            }
+            _ => unreachable!(),
+        };
+        assert!(machine.is_held());
+        // The session ends: the machine is free, and the other account hosts.
+        winner.disconnect().await;
+        eventually(Duration::from_secs(2), "the machine is free", || !machine.is_held()).await;
+        let (again, _task) = loser_mem.open(loser_who, viewer_config(asks)).await;
+        assert!(again.is_ok(), "the other account hosts now");
+    });
+}
