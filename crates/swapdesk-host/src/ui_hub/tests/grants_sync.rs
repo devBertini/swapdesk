@@ -23,6 +23,8 @@ fn a_peers_stored_grants_reach_the_device_view_and_devices_changed() {
     m.pin(&other, PermissionSet::CONTROL);
     let mut ui = m.client(info(false));
     let id = other.hex();
+    // The interface is registered (it answers) before the value arrives, so the push cannot go before it.
+    assert_eq!(listed_there(&mut ui, &id), None);
 
     m.hub.hub.apply_peer_grants(other.id(), PermissionSet::VIEW.union(PermissionSet::FILES));
     let want = PermissionSet::VIEW.union(PermissionSet::FILES).bits();
