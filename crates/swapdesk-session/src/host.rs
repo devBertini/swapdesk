@@ -173,6 +173,12 @@ pub enum HostEvent {
         device: DeviceId,
         grants: PermissionSet,
     },
+    /// A device said which protocol minor it speaks over a connection its pinned key authenticated (a grants sync,
+    /// GRANTS-SYNC.md 4.3): it counts over the hint of its discovery record.
+    PeerMinor {
+        device: DeviceId,
+        minor: u16,
+    },
 }
 
 /// The host's user and desktop, as the session layer needs them. The service implements it over the session
@@ -281,6 +287,8 @@ pub(crate) struct HostInner {
     /// Signalled whenever a live session ends or is marked lost, for a resume that waits for it.
     changed: Notify,
     next_request: AtomicU64,
+    /// What each device may still spend on grants syncs (GRANTS-SYNC.md 4.6).
+    pub(crate) sync_budget: Mutex<crate::grants_sync::SyncBudget>,
 }
 
 /// Owns the sessions of this machine as a host. Cheap to clone.
@@ -289,7 +297,7 @@ pub struct HostService {
     pub(crate) inner: Arc<HostInner>,
 }
 
-fn app_code(code: ErrorCode) -> VarInt {
+pub(crate) fn app_code(code: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(code.tag()))
 }
 
@@ -346,6 +354,7 @@ impl HostService {
                 deciding: Mutex::new(HashSet::new()),
                 changed: Notify::new(),
                 next_request: AtomicU64::new(1),
+                sync_budget: Mutex::new(crate::grants_sync::SyncBudget::default()),
             }),
         }
     }
@@ -362,9 +371,28 @@ impl HostService {
     }
 
     /// The same over any control link (the in-memory pair of the tests).
-    pub async fn serve_io(&self, io: ControlIo, conn: Option<Connection>, device: DeviceId) -> SessionEnd {
-        let (ev_tx, ev_rx) = mpsc::channel(256);
+    pub async fn serve_io(&self, mut io: ControlIo, conn: Option<Connection>, device: DeviceId) -> SessionEnd {
         let inner = &self.inner;
+        let deadline = now() + inner.cfg.handshake_timeout;
+        // The first control message says what the connection is: `Hello` opens a session, `GrantsSync` a grants
+        // sync (GRANTS-SYNC.md 4.2), which never reaches the session's state machine.
+        let first = tokio::time::timeout(inner.cfg.handshake_timeout, io.rx.recv()).await.ok().flatten();
+        if let Some(Ok(msg)) = &first
+            && let Some(sync) = crate::grants_sync::as_sync(msg)
+        {
+            return crate::grants_sync::answer(self, io, conn, device, sync).await;
+        }
+        let (ev_tx, ev_rx) = mpsc::channel(256);
+        // Anything else is the session's: the first message goes to its state machine before the rest.
+        match first {
+            Some(item) => {
+                let _ = ev_tx.try_send(crate::ctx::Ev::In(item));
+            }
+            None if io.rx.is_closed() => {
+                let _ = ev_tx.try_send(crate::ctx::Ev::In(Err(crate::link::LinkError::Lost)));
+            }
+            None => {}
+        }
         let ctx = SessionCtx::new(CtxParts {
             role: Role::Host,
             device: Some(device),
@@ -375,12 +403,7 @@ impl HostService {
             clock: Arc::clone(&inner.clock),
             consent: Some(ConsentSource { ui: Arc::clone(&inner.ui), timeout: inner.cfg.consent_timeout, device }),
         });
-        let side = Side::Host {
-            service: Arc::clone(&self.inner),
-            device,
-            hello: None,
-            deadline: now() + inner.cfg.handshake_timeout,
-        };
+        let side = Side::Host { service: Arc::clone(&self.inner), device, hello: None, deadline };
         // A panic in a handler ends only this session (D15): the guard takes it out of the live table as lost, so
         // the host is not left "busy" with a session nobody runs.
         let _guard = EndGuard { inner: Arc::clone(&self.inner), ctx: ctx.clone() };

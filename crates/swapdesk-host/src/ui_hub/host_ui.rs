@@ -304,6 +304,11 @@ impl HostUi for HubHostUi {
                 hub.audit(device, AuditEvent::ConsentAsked { feature, answer }, None);
             }
             HostEvent::PeerGrants { device, grants } => hub.apply_peer_grants(device, grants),
+            // What a device said over a connection its pinned key authenticated wins over its record's hint.
+            HostEvent::PeerMinor { device, minor } => {
+                let hint = hub.minor_hint(&device);
+                lock(&hub.minors).said(device, minor, hint);
+            }
         }
     }
 }

@@ -18,6 +18,7 @@ mod actor;
 pub mod caps;
 pub mod ctx;
 pub mod forward;
+mod grants_sync;
 pub mod host;
 pub mod link;
 pub mod liveness;
