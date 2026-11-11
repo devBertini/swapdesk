@@ -7,9 +7,9 @@
 //! `--service-pid` (development). The handshake runs on a helper thread with a deadline, so a service that accepts
 //! and never answers cannot keep the window from opening.
 //!
-//! When the service cannot be reached the caller uses [`DownBackend`]: every command is answered `ServiceDown` at
-//! once, which is the state the UI already knows how to show. There is no reconnection: a service that comes up
-//! later is found by the next start of `Swapdesk.exe`.
+//! [`connect`] is one try. The interface calls it through [`crate::reconnect::Reconnecting`], which tries again every
+//! second for 30 s at launch and after a break, and answers `ServiceDown` past that (the state the UI already knows
+//! how to show).
 
 use std::sync::{Arc, mpsc};
 use std::time::Duration;

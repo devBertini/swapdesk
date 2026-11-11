@@ -15,6 +15,7 @@
 //!
 //! - [`shared`]: the OS-free half of the viewer pipeline (mailbox, feedback, cursor, audio player, output side).
 
+pub mod reconnect;
 pub mod shared;
 
 #[cfg(windows)]

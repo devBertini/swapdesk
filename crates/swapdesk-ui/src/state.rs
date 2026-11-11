@@ -1851,6 +1851,20 @@ impl UiState {
                 }
                 Changed::VIEWER
             }
+            UiEvent::ServiceReconnected => {
+                // The sessions of the old service ended with it.
+                let ended: Vec<(u64, String)> = self.sessions.iter().map(|s| (s.id, s.device_id.clone())).collect();
+                for (session_id, device_id) in ended {
+                    self.apply(UiEvent::Session {
+                        session_id,
+                        device_id,
+                        state: SessionState::Ended { reason: Some(ApiCode::ServiceDown) },
+                    });
+                }
+                let again = self.startup_commands();
+                self.followups.extend(again);
+                Changed::ALL
+            }
             UiEvent::ConsentPending { session_id, feature, remaining_s } => {
                 if self.viewer_session().is_none_or(|s| s.id != session_id) {
                     return Changed::NONE;

@@ -16,7 +16,8 @@ fn main() {
     use std::sync::Arc;
 
     use swapdesk_app::cli;
-    use swapdesk_app::connect::{self, DownBackend};
+    use swapdesk_app::connect;
+    use swapdesk_app::reconnect::{Connector, Linked, Reconnecting, Timing};
     use swapdesk_app::viewer::{ObservingBackend, ViewerOptions, ViewerPipeline};
     use swapdesk_shell_win::{Waker, message_box, run, run_with_host, system_dark, system_language};
     use swapdesk_ui::mock::{MockBackend, Scenario};
@@ -86,14 +87,21 @@ fn main() {
             pipeline.set_user_prefs(p.keyboard_mode, p.swap_ctrl_cmd, p.release_key);
         }
     }
-    let backend: Arc<dyn UiBackend> = match connect::connect(&options, waker.clone(), pipeline.clone()) {
-        Ok(service) => {
+    // The service's pipe, tried for 30 s at launch and again after a break (a service that starts after the sign-in, a
+    // restarted service); past that, every command answers ServiceDown and the UI shows that state.
+    let connector: Connector = {
+        let (options, waker, pipeline) = (options.clone(), waker.clone(), pipeline.clone());
+        Box::new(move || {
+            let service = connect::connect(&options, waker.clone(), pipeline.clone()).ok()?;
             pipeline.set_out(service.clone());
-            Arc::new(ObservingBackend::new(service, pipeline.clone()))
-        }
-        // Nothing to talk to: every command answers ServiceDown and the UI shows that state.
-        Err(_) => Arc::new(DownBackend::new(waker.clone())),
+            let link = service.clone();
+            Some(Linked {
+                backend: Arc::new(ObservingBackend::new(service, pipeline.clone())),
+                is_down: Box::new(move || link.is_down()),
+            })
+        })
     };
+    let backend: Arc<dyn UiBackend> = Arc::new(Reconnecting::start(connector, waker.clone(), Timing::default()));
     let startup = state.startup_commands();
     if let Err(e) = run_with_host(state, backend, waker, startup, Some(pipeline.clone())) {
         message_box(&format!("Swapdesk could not start: {e}"));

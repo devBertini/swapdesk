@@ -920,6 +920,9 @@ pub enum UiEvent {
     },
     ActivityAlert(AuditView),
     SettingsChanged(Settings),
+    /// The link to the service broke and is open again (a restarted service, WAITING.md 4 row 23): what the old
+    /// service held is gone, and the interface asks for its data again.
+    ServiceReconnected,
     ElevationResult {
         action: ElevatedAction,
         result: Result<(), ApiError>,

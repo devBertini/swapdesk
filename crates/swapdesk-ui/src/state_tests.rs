@@ -2556,3 +2556,18 @@ fn the_files_say_that_the_host_asks_its_user_until_the_listing_comes() {
     });
     assert_eq!(s.consent_wait(Feature::Files), None);
 }
+
+/// WAITING.md 4, row 23: the link to the service broke and is open again. The sessions of the old service ended with
+/// it, and the interface asks for its data again.
+#[test]
+fn a_reconnected_service_ends_the_old_sessions_and_the_data_is_asked_for_again() {
+    let mut s = viewer();
+    assert!(s.viewer_session().is_some());
+    s.take_followups();
+    s.apply(UiEvent::ServiceReconnected);
+    assert!(s.viewer_session().is_none(), "the session of the old service is gone");
+    let again = s.take_followups();
+    for c in [Command::GetThisDevice, Command::GetNetwork, Command::ListDevices, Command::GetSettings] {
+        assert!(again.contains(&c), "{c:?} is asked again: {again:?}");
+    }
+}
