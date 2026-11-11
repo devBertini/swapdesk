@@ -13,6 +13,7 @@
 
 pub mod http;
 pub mod keys;
+pub mod manager;
 pub mod manifest;
 pub mod package;
 pub mod policy;
