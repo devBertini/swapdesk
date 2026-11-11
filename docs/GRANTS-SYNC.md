@@ -1,6 +1,6 @@
 # Design note: learning the other side's grants (`grants_there`)
 
-Status: proposal, 2026-11-10, revised the same day for D44 (each account of a computer has its own Swapdesk identity, trust store, settings and activity; design in `docs/ACCOUNTS.md`). Nothing here is built. The owner's choices still open are in section 9; everything else has a recommended default. **GUESS** marks a number or reading not yet proven by a test.
+Status: proposal, 2026-11-10, revised the same day for D44 (each account of a computer has its own Swapdesk identity, trust store, settings and activity; design in `docs/ACCOUNTS.md`). Built in 1.1 (S1 to S7 and S9, 2026-11-11); S8 waits for the owner's pick of 7.3 and S10 is the cross-machine check of the owner batch. The owner's choices still open are in section 9; everything else has a recommended default. **GUESS** marks a number or reading not yet proven by a test.
 
 ## 1. The problem
 
@@ -293,7 +293,7 @@ Tests, on A-S3's machine layer with two accounts and fakes, red before (they can
 
 **S10. Cross-machine check (a Windows machine and a Mac, both 1.1, test installs).** With no session between them: the Mac's account marks permissions for the Windows account; the Windows device view carries them within 5 s; the same in the other direction; then a session, a change during it, and its end. Once accounts are built: a second Windows account paired with the Mac on its own slot sees only its own column change. Printed markers for each step; the owner's eye check of the Permissões column on both screens goes in the milestone's owner batch, with `ACCOUNTS.md`'s.
 
-**Documents in the same stages:** `docs/PROTOCOL.md` (S1, S4, S5), `docs/CONTRACTS.md` (C5.1 row of `grants_there`: "written from `StoredGrants` and `GrantsSync`", per account; C2.4 and C6 op 39 in S7), `docs/SPEC.md` F-PERM-01 (the other direction is shown as the other side last reported it, outside sessions too), `docs/THREAT-MODEL.md` (the rows of section 5), the flow map, `docs/DECISIONS.md` (the owner's pick).
+**Documents in the same stages:** `docs/PROTOCOL.md` (S1, S4, S5), `docs/CONTRACTS.md` (C5.1 row of `grants_there`: "written from `StoredGrants` and `GrantsSync`", per account; C2.4 and C6 op 39 in S7), `docs/SPEC.md` F-PERM-01 (the other direction is shown as the other side last reported it, outside sessions too), `docs/THREAT-MODEL.md` (the rows of section 5), the flow map, `docs/DECISIONS.md` (the owner's pick). The rows for `grants_there` (C5.1), the other direction of F-PERM-01 outside sessions, and the threat rows of section 5 were written with the documents stage of `ACCOUNTS.md` (S11).
 
 ## 9. The owner's decisions
 

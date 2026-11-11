@@ -2,7 +2,7 @@
 
 ## The other computer does not show up
 
-Swapdesk finds the other computer with DNS-SD (mDNS) on the local network and talks to it over UDP ports 47820 and 47821. It only works when both computers are on the same network segment. Check these, in this order:
+Swapdesk finds the other computer with DNS-SD (mDNS) on the local network and talks to it over UDP ports 47820 and 47821 (on a Windows computer with several accounts, each account has its own pair from there up, to 47882 and 47883). It only works when both computers are on the same network segment. Check these, in this order:
 
 1. **Swapdesk is open on the other computer**, or its service is installed and running (Windows: `SwapdeskService` in Services).
 2. **Both are on the same network.** The same Wi-Fi name, or a cable into the same router. A laptop on Wi-Fi and a desktop on cable work when the router bridges them, which home routers normally do.
@@ -10,7 +10,7 @@ Swapdesk finds the other computer with DNS-SD (mDNS) on the local network and ta
 4. **There are not two routers.** A second router (or a mesh node in router mode) makes a second subnet. Swapdesk refuses peers that are not on-link, by design: it only accepts addresses in the subnet of the interface the packet arrived on, and sends with a hop limit of 1, so nothing can be routed in from outside the LAN. Put the second router in access point (bridge) mode.
 5. **No VPN is on.** A VPN can move the default route or block local traffic. Swapdesk never listens on VPN or virtual interfaces (WSL, Hyper-V, Docker) at all.
 6. **Windows treats the network as Private.** Settings > Network & internet > Wi-Fi (or Ethernet) > the network > Network profile type: Private. The firewall rules the installer adds cover Private and Domain networks only, never Public ones.
-7. **No other firewall blocks it.** Third-party security suites often have their own firewall: allow UDP 47820, 47821 and 5353 on the local network for the Swapdesk programs.
+7. **No other firewall blocks it.** Third-party security suites often have their own firewall: allow UDP 47820 to 47883 and 5353 on the local network for the Swapdesk programs.
 8. **mDNS is not blocked.** Some routers filter multicast. If discovery fails but the computers can ping each other, use "Add by address" with the other computer's IPv4 address (Windows: `ipconfig`; macOS: System Settings > Wi-Fi > Details).
 9. **macOS allowed it.** On a Mac, the first run asks for Local Network access: allow it in System Settings > Privacy & Security > Local Network.
 

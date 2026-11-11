@@ -32,7 +32,7 @@ gh attestation verify Swapdesk-windows-x64-1.0.0.zip -R devBertini/swapdesk
 Requirements: Windows 10 or 11 (x64) on a local network set as **Private** (the firewall rules the installer adds cover Private and Domain profiles only).
 
 1. Download `Swapdesk-windows-x64-1.0.0.zip` from the [releases](https://github.com/devBertini/swapdesk/releases) page and check its SHA-256 against the `.sha256` file next to it.
-2. Unzip it, read `install.ps1` if you like (every change is listed in its header), and double-click `install.cmd`. Approve the Windows (UAC) prompt. It installs to `%ProgramFiles%\Swapdesk`, registers the `SwapdeskService` service, adds the firewall rules (UDP 47820, 47821 and mDNS 5353, local subnet only) and a Start menu shortcut.
+2. Unzip it, read `install.ps1` if you like (every change is listed in its header), and double-click `install.cmd`. Approve the Windows (UAC) prompt. It installs to `%ProgramFiles%\Swapdesk`, registers the `SwapdeskService` service, adds the firewall rules (UDP 47820 to 47883 and mDNS 5353, local subnet only: each Windows account that uses Swapdesk gets its own pair of ports, from 47820 and 47821 up, for up to 32 accounts) and a Start menu shortcut.
 3. Open **Swapdesk** from the Start menu.
 
 `uninstall.cmd` in the same folder removes everything and checks that nothing is left. `install.cmd -DryRun` and `uninstall.cmd -DryRun` print every action without doing any.
@@ -51,9 +51,13 @@ On its first start Swapdesk adds itself to the items that open at login and stay
 
 To uninstall on macOS: choose "Quit Swapdesk" in its menu bar item, remove Swapdesk from System Settings > General > Login Items & Extensions and from each list in Privacy & Security, move the app from Applications to the Trash, and delete `~/Library/Application Support/Swapdesk` (the device key, the paired devices and the trace log).
 
+## Updating from 1.0
+
+Each Windows account now has its own Swapdesk: pairings, permissions, settings and activity. Updating starts every account empty: pairings made before 1.1 do not carry over to accounts. On each other computer, forget this computer's old entry (or choose Pair on it) and pair again with the account you use; allow "Enter without asking" again where you want it. Going back to 1.0 restores the old pairings as they were.
+
 ## First connection
 
-Open Swapdesk on both computers. The other computer appears under "Na rede" ("On the network"); if it does not, type its IPv4 address in "Adicionar por endereço" ("Add by address") and see [docs/FAQ.md](docs/FAQ.md). Pair them: both screens show the same 6-digit code; confirm it on both. Then connect: the computer being controlled asks its user to accept, and what was granted is kept per device.
+Open Swapdesk on both computers. The other computer appears under "Na rede" ("On the network"); if it does not, type its IPv4 address in "Adicionar por endereço" ("Add by address"), followed by `:port` when its Swapdesk listens on another port than 47820 (an account other than the first one of a Windows computer does), and see [docs/FAQ.md](docs/FAQ.md). A computer still on 1.0 cannot type a port, so by address it reaches only the first account of a 1.1 Windows computer; through the "Na rede" list it reaches every account. Pair them: both screens show the same 6-digit code; confirm it on both. Then connect: the computer being controlled asks its user to accept, and what was granted is kept per device. A Windows computer with several accounts shows each account that has paired as a device of its own, named "<computer name> · <account name>" (editable in Ajustes), and a computer is paired with one account, never with the whole machine.
 
 The interface is in Brazilian Portuguese and English: it follows the system language, and Settings switches it.
 
@@ -118,9 +122,9 @@ This is enforced in code, not left to configuration ([docs/SPEC.md](docs/SPEC.md
 Full detail is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 - **Pairing by comparing a 6-digit code.** Both users open "Parear este computador" ("Pair this computer") within 2 minutes. Both screens show the same code, derived from a commitment exchange and both keys (ZRTP-style, RFC 6189 argument). A key is pinned only after both users confirm the codes match. Three failed attempts in 15 minutes lock pairing for 15 minutes, and each further lockout within 24 hours doubles that, up to 24 hours.
-- **Pinned keys.** Each machine has one Ed25519 device key. Sessions use TLS 1.3 with mutual authentication and only pinned keys. No session tickets and no 0-RTT are accepted, and the key is checked again after every handshake.
+- **Pinned keys.** Each Windows account and each Mac user has its own Ed25519 device key. Sessions use TLS 1.3 with mutual authentication and only pinned keys. No session tickets and no 0-RTT are accepted, and the key is checked again after every handshake.
 - **Permissions per device and direction.** `VIEW`, `CONTROL`, `AUDIO`, `TERMINAL`, `ADMIN_TERMINAL`, `FILES`, `CLIPBOARD`, `UNATTENDED`. A newly paired device has none, so every session prompts the host's user until more is granted.
-- **Admin-only unattended access.** Granting `UNATTENDED` or `ADMIN_TERMINAL` needs a local administrator (UAC elevation on Windows), checked by the privileged service, never by the interface, and so does widening what a device with `UNATTENDED` may do. Pairing, grants and outgoing connections are reserved to the interface of the console session. On macOS, unattended access is not in 1.0.
+- **Admin-only unattended access.** Granting `UNATTENDED` or `ADMIN_TERMINAL` needs a local administrator (UAC elevation on Windows; for a standard account, an administrator approves at the UAC prompt in that account's session and the activity log records who), checked by the privileged service, never by the interface, and so does widening what a device with `UNATTENDED` may do. Entering without asking opens the session with the user's own reach; a button in the session ("Elevar controle") raises it to the sign-in screen, the lock screen and administrator prompts, after the system's own confirmation on the controlling computer (UAC on Windows, the administrator password on the Mac). Pairing, grants and outgoing connections are reserved to the interface of the console session. An account hosts only while it is at its computer's screen: a device paired with account A never sees or controls account B's session. On macOS, unattended access is not in 1.0.
 - On Windows the private key stays in the privileged service; on macOS it is a file readable only by the logged-in user (decision D31). The viewer, the terminal and file access run as the logged-in user, never as SYSTEM or root.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).

@@ -1,6 +1,6 @@
 # Design note: each account has its own Swapdesk (D44)
 
-Status: design, 2026-11-10. Nothing here is built. It designs D44 (`docs/DECISIONS.md`): each account of a computer has its own Swapdesk data (pairings, the permissions in both directions, settings, activity), on every system, and nothing is shared between accounts. The points still open come back to the owner in section 19. **UNPROVEN** and **GUESS** as in `docs/SPEC.md`. Facts about Windows, macOS and the libraries were read on the pages listed in section 16, on 2026-11-10.
+Status: design, 2026-11-10; built in 1.1 (S1 to S10, 2026-11-11; the "As built" notes say where the build differs), with the hand checks of 15 still open. It designs D44 (`docs/DECISIONS.md`): each account of a computer has its own Swapdesk data (pairings, the permissions in both directions, settings, activity), on every system, and nothing is shared between accounts. The points still open come back to the owner in section 19. **UNPROVEN** and **GUESS** as in `docs/SPEC.md`. Facts about Windows, macOS and the libraries were read on the pages listed in section 16, on 2026-11-10.
 
 **Decided by the owner, 2026-11-10.**
 1. **Nobody inherits the 1.0 data** (section 10). Every account starts empty; each paired computer forgets this computer and pairs again with the account it wants. The 1.0 files stay on disk untouched and are never served by 1.1. There is no inheritance, no claim card and no write-through.
