@@ -53,6 +53,8 @@ pub struct ServiceConfig {
     /// The runner the service itself uses for a quick action when no user helper is attached (Windows:
     /// `WinActions::service()`: lock, sleep, restart). `None`: such an action is refused as unavailable.
     pub service_actions: Option<Box<dyn ActionRunner + Send>>,
+    /// The protocol minor the session endpoint announces: this build's own. Tests play a host of 1.0 with 0.
+    pub proto_minor: u16,
 }
 
 /// The collaborators of a core, the part of the configuration with no sensible default.
@@ -87,6 +89,7 @@ impl ServiceConfig {
             audio_exclude_pid: 0,
             listen_extra: Vec::new(),
             allow_loopback_peers: false,
+            proto_minor: swapdesk_proto::PROTO_MINOR,
             service_actions: None,
         }
     }

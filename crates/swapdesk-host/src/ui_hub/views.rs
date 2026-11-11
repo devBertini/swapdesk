@@ -451,6 +451,10 @@ impl Hub {
     /// The protocol minor to count on for `id`, whose record now carries `hint` ([`Hub::minor_hint`]): what it said
     /// in a session, else what its record says, else 0 (PROTOCOL.md 1). A viewer asks for anything of a later minor only toward a device this says knows it.
     pub fn known_minor(&self, id: &DeviceId, hint: Option<u16>) -> u16 {
+        // A device that closed a grants sync as a violation speaks minor 0 until its record comes back.
+        if lock(&self.sync).refused(id) {
+            return 0;
+        }
         lock(&self.minors).known(id, hint)
     }
 

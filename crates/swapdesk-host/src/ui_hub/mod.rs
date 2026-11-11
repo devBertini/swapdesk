@@ -28,6 +28,7 @@ mod peer_minor;
 pub mod presence;
 mod queue;
 pub mod store;
+mod sync_dial;
 mod terminal;
 mod views;
 
@@ -165,6 +166,8 @@ pub(crate) struct Hub {
     minors: Mutex<peer_minor::PeerMinors>,
     /// The writes of what each paired device reported it allows here (`grants_there`), at most one a second.
     peer_writes: Mutex<grants_sync::PeerWrites>,
+    /// The grants sync outside a session, per paired device (GRANTS-SYNC.md 4.3).
+    sync: Mutex<sync_dial::SyncState>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
@@ -287,6 +290,7 @@ impl UiHub {
             learned: Mutex::new(HashMap::new()),
             minors: Mutex::new(peer_minor::PeerMinors::default()),
             peer_writes: Mutex::new(grants_sync::PeerWrites::default()),
+            sync: Mutex::new(sync_dial::SyncState::default()),
             live_sessions: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
@@ -300,6 +304,7 @@ impl UiHub {
         hub.p.presence.set_listener(Arc::new(move || {
             if let Some(h) = weak.upgrade() {
                 h.devices_changed();
+                h.sync_presence_changed();
             }
         }));
         Self { hub }
@@ -324,6 +329,8 @@ impl UiHub {
         core.set_extras(Arc::new(HubExtras { hub: Arc::downgrade(&self.hub) }));
         // The viewer role's clipboard, the clipboard notices and the audit of quick actions.
         core.set_clip_actions(Arc::new(clip_actions::HubClipActions { hub: Arc::downgrade(&self.hub) }));
+        // The core is up: what is on the network now is synced (GRANTS-SYNC.md 4.4).
+        self.hub.sync_presence_changed();
     }
 
     /// Wake-on-LAN: how the socket of an attempt is made and how long it runs. The default is a UDP socket bound to

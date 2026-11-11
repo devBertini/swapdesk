@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use quinn::{Connection, VarInt};
 use swapdesk_platform::Clock;
 use swapdesk_proto::{
-    Capabilities, Desktop, Display, ErrorCode, Feature, GrantMode, Hello, Intent, Os, PermissionSet, PromptPending,
+    Capabilities, Desktop, Display, ErrorCode, Feature, GrantMode, Hello, Intent, Os, PROTO_MINOR, PermissionSet,
+    PromptPending,
 };
 use swapdesk_trust::{DeviceId, TrustHandle};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -53,6 +54,9 @@ pub struct HostConfig {
     pub max_live_sessions: usize,
     pub liveness: LivenessConfig,
     pub caps: Caps,
+    /// The protocol minor this host announces in its `HelloAck`: this build's own. A test that plays a host of 1.0
+    /// sets 0 (it then takes no grants sync, as a 1.0 host does not).
+    pub proto_minor: u16,
 }
 
 impl HostConfig {
@@ -72,6 +76,7 @@ impl HostConfig {
             max_live_sessions: 1,
             liveness: LivenessConfig::default(),
             caps: Caps::default(),
+            proto_minor: PROTO_MINOR,
         }
     }
 }
@@ -378,6 +383,7 @@ impl HostService {
         // sync (GRANTS-SYNC.md 4.2), which never reaches the session's state machine.
         let first = tokio::time::timeout(inner.cfg.handshake_timeout, io.rx.recv()).await.ok().flatten();
         if let Some(Ok(msg)) = &first
+            && inner.cfg.proto_minor >= 1
             && let Some(sync) = crate::grants_sync::as_sync(msg)
         {
             return crate::grants_sync::answer(self, io, conn, device, sync).await;

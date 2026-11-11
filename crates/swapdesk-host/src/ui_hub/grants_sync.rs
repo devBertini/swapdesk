@@ -47,8 +47,15 @@ impl PeerWrites {
 }
 
 impl Hub {
-    /// The peer `device` reported what its side stored for this machine (display only).
+    /// The peer `device` pushed what its side stored for this machine (display only): `StoredGrants` in a session,
+    /// or a grants sync it started.
     pub(super) fn apply_peer_grants(self: &Arc<Self>, device: DeviceId, grants: PermissionSet) {
+        self.sync_peer_pushed(device);
+        self.store_peer_grants(device, grants);
+    }
+
+    /// Keeps `grants` as what `device` allows here (the coalesced write below).
+    pub(super) fn store_peer_grants(self: &Arc<Self>, device: DeviceId, grants: PermissionSet) {
         let now = Instant::now();
         let due = {
             let mut writes = lock(&self.peer_writes);

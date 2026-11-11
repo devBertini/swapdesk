@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use quinn::{Connection, VarInt};
 use swapdesk_proto::{
-    Bye, Desktop, DisplayList, ErrorCode, ErrorMessage, HelloAck, HostState, Message, PROTO_MINOR, PermissionSet,
+    Bye, Desktop, DisplayList, ErrorCode, ErrorMessage, HelloAck, HostState, Message, PermissionSet,
     PermissionsChanged, Ping, Pong, SessionGrant, SessionRefused, WakeInfo,
 };
 use swapdesk_trust::DeviceId;
@@ -535,7 +535,7 @@ impl Actor {
                 let Side::Host { service, hello: slot, .. } = &mut self.side else { return None };
                 let cfg = &service.cfg;
                 let ack = HelloAck {
-                    proto_minor: PROTO_MINOR,
+                    proto_minor: cfg.proto_minor,
                     app_version: cfg.app_version.clone(),
                     name: cfg.name.clone(),
                     os: cfg.os,
@@ -647,7 +647,7 @@ impl Actor {
             return None;
         }
         let own = match &self.side {
-            Side::Host { .. } => PROTO_MINOR,
+            Side::Host { service, .. } => service.cfg.proto_minor,
             Side::Viewer { own_minor, .. } => *own_minor,
         };
         let msg = Message::from(swapdesk_proto::StoredGrants { grants: want });

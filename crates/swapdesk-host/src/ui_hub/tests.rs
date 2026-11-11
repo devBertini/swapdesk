@@ -121,7 +121,16 @@ impl Machine {
     }
 
     /// `ports`: fixed (session, pairing) ports on 127.0.0.1, for a peer reached through a typed address.
+    /// A machine whose session endpoint announces protocol minor `minor` (0 plays a host of 1.0).
+    fn with_minor(name: &str, minor: u16) -> Self {
+        Self::build_full(name, FakeNetInterfaces::new(Vec::new()), true, None, minor)
+    }
+
     fn build_at(name: &str, interfaces: FakeNetInterfaces, dev: bool, ports: Option<(u16, u16)>) -> Self {
+        Self::build_full(name, interfaces, dev, ports, swapdesk_proto::PROTO_MINOR)
+    }
+
+    fn build_full(name: &str, interfaces: FakeNetInterfaces, dev: bool, ports: Option<(u16, u16)>, minor: u16) -> Self {
         let identity = Arc::new(Identity::generate(0).expect("identity"));
         let secrets = Arc::new(MemorySecretStore::new());
         let trust = TrustHandle::open(secrets.clone()).expect("trust");
@@ -162,6 +171,7 @@ impl Machine {
         let mut cfg = ServiceConfig::new(name, Os::Windows, "11 24H2", deps);
         let session_port = ports.map_or(0, |p| p.0);
         cfg.session_port = session_port;
+        cfg.proto_minor = minor;
         let cfg = if dev { cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port)) } else { cfg };
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);

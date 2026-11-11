@@ -43,15 +43,16 @@ use swapdesk_ipc::{IpcRole, Message as Ipc};
 use swapdesk_lan::guard::{Refusal, check_incoming, find_on_link};
 use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
 use swapdesk_platform::{Level, NetInterfaces};
+use swapdesk_proto::GrantsSync;
 use swapdesk_proto::{Intent, PermissionSet};
 use swapdesk_session::{
-    ConsentRequest, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest, Registry,
-    StartInfo, ViewerConfig,
+    ConsentRequest, ControlIo, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest,
+    Registry, StartInfo, ViewerConfig,
 };
 use swapdesk_swap::{SwapHandler, SwapOutcome};
 use swapdesk_trust::{
-    Admission, DeviceId, SessionLimits, TrustHandle, accept_session, endpoint_from_socket, open_session_endpoint,
-    turn_away,
+    Admission, DeviceId, SessionLimits, TrustHandle, accept_session, connect_session, endpoint_from_socket,
+    open_session_endpoint, turn_away,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot;
@@ -121,6 +122,44 @@ struct Dialer {
     listeners: Arc<listen::Listeners>,
 }
 
+/// How long a grants sync may take, from the dial to the answer (GRANTS-SYNC.md 4.2).
+pub const SYNC_LIMIT: Duration = Duration::from_secs(5);
+
+/// Why a grants sync gave no answer.
+#[derive(Debug)]
+pub enum SyncError {
+    /// The address did not pass the LAN guard, or the device is not paired.
+    Guard(ConnectError),
+    /// The device's handshake refused this side's key.
+    UnknownKey,
+    /// The device closed it as a violation: it does not speak minor 1, whatever its record says.
+    Violation,
+    /// The device is over its budget, or already syncing with this side.
+    Busy,
+    /// Anything else: a lost or silent connection.
+    Failed,
+}
+
+/// What an application close of the device means.
+fn closed_why(e: &quinn::ConnectionError) -> SyncError {
+    use swapdesk_proto::ErrorCode;
+    match e {
+        quinn::ConnectionError::ApplicationClosed(c) => match u16::try_from(c.error_code.into_inner()) {
+            Ok(code) if code == ErrorCode::ProtocolViolation.tag() || code == ErrorCode::UnsupportedVersion.tag() => {
+                SyncError::Violation
+            }
+            Ok(code) if code == ErrorCode::Busy.tag() => SyncError::Busy,
+            Ok(code) if code == ErrorCode::UnknownDevice.tag() => SyncError::UnknownKey,
+            _ => SyncError::Failed,
+        },
+        // A TLS alert (QUIC's crypto error codes, 0x100 to 0x1ff): the device's verifier refused this side's key.
+        quinn::ConnectionError::ConnectionClosed(c) if (0x100..=0x1ff).contains(&u64::from(c.error_code)) => {
+            SyncError::UnknownKey
+        }
+        _ => SyncError::Failed,
+    }
+}
+
 /// Opens viewer sessions. Shared by the core and by the swap environment, which opens the new connection of a swap
 /// from a session task.
 pub(crate) struct Connector {
@@ -134,20 +173,14 @@ pub(crate) struct Connector {
 }
 
 impl Connector {
-    /// Opens a session to `addr` as a viewer. The device must be paired (its key is read from the trust store, never
-    /// from the address) and the address must pass the LAN guard. `swap_token` enters a swap (PROTOCOL.md 6.3).
-    /// `waiting` hears `Connecting` and `Prompted` while the host decides.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn connect(
+    /// What every dial to a paired device starts with: the address passes the LAN guard (IPv4, on link, not our own),
+    /// the device's pinned key and stored grants come from the trust store (never from the address), and a socket is
+    /// bound on the local address of that link with TTL 1.
+    async fn endpoint_for(
         &self,
         addr: SocketAddr,
         device: DeviceId,
-        intent: Intent,
-        unattended: bool,
-        extra: PermissionSet,
-        swap_token: Option<[u8; 16]>,
-        waiting: Option<WaitHook>,
-    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+    ) -> Result<(Endpoint, swapdesk_trust::Spki, PermissionSet), ConnectError> {
         let d = &self.dialer;
         let SocketAddr::V4(v4) = addr else { return Err(ConnectError::NotIpv4) };
         let local = if d.allow_loopback && v4.ip().is_loopback() {
@@ -169,6 +202,57 @@ impl Connector {
         let socket = bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(ConnectError::Socket)?;
         let endpoint = endpoint_from_socket(socket, None)
             .map_err(|e| ConnectError::Socket(std::io::Error::other(e.to_string())))?;
+        Ok((endpoint, spki, stored))
+    }
+
+    /// A grants sync with `device` at `addr` (GRANTS-SYNC.md 4.2): one `GrantsSync` each way over a connection its
+    /// pinned key authenticates, carrying what this side stored for the device; the answer carries what the device
+    /// stored for this side. Gives up `SYNC_LIMIT` after it started.
+    pub(crate) async fn sync_grants(&self, addr: SocketAddr, device: DeviceId) -> Result<GrantsSync, SyncError> {
+        let attempt = async {
+            let (endpoint, spki, stored) = self.endpoint_for(addr, device).await.map_err(SyncError::Guard)?;
+            let conn = connect_session(&endpoint, &self.dialer.identity, addr, spki).await.map_err(|e| match e {
+                // The handshake refused this side's key: the device forgot it (or pins another key of this
+                // computer).
+                swapdesk_trust::TrustError::Tls(_) | swapdesk_trust::TrustError::UnknownDevice => SyncError::UnknownKey,
+                _ => SyncError::Failed,
+            })?;
+            let (send, recv) = conn.open_bi().await.map_err(|e| closed_why(&e))?;
+            let mut io = ControlIo::from_quinn(send, recv);
+            io.out.set_peer_minor(swapdesk_proto::PROTO_MINOR);
+            io.out
+                .send(GrantsSync { proto_minor: swapdesk_proto::PROTO_MINOR, grants: stored })
+                .await
+                .map_err(|_| SyncError::Failed)?;
+            let answer = match io.rx.recv().await {
+                Some(Ok(swapdesk_proto::Message::GrantsSync(g))) if g.proto_minor >= 1 => Ok(g),
+                Some(Ok(_)) => Err(SyncError::Violation),
+                Some(Err(_)) | None => Err(conn.close_reason().map_or(SyncError::Failed, |e| closed_why(&e))),
+            };
+            // No session: the client closes the connection itself.
+            conn.close(quinn::VarInt::from_u32(0), b"");
+            endpoint.wait_idle().await;
+            answer
+        };
+        tokio::time::timeout(SYNC_LIMIT, attempt).await.unwrap_or(Err(SyncError::Failed))
+    }
+
+    /// Opens a session to `addr` as a viewer. The device must be paired (its key is read from the trust store, never
+    /// from the address) and the address must pass the LAN guard. `swap_token` enters a swap (PROTOCOL.md 6.3).
+    /// `waiting` hears `Connecting` and `Prompted` while the host decides.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect(
+        &self,
+        addr: SocketAddr,
+        device: DeviceId,
+        intent: Intent,
+        unattended: bool,
+        extra: PermissionSet,
+        swap_token: Option<[u8; 16]>,
+        waiting: Option<WaitHook>,
+    ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
+        let d = &self.dialer;
+        let (endpoint, spki, stored) = self.endpoint_for(addr, device).await?;
         let mut cfg = ViewerConfig::new(
             &d.cfg_name,
             d.os,
@@ -486,6 +570,7 @@ impl ServiceCore {
         let mut host_cfg =
             HostConfig::new(&cfg.name, cfg.os, &cfg.os_version, &cfg.app_version, cfg.capabilities.clone());
         host_cfg.max_live_sessions = 1;
+        host_cfg.proto_minor = cfg.proto_minor;
         let ui = Arc::new(CoreUi { inner: Arc::clone(&cfg.ui), shared: Arc::clone(&shared) });
         let host = HostService::new(host_cfg, Arc::clone(&cfg.trust), ui, registry, Arc::clone(&cfg.clock));
         let _ = env.host.set(host.clone());
@@ -773,6 +858,11 @@ impl ServiceCore {
         waiting: Option<WaitHook>,
     ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
         self.connector.connect(addr, device, intent, unattended, extra, None, waiting).await
+    }
+
+    /// A grants sync with `device` at `addr` (see `Connector::sync_grants`).
+    pub async fn sync_grants_async(&self, addr: SocketAddr, device: DeviceId) -> Result<GrantsSync, SyncError> {
+        self.connector.sync_grants(addr, device).await
     }
 
     /// The live viewer session `session_id`.

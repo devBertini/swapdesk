@@ -314,7 +314,7 @@ impl Hub {
     /// connection (C2.3, D7), and so is any bit added while the device has `UNATTENDED` (it would widen entry without
     /// a prompt); taking bits away is open to any console connection (it narrows). A connection that is not elevated
     /// may make that one change after an administrator confirmed exactly it (a pass, `elevation.rs`).
-    fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
+    fn set_grants(self: &Arc<Self>, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
         let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let old = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.grants_here)).ok_or(ApiCode::NotFound)?;
@@ -360,6 +360,8 @@ impl Hub {
         if let Some(core) = self.core() {
             core.host().stored_grants_changed(&id);
         }
+        // Outside a session the device hears it from a grants sync, 1 s after the last change (GRANTS-SYNC.md 4.4).
+        self.sync_after_change(id);
         // This machine's viewer sessions with the device tell it too (GRANTS-SYNC.md 3.2).
         for conn in lock(&self.conns).iter() {
             for v in lock(&conn.viewers).values().filter(|v| v.device == id) {
@@ -504,6 +506,8 @@ impl Hub {
     /// `Ended`) or with `NotOpened` and why. Only what is wrong with the request itself is a reply's error.
     pub(super) fn connect(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, device_id: &str, intent: Intent) {
         let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
+        // The user acted on the device: a key it refused may be pinned again.
+        self.sync_user_acted(&id);
         if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
             return reply(conn, req, Err(ApiCode::NotFound));
         }
