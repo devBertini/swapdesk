@@ -40,9 +40,13 @@ pub fn session_user_sid(session: u32) -> Result<String, String> {
     swapdesk_sys_win::session_user_sid(session).map_err(|e| format!("no user token for session {session}: {e}"))
 }
 
+/// The hub of the account a client's SID belongs to (ACCOUNTS.md 7.1: an interface reaches only its own account).
+/// An error refuses the connection with why.
+pub type Route = Arc<dyn Fn(&str) -> Result<UiHub, String> + Send + Sync>;
+
 /// What the accept loops share.
 pub struct UiPipes {
-    pub hub: UiHub,
+    route: Route,
     pub trace: Arc<dyn TraceSink>,
     pub mode: Mode,
     /// `-<n>` with `--instance`, else empty.
@@ -84,9 +88,22 @@ impl OpenSessions {
 }
 
 impl UiPipes {
+    /// Every client reaches `hub` (one account: the tests).
+    #[cfg(test)]
     pub fn new(hub: UiHub, trace: Arc<dyn TraceSink>, mode: Mode, suffix: String, stop: Arc<AtomicBool>) -> Arc<Self> {
+        Self::routed(Arc::new(move |_sid: &str| Ok(hub.clone())), trace, mode, suffix, stop)
+    }
+
+    /// A client reaches the hub `route` gives for its SID.
+    pub fn routed(
+        route: Route,
+        trace: Arc<dyn TraceSink>,
+        mode: Mode,
+        suffix: String,
+        stop: Arc<AtomicBool>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            hub,
+            route,
             trace,
             mode,
             suffix,
@@ -235,6 +252,14 @@ impl UiPipes {
                 return refuse(&e);
             }
         }
+        // 5. The account of that user: its hub alone (built the first time the user opens Swapdesk).
+        let hub = match (self.route)(&who.user_sid) {
+            Ok(h) => h,
+            Err(e) => {
+                bye(&mut writer, ErrorCode::Internal);
+                return refuse(&format!("no account: {e}"));
+            }
+        };
         let name =
             session_user_name(session).ok().flatten().or_else(|| std::env::var("USERNAME").ok()).unwrap_or_default();
         let info = ConnInfo {
@@ -255,9 +280,9 @@ impl UiPipes {
         let for_cut = Mutex::new(for_cut);
         let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || lock(&for_cut).cancel_io());
         let (what, end) = if hello.role == IpcRole::Elevator {
-            ("an elevator", self.hub.serve_elevator_cancellable(reader, writer, info, cancel))
+            ("an elevator", hub.serve_elevator_cancellable(reader, writer, info, cancel))
         } else {
-            ("a UI", self.hub.serve_cancellable(reader, writer, info, cancel))
+            ("a UI", hub.serve_cancellable(reader, writer, info, cancel))
         };
         lock(&self.open).retain(|(i, _)| *i != id);
         if let Err(e) = end {
@@ -373,6 +398,7 @@ mod tests {
     /// the current user owns the pipe and is its one client.
     struct DevPipe {
         pipes: Arc<UiPipes>,
+        hub: UiHub,
         lines: Arc<Lines>,
         name: String,
     }
@@ -401,9 +427,10 @@ mod tests {
             });
             let session = own_session();
             hub.set_console_session(Some(session));
-            let pipes = UiPipes::new(hub, lines.clone(), Mode::Dev, suffix.clone(), Arc::new(AtomicBool::new(false)));
+            let pipes =
+                UiPipes::new(hub.clone(), lines.clone(), Mode::Dev, suffix.clone(), Arc::new(AtomicBool::new(false)));
             pipes.ensure(session);
-            Self { pipes, lines, name: format!("{}{suffix}", swapdesk_sys_win::ui_pipe_name(session)) }
+            Self { pipes, hub, lines, name: format!("{}{suffix}", swapdesk_sys_win::ui_pipe_name(session)) }
         }
 
         fn client(&self, role: IpcRole) -> Client {
@@ -414,7 +441,7 @@ mod tests {
     impl Drop for DevPipe {
         fn drop(&mut self) {
             self.pipes.stop_all();
-            self.pipes.hub.shutdown();
+            self.hub.shutdown();
         }
     }
 

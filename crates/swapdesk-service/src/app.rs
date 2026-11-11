@@ -9,11 +9,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use swapdesk_capture_win::QpcClock;
+use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts};
 use swapdesk_host::netcache::CachedInterfaces;
 use swapdesk_host::service::TerminalEnv;
 use swapdesk_host::service::{
-    CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceCore, ServiceDeps,
+    CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps,
 };
+use swapdesk_host::ui_hub::presence::FilteredPresence;
 use swapdesk_host::ui_hub::store::{FileAuditLog, load_settings};
 use swapdesk_host::ui_hub::{DevOptions, DnsSdPresence, HubParams, NoPresence, Presence, SystemHooks, UiHub};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
@@ -29,9 +31,9 @@ use swapdesk_sys_win::{
 };
 use swapdesk_trust::{Identity, SystemWallClock, TrustHandle, WallClock};
 
-use crate::helpers::{HowToStart, Launch, Supervisor};
+use crate::helpers::{CoreOf, HowToStart, Launch, Supervisor};
 use crate::options::Options;
-use crate::ui_pipe::{Mode, UiPipes};
+use crate::ui_pipe::{Mode, Route, UiPipes};
 
 /// The service's name with the SCM.
 pub const SERVICE_NAME: &str = "SwapdeskService";
@@ -147,7 +149,6 @@ impl NetInterfaces for LoopbackOnly {
 /// The stores and the trace of this run.
 struct Env {
     store: Arc<WinSecretStore>,
-    dir: PathBuf,
     trace: Arc<dyn TraceSink>,
 }
 
@@ -172,7 +173,7 @@ fn open_env(opts: &Options) -> Result<Env, String> {
         Arc::new(FileTrace::open(&trace_dir, "trace.log", level).map_err(|e| format!("trace log: {e}"))?);
     // D12: a panic leaves its record in the same folder as the trace.
     swapdesk_sys_win::install_panic_hook(&trace_dir, "swapdesk-service");
-    Ok(Env { store: Arc::new(store), dir, trace })
+    Ok(Env { store: Arc::new(store), trace })
 }
 
 fn computer_name() -> String {
@@ -217,10 +218,12 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     }
 }
 
+/// The event channel of every account's core, with its core.
+type CoreEvents = Arc<Mutex<Vec<(Arc<ServiceCore>, std::sync::mpsc::Receiver<CoreEvent>)>>>;
+
 fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String> {
     let ServiceContext { mut watcher, events: ctx_events, stop } = ctx;
-    let Env { store, dir, trace } = env;
-    let wall = SystemWallClock;
+    let Env { store, trace } = env;
     trace.log(
         Level::Info,
         "service",
@@ -232,92 +235,134 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         ),
     );
 
-    let identity = Arc::new(Identity::load_or_create(&*store, wall.unix_ms()).map_err(|e| format!("identity: {e}"))?);
-    let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
-    let mut settings = load_settings(&*store, &computer_name())?;
+    // The machine's settings (C5.1): its name and the base of the port slots. 1.1 only reads them (ACCOUNTS.md 10.2).
+    let mut machine = load_settings(&*store, &computer_name())?;
     if opts.instance.is_some() {
-        settings.port = DEFAULT_SESSION_PORT + opts.port_offset();
-        settings.pair_port = DEFAULT_PAIR_PORT + opts.port_offset();
+        machine.port = DEFAULT_SESSION_PORT + opts.port_offset();
+        machine.pair_port = DEFAULT_PAIR_PORT + opts.port_offset();
     }
-    let audit =
-        Arc::new(FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?);
     // The interface list is read at most once a second and again at once when the network changes: the LAN guard asks
     // for it on every incoming connection, pairing and presence on every event.
     let inner: Arc<dyn NetInterfaces> =
         if opts.dev_loopback { Arc::new(LoopbackOnly) } else { Arc::new(WindowsNetInterfaces) };
     let cached = Arc::new(CachedInterfaces::new(inner));
     let interfaces: Arc<dyn NetInterfaces> = cached.clone();
-    let presence: Arc<dyn Presence> = if opts.dev_loopback {
-        Arc::new(NoPresence)
-    } else {
-        let own =
-            Txt { name: settings.name.clone(), os: Os::Windows, fingerprint: identity.device_id(), pairing: false };
-        match DnsSdPresence::start(
-            Arc::clone(&interfaces),
-            own,
-            DnsSdConfig { service_port: settings.port, ..DnsSdConfig::default() },
-        ) {
-            Ok(p) => Arc::new(p),
-            Err(e) => {
-                trace.log(Level::Warn, "service", format_args!("discovery is off: {e}"));
-                Arc::new(NoPresence)
-            }
-        }
-    };
     let clock = Arc::new(QpcClock);
-    let lo = |port: u16| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let hub = UiHub::new(HubParams {
-        os: Os::Windows,
-        // No safe call gives the build number; a version query belongs in `swapdesk-sys-win`.
-        os_version: "Windows".into(),
-        identity: Arc::clone(&identity),
-        trust: Arc::clone(&trust),
-        secrets: store.clone(),
-        settings: settings.clone(),
-        interfaces: Arc::clone(&interfaces),
-        presence,
-        audit,
-        clock: clock.clone(),
-        wall: Arc::new(SystemWallClock),
-        trace: Arc::clone(&trace),
-        hooks: Arc::new(WinHooks { awake: Mutex::new(None), trace: Arc::clone(&trace) }),
-        dev: opts.dev_loopback.then(|| DevOptions { pair_listen: vec![lo(settings.pair_port)] }),
-    });
+    let session = active_console_session();
+    let term_env = WinTerminalEnv::new(opts.console, session);
+    // Each account's core reports its events here: the loop below reads them all.
+    let core_events: CoreEvents = Arc::default();
+
+    // ACCOUNTS.md 15 S3: one identity, trust store, hub and core per account, built the first time the account needs
+    // one (its user opens Swapdesk), and at start for every account the machine knows.
+    let factory: AccountFactory = {
+        let (root, trace, interfaces, clock, term_env) =
+            (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
+        let (core_events, events, machine_name) = (Arc::clone(&core_events), ctx_events.clone(), machine.name.clone());
+        let dev_loopback = opts.dev_loopback;
+        Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
+            let wall = SystemWallClock;
+            let store =
+                Arc::new(root.open_account(&seat.sid, Some(&*trace)).map_err(|e| format!("account folder: {e}"))?);
+            let dir = store.dir().to_path_buf();
+            let identity =
+                Arc::new(Identity::load_or_create(&*store, wall.unix_ms()).map_err(|e| format!("identity: {e}"))?);
+            let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
+            let mut settings = load_settings(&*store, &machine_name)?;
+            settings.port = seat.session_port;
+            settings.pair_port = seat.pair_port;
+            let audit = Arc::new(
+                FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?,
+            );
+            let presence: Arc<dyn Presence> = if dev_loopback {
+                Arc::new(NoPresence)
+            } else {
+                let own_txt = Txt {
+                    name: settings.name.clone(),
+                    os: Os::Windows,
+                    fingerprint: identity.device_id(),
+                    pairing: false,
+                };
+                let config = DnsSdConfig { service_port: seat.session_port, ..DnsSdConfig::default() };
+                match DnsSdPresence::start(Arc::clone(&interfaces), own_txt, config) {
+                    Ok(p) => Arc::new(FilteredPresence::new(Arc::new(p), own)),
+                    Err(e) => {
+                        trace.log(Level::Warn, "service", format_args!("discovery is off for an account: {e}"));
+                        Arc::new(NoPresence)
+                    }
+                }
+            };
+            let lo = |port: u16| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+            let hub = UiHub::new(HubParams {
+                os: Os::Windows,
+                // No safe call gives the build number; a version query belongs in `swapdesk-sys-win`.
+                os_version: "Windows".into(),
+                identity: Arc::clone(&identity),
+                trust: Arc::clone(&trust),
+                secrets: store.clone(),
+                settings: settings.clone(),
+                interfaces: Arc::clone(&interfaces),
+                presence,
+                audit,
+                clock: clock.clone(),
+                wall: Arc::new(SystemWallClock),
+                trace: Arc::clone(&trace),
+                hooks: Arc::new(WinHooks { awake: Mutex::new(None), trace: Arc::clone(&trace) }),
+                dev: dev_loopback.then(|| DevOptions { pair_listen: vec![lo(seat.pair_port)] }),
+            });
+            let receiving = trust.read(|s| !s.devices.is_empty());
+            let deps = ServiceDeps {
+                identity: Arc::clone(&identity),
+                trust,
+                clock: clock.clone(),
+                trace: Arc::clone(&trace),
+                ui: hub.host_ui(),
+                interfaces: Arc::clone(&interfaces),
+            };
+            let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps);
+            cfg.session_port = seat.session_port;
+            cfg.pair_port = seat.pair_port;
+            cfg.win_session = active_console_session().unwrap_or(0);
+            cfg.machine = Some(shared.clone());
+            cfg.receiving = receiving;
+            // A quick action with no user helper attached runs here: lock, sleep and restart as system calls.
+            cfg = cfg.with_service_actions(swapdesk_sys_win::actions::WinActions::service());
+            if dev_loopback {
+                cfg = cfg.dev_loopback(lo(seat.session_port));
+            }
+            let core = Arc::new(ServiceCore::start(cfg).map_err(|e| e.to_string())?);
+            hub.bind_core(&core);
+            core.set_terminal_env(term_env.clone());
+            hub.set_console_session(active_console_session());
+            let rx = core.take_events().ok_or("the core's events were taken")?;
+            // The loop sleeps until something wakes it: the core says so after each event it queues.
+            core.set_event_waker({
+                let events = events.clone();
+                Arc::new(move || events.wake())
+            });
+            lock(&core_events).push((Arc::clone(&core), rx));
+            Ok(Account { seat: seat.clone(), device_id: identity.device_id(), hub, core })
+        })
+    };
+    let accounts = Arc::new(Accounts::new(
+        machine.port,
+        store.clone(),
+        factory,
+        Box::new(|| SystemWallClock.unix_ms()),
+        Arc::clone(&trace),
+    ));
+    for (sid, why) in accounts.start_known() {
+        trace.log(Level::Warn, "service", format_args!("an account could not start ({}): {why}", sid.len()));
+    }
 
     let console = console_state().map_err(|e| format!("console state: {e}"))?;
-    let session = active_console_session();
-    let deps = ServiceDeps {
-        identity,
-        trust,
-        clock,
-        trace: Arc::clone(&trace),
-        ui: hub.host_ui(),
-        interfaces: Arc::clone(&interfaces),
-    };
-    let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps);
-    cfg.session_port = settings.port;
-    cfg.pair_port = settings.pair_port;
-    cfg.win_session = session.unwrap_or(0);
-    // A quick action with no user helper attached runs here: lock, sleep and restart as system calls (stage 42).
-    cfg = cfg.with_service_actions(swapdesk_sys_win::actions::WinActions::service());
-    if opts.dev_loopback {
-        cfg = cfg.dev_loopback(lo(settings.port));
-    }
-    let core = Arc::new(ServiceCore::start(cfg).map_err(|e| e.to_string())?);
-    hub.bind_core(&core);
-    let term_env = WinTerminalEnv::new(opts.console, session);
-    core.set_terminal_env(term_env.clone());
-    hub.set_console_session(session);
-    let core_events = core.take_events().ok_or("the core's events were taken")?;
-    // The loop below sleeps until something wakes it: the core says so after each event it queues.
-    core.set_event_waker({
-        let events = ctx_events.clone();
-        Arc::new(move || events.wake())
-    });
-
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mode = if opts.console { Mode::Dev } else { Mode::Production };
-    let pipes = UiPipes::new(hub.clone(), Arc::clone(&trace), mode, opts.suffix(), Arc::clone(&stop_flag));
+    let route: Route = {
+        let accounts = Arc::clone(&accounts);
+        Arc::new(move |sid: &str| accounts.account(sid).map(|a| a.hub.clone()))
+    };
+    let pipes = UiPipes::routed(route, Arc::clone(&trace), mode, opts.suffix(), Arc::clone(&stop_flag));
     if let Some(s) = session {
         pipes.ensure(s);
     }
@@ -331,8 +376,25 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     if !exe.exists() {
         trace.log(Level::Error, "service", format_args!("{} does not exist: no helper can start", exe.display()));
     }
+    // The helpers attach to the account of the user at the console; with one account only, to that one (the sign-in
+    // screen of a single-user machine). S4 of ACCOUNTS.md binds this to the console with the fence.
+    let core_of: CoreOf = {
+        let (accounts, dev) = (Arc::clone(&accounts), opts.console);
+        Arc::new(move || {
+            let sid = if dev {
+                current_user_sid().ok()
+            } else {
+                active_console_session().and_then(|s| session_user_sid(s).ok())
+            };
+            if let Some(a) = sid.and_then(|sid| accounts.get(&sid)) {
+                return Some(Arc::clone(&a.core));
+            }
+            let all = accounts.all();
+            (all.len() == 1).then(|| Arc::clone(&all[0].core))
+        })
+    };
     let mut supervisor = Supervisor::new(
-        Arc::clone(&core),
+        core_of,
         Arc::clone(&trace),
         HowToStart { launch, suffix: opts.suffix(), exe },
         (session, console.user.is_some()),
@@ -365,6 +427,11 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut last_net = interfaces.list().ok();
     let mut next_net = Instant::now() + reconcile;
     let mut next_watchdog = Instant::now() + WATCHDOG;
+    let every_hub = |f: &dyn Fn(&UiHub)| {
+        for a in accounts.all() {
+            f(&a.hub);
+        }
+    };
     while !stop.is_set() {
         // Sleep until the earliest of: a restart that is due, the next network look, the watchdog. A session event, a
         // core event, a finished helper start or the network watcher wakes the loop sooner.
@@ -372,7 +439,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         let timeout = deadline.map_or(WATCHDOG, |d| d.saturating_duration_since(Instant::now()));
         match watcher.next_event(timeout) {
             Ok(Some(SessionEvent::ConsoleChanged(state))) => {
-                hub.set_console_session(state.session_id);
+                every_hub(&|h| h.set_console_session(state.session_id));
                 term_env.set_session(state.session_id);
                 if let Some(s) = state.session_id {
                     pipes.ensure(s);
@@ -380,21 +447,23 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 supervisor.console_changed(state.session_id, state.user.is_some());
             }
             Ok(Some(SessionEvent::DesktopSwitched(d))) => {
-                hub.set_desktop(d);
-                core.host().set_desktop(d);
+                for a in accounts.all() {
+                    a.hub.set_desktop(d);
+                    a.core.host().set_desktop(d);
+                }
             }
             Ok(Some(SessionEvent::NetworkChanged)) => {
                 cached.invalidate();
                 last_net = interfaces.list().ok();
                 next_net = Instant::now() + reconcile;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
             Ok(Some(SessionEvent::Resumed)) => {
                 trace.log(Level::Info, "service", format_args!("resumed from sleep"));
                 cached.invalidate();
                 last_net = interfaces.list().ok();
                 next_net = Instant::now() + reconcile;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
             Ok(Some(SessionEvent::Suspending)) => trace.log(Level::Info, "service", format_args!("suspending")),
             Ok(Some(SessionEvent::DisplaysChanged)) => {
@@ -404,7 +473,11 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             // The watcher closed: the service is stopping.
             Err(_) => break,
         }
-        while let Ok(ev) = core_events.try_recv() {
+        let pending: Vec<(Arc<ServiceCore>, CoreEvent)> = lock(&core_events)
+            .iter()
+            .flat_map(|(core, rx)| rx.try_iter().map(|ev| (Arc::clone(core), ev)).collect::<Vec<_>>())
+            .collect();
+        for (core, ev) in pending {
             match ev {
                 CoreEvent::HelperGone { pid, .. } => supervisor.helper_gone(pid),
                 CoreEvent::SasRequested { .. } => sas(&core, &*trace),
@@ -420,7 +493,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             let fresh = interfaces.list().ok();
             if fresh != last_net {
                 last_net = fresh;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
         }
         if now >= next_watchdog {
@@ -430,13 +503,13 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     drop(net_watcher);
 
     trace.log(Level::Info, "service", format_args!("stopping"));
-    hub.shutdown();
+    every_hub(&|h| h.shutdown());
     supervisor.stop_all();
     pipes.stop_all();
     drop(supervisor);
-    // The last handle: the core ends its sessions and its runtime.
-    drop(core);
-    drop(hub);
+    // The last handles: each core ends its sessions and its runtime.
+    lock(&core_events).clear();
+    drop(accounts);
     trace.log(Level::Info, "service", format_args!("stopped"));
     Ok(())
 }
