@@ -391,10 +391,10 @@ An entry that finds the sign-in screen (the restart case) starts paused, and one
 
 - **Only `settings.bin`, read-only:**
   - `port` and `pair_port`, the base of the slots, so a computer configured on other ports keeps them;
-  - `name`, only as the default name of the computer's first account (6, proposal);
+  - (D55: the first account takes the suffix like every other, so `name` is not read);
   - nothing else. `service_enabled`, `lock_on_end` and `keep_awake` are not carried: each account starts with its own defaults.
 - **Never:** `identity.bin` (the 1.0 key is never loaded, presented or used to dial), `trust.bin`, the 1.0 audit logs.
-- **Only if the owner keeps the notice of 19:** whether `identity.bin` exists, to show a one-time note in each account's Pareados list.
+- **The notice (D55, kept):** whether `identity.bin` exists, to show a one-time note in each account's Pareados list.
 
 ### 10.3 What a peer experiences
 
@@ -826,7 +826,7 @@ Proof: the `-DryRun` output lists the range and the names; the real run is the o
 
 ## 19. Still open for the owner
 
-Recommendation first. The four points the owner decided on 2026-11-10 are at the top of this note.
+Recommendation first. The four points the owner decided on 2026-11-10 are at the top of this note. Points 1, 2, 3 and 5 were decided on 2026-11-11 (D55): 1 the alternative (the suffix for every account), 2, 3 and 5 as recommended.
 
 1. **The first account's name** (6). Recommended: the first account of a computer is named like the computer was in 1.0 (the 1.0 Swapdesk name, else the Windows computer name), with no account part. Later accounts get "<computer name> · <Windows account name>". Alternative: the account part for every account, the first included.
 2. **Texts of the elevation step** (9). Recommended:
