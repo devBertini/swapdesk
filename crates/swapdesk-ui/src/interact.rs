@@ -60,6 +60,8 @@ pub enum ControlId {
     Edit(EditId),
     Select(SelectId),
     OpenAtLogin,
+    /// "Receber conexões" (ACCOUNTS.md 7.2, D57): this account's endpoint and record.
+    Receive,
     LockOnEnd,
     KeepAwake,
     ShowStats,
@@ -712,18 +714,17 @@ impl UiState {
         let Some(set) = &self.settings else { return };
         let c = s.add(ControlId::Edit(EditId::Name), UiRole::TextInput, self.name_of(MsgKey::FieldName));
         c.value = Some(set.name.clone());
+        c.description = Some(self.name_of(MsgKey::NameNetworkHint));
         let c = s.add(ControlId::Select(SelectId::Language), UiRole::ComboBox, self.name_of(MsgKey::FieldLanguage));
         c.value = Some(self.select_value(SelectId::Language));
         let c = s.add(ControlId::Select(SelectId::Theme), UiRole::ComboBox, self.name_of(MsgKey::FieldTheme));
         c.value = Some(self.select_value(SelectId::Theme));
         s.switch(ControlId::OpenAtLogin, self.name_of(MsgKey::OpenAtLogin), set.open_at_login, None);
-        s.text(
-            UiRole::Text,
-            format!(
-                "{}: {}",
-                self.name_of(MsgKey::ServiceName),
-                self.name_of(if set.service_enabled { MsgKey::ServiceActive } else { MsgKey::ServiceInactive })
-            ),
+        s.switch(
+            ControlId::Receive,
+            self.name_of(MsgKey::ServiceName),
+            set.service_enabled,
+            Some(self.name_of(MsgKey::ServiceHint)),
         );
         s.switch(ControlId::LockOnEnd, self.name_of(MsgKey::LockOnEnd), set.lock_on_end, None);
         s.switch(ControlId::KeepAwake, self.name_of(MsgKey::KeepAwake), set.keep_awake, None);
@@ -1394,6 +1395,7 @@ impl UiState {
             ControlId::Edit(e) => a.effect = Some(Effect::FocusEdit(e)),
             ControlId::Select(s) => a.effect = Some(Effect::Menu(s)),
             ControlId::OpenAtLogin => self.toggle_setting(&mut a, |s| s.open_at_login = !s.open_at_login),
+            ControlId::Receive => self.toggle_setting(&mut a, |s| s.service_enabled = !s.service_enabled),
             ControlId::LockOnEnd => self.toggle_setting(&mut a, |s| s.lock_on_end = !s.lock_on_end),
             ControlId::KeepAwake => self.toggle_setting(&mut a, |s| s.keep_awake = !s.keep_awake),
             ControlId::ShowStats => self.toggle_setting(&mut a, |s| s.show_stats = !s.show_stats),

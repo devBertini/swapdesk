@@ -8,8 +8,8 @@ use swapdesk_platform::{ErrorKind, PlatformError};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSID, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenElevationType, TokenGroups, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSID, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenElevationType, TokenGroups, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -115,6 +115,31 @@ pub fn sid_to_string(psid: PSID) -> Result<String> {
 /// `S-1-5-...` for a SID string that may be an SDDL alias.
 pub fn normalize_sid(text: &str) -> Result<String> {
     sid_to_string(Sid::parse(text)?.as_ptr())
+}
+
+/// The account name ("alex") of a SID on this machine, as Windows shows it (ACCOUNTS.md 6, D55: the default name
+/// a peer sees is "<computer> · <account>").
+pub fn account_name_of_sid(sid: &str) -> Result<String> {
+    let sid = Sid::parse(sid)?;
+    let mut name = [0u16; 256];
+    let mut domain = [0u16; 256];
+    let (mut name_len, mut domain_len, mut kind) = (256u32, 256u32, 0i32);
+    // SAFETY: the SID lives for the call; both buffers hold the lengths passed; a null system name is this machine.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid.as_ptr(),
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error("LookupAccountSidW"));
+    }
+    Ok(String::from_utf16_lossy(&name[..name_len as usize]))
 }
 
 /// Opens the current process token.

@@ -677,7 +677,7 @@ New tests, red before:
 Tests, red before:
 - `settings_of_one_account_do_not_change_anothers`;
 - `receive_off_closes_the_accounts_endpoint_and_withdraws_its_record`;
-- `a_later_account_is_named_computer_dot_account_and_the_first_keeps_its_name`.
+- `every_account_is_named_computer_dot_account` (D55: the first account takes the suffix too).
 
 **S9. macOS.**
 - `swapdesk-app-mac/src/service.rs`: the slot fallback, the uid `UserRef`, `peers.bin`.

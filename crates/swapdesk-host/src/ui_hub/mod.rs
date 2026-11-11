@@ -229,10 +229,10 @@ impl Hub {
         }
     }
 
-    /// Whether this account receives connections: with a pairing, or while its pairing mode is open (ACCOUNTS.md 6).
-    /// Its endpoint listens and its record is announced exactly then.
+    /// Whether this account receives connections: while its pairing mode is open, or with a pairing and its
+    /// "Receber conexões" on (ACCOUNTS.md 6 and 7.2). Its endpoint listens and its record is announced exactly then.
     pub fn wants_to_receive(&self) -> bool {
-        self.mode.is_open() || self.p.trust.read(|s| !s.devices.is_empty())
+        self.mode.is_open() || (lock(&self.settings).service_enabled && self.p.trust.read(|s| !s.devices.is_empty()))
     }
 
     /// Applies [`Hub::wants_to_receive`] to the core and the announcement. Called when the core is bound, after a

@@ -240,8 +240,8 @@ strings! {
     ThemeDark => "Escuro", "Dark";
     OpenAtLogin => "Abrir ao ligar o computador", "Open when the computer starts";
     GroupUnattended => "Sem ninguém na frente", "With no one in front";
-    ServiceName => "Serviço do Swapdesk", "Swapdesk service";
-    ServiceHint => "Permite entrar na tela de login e no bloqueio", "Allows entering the sign-in and lock screens";
+    ServiceName => "Receber conexões", "Receive connections";
+    ServiceHint => "Outros computadores podem se conectar a esta conta", "Other computers can connect to this account";
     ServiceActive => "Ativo", "On";
     ServiceInactive => "Desligado", "Off";
     LockOnEnd => "Bloquear ao terminar a sessão", "Lock when the session ends";
@@ -514,6 +514,7 @@ strings! {
     ElevateHint => "Controlar também os avisos de administrador e a tela de entrada", "Also control administrator prompts and the sign-in screen";
     PausedAwayBody => "Esta conta não está mais na tela do {0}. A sessão volta quando ela voltar.", "This account is no longer on {0}'s screen. The session resumes when it is back.";
     PausedElevateBody => "O {0} mostra uma tela protegida. Eleve o controle para vê-la e usá-la.", "{0} shows a protected screen. Elevate control to see and use it.";
+    NameNetworkHint => "Outros computadores da rede veem este nome.", "Other computers on the network see this name.";
     ElevDeclined => "A confirmação foi recusada.", "The confirmation was declined.";
     ElevBodyWindowsCredentials => "Esta mudança precisa de um administrador deste computador. O Windows vai pedir o nome e a senha de um administrador.", "This change needs an administrator of this computer. Windows will ask for an administrator's name and password.";
 }

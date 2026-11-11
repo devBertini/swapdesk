@@ -180,3 +180,16 @@ fn a_computer_with_no_1_0_data_shows_no_note() {
     let root = Arc::new(open_root(&t.0));
     assert!(!root_facts(&root).unwrap().had_1_0);
 }
+
+/// D55: every account, the first included, is named "<computer> · <account>" until its user changes it.
+#[test]
+fn every_account_is_named_computer_dot_account() {
+    assert_eq!(super::account_name("SALA", Some("ana")), "SALA · ana");
+    assert_eq!(super::account_name("SALA", None), "SALA", "an account name that cannot be read");
+    assert_eq!(super::account_name("SALA", Some(" ")), "SALA");
+    let long = super::account_name(&"x".repeat(62), Some("ana"));
+    assert!(long.len() <= 64 && swapdesk_host::ui_hub::store::valid_name(&long), "{long:?}");
+    // The real lookup reads this test's own account.
+    let me = swapdesk_sys_win::current_user_sid().unwrap();
+    assert!(!swapdesk_sys_win::account_name_of_sid(&me).unwrap().is_empty());
+}

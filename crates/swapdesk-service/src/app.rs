@@ -176,6 +176,24 @@ fn open_env(opts: &Options) -> Result<Env, String> {
     Ok(Env { store: Arc::new(store), trace })
 }
 
+/// The name a peer sees of an account until its user changes it (D55): "<computer> · <Windows account>", the
+/// computer's name alone when the account's name cannot be read.
+fn default_account_name(sid: &str) -> String {
+    account_name(&computer_name(), swapdesk_sys_win::account_name_of_sid(sid).ok().as_deref())
+}
+
+/// "<computer> · <account>", within the name's limit (64 bytes, cut at a character).
+pub(crate) fn account_name(computer: &str, account: Option<&str>) -> String {
+    let mut name = match account.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{computer} · {a}"),
+        None => computer.to_string(),
+    };
+    while name.len() > 64 {
+        name.pop();
+    }
+    name
+}
+
 fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Swapdesk PC".to_string())
 }
@@ -317,7 +335,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
             let wall = SystemWallClock;
             let AccountData { store, identity, trust, settings } =
-                open_account_data(&root, seat, &computer_name(), wall.unix_ms(), &*trace)?;
+                open_account_data(&root, seat, &default_account_name(&seat.sid), wall.unix_ms(), &*trace)?;
             let dir = store.dir().to_path_buf();
             let audit = Arc::new(
                 FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?,

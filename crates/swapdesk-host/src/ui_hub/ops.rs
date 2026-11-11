@@ -859,6 +859,8 @@ impl Hub {
         };
         if before.service_enabled != after.service_enabled {
             self.p.hooks.service_enabled(after.service_enabled);
+            // "Receber conexões": this account's endpoint closes or opens, and its record goes or comes back.
+            self.update_receiving();
         }
         if before.keep_awake != after.keep_awake {
             self.p

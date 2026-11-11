@@ -1149,9 +1149,9 @@ fn activity_main(f: &mut Frame) {
 // Ajustes
 
 enum SettingRow {
-    Edit { label: String, value: String, width: f32 },
+    Edit { label: String, hint: Option<String>, value: String, width: f32 },
     Select { id: SelectId, label: String, hint: Option<String>, value: String, width: f32 },
-    Toggle { id: ControlId, label: String, on: bool },
+    Toggle { id: ControlId, label: String, hint: Option<String>, on: bool },
     Status { label: String, hint: Option<String>, value: Option<(String, Color)> },
 }
 
@@ -1185,16 +1185,16 @@ fn settings_main(f: &mut Frame) {
         },
         None => f.t(MsgKey::NoNetwork),
     };
-    let service = if set.service_enabled {
-        (f.t(MsgKey::ServiceActive), pal.ok)
-    } else {
-        (f.t(MsgKey::ServiceInactive), pal.soft)
-    };
     let left = [
         (
             MsgKey::SidebarThisComputer,
             vec![
-                SettingRow::Edit { label: f.t(MsgKey::FieldName), value: set.name.clone(), width: 190.0 },
+                SettingRow::Edit {
+                    label: f.t(MsgKey::FieldName),
+                    hint: Some(f.t(MsgKey::NameNetworkHint)),
+                    value: set.name.clone(),
+                    width: 190.0,
+                },
                 SettingRow::Select {
                     id: SelectId::Language,
                     label: f.t(MsgKey::FieldLanguage),
@@ -1212,6 +1212,7 @@ fn settings_main(f: &mut Frame) {
                 SettingRow::Toggle {
                     id: ControlId::OpenAtLogin,
                     label: f.t(MsgKey::OpenAtLogin),
+                    hint: None,
                     on: set.open_at_login,
                 },
             ],
@@ -1219,13 +1220,24 @@ fn settings_main(f: &mut Frame) {
         (
             MsgKey::GroupUnattended,
             vec![
-                SettingRow::Status {
+                SettingRow::Toggle {
+                    id: ControlId::Receive,
                     label: f.t(MsgKey::ServiceName),
                     hint: Some(f.t(MsgKey::ServiceHint)),
-                    value: Some(service),
+                    on: set.service_enabled,
                 },
-                SettingRow::Toggle { id: ControlId::LockOnEnd, label: f.t(MsgKey::LockOnEnd), on: set.lock_on_end },
-                SettingRow::Toggle { id: ControlId::KeepAwake, label: f.t(MsgKey::KeepAwake), on: set.keep_awake },
+                SettingRow::Toggle {
+                    id: ControlId::LockOnEnd,
+                    label: f.t(MsgKey::LockOnEnd),
+                    hint: None,
+                    on: set.lock_on_end,
+                },
+                SettingRow::Toggle {
+                    id: ControlId::KeepAwake,
+                    label: f.t(MsgKey::KeepAwake),
+                    hint: None,
+                    on: set.keep_awake,
+                },
             ],
         ),
     ];
@@ -1240,7 +1252,12 @@ fn settings_main(f: &mut Frame) {
                     value: f.st.select_value(SelectId::Quality),
                     width: 170.0,
                 },
-                SettingRow::Toggle { id: ControlId::ShowStats, label: f.t(MsgKey::ShowStats), on: set.show_stats },
+                SettingRow::Toggle {
+                    id: ControlId::ShowStats,
+                    label: f.t(MsgKey::ShowStats),
+                    hint: None,
+                    on: set.show_stats,
+                },
             ],
         ),
         (
@@ -1256,6 +1273,7 @@ fn settings_main(f: &mut Frame) {
                 SettingRow::Toggle {
                     id: ControlId::SwapCtrlCmd,
                     label: f.t(MsgKey::SwapCtrlCmd),
+                    hint: None,
                     on: set.swap_ctrl_cmd,
                 },
                 SettingRow::Select {
@@ -1403,9 +1421,9 @@ fn settings_group(f: &mut Frame, x: f32, y: f32, w: f32, title: &str, rows: &[Se
 /// Label, hint and the width of the control at the row's end.
 fn row_parts<'r>(p: &dyn crate::painter::Painter, row: &'r SettingRow) -> (&'r str, Option<&'r str>, f32) {
     match row {
-        SettingRow::Edit { label, width, .. } => (label.as_str(), None, *width),
+        SettingRow::Edit { label, hint, width, .. } => (label.as_str(), hint.as_deref(), *width),
         SettingRow::Select { label, hint, width, .. } => (label.as_str(), hint.as_deref(), *width),
-        SettingRow::Toggle { label, .. } => (label.as_str(), None, layout::SWITCH_W),
+        SettingRow::Toggle { label, hint, .. } => (label.as_str(), hint.as_deref(), layout::SWITCH_W),
         SettingRow::Status { label, hint, value, .. } => {
             (label.as_str(), hint.as_deref(), value.as_ref().map_or(0.0, |(s, _)| p.label(s, text::NAME).w))
         }

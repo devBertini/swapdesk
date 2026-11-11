@@ -12,6 +12,8 @@ use super::*;
 struct Built {
     identity: Arc<Identity>,
     trust: Arc<TrustHandle>,
+    /// What the account announces on the network (under its filter).
+    presence: Arc<FakePresence>,
 }
 
 type Registry = Arc<Mutex<HashMap<String, Built>>>;
@@ -27,8 +29,9 @@ fn machine(base: u16) -> (Accounts, Registry) {
         let trace = LogCapture::new();
         let interfaces = Arc::new(FakeNetInterfaces::new(Vec::new()));
         let clock = Arc::new(MonotonicClock::new());
+        let fake = FakePresence::new();
         let presence: Arc<dyn super::super::Presence> =
-            Arc::new(super::super::presence::FilteredPresence::new(FakePresence::new(), own));
+            Arc::new(super::super::presence::FilteredPresence::new(fake.clone(), own));
         let lo = |p: u16| SocketAddrV4::new(Ipv4Addr::LOCALHOST, p);
         let hub = UiHub::new(HubParams {
             os: Os::Windows,
@@ -68,7 +71,7 @@ fn machine(base: u16) -> (Accounts, Registry) {
         };
         hub.bind_core(&core);
         hub.set_console_session(Some(1));
-        reg.lock().unwrap().insert(seat.sid.clone(), Built { identity: Arc::clone(&identity), trust });
+        reg.lock().unwrap().insert(seat.sid.clone(), Built { identity: Arc::clone(&identity), trust, presence: fake });
         Ok(Account { seat: seat.clone(), device_id: identity.device_id(), hub, core })
     });
     let accounts = Accounts::new(
@@ -297,4 +300,50 @@ fn the_note_after_the_update_shows_only_while_the_account_has_no_pairing() {
     let viewer = Identity::generate(0).unwrap();
     pin_viewer(&built.lock().unwrap()[A], &viewer);
     assert!(!note(), "paired");
+}
+
+fn settings(name: &str, receive: bool) -> UiOp {
+    UiOp::SetSettings(swapdesk_ipc::SettingsUpdate {
+        name: name.into(),
+        service_enabled: receive,
+        lock_on_end: true,
+        keep_awake: false,
+    })
+}
+
+/// ACCOUNTS.md 7.2: each account's settings are its own.
+#[test]
+fn settings_of_one_account_do_not_change_anothers() {
+    let base = free_slots();
+    let (accounts, _built) = machine(base);
+    let (a, b) = (accounts.account(A).unwrap(), accounts.account(B).unwrap());
+    let mut ui_a = Client::connect(&a.hub, ConnInfo { session_id: 1, user: user(A), admin: false, can_elevate: false });
+    let mut ui_b = Client::connect(&b.hub, ConnInfo { session_id: 1, user: user(B), admin: false, can_elevate: false });
+    let ReplyBody::Settings(before_b) = ui_b.call(UiOp::GetSettings).unwrap() else { panic!() };
+    assert!(ui_a.call(settings("PC · ana", false)).is_ok());
+    let ReplyBody::Settings(after_a) = ui_a.call(UiOp::GetSettings).unwrap() else { panic!() };
+    let ReplyBody::Settings(after_b) = ui_b.call(UiOp::GetSettings).unwrap() else { panic!() };
+    assert_eq!((after_a.name.as_str(), after_a.service_enabled, after_a.lock_on_end), ("PC · ana", false, true));
+    assert_eq!(after_b, before_b, "B is untouched");
+    drop((ui_a, ui_b));
+}
+
+/// ACCOUNTS.md 7.2 (D57): "Receber conexões" off closes the account's endpoint and withdraws its record; on again,
+/// both come back. Pairing mode opened by the user still listens.
+#[test]
+fn receive_off_closes_the_accounts_endpoint_and_withdraws_its_record() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    let ka = built.lock().unwrap()[A].clone();
+    pin_viewer(&ka, &Identity::generate(0).unwrap());
+    a.hub.hub.update_receiving();
+    assert!(a.core.receiving() && ka.presence.announced() == Some(true), "paired: it receives");
+    let mut ui = Client::connect(&a.hub, ConnInfo { session_id: 1, user: user(A), admin: false, can_elevate: false });
+    assert!(ui.call(settings("PC · ana", false)).is_ok());
+    assert!(!a.core.receiving(), "the endpoint is closed");
+    assert_eq!(ka.presence.announced(), Some(false), "the record is withdrawn");
+    assert!(ui.call(settings("PC · ana", true)).is_ok());
+    assert!(a.core.receiving() && ka.presence.announced() == Some(true));
+    drop(ui);
 }
