@@ -1239,8 +1239,8 @@ fn a_viewer_that_the_host_does_not_know_never_gets_a_session_over_the_wire() {
 
 // ---------- protocol minor 1 in a session ----------
 
-/// A build of minor 1 takes `StoredGrants` after the grant, either way, without acting on it yet, and answers
-/// `Elevate` as a session that may not elevate: a later build that sends them is not cut off by this one.
+/// A build of minor 1 takes `StoredGrants` after the grant, either way, without acting on it, and refuses `Elevate`
+/// in a session that entered with a prompt (ACCOUNTS.md 9.3), without ending it.
 #[test]
 fn stored_grants_is_taken_after_the_grant_and_elevate_is_refused_without_ending_the_session() {
     run_paused(async {
@@ -1256,7 +1256,7 @@ fn stored_grants_is_taken_after_the_grant_and_elevate_is_refused_without_ending_
         // Viewer to host and host to viewer: nothing happens, the session lives.
         s.ctx().send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
         host_ctx.send(StoredGrants { grants: PermissionSet::CONTROL }).await.unwrap();
-        // The elevation step is not built: a refusal that is not fatal, about this message.
+        // A prompted session cannot be elevated: a refusal that is not fatal, about this message.
         s.ctx().send(Elevate {}).await.unwrap();
         wait_event(&mut s, Duration::from_secs(1), "the refusal of Elevate", |e| {
             is_error(e, ErrorCode::NotPermitted, 0x000C, 0)
@@ -1714,5 +1714,84 @@ fn a_session_that_starts_while_its_account_is_away_ends_after_the_minute() {
         assert!(s.ctx().ended().is_none());
         let end = tokio::time::timeout(Duration::from_secs(70), task).await.expect("ends").unwrap();
         assert_eq!(end.code, ErrorCode::AccountAway);
+    });
+}
+
+/// ACCOUNTS.md 9: a session that entered without a prompt is elevated by `Elevate`: it gains `UNATTENDED` (and
+/// `ADMIN_TERMINAL`, stored and requested), stops pausing on a secure desktop, the host logs `Elevated` and the
+/// resume token dies. Asked again it answers the same; once the device no longer holds `UNATTENDED` it refuses.
+#[test]
+fn elevate_adds_the_machine_level_bits_to_an_unattended_entry_and_is_logged() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        lock(&ui.info).desktop = Desktop::Locked;
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        assert_eq!(
+            s.grant().granted,
+            PermissionSet::CONTROL | PermissionSet::TERMINAL,
+            "entered without the machine-level bits (the terminal as the user stays)"
+        );
+        wait_event(&mut s, Duration::from_secs(1), "paused on the lock screen", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: true })
+        })
+        .await;
+        let resumable = mem.host.resumable_sessions();
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "elevated",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == stored),
+        )
+        .await;
+        wait_event(&mut s, Duration::from_secs(1), "no longer paused", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: false })
+        })
+        .await;
+        assert!(
+            ui.events().iter().any(|e| matches!(e, HostEvent::Elevated { granted, .. } if *granted == stored)),
+            "logged as Elevated"
+        );
+        assert!(!ui.events().iter().any(|e| matches!(e, HostEvent::GrantsChanged { .. })), "not as a grant change");
+        assert_eq!(mem.host.resumable_sessions(), resumable - 1, "the resume token died");
+        // Again: the same answer.
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the same answer",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == stored),
+        )
+        .await;
+        // The device loses UNATTENDED in Permissões: the session narrows, and Elevate is refused.
+        set_stored(&mem.trust, &who, PermissionSet::CONTROL);
+        mem.host.stored_grants_changed(&who.id);
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "refused", |e| is_error(e, ErrorCode::NotPermitted, 0x000C, 0))
+            .await;
+        assert!(s.ctx().ended().is_none());
+    });
+}
+
+/// `ADMIN_TERMINAL` comes with the elevation only when the viewer asked for it.
+#[test]
+fn elevate_adds_the_administrator_terminal_only_when_it_was_requested() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL);
+        let (s, _task) = mem.open(&who, viewer_config(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "elevated", |e| {
+            matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::UNATTENDED | PermissionSet::CONTROL)
+        })
+        .await;
     });
 }

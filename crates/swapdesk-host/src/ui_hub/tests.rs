@@ -1406,3 +1406,23 @@ fn other_record(other: &Machine) -> PresencePeer {
         proto_minor: 0,
     }
 }
+
+/// ACCOUNTS.md 9.2: an elevation the viewer asked for is written to the host's activity as `Elevated`, shown as
+/// "Controle elevado".
+#[test]
+fn an_elevation_is_written_to_the_activity_as_elevated_control() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+    let mut plain = m.client(info(false));
+    let granted = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+    m.hub.host_ui().event(swapdesk_session::HostEvent::Elevated { device: other.id(), session_id: 7, granted });
+    let ReplyBody::Activity(lines) = plain.call(UiOp::ActivityList { before_ms: None, limit: 10 }).unwrap() else {
+        panic!()
+    };
+    assert_eq!(MsgKey::ALL[usize::from(lines[0].what.key)], MsgKey::AuditElevated, "{lines:?}");
+    assert!(m.audit.entries().iter().any(|e| e.event == AuditEvent::Elevated));
+    drop(plain);
+    m.finish();
+    other.finish();
+}

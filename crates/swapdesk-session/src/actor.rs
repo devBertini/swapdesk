@@ -177,6 +177,8 @@ pub(crate) struct Actor {
     stored_told: Option<PermissionSet>,
     /// When the session's account left the console (host side; `None` while it is there).
     away_since: Option<Instant>,
+    /// An `Elevate` was accepted and its grant change is on its way (host side).
+    elevating: bool,
     /// The desktop the state machine last applied (host side).
     applied_desktop: Option<Desktop>,
     /// Messages that must arrive, waiting for room in the outgoing queue.
@@ -263,6 +265,7 @@ impl Actor {
             reported: PermissionSet::EMPTY,
             stored_told: None,
             away_since: None,
+            elevating: false,
             applied_desktop: None,
             pending: VecDeque::new(),
             stalled_since: None,
@@ -700,14 +703,29 @@ impl Actor {
                 }
                 None
             }
-            // The elevation step is not built: the answer is the one of a session that may not elevate.
-            _ => self.reply(ErrorMessage {
-                code: ErrorCode::NotPermitted,
-                fatal: false,
-                about_type: msg.type_id(),
-                about_id: 0,
-            }),
+            // ACCOUNTS.md 9.3: the viewer confirmed on its own machine; the host checks and adds the elevated bits.
+            _ => self.on_elevate(msg.type_id()),
         })
+    }
+
+    fn on_elevate(&mut self, type_id: u16) -> Option<Finish> {
+        let refuse = |code| ErrorMessage { code, fatal: false, about_type: type_id, about_id: 0 };
+        let Side::Host { service, device, .. } = &self.side else {
+            return self.reply(refuse(ErrorCode::NotPermitted));
+        };
+        let (service, device) = (Arc::clone(service), *device);
+        let add = match service.elevation_for(&self.ctx, &device) {
+            Ok(add) => add,
+            Err(code) => return self.reply(refuse(code)),
+        };
+        let current = self.ctx.granted();
+        if current.contains(add) {
+            // Already elevated: the same answer again.
+            return self.emit(PermissionsChanged { granted: current }, true);
+        }
+        self.elevating = true;
+        self.ctx.modify_granted(|g| g | add);
+        None
     }
 
     fn host_active(&mut self, msg: Message) -> Option<Finish> {
@@ -749,12 +767,13 @@ impl Actor {
             }
         }
         if let Side::Host { service, device, .. } = &self.side {
-            service.ui.event(HostEvent::GrantsChanged {
-                device: *device,
-                session_id: self.ctx.session_id(),
-                from: old,
-                to: new,
-            });
+            let session_id = self.ctx.session_id();
+            let event = if std::mem::take(&mut self.elevating) && new.contains(PermissionSet::UNATTENDED) {
+                HostEvent::Elevated { device: *device, session_id, granted: new }
+            } else {
+                HostEvent::GrantsChanged { device: *device, session_id, from: old, to: new }
+            };
+            service.ui.event(event);
         }
         for h in self.registry.handlers() {
             h.on_permissions(&self.ctx, old, new);

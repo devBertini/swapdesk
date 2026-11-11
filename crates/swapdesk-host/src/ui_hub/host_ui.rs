@@ -293,6 +293,18 @@ impl HostUi for HubHostUi {
                     state: SessionState::Active { since_ms: since, role: Role::Host, granted: to.bits() },
                 });
             }
+            HostEvent::Elevated { device, session_id, granted } => {
+                let since = lock(&hub.started).get_mut(&session_id).map_or(now, |e| {
+                    e.1 = granted;
+                    e.0
+                });
+                hub.audit(device, AuditEvent::Elevated, None);
+                hub.notify_console(Notify::Session {
+                    session_id,
+                    device_id: device_id_hex(&device),
+                    state: SessionState::Active { since_ms: since, role: Role::Host, granted: granted.bits() },
+                });
+            }
             HostEvent::PeerOffline { device, session_id } => {
                 hub.notify_console(Notify::Session {
                     session_id,

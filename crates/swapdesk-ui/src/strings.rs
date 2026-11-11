@@ -31,7 +31,6 @@ strings! {
     // Sidebar
     SidebarThisComputer => "Este computador", "This computer";
     SidebarPaired => "Pareados", "Paired";
-    SidebarLegacyNote => "Os pareamentos de antes da versão 1.1 não passam para as contas. Pareie de novo com os computadores que você usa.", "Pairings made before version 1.1 do not carry over to accounts. Pair again with the computers you use.";
     SidebarOnNetwork => "Na rede", "On the network";
     AddressLabel => "Adicionar por endereço", "Add by address";
     AddressPlaceholder => "192.168.0.21", "192.168.0.21";
@@ -509,6 +508,8 @@ strings! {
     FilesConsentWaiting => "Esperando quem usa o {0} permitir os arquivos.", "Waiting for the person using {0} to allow the files.";
     ActionWaiting => "Esperando o {0} executar a ação…", "Waiting for {0} to run the action…";
     PermAdminTerminalMacOff => "Indisponível no macOS nesta versão", "Not available on macOS in this version";
+    SidebarLegacyNote => "Os pareamentos de antes da versão 1.1 não passam para as contas. Pareie de novo com os computadores que você usa.", "Pairings made before version 1.1 do not carry over to accounts. Pair again with the computers you use.";
+    AuditElevated => "Controle elevado", "Elevated control";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

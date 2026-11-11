@@ -155,6 +155,7 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         }
         AuditEvent::Swapped => (msg(MsgKey::AuditSwap, &[device_name.to_string()]), false),
         AuditEvent::FilesSent { count, .. } => (msg(MsgKey::AuditControlFiles, &[count.to_string()]), false),
+        AuditEvent::Elevated => (msg(MsgKey::AuditElevated, &[]), false),
         _ => return None,
     })
 }

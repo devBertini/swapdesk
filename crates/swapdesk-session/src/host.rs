@@ -188,6 +188,13 @@ pub enum HostEvent {
         device: DeviceId,
         minor: u16,
     },
+    /// The viewer elevated a session that entered without a prompt (`Elevate`, ACCOUNTS.md 9): it holds `granted`
+    /// now, `UNATTENDED` among them. Written to the activity as `Elevated`; the banner says "Controle elevado".
+    Elevated {
+        device: DeviceId,
+        session_id: u64,
+        granted: PermissionSet,
+    },
 }
 
 /// Who is at the console, seen from one account's core (ACCOUNTS.md 5.1).
@@ -577,6 +584,25 @@ impl HostService {
 }
 
 impl HostInner {
+    /// What `Elevate` adds to a session (ACCOUNTS.md 9.3): `UNATTENDED`, and `ADMIN_TERMINAL` when it is stored and
+    /// was requested. Refused (`NOT_PERMITTED`) unless the session entered without a prompt and the device still holds
+    /// `UNATTENDED` in this account's store. The session's resume token dies: a reconnect enters again, unelevated.
+    pub(crate) fn elevation_for(&self, ctx: &SessionCtx, device: &DeviceId) -> Result<PermissionSet, ErrorCode> {
+        if !ctx.entered_unattended() {
+            return Err(ErrorCode::NotPermitted);
+        }
+        let stored = self.stored(device).map(|d| d.grants_here).unwrap_or(PermissionSet::EMPTY);
+        if !stored.contains(PermissionSet::UNATTENDED) {
+            return Err(ErrorCode::NotPermitted);
+        }
+        let mut add = PermissionSet::UNATTENDED;
+        if stored.contains(PermissionSet::ADMIN_TERMINAL) && ctx.requested().contains(PermissionSet::ADMIN_TERMINAL) {
+            add = add | PermissionSet::ADMIN_TERMINAL;
+        }
+        lock(&self.table).resume.invalidate(ctx.session_id());
+        Ok(add)
+    }
+
     pub(crate) fn stored(&self, device: &DeviceId) -> Option<swapdesk_trust::PairedDevice> {
         self.trust.read(|s| s.find_by_id(device).cloned())
     }

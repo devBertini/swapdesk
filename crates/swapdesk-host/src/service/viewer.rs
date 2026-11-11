@@ -306,6 +306,7 @@ pub(crate) struct Inner {
     stop: Arc<Stop>,
     chat: Arc<ChatRouter>,
     terms: Arc<ViewerTerms>,
+    elevation: Arc<ElevationWait>,
     swap: SwapHandler,
     wall: Arc<dyn swapdesk_trust::WallClock>,
     clip: Arc<ClipboardHandler<PipeClipboard>>,
@@ -322,6 +323,30 @@ impl Drop for Inner {
         self.cell.get().bye(ErrorCode::NoError);
     }
 }
+
+/// The answer to this session's `Elevate` (ACCOUNTS.md 9.3), filled by the event pump: the host's
+/// `PermissionsChanged` holding `UNATTENDED`, or its `Error` about 0x000C.
+#[derive(Default)]
+pub(crate) struct ElevationWait {
+    waiting: Mutex<Option<tokio::sync::oneshot::Sender<Result<(), ErrorCode>>>>,
+}
+
+impl ElevationWait {
+    fn arm(&self) -> tokio::sync::oneshot::Receiver<Result<(), ErrorCode>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *lock(&self.waiting) = Some(tx);
+        rx
+    }
+
+    fn answer(&self, result: Result<(), ErrorCode>) {
+        if let Some(tx) = lock(&self.waiting).take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+/// How long the viewer waits for the host's answer to `Elevate` (ACCOUNTS.md 9.3).
+pub const ELEVATE_WAIT: Duration = Duration::from_secs(10);
 
 /// A viewer session, as the UI drives it. Cheap to clone; the last clone dropped disconnects.
 #[derive(Clone)]
@@ -422,6 +447,32 @@ impl ViewerHandle {
     pub fn wait_ended(&self, limit: Duration) -> Option<SessionEnd> {
         let ctx = self.inner.cell.get();
         self.inner.rt.block_on(async { tokio::time::timeout(limit, ctx.wait_ended()).await }).ok()
+    }
+
+    /// "Elevar controle" (ACCOUNTS.md 9.3), after the confirmation on this machine: sends `Elevate` and waits for the
+    /// host's answer. `Ok` when the session holds `UNATTENDED` (at once if it already does). `UNSUPPORTED_VERSION`
+    /// toward a host of minor 0 (nothing is sent); `NOT_PERMITTED` for a session that entered with a prompt, or the
+    /// host's refusal; `TIMEOUT` after [`ELEVATE_WAIT`].
+    pub async fn elevate(&self) -> Result<(), ErrorCode> {
+        let ctx = self.inner.cell.get();
+        if ctx.granted().contains(PermissionSet::UNATTENDED) {
+            return Ok(());
+        }
+        if ctx.peer_minor() < 1 {
+            return Err(ErrorCode::UnsupportedVersion);
+        }
+        if self.inner.mode != swapdesk_proto::GrantMode::Unattended {
+            return Err(ErrorCode::NotPermitted);
+        }
+        let rx = self.inner.elevation.arm();
+        if ctx.try_send(swapdesk_proto::Elevate {}).is_err() {
+            return Err(ErrorCode::Unavailable);
+        }
+        match tokio::time::timeout(ELEVATE_WAIT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ErrorCode::Unavailable),
+            Err(_) => Err(ErrorCode::Timeout),
+        }
     }
 
     /// "Inverter" (PROTOCOL.md 6.3): asks the host to swap. Resolves with how it ended; see [`SwapOutcome`].
@@ -647,6 +698,7 @@ struct Drive {
     stop: Arc<Stop>,
     redial: Arc<Redial>,
     terms: Arc<ViewerTerms>,
+    elevation: Arc<ElevationWait>,
 }
 
 fn active(ctx: &SessionCtx, since_ms: u64) -> SessionState {
@@ -687,7 +739,13 @@ impl Drive {
         let ctx = session.ctx().clone();
         while let Some(event) = session.next_event().await {
             let state = match event {
-                ViewerEvent::PermissionsChanged(_) | ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms)),
+                ViewerEvent::PermissionsChanged(granted) => {
+                    if granted.contains(PermissionSet::UNATTENDED) {
+                        self.elevation.answer(Ok(()));
+                    }
+                    Some(active(&ctx, self.since_ms))
+                }
+                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms)),
                 ViewerEvent::HostState { desktop, paused } => {
                     Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms) })
                 }
@@ -707,6 +765,9 @@ impl Drive {
                 ViewerEvent::Message(Ctl::Error(e)) => {
                     if e.about_type == 0x0501 {
                         self.terms.refused(e.about_id, e.code);
+                    }
+                    if e.about_type == 0x000C {
+                        self.elevation.answer(Err(e.code));
                     }
                     None
                 }
@@ -810,6 +871,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let _ = registry.register(clip.clone());
     let _ = registry.register(actions.clone());
     let terms = ViewerTerms::new(out_tx.clone(), rt.clone());
+    let elevation = Arc::new(ElevationWait::default());
     let _ = registry.register(terms.clone());
     let _ = registry.register(files.channel());
     cfg.registry = registry;
@@ -840,6 +902,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         stop: Arc::clone(&stop),
         redial: Arc::new(Redial { endpoint: endpoint.clone(), identity, addr, expected, cfg: redial_cfg }),
         terms: Arc::clone(&terms),
+        elevation: Arc::clone(&elevation),
     };
     drive.emit(active(&ctx, since_ms), None).await;
 
@@ -998,6 +1061,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         stop,
         chat,
         terms,
+        elevation,
         swap,
         wall,
         clip,

@@ -458,7 +458,22 @@ fn d13_a_prompted_session_and_the_administrator_terminal_never_ask() {
         .expect("the unattended session opens");
     assert_eq!(handle.mode(), swapdesk_proto::GrantMode::Unattended);
     assert_eq!(rig.open(&handle, 1, true), Err(ErrorCode::NotPermitted));
+    // "Elevar controle" (ACCOUNTS.md 9): the session gains it, and the administrator terminal opens, as SYSTEM in the
+    // service with another user logged in, without asking anybody.
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Ok(()));
+    assert!(handle.granted().contains(PermissionSet::UNATTENDED.union(PermissionSet::ADMIN_TERMINAL)));
+    assert!(rig.open(&handle, 2, true).is_ok(), "the administrator terminal opens after the elevation");
     assert_eq!(rig.consents(), 0);
+    rig.finish();
+}
+
+/// ACCOUNTS.md 9.3, the viewer's side: `elevate` sends nothing for a session that entered with a prompt.
+#[test]
+fn a_prompted_session_cannot_be_elevated() {
+    let rig = Rig::build(TERM, Some(SID_B), true, true);
+    let (handle, _seen) = rig.prompted();
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Err(ErrorCode::NotPermitted));
+    assert!(!handle.granted().contains(PermissionSet::UNATTENDED));
     rig.finish();
 }
 
