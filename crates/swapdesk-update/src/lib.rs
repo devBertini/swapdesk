@@ -11,6 +11,7 @@
 //! No OS call, no network and no `unsafe`: the crate builds on every host. The HTTPS clients and the swap of the
 //! installed files live in the platform crates.
 
+pub mod apply;
 pub mod http;
 pub mod keys;
 pub mod manager;
