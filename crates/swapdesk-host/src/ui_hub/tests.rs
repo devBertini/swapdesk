@@ -33,6 +33,7 @@ use crate::helper_tests::Passthrough;
 use crate::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use crate::testpipe::{PipeWriter, duplex_blocking};
 
+mod accounts;
 mod clip_actions;
 mod connect;
 mod elevation;
