@@ -55,6 +55,7 @@ fn the_swap_tool_sits_right_before_disconnect_toward_a_machine_of_this_os() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let ids: Vec<ControlId> = state.controls(WindowKind::Viewer).iter().map(|c| c.id).collect();

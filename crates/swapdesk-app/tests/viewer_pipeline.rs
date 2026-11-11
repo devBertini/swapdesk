@@ -147,6 +147,7 @@ fn control_granted() -> UiEvent {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::Control),
+            elevation: Default::default(),
         },
     }
 }

@@ -283,9 +283,29 @@ pub enum Decision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElevatedAction {
-    SetGrants { device_id: String, grants: Permissions },
-    ConnectUnattended { device_id: String, intent: Intent },
-    OpenAdminTerminal { session_id: u64 },
+    SetGrants {
+        device_id: String,
+        grants: Permissions,
+    },
+    /// "Elevar controle" in a viewer session (ACCOUNTS.md 9).
+    ElevateSession {
+        session_id: u64,
+    },
+    OpenAdminTerminal {
+        session_id: u64,
+    },
+}
+
+/// Whether a viewer session can be elevated (ACCOUNTS.md 9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ElevationLevel {
+    /// Entered with a prompt, toward a 1.0 host, or a host session.
+    #[default]
+    Unavailable,
+    /// Entered without a prompt: "Elevar controle" is offered.
+    Available,
+    /// Elevated: it sees and controls the secure desktops.
+    Elevated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +318,7 @@ pub enum SessionState {
         since_ms: u64,
         role: Role,
         granted: Permissions,
+        elevation: ElevationLevel,
     },
     Paused {
         desktop: DesktopKind,
@@ -612,6 +633,10 @@ pub enum Command {
     RefreshGrants {
         device_id: String,
     },
+    /// Op 50: "Elevar controle" in viewer session `session_id`, after the confirmation on this machine.
+    ElevateSession {
+        session_id: u64,
+    },
     Elevate {
         action: ElevatedAction,
         /// What the step shows, in the interface's language: the Mac's system dialog shows it as its extra text.
@@ -782,6 +807,7 @@ impl core::fmt::Debug for Command {
             Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
             Self::RenameDevice { device_id, name } => dbg_fields!("RenameDevice", device_id, name),
             Self::RefreshGrants { device_id } => dbg_fields!("RefreshGrants", device_id),
+            Self::ElevateSession { session_id } => dbg_fields!("ElevateSession", session_id),
             Self::Elevate { action, run, .. } => dbg_fields!("Elevate", action, run),
             Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
             Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),
@@ -984,6 +1010,8 @@ impl Command {
             // ends an entry that hears nothing for `CONNECT_GIVE_UP_S`.
             // The host's runner may wait on the machine (a suspend); the service gives up at 25 s.
             Command::RunAction { .. } => 30,
+            // The service waits 10 s for the host's answer.
+            Command::ElevateSession { .. } => 15,
             // The host's user may be asked first (D13: 20 s), and the shell then starts.
             // The same for the first listing of the files (D13), which then lists the folder.
             Command::TermOpen { .. } | Command::FilesList { .. } => 25,

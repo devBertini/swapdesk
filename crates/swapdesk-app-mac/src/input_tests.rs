@@ -75,7 +75,12 @@ impl Rig {
     }
 
     fn active(&self, granted: Permissions) {
-        self.session_event(SessionState::Active { since_ms: 0, role: Role::Viewer, granted });
+        self.session_event(SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted,
+            elevation: Default::default(),
+        });
     }
 
     fn recorded(&self) -> Vec<(u64, InputEvent)> {

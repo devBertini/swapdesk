@@ -67,6 +67,7 @@ fn each_button_of_the_session_bar_has_a_hint_of_its_own_that_says_what_it_does()
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let expected = [

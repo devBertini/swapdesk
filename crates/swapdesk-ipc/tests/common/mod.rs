@@ -241,6 +241,7 @@ pub fn op() -> BoxedStrategy<UiOp> {
         txt(64).prop_map(|device_id| UiOp::ForgetDevice { device_id }).boxed(),
         (txt(64), txt(64)).prop_map(|(device_id, name)| UiOp::RenameDevice { device_id, name }).boxed(),
         txt(64).prop_map(|device_id| UiOp::RefreshGrants { device_id }).boxed(),
+        any::<u64>().prop_map(|session_id| UiOp::ElevateSession { session_id }).boxed(),
         (txt(64), pick(Intent::ALL), any::<bool>())
             .prop_map(|(device_id, intent, unattended)| UiOp::Connect { device_id, intent, unattended })
             .boxed(),
@@ -323,8 +324,9 @@ pub fn notify() -> BoxedStrategy<Notify> {
     let state = prop_oneof![
         Just(SessionState::Connecting),
         any::<u16>().prop_map(|remaining_s| SessionState::Prompted { remaining_s }),
-        (any::<u64>(), pick(Role::ALL), any::<u16>())
-            .prop_map(|(since_ms, role, granted)| { SessionState::Active { since_ms, role, granted } }),
+        (any::<u64>(), pick(Role::ALL), any::<u16>(), 0u8..3).prop_map(|(since_ms, role, granted, elevation)| {
+            SessionState::Active { since_ms, role, granted, elevation }
+        }),
         pick(Desktop::ALL).prop_map(|desktop| SessionState::Paused { desktop }),
         any::<u32>().prop_map(|attempt| SessionState::Reconnecting { attempt }),
         any::<u16>().prop_map(|remaining_s| SessionState::Waking { remaining_s }),
@@ -577,7 +579,12 @@ pub fn ticket() -> BoxedStrategy<ElevationTicket> {
 }
 
 pub fn elev_action() -> BoxedStrategy<ElevAction> {
-    (txt(64), any::<u16>()).prop_map(|(device_id, grants)| ElevAction::SetGrants { device_id, grants }).boxed()
+    prop_oneof![
+        (txt(64), any::<u16>()).prop_map(|(device_id, grants)| ElevAction::SetGrants { device_id, grants }),
+        any::<u64>().prop_map(|session_id| ElevAction::OpenAdminTerminal { session_id }),
+        any::<u64>().prop_map(|session_id| ElevAction::ElevateSession { session_id }),
+    ]
+    .boxed()
 }
 
 pub fn extra_op() -> BoxedStrategy<UiOp> {

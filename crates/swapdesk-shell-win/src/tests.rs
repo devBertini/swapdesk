@@ -360,6 +360,7 @@ fn hovering_a_button_of_the_session_bar_shows_what_that_button_does_and_never_th
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let plain = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
@@ -490,6 +491,7 @@ fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
             since_ms: 0,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
@@ -524,6 +526,7 @@ fn the_viewer_toolbar_has_no_swap_toward_another_os() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();

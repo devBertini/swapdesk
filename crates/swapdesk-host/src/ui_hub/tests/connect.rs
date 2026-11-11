@@ -468,19 +468,19 @@ fn a_viewer_asks_unattended_only_toward_a_host_known_to_be_minor_1() {
     p.finish();
 }
 
-/// Until each account of a machine has its own key, the other machine's grant is the machine's: only an
-/// administrator account asks for the entry, so a standard account of the viewer machine is asked about at the
-/// host like any connect (D10).
+/// D45 (it was `a_standard_account_of_the_viewer_machine_does_not_ask_for_the_entry`, D10's interim rule): each
+/// account has its own key, so the other machine's grant is this account's alone, and a standard account enters
+/// without a prompt like an administrator. What reaches the machine level asks this machine's confirmation later.
 #[test]
-fn a_standard_account_of_the_viewer_machine_does_not_ask_for_the_entry() {
+fn a_standard_account_of_the_viewer_machine_enters_without_a_prompt() {
     let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
     let mut p = Pair::build_as(stored, Some(swapdesk_proto::PROTO_MINOR), info(false));
     let entry = p.press();
-    let incoming = p.incoming();
-    assert_eq!(incoming.device.id, p.viewer.hex());
-    assert!(p.viewer_ui.nothing_within(Duration::from_millis(200), is_active), "no session before the answer");
-    assert!(p.answer(&incoming, Decision::Decline).is_ok());
-    assert_eq!(not_opened(&mut p.viewer_ui, entry, Duration::from_secs(5)), ConnectWhy::Declined);
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(p.host_ui.nothing_within(Duration::from_millis(200), is_incoming), "the host's user is not asked");
+    let hosted = p.host.core.host().sessions();
+    assert!(!hosted[0].granted.contains(PermissionSet::UNATTENDED), "without the machine-level bits");
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: session }).is_ok());
     p.finish();
 }
 
@@ -498,5 +498,122 @@ fn the_card_of_a_device_with_nothing_stored_never_ticks_the_terminal() {
         assert_eq!(preset.bits() & bit, 0, "{preset:?}");
     }
     assert!(p.answer(&incoming, Decision::Decline).is_ok());
+    p.finish();
+}
+
+// ---------- ELEVATION.md slice 7: the viewer-side actions of a session ----------
+
+/// The elevated instance of the asking user, in the same session.
+fn approver() -> ConnInfo {
+    ConnInfo { admin: true, ..administrator_account() }
+}
+
+fn ticket_for(ui: &mut Client, action: swapdesk_ipc::ElevAction) -> Result<swapdesk_ipc::ElevationTicket, ApiCode> {
+    match ui.call(UiOp::ElevationBegin { action })? {
+        ReplyBody::ElevationTicket { ticket, .. } => Ok(ticket),
+        other => panic!("not a ticket: {other:?}"),
+    }
+}
+
+fn admin_open(ui: &mut Client, session_id: u64) -> Result<ReplyBody, ApiCode> {
+    ui.call(UiOp::TermOpen { session_id, cols: 80, rows: 24, admin: true })
+}
+
+/// An entry without a prompt toward a host of 1.1, live in the viewer's interface.
+fn unattended_pair() -> (Pair, u64) {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+    let mut p = Pair::build_with(stored, Some(swapdesk_proto::PROTO_MINOR));
+    let entry = p.press();
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    (p, session)
+}
+
+/// A prompted session that holds the administrator terminal (stored, asked for, and ticked at the host).
+fn prompted_pair() -> (Pair, u64) {
+    let mut p =
+        Pair::build_with(PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL, Some(swapdesk_proto::PROTO_MINOR));
+    let entry = p.press();
+    let incoming = p.incoming();
+    let ticked = (PermissionSet::CONTROL | PermissionSet::ADMIN_TERMINAL).bits();
+    let op = UiOp::AnswerIncoming { request_id: incoming.request_id, decision: Decision::Accept, grants: ticked };
+    assert!(p.host_ui.call(op).is_ok());
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(p.host.core.host().sessions()[0].granted.contains(PermissionSet::ADMIN_TERMINAL));
+    (p, session)
+}
+
+#[test]
+fn a_session_ticket_is_refused_unless_it_is_this_connections_and_can_be_elevated() {
+    use swapdesk_ipc::ElevAction::ElevateSession;
+    let (mut p, session) = unattended_pair();
+    assert!(ticket_for(&mut p.viewer_ui, ElevateSession { session_id: session }).is_ok());
+    assert_eq!(ticket_for(&mut p.viewer_ui, ElevateSession { session_id: session + 1 }), Err(ApiCode::NotFound));
+    let mut other = p.viewer.client(administrator_account());
+    assert_eq!(
+        ticket_for(&mut other, ElevateSession { session_id: session }),
+        Err(ApiCode::NotFound),
+        "another connection's"
+    );
+    drop(other);
+    p.finish();
+    // A prompted session cannot be elevated.
+    let (mut p, session) = prompted_pair();
+    assert_eq!(ticket_for(&mut p.viewer_ui, ElevateSession { session_id: session }), Err(ApiCode::Invalid));
+    p.finish();
+}
+
+#[test]
+fn an_admin_terminal_ticket_needs_a_session_holding_admin_terminal() {
+    use swapdesk_ipc::ElevAction::OpenAdminTerminal;
+    // An entry without a prompt does not hold it before the elevation.
+    let (mut p, session) = unattended_pair();
+    assert_eq!(ticket_for(&mut p.viewer_ui, OpenAdminTerminal { session_id: session }), Err(ApiCode::Invalid));
+    p.finish();
+    let (mut p, session) = prompted_pair();
+    assert!(ticket_for(&mut p.viewer_ui, OpenAdminTerminal { session_id: session }).is_ok());
+    p.finish();
+}
+
+/// ACCOUNTS.md 9.3 and 8.3: "Elevar controle" and the administrator terminal need this machine's confirmation.
+#[test]
+fn elevate_and_the_administrator_terminal_need_the_viewer_side_pass() {
+    let (mut p, session) = unattended_pair();
+    assert_eq!(p.viewer_ui.call(UiOp::ElevateSession { session_id: session }).unwrap_err(), ApiCode::NeedsAdmin);
+    let ticket =
+        ticket_for(&mut p.viewer_ui, swapdesk_ipc::ElevAction::ElevateSession { session_id: session }).unwrap();
+    p.viewer.hub.confirm_elevation(&ticket, &approver(), true).expect("confirmed");
+    assert!(p.viewer_ui.call(UiOp::ElevateSession { session_id: session }).is_ok(), "the pass lets it through");
+    let hosted = p.host.core.host().sessions();
+    assert!(hosted[0].granted.contains(PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL));
+    let elevated = p.host.audit.entries().into_iter().any(|e| e.event == AuditEvent::Elevated);
+    assert!(elevated, "the host logs it");
+    p.finish();
+    // The administrator terminal of a prompted session: the same.
+    let (mut p, session) = prompted_pair();
+    assert_eq!(admin_open(&mut p.viewer_ui, session).unwrap_err(), ApiCode::NeedsAdmin);
+    p.finish();
+}
+
+#[test]
+fn an_elevated_session_opens_the_administrator_terminal_without_a_second_pass() {
+    let (mut p, session) = unattended_pair();
+    let ticket =
+        ticket_for(&mut p.viewer_ui, swapdesk_ipc::ElevAction::ElevateSession { session_id: session }).unwrap();
+    p.viewer.hub.confirm_elevation(&ticket, &approver(), true).expect("confirmed");
+    assert!(p.viewer_ui.call(UiOp::ElevateSession { session_id: session }).is_ok());
+    // The elevation was confirmed on this machine: the terminal asks nothing more, twice.
+    assert!(admin_open(&mut p.viewer_ui, session).is_ok());
+    assert!(admin_open(&mut p.viewer_ui, session).is_ok());
+    p.finish();
+}
+
+#[test]
+fn an_admin_terminal_pass_opens_one_terminal() {
+    let (mut p, session) = prompted_pair();
+    let ticket =
+        ticket_for(&mut p.viewer_ui, swapdesk_ipc::ElevAction::OpenAdminTerminal { session_id: session }).unwrap();
+    p.viewer.hub.confirm_elevation(&ticket, &approver(), true).expect("confirmed");
+    assert!(admin_open(&mut p.viewer_ui, session).is_ok(), "the pass");
+    assert_eq!(admin_open(&mut p.viewer_ui, session).unwrap_err(), ApiCode::NeedsAdmin, "used once");
     p.finish();
 }

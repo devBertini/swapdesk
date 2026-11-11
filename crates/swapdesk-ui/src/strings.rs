@@ -195,7 +195,7 @@ strings! {
     ElevActGrantUnattended => "Liberar “Entrar sem perguntar” para {0}", "Allow “Enter without asking” for {0}";
     ElevActGrantAdminTerminal => "Liberar o terminal de administrador para {0}", "Allow the administrator terminal for {0}";
     ElevActGrants => "Mudar o que {0} pode fazer neste computador", "Change what {0} can do on this computer";
-    ElevActConnectUnattended => "Entrar sem perguntar em {0}", "Enter {0} without asking";
+    ElevActElevateSession => "Elevar o controle em {0}", "Elevate control on {0}";
     ElevActAdminTerminalOpen => "Abrir o terminal de administrador", "Open the administrator terminal";
     ElevContinue => "Continuar", "Continue";
     ElevCancel => "Cancelar", "Cancel";
@@ -510,6 +510,9 @@ strings! {
     PermAdminTerminalMacOff => "Indisponível no macOS nesta versão", "Not available on macOS in this version";
     SidebarLegacyNote => "Os pareamentos de antes da versão 1.1 não passam para as contas. Pareie de novo com os computadores que você usa.", "Pairings made before version 1.1 do not carry over to accounts. Pair again with the computers you use.";
     AuditElevated => "Controle elevado", "Elevated control";
+    ElevateButton => "Elevar controle", "Elevate control";
+    ElevateHint => "Controlar também os avisos de administrador e a tela de entrada", "Also control administrator prompts and the sign-in screen";
+    PausedElevateBody => "O {0} mostra uma tela protegida. Eleve o controle para vê-la e usá-la.", "{0} shows a protected screen. Elevate control to see and use it.";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

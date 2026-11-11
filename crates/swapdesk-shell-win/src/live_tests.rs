@@ -291,7 +291,12 @@ fn session(id: u64, state: swapdesk_ui::SessionState) -> swapdesk_ui::UiEvent {
 }
 
 fn active(role: swapdesk_ui::Role) -> swapdesk_ui::SessionState {
-    swapdesk_ui::SessionState::Active { since_ms: 0, role, granted: swapdesk_ui::Permissions::NONE }
+    swapdesk_ui::SessionState::Active {
+        since_ms: 0,
+        role,
+        granted: swapdesk_ui::Permissions::NONE,
+        elevation: Default::default(),
+    }
 }
 
 fn iconic(live: &Live) -> bool {

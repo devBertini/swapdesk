@@ -173,6 +173,12 @@ pub enum UiOp {
     },
     /// Ops 40 to 49: the files feature (stage 44), see [`FilesOp`].
     Files(FilesOp),
+    /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
+    /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
+    /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
+    ElevateSession {
+        session_id: u64,
+    },
 }
 
 impl UiOp {
@@ -218,6 +224,7 @@ impl UiOp {
             Self::ElevationEnd { .. } => 38,
             Self::RefreshGrants { .. } => 39,
             Self::Files(f) => f.code(),
+            Self::ElevateSession { .. } => 50,
         }
     }
 
@@ -314,6 +321,7 @@ impl UiOp {
             Self::ElevationBegin { action } => action.put(w, 0)?,
             Self::ElevationDescribe { ticket } | Self::ElevationEnd { ticket } => ticket.put(w, 0)?,
             Self::RefreshGrants { device_id } => w.put_str(device_id, MAX_NAME)?,
+            Self::ElevateSession { session_id } => w.put_u64(*session_id),
             Self::ElevationConfirm { ticket, approve } => {
                 ticket.put(w, 0)?;
                 w.put_bool(*approve);
@@ -364,6 +372,7 @@ impl UiOp {
             38 => Self::ElevationEnd { ticket: ElevationTicket::get(r, 0)? },
             39 => Self::RefreshGrants { device_id: r.str(MAX_NAME)? },
             40..=49 => Self::Files(FilesOp::get_body(op, r)?),
+            50 => Self::ElevateSession { session_id: r.u64()? },
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }
@@ -490,7 +499,7 @@ impl ReplyBody {
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;

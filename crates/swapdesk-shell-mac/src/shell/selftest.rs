@@ -186,7 +186,12 @@ fn a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm: MainThrea
         fn detached(&self) {}
     }
     let session = |id: u64, state: SessionState| UiEvent::Session { session_id: id, device_id: String::new(), state };
-    let active = |role: Role| SessionState::Active { since_ms: 0, role, granted: swapdesk_ui::Permissions::NONE };
+    let active = |role: Role| SessionState::Active {
+        since_ms: 0,
+        role,
+        granted: swapdesk_ui::Permissions::NONE,
+        elevation: Default::default(),
+    };
 
     // A mock run: the scenario holds an Active host session and the window stays.
     let shell = open(mtm, Scenario::Banner, ViewerHooks::default());

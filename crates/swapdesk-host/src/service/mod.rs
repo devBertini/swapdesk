@@ -65,6 +65,7 @@ pub use helper_link::{AttachError, HelperEvent, HelperLink};
 pub use routing::{HelperKind, input_helper, media_helper};
 pub use shared::CoreEvent;
 pub use terminal::TerminalEnv;
+pub(crate) use viewer::elevation_of as viewer_elevation_of;
 pub use viewer::{
     ApplyError, ConnectError, StateChange, TermOut, Timeout, ViewerHandle, ViewerMessages, ViewerOut, WaitHook,
     end_reason,

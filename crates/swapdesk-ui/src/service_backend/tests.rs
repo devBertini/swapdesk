@@ -254,7 +254,12 @@ fn notifications_become_events_and_wake_the_ui() {
     let session = UiEvent::Session {
         session_id: 11,
         device_id: "mac".into(),
-        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted: Permissions(3) },
+        state: SessionState::Active {
+            since_ms: 1,
+            role: Role::Viewer,
+            granted: Permissions(3),
+            elevation: Default::default(),
+        },
     };
     svc.write(Message::UiNotify(Notify::DevicesChanged(vec![cv::device_to_wire(&device("mac"))])));
     svc.write(Message::UiNotify(cv::event_to_notify(&session).unwrap()));
@@ -987,23 +992,29 @@ fn elevate_without_an_elevator_reports_internal_and_sends_no_ticket() {
     assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: l, result: Ok(Reply::Devices(vec![])) }]);
 }
 
+/// ELEVATION.md slice 7 (it was `an_action_on_hold_sends_no_ticket_and_reports_internal`): no action is on hold any
+/// more; each one asks the service for a ticket with its own wire action.
 #[test]
-fn an_action_on_hold_sends_no_ticket_and_reports_internal() {
+fn every_action_gets_a_ticket() {
     let (b, mut svc, _) = Fake::connect();
     let elevator = FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) });
     b.set_elevator(elevator.clone());
-    for action in [
-        ElevatedAction::ConnectUnattended { device_id: "mac".into(), intent: Intent::Control },
-        ElevatedAction::OpenAdminTerminal { session_id: 1 },
+    for (action, wire) in [
+        (ElevatedAction::ElevateSession { session_id: 4 }, ElevAction::ElevateSession { session_id: 4 }),
+        (ElevatedAction::OpenAdminTerminal { session_id: 1 }, ElevAction::OpenAdminTerminal { session_id: 1 }),
     ] {
         let t = b.send(Command::Elevate { action: action.clone(), line: String::new(), run: 1 });
+        let (req, op) = svc.request();
+        assert_eq!(op, UiOp::ElevationBegin { action: wire });
+        svc.reply(req, ReplyBody::ElevationTicket { ticket: TICKET, ttl_s: 120 });
+        let (req, end) = svc.request();
+        assert_eq!(end, UiOp::ElevationEnd { ticket: TICKET });
+        svc.reply(req, ReplyBody::ElevationOutcome(ElevationOutcome::Confirmed));
         let got = collect(&b, 2);
-        assert_eq!(got[0], UiEvent::ElevationResult { action, run: 1, result: Err(ApiError::new(ApiCode::Internal)) });
+        assert_eq!(got[0], UiEvent::ElevationResult { action, run: 1, result: Ok(()) });
         assert_eq!(got[1], UiEvent::Reply { ticket: t, result: Ok(Reply::Done) });
     }
-    assert!(elevator.seen.lock().unwrap().is_empty());
-    b.send(Command::ListDevices);
-    assert_eq!(svc.request(), (1, UiOp::ListDevices));
+    assert_eq!(elevator.seen.lock().unwrap().len(), 2);
 }
 
 #[test]

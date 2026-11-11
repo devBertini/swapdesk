@@ -314,17 +314,8 @@ fn a_confirmed_elevation_resends_the_command_that_needed_it() {
     let _ = s.take_followups();
     s.apply(UiEvent::ElevationResult { action, run, result: Err(ApiError::new(ApiCode::Refused)) });
     assert!(s.take_followups().is_empty());
-
-    // The other two actions are on hold: their step closes and nothing is resent.
-    let mut s = viewer();
-    let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
-    tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
-    let a = s.activate(ControlId::DialogPrimary);
-    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
-    let _ = s.take_followups();
-    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
-    assert!(s.elevation().is_none());
-    assert!(s.take_followups().is_empty());
+    // The other two actions resend theirs: a_confirmed_elevate_session_sends_elevate_session_again and
+    // a_confirmed_admin_terminal_opens_the_administrator_terminal.
 }
 
 #[test]
@@ -389,9 +380,13 @@ fn each_failure_code_has_its_line_in_the_step() {
 #[test]
 fn other_admin_only_commands_also_lead_to_the_elevation_step() {
     let mut s = viewer();
+    tracked_error(&mut s, &Command::ElevateSession { session_id: 1 }, ApiCode::NeedsAdmin);
+    assert!(matches!(s.elevation().unwrap().action, ElevatedAction::ElevateSession { session_id: 1 }));
+    // ACCOUNTS.md 9: entering without a prompt asks nothing on this machine any more.
+    let mut s = viewer();
     let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
     tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
-    assert!(matches!(s.elevation().unwrap().action, ElevatedAction::ConnectUnattended { .. }));
+    assert!(s.elevation().is_none());
     let mut s = viewer();
     tracked_error(&mut s, &Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }, ApiCode::NeedsAdmin);
     assert!(matches!(s.elevation().unwrap().action, ElevatedAction::OpenAdminTerminal { session_id: 1 }));
@@ -413,6 +408,7 @@ fn session_events_open_and_close_the_windows() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
@@ -431,7 +427,12 @@ fn session_events_open_and_close_the_windows() {
     s.apply(UiEvent::Session {
         session_id: 2,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 0, role: Role::Host, granted: Permissions::NONE },
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Host,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     });
     assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
     s.apply(UiEvent::Session {
@@ -636,7 +637,12 @@ fn stats_redraw_only_when_the_option_is_on() {
     s.apply(UiEvent::Session {
         session_id: 1,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     });
     let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1 } });
     assert!(c.is_none(), "no redraw for numbers nobody sees");
@@ -1071,6 +1077,7 @@ fn a_lost_session_shows_the_attempt_and_says_so_when_the_minute_ends() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::Control),
+            elevation: Default::default(),
         },
     });
     assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbDisconnect));
@@ -1177,7 +1184,12 @@ fn a_display_listing_belongs_to_the_session_its_command_named() {
     s.apply(session_event(
         1,
         MAC,
-        SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     ));
     s.apply(session_event(2, AIR, SessionState::Connecting));
     s.track(Ticket(7), &Command::ListDisplays { session_id: 2 });
@@ -1198,12 +1210,22 @@ fn a_viewer_session_coming_up_sends_the_audio_switch_once() {
     let mut s = base();
     s.apply(session_event(3, MAC, SessionState::Connecting));
     assert!(s.take_followups().is_empty(), "nothing before the session is up");
-    let active = SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE };
+    let active = SessionState::Active {
+        since_ms: 0,
+        role: Role::Viewer,
+        granted: Permissions::NONE,
+        elevation: Default::default(),
+    };
     s.apply(session_event(3, MAC, active.clone()));
     assert_eq!(s.take_followups(), vec![Command::SetAudio { session_id: 3, on: true }]);
     s.apply(session_event(3, MAC, active));
     assert!(s.take_followups().is_empty(), "an update of a live session sends nothing");
-    let host = SessionState::Active { since_ms: 0, role: Role::Host, granted: Permissions::NONE };
+    let host = SessionState::Active {
+        since_ms: 0,
+        role: Role::Host,
+        granted: Permissions::NONE,
+        elevation: Default::default(),
+    };
     s.apply(session_event(4, MAC, host));
     assert!(s.take_followups().is_empty(), "the host side has no audio switch");
 }
@@ -1217,14 +1239,19 @@ fn the_display_listing_is_asked_once_per_viewer_session() {
     s.apply(session_event(
         3,
         MAC,
-        SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     ));
     assert_eq!(s.take_display_request(), Some(Command::ListDisplays { session_id: 3 }));
     assert!(s.take_display_request().is_none());
 }
 
 fn active(role: Role, granted: Permissions) -> SessionState {
-    SessionState::Active { since_ms: 0, role, granted }
+    SessionState::Active { since_ms: 0, role, granted, elevation: Default::default() }
 }
 
 #[test]
@@ -1623,11 +1650,12 @@ fn an_early_refusal_of_the_connect_ends_the_card_with_its_why() {
         assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Ended { why }, "{code:?}");
         assert!(s.error().is_none(), "the card says it ({code:?})");
     }
-    // An unattended connect that needs an administrator still asks for one, and leaves no card behind.
+    // ACCOUNTS.md 9: entering without a prompt never asks for an administrator on this machine (the elevation step
+    // comes later, inside the session).
     let mut s = base();
     let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
     tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
-    assert!(s.elevation().is_some() && s.wait_card(MAC).is_none());
+    assert!(s.elevation().is_none());
 }
 
 #[test]
@@ -1848,7 +1876,7 @@ fn the_administrator_terminal_is_offered_only_with_its_grant_and_is_labelled() {
     s.apply(UiEvent::Session {
         session_id: 1,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted },
+        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted, elevation: Default::default() },
     });
     assert!(s.admin_terminal_offered());
     let cmds = open_terminal(&mut s);
@@ -1989,6 +2017,7 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
             since_ms: 0,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert!(!has(&s, WindowKind::Banner, ControlId::BannerSwap));
@@ -2009,6 +2038,7 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert!(has(&v, WindowKind::Viewer, ControlId::TbSwap));
@@ -2027,6 +2057,7 @@ fn the_banner_timer_is_due_at_the_next_minute_boundary_and_only_while_hosting() 
             since_ms: since,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert_eq!(s.banner_minute_delay_ms(since), Some(60_000), "on the boundary the next one is a minute away");
@@ -2639,4 +2670,32 @@ fn opening_permissions_asks_the_service_to_refresh_that_device() {
     s.activate(ControlId::Tab(DeviceTab::Overview));
     s.activate(ControlId::Tab(DeviceTab::Permissions));
     assert_eq!(s.take_followups().len(), 1);
+}
+
+/// ELEVATION.md slice 7: a confirmed "Elevar controle" sends op 50 again, once.
+#[test]
+fn a_confirmed_elevate_session_sends_elevate_session_again() {
+    let mut s = viewer();
+    tracked_error(&mut s, &Command::ElevateSession { session_id: 1 }, ApiCode::NeedsAdmin);
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!("{:?}", a.commands) };
+    assert_eq!(action, ElevatedAction::ElevateSession { session_id: 1 });
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
+    assert!(s.elevation().is_none());
+    assert_eq!(s.take_followups(), vec![Command::ElevateSession { session_id: 1 }]);
+    assert!(s.take_followups().is_empty());
+}
+
+/// ELEVATION.md slice 7: a confirmed administrator terminal opens it in that session's panel.
+#[test]
+fn a_confirmed_admin_terminal_opens_the_administrator_terminal() {
+    let mut s = viewer();
+    tracked_error(&mut s, &Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }, ApiCode::NeedsAdmin);
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!("{:?}", a.commands) };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
+    assert_eq!(s.take_followups(), vec![Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }]);
+    assert_eq!(s.term_phase(), &TermPhase::Opening { admin: true });
 }

@@ -170,3 +170,27 @@ fn an_unknown_elev_action_tag_is_a_codec_error() {
         assert!(matches!(ReplyBody::decode(36, &body), Err(IpcError::Codec(_))), "reply, tag {tag}");
     }
 }
+
+/// ELEVATION.md 3.1 and ACCOUNTS.md 9.3: the actions of tags 2 and 3 and op 50 round-trip; tag 1, and every tag from
+/// 4 up, is a codec error.
+#[test]
+fn elev_action_tags_2_and_3_round_trip_and_tag_1_is_a_codec_error() {
+    for action in [ElevAction::OpenAdminTerminal { session_id: 7 }, ElevAction::ElevateSession { session_id: u64::MAX }]
+    {
+        let msg = Message::UiRequest { req: 3, op: UiOp::ElevationBegin { action } };
+        assert_eq!(decode_message(&encode_message(&msg).unwrap()).unwrap(), msg);
+    }
+    let op = Message::UiRequest { req: 4, op: UiOp::ElevateSession { session_id: 9 } };
+    assert_eq!(decode_message(&encode_message(&op).unwrap()).unwrap(), op);
+    let mut bytes = encode_message(&Message::UiRequest {
+        req: 5,
+        op: UiOp::ElevationBegin { action: ElevAction::ElevateSession { session_id: 1 } },
+    })
+    .unwrap();
+    // The action's tag is the first byte after the op's header: find tag 3 followed by session id 1 and break it.
+    let at = bytes.windows(9).position(|w| w == [3, 1, 0, 0, 0, 0, 0, 0, 0]).expect("the action");
+    for bad in [1u8, 4, 255] {
+        bytes[at] = bad;
+        assert!(decode_message(&bytes).is_err(), "tag {bad}");
+    }
+}

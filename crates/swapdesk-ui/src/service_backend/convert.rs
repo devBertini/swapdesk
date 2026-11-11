@@ -264,9 +264,16 @@ pub fn session_state_to_wire(s: &a::SessionState) -> w::SessionState {
     match s {
         a::SessionState::Connecting => w::SessionState::Connecting,
         a::SessionState::Prompted { remaining_s } => w::SessionState::Prompted { remaining_s: *remaining_s },
-        a::SessionState::Active { since_ms, role, granted } => {
-            w::SessionState::Active { since_ms: *since_ms, role: role_to_wire(*role), granted: granted.0 }
-        }
+        a::SessionState::Active { since_ms, role, granted, elevation } => w::SessionState::Active {
+            since_ms: *since_ms,
+            role: role_to_wire(*role),
+            granted: granted.0,
+            elevation: match elevation {
+                a::ElevationLevel::Unavailable => 0,
+                a::ElevationLevel::Available => 1,
+                a::ElevationLevel::Elevated => 2,
+            },
+        },
         a::SessionState::Paused { desktop } => w::SessionState::Paused { desktop: desktop_to_wire(*desktop) },
         a::SessionState::Reconnecting { attempt } => w::SessionState::Reconnecting { attempt: *attempt },
         a::SessionState::Waking { remaining_s } => w::SessionState::Waking { remaining_s: *remaining_s },
@@ -279,9 +286,16 @@ pub fn session_state_from_wire(s: w::SessionState) -> a::SessionState {
     match s {
         w::SessionState::Connecting => a::SessionState::Connecting,
         w::SessionState::Prompted { remaining_s } => a::SessionState::Prompted { remaining_s },
-        w::SessionState::Active { since_ms, role, granted } => {
-            a::SessionState::Active { since_ms, role: role_from_wire(role), granted: a::Permissions(granted) }
-        }
+        w::SessionState::Active { since_ms, role, granted, elevation } => a::SessionState::Active {
+            since_ms,
+            role: role_from_wire(role),
+            granted: a::Permissions(granted),
+            elevation: match elevation {
+                1 => a::ElevationLevel::Available,
+                2 => a::ElevationLevel::Elevated,
+                _ => a::ElevationLevel::Unavailable,
+            },
+        },
         w::SessionState::Paused { desktop } => a::SessionState::Paused { desktop: desktop_from_wire(desktop) },
         w::SessionState::Reconnecting { attempt } => a::SessionState::Reconnecting { attempt },
         w::SessionState::Waking { remaining_s } => a::SessionState::Waking { remaining_s },
@@ -571,6 +585,7 @@ pub fn route(c: &a::Command) -> Route {
         C::ForgetDevice { device_id } => O::ForgetDevice { device_id: device_id.clone() },
         C::RenameDevice { device_id, name } => O::RenameDevice { device_id: device_id.clone(), name: name.clone() },
         C::RefreshGrants { device_id } => O::RefreshGrants { device_id: device_id.clone() },
+        C::ElevateSession { session_id } => O::ElevateSession { session_id: *session_id },
         C::Connect { device_id, intent, unattended } => {
             O::Connect { device_id: device_id.clone(), intent: intent_to_wire(*intent), unattended: *unattended }
         }
@@ -714,7 +729,12 @@ mod tests {
         for s in [
             a::SessionState::Connecting,
             a::SessionState::Prompted { remaining_s: 9 },
-            a::SessionState::Active { since_ms: 1, role: a::Role::Host, granted: a::Permissions(3) },
+            a::SessionState::Active {
+                since_ms: 1,
+                role: a::Role::Host,
+                granted: a::Permissions(3),
+                elevation: Default::default(),
+            },
             a::SessionState::Paused { desktop: a::DesktopKind::Secure },
             a::SessionState::Reconnecting { attempt: 2 },
             a::SessionState::Waking { remaining_s: 30 },

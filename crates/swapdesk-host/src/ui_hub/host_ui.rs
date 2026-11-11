@@ -260,7 +260,12 @@ impl HostUi for HubHostUi {
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
-                    state: SessionState::Active { since_ms: now, role: Role::Host, granted: granted.bits() },
+                    state: SessionState::Active {
+                        since_ms: now,
+                        role: Role::Host,
+                        granted: granted.bits(),
+                        elevation: 0,
+                    },
                 });
             }
             HostEvent::Refused { device, code } => {
@@ -290,7 +295,7 @@ impl HostUi for HubHostUi {
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
-                    state: SessionState::Active { since_ms: since, role: Role::Host, granted: to.bits() },
+                    state: SessionState::Active { since_ms: since, role: Role::Host, granted: to.bits(), elevation: 0 },
                 });
             }
             HostEvent::Elevated { device, session_id, granted } => {
@@ -302,7 +307,12 @@ impl HostUi for HubHostUi {
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
-                    state: SessionState::Active { since_ms: since, role: Role::Host, granted: granted.bits() },
+                    state: SessionState::Active {
+                        since_ms: since,
+                        role: Role::Host,
+                        granted: granted.bits(),
+                        elevation: 0,
+                    },
                 });
             }
             HostEvent::PeerOffline { device, session_id } => {
@@ -317,7 +327,7 @@ impl HostUi for HubHostUi {
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
-                    state: SessionState::Active { since_ms: since, role: Role::Host, granted },
+                    state: SessionState::Active { since_ms: since, role: Role::Host, granted, elevation: 0 },
                 });
             }
             HostEvent::ConsentAsked { device, feature, answer } => {

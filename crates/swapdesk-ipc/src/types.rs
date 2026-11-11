@@ -126,7 +126,11 @@ wire_enum! {
 pub enum ElevAction {
     /// Set `grants` (the raw bit set of PROTOCOL.md 6.1, validated by the service) of a paired device.
     SetGrants { device_id: String, grants: u16 },
-    // Tags 1 and 2 are unassigned: an unknown tag is a codec error.
+    // Tag 1 is unassigned: an unknown tag is a codec error.
+    /// Open the administrator terminal in viewer session `session_id` (ELEVATION.md 3.1, tag 2).
+    OpenAdminTerminal { session_id: u64 },
+    /// "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3, tag 3).
+    ElevateSession { session_id: u64 },
 }
 
 impl Wire for ElevAction {
@@ -139,6 +143,14 @@ impl Wire for ElevAction {
                 w.put_str(device_id, MAX_NAME)?;
                 w.put_u16(*grants);
             }
+            Self::OpenAdminTerminal { session_id } => {
+                w.put_u8(2);
+                w.put_u64(*session_id);
+            }
+            Self::ElevateSession { session_id } => {
+                w.put_u8(3);
+                w.put_u64(*session_id);
+            }
         }
         Ok(())
     }
@@ -146,6 +158,8 @@ impl Wire for ElevAction {
     fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
         match r.u8()? {
             0 => Ok(Self::SetGrants { device_id: r.str(MAX_NAME)?, grants: r.u16()? }),
+            2 => Ok(Self::OpenAdminTerminal { session_id: r.u64()? }),
+            3 => Ok(Self::ElevateSession { session_id: r.u64()? }),
             t => Err(unknown_tag("ElevAction", t)),
         }
     }
@@ -382,10 +396,12 @@ pub enum SessionState {
     Prompted {
         remaining_s: u16,
     },
+    /// `elevation` (ACCOUNTS.md 9.3, viewer sessions): 0 not available, 1 available ("Elevar controle"), 2 elevated.
     Active {
         since_ms: u64,
         role: Role,
         granted: u16,
+        elevation: u8,
     },
     Paused {
         desktop: Desktop,
@@ -417,11 +433,12 @@ impl Wire for SessionState {
                 w.put_u8(1);
                 w.put_u16(*remaining_s);
             }
-            Self::Active { since_ms, role, granted } => {
+            Self::Active { since_ms, role, granted, elevation } => {
                 w.put_u8(2);
                 w.put_u64(*since_ms);
                 role.put(w, 0)?;
                 w.put_u16(*granted);
+                w.put_u8(*elevation);
             }
             Self::Paused { desktop } => {
                 w.put_u8(3);
@@ -451,7 +468,7 @@ impl Wire for SessionState {
         match r.u8()? {
             0 => Ok(Self::Connecting),
             1 => Ok(Self::Prompted { remaining_s: r.u16()? }),
-            2 => Ok(Self::Active { since_ms: r.u64()?, role: Role::get(r, 0)?, granted: r.u16()? }),
+            2 => Ok(Self::Active { since_ms: r.u64()?, role: Role::get(r, 0)?, granted: r.u16()?, elevation: r.u8()? }),
             3 => Ok(Self::Paused { desktop: Desktop::get(r, 0)? }),
             4 => Ok(Self::Reconnecting { attempt: r.u32()? }),
             5 => Ok(Self::Waking { remaining_s: r.u16()? }),

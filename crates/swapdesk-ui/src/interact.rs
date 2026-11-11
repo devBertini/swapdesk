@@ -280,7 +280,7 @@ pub fn elevation_action_text(lang: Language, action: &ElevatedAction, peer_name:
             }
             lines.join("\n")
         }
-        ElevatedAction::ConnectUnattended { .. } => say(MsgKey::ElevActConnectUnattended, &[peer_name]),
+        ElevatedAction::ElevateSession { .. } => say(MsgKey::ElevActElevateSession, &[peer_name]),
         ElevatedAction::OpenAdminTerminal { .. } => say(MsgKey::ElevActAdminTerminalOpen, &[]),
     }
 }
@@ -972,9 +972,16 @@ impl UiState {
 
     fn elevation_action_text(&self, action: &ElevatedAction) -> String {
         let peer = match action {
-            ElevatedAction::SetGrants { device_id, .. } | ElevatedAction::ConnectUnattended { device_id, .. } => {
+            ElevatedAction::SetGrants { device_id, .. } => {
                 self.device_by_id(device_id).map(|d| d.name.clone()).unwrap_or_default()
             }
+            ElevatedAction::ElevateSession { session_id } => self
+                .sessions
+                .iter()
+                .find(|s| s.id == *session_id)
+                .and_then(|s| self.device_by_id(&s.device_id))
+                .map(|d| d.name.clone())
+                .unwrap_or_default(),
             ElevatedAction::OpenAdminTerminal { .. } => String::new(),
         };
         elevation_action_text(self.lang, action, &peer)
@@ -1257,7 +1264,7 @@ impl UiState {
 
     // ----- activation -----
 
-    fn session_id(&self) -> Option<u64> {
+    pub(crate) fn session_id(&self) -> Option<u64> {
         self.viewer_session().map(|s| s.id)
     }
 

@@ -699,10 +699,29 @@ struct Drive {
     redial: Arc<Redial>,
     terms: Arc<ViewerTerms>,
     elevation: Arc<ElevationWait>,
+    /// How the host let this session in (for whether it can be elevated).
+    mode: swapdesk_proto::GrantMode,
 }
 
-fn active(ctx: &SessionCtx, since_ms: u64) -> SessionState {
-    SessionState::Active { since_ms, role: swapdesk_ipc::Role::Viewer, granted: ctx.granted().bits() }
+fn active(ctx: &SessionCtx, since_ms: u64, mode: swapdesk_proto::GrantMode) -> SessionState {
+    SessionState::Active {
+        since_ms,
+        role: swapdesk_ipc::Role::Viewer,
+        granted: ctx.granted().bits(),
+        elevation: elevation_of(ctx, mode),
+    }
+}
+
+/// ACCOUNTS.md 9.3: 2 elevated (the session holds `UNATTENDED`), 1 available (it entered without a prompt toward a
+/// host of minor 1 or newer), 0 not available.
+pub(crate) fn elevation_of(ctx: &SessionCtx, mode: swapdesk_proto::GrantMode) -> u8 {
+    if ctx.granted().contains(PermissionSet::UNATTENDED) {
+        2
+    } else if mode == swapdesk_proto::GrantMode::Unattended && ctx.peer_minor() >= 1 {
+        1
+    } else {
+        0
+    }
 }
 
 impl Drive {
@@ -743,11 +762,11 @@ impl Drive {
                     if granted.contains(PermissionSet::UNATTENDED) {
                         self.elevation.answer(Ok(()));
                     }
-                    Some(active(&ctx, self.since_ms))
+                    Some(active(&ctx, self.since_ms, self.mode))
                 }
-                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms)),
+                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, self.mode)),
                 ViewerEvent::HostState { desktop, paused } => {
-                    Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms) })
+                    Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms, self.mode) })
                 }
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
                 ViewerEvent::PromptPending { .. } => None,
@@ -811,7 +830,7 @@ impl Drive {
                 let ctx = session.ctx().clone();
                 self.cell.replace(ctx.clone());
                 self.start_datagrams(&ctx);
-                self.emit(active(&ctx, self.since_ms), None).await;
+                self.emit(active(&ctx, self.since_ms, self.mode), None).await;
                 Some(session)
             }
             Either::Left(Err(why)) => {
@@ -903,8 +922,9 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         redial: Arc::new(Redial { endpoint: endpoint.clone(), identity, addr, expected, cfg: redial_cfg }),
         terms: Arc::clone(&terms),
         elevation: Arc::clone(&elevation),
+        mode,
     };
-    drive.emit(active(&ctx, since_ms), None).await;
+    drive.emit(active(&ctx, since_ms, mode), None).await;
 
     // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
     // the queue is full) the frame is dropped, and so is every P-frame after it until a keyframe, which is asked for.

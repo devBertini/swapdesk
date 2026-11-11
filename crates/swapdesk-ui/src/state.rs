@@ -2052,8 +2052,25 @@ impl UiState {
             Ok(()) => {
                 self.elevation = None;
                 // The command that needed the administrator goes again: the service now lets it through once.
-                if let ElevatedAction::SetGrants { device_id, grants } = action {
-                    self.followups.push(Command::SetGrants { device_id, grants });
+                match action {
+                    ElevatedAction::SetGrants { device_id, grants } => {
+                        self.followups.push(Command::SetGrants { device_id, grants });
+                    }
+                    ElevatedAction::ElevateSession { session_id } => {
+                        self.followups.push(Command::ElevateSession { session_id });
+                    }
+                    // The administrator terminal of that session, if its window is still this one's.
+                    ElevatedAction::OpenAdminTerminal { session_id } => {
+                        if self.session_id() == Some(session_id) {
+                            if let (TermPhase::Open { .. }, Some(term_id)) = (&self.term, self.term_id) {
+                                self.followups.push(Command::TermClose { term_id });
+                            }
+                            self.term = TermPhase::Opening { admin: true };
+                            self.term_id = None;
+                            self.term_account = None;
+                            self.followups.push(Command::TermOpen { session_id, admin: true, cols: 80, rows: 24 });
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -2303,8 +2320,8 @@ impl UiState {
                 Command::SetGrants { device_id, grants } => {
                     Some(ElevatedAction::SetGrants { device_id: device_id.clone(), grants: *grants })
                 }
-                Command::Connect { device_id, intent, unattended: true } => {
-                    Some(ElevatedAction::ConnectUnattended { device_id: device_id.clone(), intent: *intent })
+                Command::ElevateSession { session_id } => {
+                    Some(ElevatedAction::ElevateSession { session_id: *session_id })
                 }
                 Command::TermOpen { session_id, admin: true, .. } => {
                     Some(ElevatedAction::OpenAdminTerminal { session_id: *session_id })

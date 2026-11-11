@@ -35,18 +35,22 @@ impl Hub {
         if !dims_ok(cols, rows) {
             return reply(conn, req, Err(self.api_error(ApiCode::Invalid, "terminal size")));
         }
-        if admin && !conn.info.admin {
-            // D10: an administrator terminal on another machine is used from an elevated connection only.
-            return reply(
-                conn,
-                req,
-                Err(self
-                    .api_error(ApiCode::NeedsAdmin, "administrator terminal from a connection that is not elevated")),
-            );
-        }
         let Some(handle) = lock(&conn.viewers).get(&session_id).map(|v| v.handle.clone()) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
+        // ELEVATION.md 3.2: the administrator terminal of another machine needs this machine's confirmation: an
+        // administrator connection, a session already elevated (confirmed then), or the pass of a confirmation.
+        if admin
+            && !(conn.info.admin
+                || handle.granted().contains(swapdesk_proto::PermissionSet::UNATTENDED)
+                || self.take_pass(conn, &swapdesk_ipc::ElevAction::OpenAdminTerminal { session_id }))
+        {
+            return reply(
+                conn,
+                req,
+                Err(self.api_error(ApiCode::NeedsAdmin, "administrator terminal without this machine's confirmation")),
+            );
+        }
         let Some(rt) = self.rt().cloned() else { return reply(conn, req, Err(ApiCode::ServiceDown)) };
         let term_id = self.fresh_id();
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
@@ -69,6 +73,41 @@ impl Hub {
                 }
             };
             reply(&c, req, Ok(body));
+        });
+    }
+
+    /// Op 50, "Elevar controle" (ACCOUNTS.md 9.3): with an administrator connection or the pass of its confirmation,
+    /// the session asks the host and the reply waits for its answer.
+    pub(super) fn elevate_session(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64) {
+        let Some(handle) = lock(&conn.viewers).get(&session_id).map(|v| v.handle.clone()) else {
+            return reply(conn, req, Err(ApiCode::NotFound));
+        };
+        if !(conn.info.admin || self.take_pass(conn, &swapdesk_ipc::ElevAction::ElevateSession { session_id })) {
+            return reply(
+                conn,
+                req,
+                Err(self.api_error(ApiCode::NeedsAdmin, "elevation without this machine's confirmation")),
+            );
+        }
+        let Some(rt) = self.rt().cloned() else { return reply(conn, req, Err(ApiCode::ServiceDown)) };
+        let (me, c) = (Arc::clone(self), Arc::clone(conn));
+        rt.spawn(async move {
+            let result = match handle.elevate().await {
+                Ok(()) => Ok(ReplyBody::Done),
+                Err(code) => {
+                    me.log(
+                        swapdesk_platform::Level::Info,
+                        format_args!("elevation of session {session_id:#x} refused: {code:?}"),
+                    );
+                    Err(match code {
+                        swapdesk_proto::ErrorCode::UnsupportedVersion => ApiCode::Invalid,
+                        swapdesk_proto::ErrorCode::NotPermitted => ApiCode::NotPermitted,
+                        swapdesk_proto::ErrorCode::Timeout => ApiCode::Timeout,
+                        _ => ApiCode::Internal,
+                    })
+                }
+            };
+            reply(&c, req, result);
         });
     }
 

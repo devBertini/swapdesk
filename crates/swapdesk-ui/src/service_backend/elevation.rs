@@ -62,14 +62,15 @@ pub(super) fn answer_waiter(inner: &Inner, req: u32, status: u16, body: &[u8]) -
     true
 }
 
-/// The wire action of a C6 one. Only `SetGrants` is carried by the service for now: the others have no ticket.
+/// The wire action of a C6 one (ELEVATION.md 3.1: tags 0, 2 and 3).
 fn wire_action(action: &ElevatedAction) -> Option<ElevAction> {
-    match action {
+    Some(match action {
         ElevatedAction::SetGrants { device_id, grants } => {
-            Some(ElevAction::SetGrants { device_id: device_id.clone(), grants: grants.0 })
+            ElevAction::SetGrants { device_id: device_id.clone(), grants: grants.0 }
         }
-        ElevatedAction::ConnectUnattended { .. } | ElevatedAction::OpenAdminTerminal { .. } => None,
-    }
+        ElevatedAction::OpenAdminTerminal { session_id } => ElevAction::OpenAdminTerminal { session_id: *session_id },
+        ElevatedAction::ElevateSession { session_id } => ElevAction::ElevateSession { session_id: *session_id },
+    })
 }
 
 /// Starts the worker of an `Elevate` command; its ticket is answered when the worker is done.

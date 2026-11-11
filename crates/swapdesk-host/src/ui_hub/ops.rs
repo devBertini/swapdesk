@@ -143,6 +143,7 @@ impl Hub {
                 self.term_open(conn, req, session_id, cols, rows, admin)
             }
             UiOp::Files(op) => self.files_op(conn, req, op),
+            UiOp::ElevateSession { session_id } => self.elevate_session(conn, req, session_id),
             op => self.request_other(conn, req, op),
         }
     }
@@ -261,6 +262,7 @@ impl Hub {
             | UiOp::Wake { .. }
             | UiOp::RunAction { .. }
             | UiOp::TermOpen { .. }
+            | UiOp::ElevateSession { .. }
             | UiOp::Files(_) => Err(ApiCode::Internal),
             UiOp::ElevationBegin { action } => self.elevation_begin(conn, action),
             UiOp::ElevationEnd { ticket } => Ok(ReplyBody::ElevationOutcome(self.elevation_end(conn, &ticket))),
@@ -577,17 +579,16 @@ impl Hub {
         // prompts every other. A 1.0 host is never asked: it would let the device in at once with machine-level
         // input, which its own interface never asked for.
         //
-        // Only for an administrator account of this machine, for now: the other machine gave its grant to this
-        // machine's one key, which every local account dials with, so without this any account here would walk
-        // into a host that trusted one person (D10). It goes when each account has its own key (D44). The Mac's app
-        // connection says `can_elevate` for every account: there each account already runs its own service with its
-        // own key (D31), so the grant was made to that account alone.
+        // Every account asks (D45, ACCOUNTS.md 9.3): each account has its own key (D44), so the other machine's
+        // grant belongs to this account alone. What reaches the machine level (`Elevate`, the administrator terminal)
+        // asks for the system's confirmation on this machine when it is used, not here.
         let hint = self.minor_hint(&id);
-        let unattended = (conn.info.admin || conn.info.can_elevate) && self.known_minor(&id, hint) >= 1;
-        // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
-        // at the host), and an administrator connection also asks for the administrator terminal (D10).
+        let toward_minor_1 = self.known_minor(&id, hint) >= 1;
+        let unattended = toward_minor_1;
+        // An unattended entry grants only what was asked for: the terminal (D13 then decides at the host), and toward
+        // a host of minor 1 the administrator terminal, which this machine then opens only after its confirmation.
         let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };
-        if conn.info.admin {
+        if toward_minor_1 || conn.info.admin {
             extra = extra.union(PermissionSet::ADMIN_TERMINAL);
         }
         // What the attempt reports while the host decides. A state that comes after the entry ended (a cancel, the host's

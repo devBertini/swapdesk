@@ -20,6 +20,16 @@ pub fn action_line(lang: Language, action: &ElevAction, peer_name: &str) -> Stri
             &ElevatedAction::SetGrants { device_id: device_id.clone(), grants: Permissions(*grants) },
             peer_name,
         ),
+        ElevAction::OpenAdminTerminal { session_id } => crate::interact::elevation_action_text(
+            lang,
+            &ElevatedAction::OpenAdminTerminal { session_id: *session_id },
+            peer_name,
+        ),
+        ElevAction::ElevateSession { session_id } => crate::interact::elevation_action_text(
+            lang,
+            &ElevatedAction::ElevateSession { session_id: *session_id },
+            peer_name,
+        ),
     }
 }
 

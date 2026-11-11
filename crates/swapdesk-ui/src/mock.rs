@@ -443,6 +443,7 @@ impl Scenario {
                     Permission::Files,
                     Permission::Clipboard,
                 ]),
+                elevation: Default::default(),
             },
         }
     }
@@ -455,6 +456,7 @@ impl Scenario {
                 since_ms: NOW_MS - 12 * MIN,
                 role: Role::Host,
                 granted: perms(&[Permission::View, Permission::Control, Permission::Files]),
+                elevation: Default::default(),
             },
         }
     }
@@ -1087,6 +1089,7 @@ impl World {
                                 Permission::Files,
                                 Permission::Clipboard,
                             ]),
+                            elevation: Default::default(),
                         },
                     },
                     entry,

@@ -112,13 +112,18 @@ fn seconds_up(micros: u64) -> u16 {
 fn kind(action: &ElevAction) -> &'static str {
     match action {
         ElevAction::SetGrants { .. } => "SetGrants",
+        ElevAction::OpenAdminTerminal { .. } => "OpenAdminTerminal",
+        ElevAction::ElevateSession { .. } => "ElevateSession",
     }
 }
 
 /// The device an action concerns, as the trace shows it.
-fn device_of(action: &ElevAction) -> &str {
+fn device_of(action: &ElevAction) -> String {
     match action {
-        ElevAction::SetGrants { device_id, .. } => device_id,
+        ElevAction::SetGrants { device_id, .. } => device_id.clone(),
+        ElevAction::OpenAdminTerminal { session_id } | ElevAction::ElevateSession { session_id } => {
+            format!("of session {session_id:#x}")
+        }
     }
 }
 
@@ -138,7 +143,7 @@ impl Hub {
             return Err(self
                 .api_error(ApiCode::NotPermitted, "an elevation ticket for an account that is not an administrator"));
         }
-        let (action, peer_name) = self.checked_action(action)?;
+        let (action, peer_name) = self.checked_action(conn, action)?;
         let now = self.p.clock.now();
         let mut table = lock(&self.elevation);
         table.sweep(now);
@@ -165,13 +170,30 @@ impl Hub {
 
     /// The action in its canonical form (the device id as lowercase hex) and the name of the device it concerns,
     /// refused as `SetGrants` refuses it: grants that are not a valid set, a device id that is malformed or unknown.
-    fn checked_action(&self, action: ElevAction) -> Result<(ElevAction, String), ApiCode> {
+    fn checked_action(&self, conn: &Conn, action: ElevAction) -> Result<(ElevAction, String), ApiCode> {
         match action {
             ElevAction::SetGrants { device_id, grants } => {
                 let new = PermissionSet::from_bits(grants).ok_or(ApiCode::Invalid)?;
                 let id = parse_device_id(&device_id).ok_or(ApiCode::Invalid)?;
                 let name = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.name.clone())).ok_or(ApiCode::NotFound)?;
                 Ok((ElevAction::SetGrants { device_id: device_id_hex(&id), grants: new.bits() }, name))
+            }
+            // ELEVATION.md 3.2: a viewer session of this connection; the administrator terminal only where the
+            // session holds it, the elevation only for an entry without a prompt toward a host of minor 1 or newer
+            // that is not elevated yet.
+            ElevAction::OpenAdminTerminal { session_id } | ElevAction::ElevateSession { session_id } => {
+                let handle = lock(&conn.viewers).get(&session_id).map(|v| v.handle.clone()).ok_or(ApiCode::NotFound)?;
+                let granted = handle.granted();
+                let ok = match action {
+                    ElevAction::OpenAdminTerminal { .. } => granted.contains(PermissionSet::ADMIN_TERMINAL),
+                    _ => crate::service::viewer_elevation_of(&handle.ctx(), handle.mode()) == 1,
+                };
+                if !ok {
+                    return Err(ApiCode::Invalid);
+                }
+                let name =
+                    self.p.trust.read(|s| s.find_by_id(&handle.device()).map(|d| d.name.clone())).unwrap_or_default();
+                Ok((action, name))
             }
         }
     }
