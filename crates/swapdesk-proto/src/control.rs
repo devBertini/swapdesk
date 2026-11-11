@@ -132,6 +132,18 @@ wire_struct! {
     ConsentPending { feature: Feature, timeout_s: u16 }
 }
 
+wire_struct! {
+    /// 0x000B, both, minor 1: what the sender's account has stored for the peer's device, not what this session
+    /// holds. Display only for the receiver.
+    StoredGrants { grants: PermissionSet }
+}
+
+wire_struct! {
+    /// 0x000C, viewer to host, minor 1: an unattended session asks for the elevated bits, after the system's
+    /// confirmation on the viewer's machine.
+    Elevate {}
+}
+
 // ---------- display and video ----------
 
 wire_struct! {
@@ -352,6 +364,14 @@ wire_struct! {
     WakeInfo { macs: Vec<[u8; 6]> [8] }
 }
 
+// ---------- between paired accounts, outside a session ----------
+
+wire_struct! {
+    /// 0x0801, both, minor 1: the only message of a grants sync connection, sent once each way in place of
+    /// `Hello`. `grants` is what the sender's account has stored for the other device.
+    GrantsSync { proto_minor: u16, grants: PermissionSet }
+}
+
 // ---------- keepalive and errors ----------
 
 wire_struct! {
@@ -430,6 +450,8 @@ messages! {
     Bye(Bye) = 0x0008,
     HostState(HostState) = 0x0009,
     ConsentPending(ConsentPending) = 0x000A,
+    StoredGrants(StoredGrants) = 0x000B,
+    Elevate(Elevate) = 0x000C,
     DisplayList(DisplayList) = 0x0101,
     SelectDisplay(SelectDisplay) = 0x0102,
     VideoSettings(VideoSettings) = 0x0103,
@@ -472,6 +494,7 @@ messages! {
     PairReveal(PairReveal) = 0x0703,
     PairConfirm(PairConfirm) = 0x0704,
     PairResult(PairResult) = 0x0705,
+    GrantsSync(GrantsSync) = 0x0801,
     Ping(Ping) = 0x0F01,
     Pong(Pong) = 0x0F02,
     Error(ErrorMessage) = 0x0FFF,
@@ -481,6 +504,33 @@ impl Message {
     /// True for the five `Pair*` messages, which travel on the pairing endpoint only.
     pub const fn is_pairing(&self) -> bool {
         matches!(self.type_id(), 0x0701..=0x0705)
+    }
+
+    /// The protocol minor that introduced the type `type_id` (PROTOCOL.md 1); 0 for every type of 1.0 and for an
+    /// unknown one.
+    pub const fn type_min_minor(type_id: u16) -> u16 {
+        match type_id {
+            0x000B | 0x000C | 0x0801 => 1,
+            _ => 0,
+        }
+    }
+
+    /// The lowest minor a peer must have announced to be sent this message: the newest of its type and of the
+    /// enum values it carries. A sender checks it against the peer's minor before it writes the message.
+    pub const fn min_minor(&self) -> u16 {
+        let carried = match self {
+            Self::SessionRefused(m) => m.code.min_minor(),
+            Self::Bye(m) => m.code.min_minor(),
+            Self::HostState(m) => m.desktop.min_minor(),
+            Self::SwapDecline(m) => m.code.min_minor(),
+            Self::FileDecline(m) => m.code.min_minor(),
+            Self::QuickActionResult(m) => m.code.min_minor(),
+            Self::PairResult(m) => m.code.min_minor(),
+            Self::Error(m) => m.code.min_minor(),
+            _ => 0,
+        };
+        let of_type = Self::type_min_minor(self.type_id());
+        if carried > of_type { carried } else { of_type }
     }
 
     /// The whole frame: `type`, `len`, payload. A payload over [`MAX_FRAME_PAYLOAD`] is an error.
@@ -552,10 +602,10 @@ mod tests {
     #[test]
     fn type_ids_are_unique_and_match_the_table() {
         let mut ids = Message::ALL_TYPE_IDS.to_vec();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 58);
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 58);
         let ping = Message::Ping(Ping { nonce: 1, t_send_us: 2 });
         assert_eq!(ping.type_id(), 0x0F01);
         assert_eq!(ping.encode_frame().unwrap()[..3], [0x4F, 0x01, 12]);

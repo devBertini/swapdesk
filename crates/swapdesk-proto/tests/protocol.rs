@@ -343,7 +343,7 @@ fn every_unknown_tag_is_fatal() {
     check_u8::<H264Profile>(&[0, 1]);
     check_u8::<KbKind>(&[0, 1, 2, 3, 4]);
     check_u8::<GrantMode>(&[0, 1, 2, 3]);
-    check_u8::<Desktop>(&[0, 1, 2, 3]);
+    check_u8::<Desktop>(&[0, 1, 2, 3, 4]);
     check_u8::<Feature>(&[0, 1]);
     check_u8::<Preset>(&[0, 1, 2]);
     check_u8::<Special>(&[0]);
@@ -357,7 +357,7 @@ fn every_unknown_tag_is_fatal() {
 fn error_codes_outside_section_8_are_fatal() {
     for code in 0..=u16::MAX {
         let r = ErrorCode::decode(&code.to_le_bytes());
-        if code <= 21 {
+        if code <= 22 {
             assert_eq!(r.unwrap().tag(), code);
         } else {
             assert!(matches!(r, Err(CodecError::UnknownTag { .. })), "{code}");
@@ -379,8 +379,8 @@ fn bad_tags_inside_messages_are_fatal() {
     assert_eq!(Message::decode_payload(0x0107, &[2]), Err(CodecError::InvalidBool));
     assert_eq!(Message::decode_payload(0x0107, &[1]).unwrap(), Message::AudioControl(AudioControl { enabled: true }));
     // an unknown enum value in PairResult.code and Error.code
-    assert!(Message::decode_payload(0x0705, &[1, 22, 0]).is_err());
-    assert!(Message::decode_payload(0x0FFF, &[22, 0, 1, 0, 0, 0, 0, 0]).is_err());
+    assert!(Message::decode_payload(0x0705, &[1, 23, 0]).is_err());
+    assert!(Message::decode_payload(0x0FFF, &[23, 0, 1, 0, 0, 0, 0, 0]).is_err());
 }
 
 #[test]
@@ -588,4 +588,134 @@ fn pairing_inputs_are_plain_concatenations() {
             Ok(())
         })
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+// ---------- minor 1 ----------
+
+#[test]
+fn stored_grants_and_grants_sync_round_trip_byte_for_byte() {
+    for bits in 0..=0x00FFu16 {
+        let Some(grants) = PermissionSet::from_bits(bits) else { continue };
+        let stored = Message::StoredGrants(StoredGrants { grants });
+        let frame = stored.encode_frame().unwrap();
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap(), stored);
+        assert_eq!(frame, [&[0x0B, 0x02][..], &bits.to_le_bytes()].concat());
+        for proto_minor in [1u16, 2, 0x1234, u16::MAX] {
+            let sync = Message::GrantsSync(GrantsSync { proto_minor, grants });
+            let frame = sync.encode_frame().unwrap();
+            assert_eq!(Message::decode_frame_exact(&frame).unwrap(), sync);
+            assert_eq!(frame, [&[0x48, 0x01, 0x04][..], &proto_minor.to_le_bytes(), &bits.to_le_bytes()].concat());
+        }
+    }
+}
+
+#[test]
+fn stored_grants_and_grants_sync_have_the_documented_bytes() {
+    let stored = Message::StoredGrants(StoredGrants { grants: PermissionSet::CONTROL });
+    assert_eq!(stored.encode_frame().unwrap(), [0x0B, 0x02, 0x03, 0x00]);
+    let sync = Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::CONTROL });
+    assert_eq!(sync.encode_frame().unwrap(), [0x48, 0x01, 0x04, 0x01, 0x00, 0x03, 0x00]);
+    // Neither travels on the pairing endpoint.
+    assert!(!stored.is_pairing() && !sync.is_pairing());
+}
+
+#[test]
+fn a_grant_set_that_breaks_implies_or_uses_reserved_bits_is_rejected_in_both() {
+    for (bits, what) in [
+        (0b10u16, "CONTROL without VIEW"),
+        (0b1_0000, "ADMIN_TERMINAL without TERMINAL"),
+        (0b1000_0000, "UNATTENDED without VIEW"),
+        (0x0101, "reserved bit 8"),
+        (0x8000, "reserved bit 15"),
+    ] {
+        let b = bits.to_le_bytes();
+        assert_eq!(
+            Message::decode_payload(0x000B, &b),
+            Err(CodecError::InvalidValue("permission set")),
+            "StoredGrants: {what}"
+        );
+        assert_eq!(
+            Message::decode_payload(0x0801, &[1, 0, b[0], b[1]]),
+            Err(CodecError::InvalidValue("permission set")),
+            "GrantsSync: {what}"
+        );
+    }
+    // The payload is exactly its fields: nothing short, nothing after them.
+    assert!(Message::decode_payload(0x000B, &[3]).is_err());
+    assert_eq!(Message::decode_payload(0x000B, &[3, 0, 0]), Err(CodecError::TrailingBytes));
+    assert!(Message::decode_payload(0x0801, &[1, 0, 3]).is_err());
+    assert_eq!(Message::decode_payload(0x0801, &[1, 0, 3, 0, 0]), Err(CodecError::TrailingBytes));
+}
+
+#[test]
+fn elevate_and_account_away_round_trip_byte_for_byte() {
+    let elevate = Message::Elevate(Elevate {});
+    let frame = elevate.encode_frame().unwrap();
+    assert_eq!(Message::decode_frame_exact(&frame).unwrap(), elevate);
+    // No fields: any payload byte is one too many.
+    assert_eq!(Message::decode_payload(0x000C, &[0]), Err(CodecError::TrailingBytes));
+
+    let away: Vec<Message> = vec![
+        SessionRefused { code: ErrorCode::AccountAway }.into(),
+        Bye { code: ErrorCode::AccountAway }.into(),
+        ErrorMessage { code: ErrorCode::AccountAway, fatal: false, about_type: 0x000C, about_id: 0 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: true }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: false }.into(),
+    ];
+    for m in away {
+        let frame = m.encode_frame().unwrap();
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap(), m, "{m:?}");
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap().encode_frame().unwrap(), frame);
+    }
+}
+
+#[test]
+fn they_have_the_documented_bytes() {
+    assert_eq!(Message::Elevate(Elevate {}).encode_frame().unwrap(), [0x0C, 0x00]);
+    let refused = Message::SessionRefused(SessionRefused { code: ErrorCode::AccountAway });
+    assert_eq!(refused.encode_frame().unwrap(), [0x06, 0x02, 0x16, 0x00]);
+    let state = Message::HostState(HostState { desktop: Desktop::AccountAway, paused: true });
+    assert_eq!(state.encode_frame().unwrap(), [0x09, 0x02, 0x04, 0x01]);
+}
+
+/// The minor of a message is the newest of its type and of the enum values it carries, so one check before a
+/// send keeps everything of minor 1 away from a 1.0 peer.
+#[test]
+fn every_type_names_the_minor_that_introduced_it() {
+    for id in Message::ALL_TYPE_IDS {
+        let want = u16::from(matches!(*id, 0x000B | 0x000C | 0x0801));
+        assert_eq!(Message::type_min_minor(*id), want, "{id:#06x}");
+    }
+    assert_eq!(Message::type_min_minor(0x3FFF), 0, "an unknown type names no minor");
+
+    // Every generated message of a 1.0 type that carries no newer value is of minor 0; the new types are of 1.
+    let mut runner = TestRunner::new(Config { cases: 64, failure_persistence: None, ..Config::default() });
+    for strategy in message_strategies() {
+        runner
+            .run(&strategy, |m| {
+                let carries_new = format!("{m:?}").contains("AccountAway");
+                let want = u16::from(Message::type_min_minor(m.type_id()) == 1 || carries_new);
+                prop_assert_eq!(m.min_minor(), want, "{:?}", m);
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    // Each message that can carry a value of minor 1 says so.
+    let code = ErrorCode::AccountAway;
+    let carriers: Vec<Message> = vec![
+        SessionRefused { code }.into(),
+        Bye { code }.into(),
+        SwapDecline { request_id: 1, code }.into(),
+        FileDecline { transfer_id: 1, code }.into(),
+        QuickActionResult { action_id: 1, code }.into(),
+        PairResult { ok: false, code }.into(),
+        ErrorMessage { code, fatal: true, about_type: 0, about_id: 0 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: true }.into(),
+    ];
+    for m in carriers {
+        assert_eq!(m.min_minor(), 1, "{m:?}");
+        assert_eq!(Message::type_min_minor(m.type_id()), 0, "{m:?}: its type is of 1.0");
+    }
+    assert_eq!(Message::from(Bye { code: ErrorCode::NoError }).min_minor(), 0);
 }

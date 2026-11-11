@@ -144,6 +144,8 @@ pub fn message_strategies() -> Vec<BoxedStrategy<Message>> {
         msg!(Bye { code: errc() }),
         msg!(HostState { desktop: sel(Desktop::ALL), paused: any::<bool>() }),
         msg!(ConsentPending { feature: sel(Feature::ALL), timeout_s: any::<u16>() }),
+        msg!(StoredGrants { grants: perms() }),
+        Just(Message::Elevate(Elevate {})).boxed(),
         msg!(DisplayList { displays: proptest::collection::vec(display(), 0..=4) }),
         msg!(SelectDisplay { display: any::<u16>() }),
         msg!(VideoSettings {
@@ -221,6 +223,7 @@ pub fn message_strategies() -> Vec<BoxedStrategy<Message>> {
         msg!(PairReveal { nonce_i: any::<[u8; 32]>() }),
         msg!(PairConfirm { matches: any::<bool>() }),
         msg!(PairResult { ok: any::<bool>(), code: errc() }),
+        msg!(GrantsSync { proto_minor: any::<u16>(), grants: perms() }),
         msg!(Ping { nonce: any::<u32>(), t_send_us: any::<u64>() }),
         msg!(Pong { nonce: any::<u32>(), t_send_us: any::<u64>(), t_peer_us: any::<u64>() }),
         msg!(

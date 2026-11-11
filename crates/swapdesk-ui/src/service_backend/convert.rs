@@ -41,7 +41,28 @@ pair_enum!(os_to_wire, os_from_wire, a::Os, p::Os; Windows, MacOs);
 pair_enum!(intent_to_wire, intent_from_wire, a::Intent, p::Intent; View, Control);
 pair_enum!(feature_to_wire, feature_from_wire, a::Feature, p::Feature; Terminal, Files);
 pair_enum!(quality_to_wire, quality_from_wire, a::Quality, p::Preset; Auto, Text, Motion);
-pair_enum!(desktop_to_wire, desktop_from_wire, a::DesktopKind, p::Desktop; Default, Secure, Locked, LoginWindow);
+
+/// The wire twin of a UI value.
+pub fn desktop_to_wire(v: a::DesktopKind) -> p::Desktop {
+    match v {
+        a::DesktopKind::Default => p::Desktop::Default,
+        a::DesktopKind::Secure => p::Desktop::Secure,
+        a::DesktopKind::Locked => p::Desktop::Locked,
+        a::DesktopKind::LoginWindow => p::Desktop::LoginWindow,
+    }
+}
+
+/// The UI twin of a wire value. `AccountAway` (protocol minor 1) reads as a locked screen until the interface
+/// has a state of its own for an account that left the console.
+pub fn desktop_from_wire(v: p::Desktop) -> a::DesktopKind {
+    match v {
+        p::Desktop::Default => a::DesktopKind::Default,
+        p::Desktop::Secure => a::DesktopKind::Secure,
+        p::Desktop::Locked | p::Desktop::AccountAway => a::DesktopKind::Locked,
+        p::Desktop::LoginWindow => a::DesktopKind::LoginWindow,
+    }
+}
+
 pair_enum!(code_to_wire, code_from_wire, a::ApiCode, w::ApiCode;
     ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal);
 pair_enum!(ready_to_wire, ready_from_wire, a::Ready, w::Ready; ReadyToReceive, ServiceOff, ServiceNeedsApproval, NoNetwork);

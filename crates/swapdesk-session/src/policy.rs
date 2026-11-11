@@ -15,7 +15,7 @@ pub enum Role {
 /// True for the messages only the session core handles: the handshake, keepalive, errors and the messages that
 /// carry state the core owns. A feature crate cannot register these.
 pub fn is_core_type(type_id: u16) -> bool {
-    matches!(type_id, 0x0001..=0x000A | 0x0701..=0x0705 | 0x0F01 | 0x0F02 | 0x0FFF)
+    matches!(type_id, 0x0001..=0x000C | 0x0701..=0x0705 | 0x0801 | 0x0F01 | 0x0F02 | 0x0FFF)
 }
 
 /// Whether `role` may receive `msg` from its peer at all (direction of 5.3). A message that fails this is a
@@ -52,6 +52,11 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | WakeInfo(_) => role == Role::Viewer,
         // The pairing endpoint only.
         PairHello(_) | PairNonce(_) | PairReveal(_) | PairConfirm(_) | PairResult(_) => false,
+        // Minor 1, on the wire but not yet taken by a session: `StoredGrants` opens with the grants sync in a
+        // session and `Elevate` with the unattended entry. Until then a peer that sends one breaks the protocol.
+        StoredGrants(_) | Elevate(_) => false,
+        // A grants sync connection only, never inside a session.
+        GrantsSync(_) => false,
     }
 }
 
@@ -270,6 +275,8 @@ mod tests {
             Message::Bye(Bye { code: ErrorCode::NoError }),
             Message::HostState(HostState { desktop: Desktop::Default, paused: false }),
             Message::ConsentPending(ConsentPending { feature: Feature::Files, timeout_s: 20 }),
+            Message::StoredGrants(StoredGrants { grants: PermissionSet::VIEW }),
+            Message::Elevate(Elevate {}),
             Message::DisplayList(DisplayList { displays: vec![] }),
             Message::SelectDisplay(SelectDisplay { display: 0 }),
             Message::VideoSettings(VideoSettings {
@@ -336,6 +343,7 @@ mod tests {
             Message::PairReveal(PairReveal { nonce_i: [0; 32] }),
             Message::PairConfirm(PairConfirm { matches: true }),
             Message::PairResult(PairResult { ok: true, code: ErrorCode::NoError }),
+            Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::VIEW }),
             Message::Ping(Ping { nonce: 1, t_send_us: 0 }),
             Message::Pong(Pong { nonce: 1, t_send_us: 0, t_peer_us: 0 }),
             Message::Error(ErrorMessage { code: ErrorCode::Internal, fatal: false, about_type: 0, about_id: 0 }),
@@ -358,8 +366,10 @@ mod tests {
             let host = may_receive(Role::Host, &m);
             let viewer = may_receive(Role::Viewer, &m);
             match m.type_id() {
-                // Pairing messages never travel on a session.
-                0x0701..=0x0705 => assert!(!host && !viewer, "{m:?}"),
+                // Pairing messages never travel on a session, nor does the message of a grants sync connection.
+                0x0701..=0x0705 | 0x0801 => assert!(!host && !viewer, "{m:?}"),
+                // Minor 1, not yet taken by a session.
+                0x000B | 0x000C => assert!(!host && !viewer, "{m:?}"),
                 // Viewer to host only.
                 0x0001 | 0x0102..=0x0105 | 0x0107 | 0x0109 | 0x0409 | 0x040B | 0x0501 | 0x0503 | 0x0504 | 0x0601 => {
                     assert!(host && !viewer, "{m:?}")
@@ -413,8 +423,8 @@ mod tests {
     #[test]
     fn core_types_are_the_handshake_keepalive_and_state_messages() {
         for id in [
-            0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x0701, 0x0F01, 0x0F02,
-            0x0FFF,
+            0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x0701,
+            0x0801, 0x0F01, 0x0F02, 0x0FFF,
         ] {
             assert!(is_core_type(id), "{id:#x}");
         }

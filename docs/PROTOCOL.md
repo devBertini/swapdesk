@@ -20,6 +20,12 @@ A change to this file after M0 is a contract change: the main session makes it, 
 - **Load:** at most 16 handshakes in flight per machine and 4 connections per remote address. Every `Incoming` whose `remote_address_validated()` is false gets `retry()` first and takes no place (a forged source address cannot fill a peer's places or the handshake cap); a validated one takes a place of its address, and the 5th at once gets `ignore()` ("not sending any packet in response", same page). Honest peers pay one extra round trip.
 - **Major version** = the number in the ALPN. A client offers every major it speaks on the session endpoint, newest first; the server picks the highest; no common ALPN fails the handshake (the UI says "versão incompatível").
 - **Minor version** = `PROTO_MINOR: u16` in `Hello`/`HelloAck` (starts at 0). A peer sends a message type or an enum value introduced in minor N only when the other side's minor is ≥ N. So an unknown type or tag is always a protocol violation (fatal), never "ignore". Layouts of existing messages never change within a major: the bytes of every 1.0 message are kept as test fixtures (section 11).
+- **What each minor added.** The code names the minor of every type and value (`Message::type_min_minor`, `ErrorCode::min_minor`, `Desktop::min_minor`), and `Message::min_minor` gives the minor a peer must have announced to be sent a message: the newest of its type and of the enum values it carries.
+
+| Minor | First release | Message types | Enum values | Toward an older peer |
+|---|---|---|---|---|
+| 0 | 1.0 | every type of 5.3 not listed below | every value not listed below | |
+| 1 | 1.1 | `StoredGrants` 0x000B, `Elevate` 0x000C, `GrantsSync` 0x0801 | `ErrorCode` `ACCOUNT_AWAY` = 22, `Desktop` `AccountAway` = 4 | the three types are never sent; `ACCOUNT_AWAY` is sent as `NOBODY_PRESENT` in every message that carries a code, and `HostState { AccountAway }` as `HostState { Locked, paused: true }` (`ErrorCode::for_minor`, `Desktop::for_minor`) |
 - **Session limits** (GUESS values, tuned in stage 14): max idle timeout 6 s; keep-alive 1 s; datagrams on, receive buffer 64 KiB; `max_concurrent_uni_streams` 512 (one stream per video frame at 60 fps, research windows.md 10b); `max_concurrent_bidi_streams` 16; explicit `receive_window` 16 MiB and `stream_receive_window` 8 MiB; a budget of 32 MiB of bytes buffered per connection across all streams, past which the receiver stops (`RecvStream::stop`) the oldest video streams first and then refuses new streams; congestion control quinn's default.
 - **No allocation from a peer-declared length:** every length is checked against its limit (section 9) before anything is reserved; large payloads are read in bounded chunks.
 - QUIC application close codes = the error codes of section 8.
@@ -108,7 +114,7 @@ Every stream starts with its **stream kind** (one QUIC varint). Datagrams start 
 1. Viewer: `Hello`. Host: `HelloAck`. Both: `Capabilities`.
 2. Host decides (F-SESS-01/02): grants at once when `Hello.requested` holds `UNATTENDED` and the device holds it, when `Hello.resume` or `Hello.swap_token` is valid (6.3, 6.4), or else sends `PromptPending` and waits for its user; then `SessionGrant` or `SessionRefused`.
 3. Nothing but the session and keepalive messages flows before `SessionGrant`; no other stream may be opened (a violation is fatal). While it waits for `SessionGrant`, the viewer may end the attempt with `Bye { NO_ERROR }`; the host closes its question and grants nothing (the message and its handling exist since 1.0).
-4. Host: `HostState`, `DisplayList`, `WakeInfo`, then video. Either side ends with `Bye`.
+4. Host: `HostState`, `DisplayList`, `WakeInfo`, then `StoredGrants` when the viewer's `Hello.proto_minor` is 1 or more, then video. A viewer whose host announced minor 1 or more sends its own `StoredGrants` when it receives `SessionGrant`. For a viewer of minor 0 the order and the bytes are those of 1.0. Either side ends with `Bye`.
 
 ### 5.3 Messages
 Types are `u16` values sent as varints. Field types in section 9. "V" = viewer, "H" = host, "P" = pairing endpoint only.
@@ -120,11 +126,13 @@ Types are `u16` values sent as varints. Field types in section 9. "V" = viewer, 
 | 0x0003 | Capabilities | both | `video_decode: Vec<VideoCap>(8)` with `VideoCap { codec: Codec, profile: H264Profile {Main, High}, max_level: u8, max_width: u16, max_height: u16, max_fps: u16 }`, `audio: Vec<AudioCodec>(4)`, `max_datagram: u16`, `keyboard: KeyboardInfo { kind: KbKind {Ansi, Iso, Jis, Abnt2, Unknown}, layout: str(64) }`, `features: u32` (bit 0 clipboard images, 1 file resume, 2 terminal, 3 admin terminal, 4 quick actions, 5 SAS) | what this build and OS can do, not what is granted |
 | 0x0004 | PromptPending | H→V | `timeout_s: u16` | viewer shows "Aguardando <host>" with the countdown |
 | 0x0005 | SessionGrant | H→V | `session_id: u64`, `granted: PermissionSet`, `mode: GrantMode {Prompted, Unattended, Resumed, Swap}`, `resume_token: [u8;16]` | Prompted: `granted` = what the host's user picked for this session, which may differ from the stored grants (D8) but never holds `UNATTENDED` or `ADMIN_TERMINAL` unless stored; Unattended and Swap: stored grants ∩ `requested`; Resumed: 6.4 |
-| 0x0006 | SessionRefused | H→V | `code: ErrorCode` | `DECLINED`, `TIMEOUT`, `NOBODY_PRESENT`, `NOT_PERMITTED`, `BUSY` |
+| 0x0006 | SessionRefused | H→V | `code: ErrorCode` | `DECLINED`, `TIMEOUT`, `NOBODY_PRESENT`, `NOT_PERMITTED`, `BUSY`; to a viewer of minor 1 or more also `ACCOUNT_AWAY` |
 | 0x0007 | PermissionsChanged | H→V | `granted: PermissionSet` | effective at once; the host stops what was revoked within 1 s (F-PERM-02) and invalidates the resume token |
 | 0x0008 | Bye | both | `code: ErrorCode` | `NO_ERROR` (user, "Desconectar"), `SWAPPED`, `HOST_SHUTDOWN`, `FORGOTTEN`; invalidates the resume token |
-| 0x0009 | HostState | H→V | `desktop: Desktop {Default, Secure, Locked, LoginWindow}`, `paused: bool` | on every desktop switch; without `UNATTENDED` the host pauses video and drops input while the desktop is not `Default` |
+| 0x0009 | HostState | H→V | `desktop: Desktop {Default, Secure, Locked, LoginWindow, AccountAway}`, `paused: bool` (`AccountAway`: minor 1, the account that hosts is not the one at the console) | on every desktop switch; without `UNATTENDED` the host pauses video and drops input while the desktop is not `Default` |
 | 0x000A | ConsentPending | H→V | `feature: Feature {Terminal, Files}`, `timeout_s: u16` | D13: an unattended session asked for the terminal or files of a logged-in user other than the one who granted `UNATTENDED`; the host asks that user; then the request proceeds or fails with `DECLINED`, `TIMEOUT` or `NOBODY_PRESENT` |
+| 0x000B | StoredGrants | both | `grants: PermissionSet` | minor 1. What the sender's account has stored for the peer's device, not what this session holds; for display only (the receiver keeps it as what the other side allows, and nothing else reads it). Sent after the grant (5.2 step 4) and again whenever the stored grants change during the session. Before `SessionGrant` it is `PROTOCOL_VIOLATION`; from a peer that announced minor 0 it is `UNSUPPORTED_VERSION`. Frame for VIEW and CONTROL: `0B 02 03 00` |
+| 0x000C | Elevate | V→H | none | minor 1. A session that entered without a prompt asks for `UNATTENDED` (and `ADMIN_TERMINAL` if stored and requested) after the system's confirmation on the viewer's machine. The host answers `PermissionsChanged` with the wider set, or `Error { NOT_PERMITTED, fatal: false, about_type: 0x000C }` when the device no longer holds `UNATTENDED` or the session was not an unattended entry. Frame: `0C 00` |
 | 0x0101 | DisplayList | H→V | `displays: Vec<Display>(16)` with `Display { id: u16, name: str(64), x: i32, y: i32, width: u32, height: u32, scale_milli: u16, refresh_mhz: u32, rotation: u16, primary: bool }` | physical pixels in the host's virtual desktop; sent again on every change |
 | 0x0102 | SelectDisplay | V→H | `display: u16` | |
 | 0x0103 | VideoSettings | V→H | `preset: Preset {Auto, Text, Motion}`, `max_fps: u16`, `max_kbps: u32`, `view_width: u16`, `view_height: u16` | Text = 4:2:0, high bitrate, fps capped at 30 (GUESS) |
@@ -163,6 +171,7 @@ Types are `u16` values sent as varints. Field types in section 9. "V" = viewer, 
 | 0x0602 | QuickActionResult | H→V | `action_id: u32`, `code: ErrorCode` | |
 | 0x0603 | WakeInfo | H→V | `macs: Vec<[u8;6]>(8)` | stored by the viewer's service for F-WAKE-01; the broadcast address is never taken from the peer |
 | 0x0701 to 0x0705 | Pair* | P | section 3 | pairing endpoint only |
+| 0x0801 | GrantsSync | both, sync connection only | `proto_minor: u16`, `grants: PermissionSet` | minor 1. The only message of a grants sync connection (5.4): `grants` is what the sender's account has stored for the other device, `proto_minor` the sender's own minor. Frame for minor 1, VIEW and CONTROL: `48 01 04 01 00 03 00` |
 | 0x0F01 | Ping | both | `nonce: u32`, `t_send_us: u64` | once per second each way |
 | 0x0F02 | Pong | both | `nonce: u32`, `t_send_us: u64`, `t_peer_us: u64` | RTT and clock offset (NTP-style) for the overlay; B1 is measured on one PC with the shared clock instead |
 | 0x0FFF | Error | both | `code: ErrorCode`, `fatal: bool`, `about_type: u16`, `about_id: u32` | `about_id` = the request, transfer or terminal id it answers, 0 if none |
@@ -170,6 +179,17 @@ Types are `u16` values sent as varints. Field types in section 9. "V" = viewer, 
 **Names on both sides** (`FileOffer.name`, `DirEntry.name` used for a download): one path component, not empty, not `.` or `..`, no `/`, `\`, `:` or control characters, and not a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with or without an extension). A bad name is `INVALID_NAME`.
 
 **Wake-on-LAN** is not a session message: the waking machine's service sends the magic packet (6 × 0xFF then the MAC 16 times; UDP port 9; GUESS, stage 22 cites the format) with TTL 1 to the broadcast address of the approved local interface whose subnet holds the device's last known address, for each MAC stored from `WakeInfo`.
+
+### 5.4 Grants sync connection (minor 1)
+
+Two paired devices tell each other what each has stored for the other without opening a session, so the read-only column of Permissões follows the other side within seconds.
+
+- It is a connection to the session endpoint (`swapdesk/1`, the same pre-handshake guard, caps, pinned-key handshake and post-handshake gate as a session) whose first control message is `GrantsSync` instead of `Hello`.
+- The client opens the control stream and sends one `GrantsSync`. The server answers with one `GrantsSync`. The client closes the connection with the application code `NO_ERROR`; there is no session, so no `Bye`. The server closes it itself 2 s after answering if the client has not (GUESS).
+- Nothing else may travel: a second message, any message other than `GrantsSync`, any other stream or any datagram is `PROTOCOL_VIOLATION` and closes the connection. `GrantsSync` after a `Hello` or inside a session is `PROTOCOL_VIOLATION`. `GrantsSync.proto_minor == 0` is `PROTOCOL_VIOLATION`: no build of minor 0 can send it.
+- It never prompts, never takes the host reservation of a session, is not written to the activity log, and is never answered `ACCOUNT_AWAY`.
+- A device over its budget of syncs is closed with `BUSY` right after its first message, without an answer and without its value being kept.
+- A client dials only a device it knows to be of minor 1 or more: from an earlier authenticated exchange (`HelloAck`, `GrantsSync`), or else from the `minor` key of its DNS-SD record (section 10). A 1.0 device is never dialled for this, so it never sees the message.
 
 ## 6. Permissions, presence, swap, resume
 
@@ -278,6 +298,7 @@ Each record is `tag: u8` and fixed fields. The host applies them in order: in a 
 | 19 | INTERNAL | a bug; logged with context |
 | 20 | INVALID_NAME | a file name broke section 5.3's rules |
 | 21 | ALREADY_PAIRED | the pairing peer's key is already pinned |
+| 22 | ACCOUNT_AWAY | minor 1: the account that would answer is not at the console of its computer. A peer of minor 0 is sent `NOBODY_PRESENT` in its place |
 
 ## 9. Serialization
 
@@ -306,7 +327,7 @@ proptest round trips for every message and header: `decode(encode(x)) == x`; `en
 - Input: `Key.usage_page` is 0x07 or 0x0C; `locks` uses bits 0 to 2; `Button` is 1 to 5; `Text` at most 256 bytes of UTF-8 (NUL allowed there and in clipboard text). Cursor at most 256x256, RGBA exactly `width*height*4` bytes; hot spot unchecked.
 - `Capabilities.features` accepts any `u32` (unknown bits ignored). `PairResult.ok` and `code` are not forced to agree. The 0x0FFF message type is `ErrorMessage`.
 - The file-name rule for `INVALID_NAME` is session logic, set in stage 21.
-- DNS-SD (stage 9): service `_swapdesk._udp.local.`, instance name = the 32-hex key fingerprint, host `swapdesk-<12 hex>.local.`, SRV port = the session port, TXT keys `name` (≤ 64 bytes), `os` (`windows`|`macos`), `fp`, `pair=1` only in pairing mode; unknown keys ignored, at most 16 entries of ≤ 255 bytes. IPv4 prefixes 1 to 30 only; 169.254/16 allowed for a direct cable. An approved interface is a hardware Ethernet/Wi-Fi adapter with no virtual or VPN marker (fails closed). mDNS alone detects a clean shutdown in about 1 s; asleep or crashed devices need the session-layer liveness probe (stage 14/22) for the 10 s criterion of F-FIND-01.
+- DNS-SD (stage 9): service `_swapdesk._udp.local.`, instance name = the 32-hex key fingerprint, host `swapdesk-<12 hex>.local.`, SRV port = the session port, TXT keys `name` (≤ 64 bytes), `os` (`windows`|`macos`), `fp`, `pair=1` only in pairing mode, `minor` (the record's protocol minor in ASCII decimal, 1 to 65535, written only from minor 1 on; absent or malformed reads 0 and never refuses the record; a hint only, an authenticated `HelloAck` or `GrantsSync` wins); unknown keys ignored, at most 16 entries of ≤ 255 bytes. IPv4 prefixes 1 to 30 only; 169.254/16 allowed for a direct cable. An approved interface is a hardware Ethernet/Wi-Fi adapter with no virtual or VPN marker (fails closed). mDNS alone detects a clean shutdown in about 1 s; asleep or crashed devices need the session-layer liveness probe (stage 14/22) for the 10 s criterion of F-FIND-01.
 - TLS (stage 10): R1 resolved, RFC 7250 raw public keys work end to end through quinn 0.11 and rustls 0.23 (ring); 2.3 stays unused. SPKI is 44 bytes. The session endpoint requires an offered `swapdesk/*` ALPN and refuses `swapdesk-pair/1`; the pairing endpoint the reverse; a hello offering both is refused on either. Client resumption is disabled explicitly in production.
 - Pairing (stage 10): the responder's refusals (PAIRING_LOCKED, BUSY, ALREADY_PAIRED, NOT_PERMITTED, UNSUPPORTED_VERSION) are its reply to `PairHello` in place of `PairNonce`. Pinning happens on both confirmations, with the store write and the provisional clear in one atomic write; the final `PairResult { ok: true }` cannot undo it. A side that rejects sends `PairConfirm { false }` then `PairResult { false, SAS_REJECTED }`. The pairing endpoint stays up past the 2-minute mode while an attempt runs and closes when the mode has ended and none runs; the mode closes when an attempt ends. The initiator counts a provisional failure from `PairNonce`. Replacing a reinstalled device's key needs the user to open "Parear" on that device's entry (`replaces`); it logs `KeyReplaced` (audit tag 16). The lockout window counts from the end of the failing attempt.
 

@@ -127,13 +127,13 @@ fn a_hello_carries_its_own_minor_and_the_fixture_holds_the_minor_of_1_0() {
 
 // ---------- (c) the fixture set is complete ----------
 
-/// Message types introduced after minor 0, with the minor that introduced each. The crate has no such mark yet:
-/// every type of its table is a 1.0 type. A type added in a later minor is listed here, with its minor, in the
-/// same change that adds it; until then this test fails for it. A type listed here must still exist.
-const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[];
+/// Message types introduced after minor 0, with the minor that introduced each. A type added in a later minor
+/// is listed here, with its minor, in the same change that adds it; until then this test fails for it. A type
+/// listed here must still exist, and the crate must name the same minor for it (`Message::type_min_minor`).
+const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[(0x000B, 1), (0x000C, 1), (0x0801, 1)];
 
 /// Enum values introduced after minor 0: `(enum name, tag, minor)`. The same rule as for the types.
-const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[];
+const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[("ErrorCode", 22, 1), ("Desktop", 4, 1)];
 
 #[test]
 fn every_message_type_of_minor_0_has_a_fixture() {
@@ -142,6 +142,11 @@ fn every_message_type_of_minor_0_has_a_fixture() {
     for (id, minor) in TYPES_AFTER_MINOR_0 {
         assert!(*minor >= 1, "type {id:#06x} is listed as newer than minor 0 with minor {minor}");
         assert!(Message::ALL_TYPE_IDS.contains(id), "type {id:#06x} is listed but does not exist");
+        assert_eq!(Message::type_min_minor(*id), *minor, "type {id:#06x}: the crate names another minor");
+    }
+    // And the other way round: a type the crate marks as newer is listed here, a 1.0 type is not.
+    for id in Message::ALL_TYPE_IDS {
+        assert_eq!(Message::type_min_minor(*id) > 0, newer.contains(id), "type {id:#06x}");
     }
     let missing: Vec<String> = Message::ALL_TYPE_IDS
         .iter()
@@ -165,6 +170,19 @@ fn every_enum_value_of_minor_0_is_carried_by_a_fixture() {
             ENUM_VALUES_AFTER_MINOR_0.iter().filter(|(n, _, _)| *n == name).map(|(_, tag, _)| *tag).collect();
         for tag in &newer {
             assert!(defined.contains(tag), "{name} {tag} is listed as newer but does not exist");
+        }
+        // The crate names the same minor for each listed value, and 0 for every other.
+        let crate_minor = |tag: u64| match name {
+            "ErrorCode" => ErrorCode::from_tag(tag as u16).map(ErrorCode::min_minor),
+            "Desktop" => Desktop::from_tag(tag as u8).map(Desktop::min_minor),
+            _ => Some(0),
+        };
+        for tag in &defined {
+            let listed = ENUM_VALUES_AFTER_MINOR_0
+                .iter()
+                .find(|(n, t, _)| *n == name && t == tag)
+                .map_or(0, |(_, _, minor)| *minor);
+            assert_eq!(crate_minor(*tag), Some(listed), "{name} {tag}: the crate names another minor");
         }
         let missing: Vec<u64> =
             defined.iter().copied().filter(|t| !newer.contains(t) && !sampled.contains(t)).collect();

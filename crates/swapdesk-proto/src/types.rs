@@ -37,8 +37,26 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// Which desktop of the host receives input (`HostState.desktop`).
-    Desktop: u8 { Default = 0, Secure = 1, Locked = 2, LoginWindow = 3 }
+    /// Which desktop of the host receives input (`HostState.desktop`). `AccountAway` (minor 1): the account that
+    /// hosts is not the one at the console.
+    Desktop: u8 { Default = 0, Secure = 1, Locked = 2, LoginWindow = 3, AccountAway = 4 }
+}
+
+impl Desktop {
+    /// The protocol minor that introduced this value (PROTOCOL.md 1): it is sent only to a peer of that minor or
+    /// newer.
+    pub const fn min_minor(self) -> u16 {
+        match self {
+            Self::AccountAway => 1,
+            Self::Default | Self::Secure | Self::Locked | Self::LoginWindow => 0,
+        }
+    }
+
+    /// What a peer of `minor` is told in place of this value: itself when the peer knows it, otherwise the value
+    /// of its own minor that reads the same to a person (an account that is away looks locked).
+    pub const fn for_minor(self, minor: u16) -> Self {
+        if self.min_minor() <= minor { self } else { Self::Locked }
+    }
 }
 
 wire_enum! {
@@ -94,6 +112,25 @@ wire_enum! {
         Internal = 19,
         InvalidName = 20,
         AlreadyPaired = 21,
+        /// Minor 1: the account that would answer is not at the console of its computer.
+        AccountAway = 22,
+    }
+}
+
+impl ErrorCode {
+    /// The protocol minor that introduced this code (PROTOCOL.md 1): it is sent only to a peer of that minor or
+    /// newer.
+    pub const fn min_minor(self) -> u16 {
+        match self {
+            Self::AccountAway => 1,
+            _ => 0,
+        }
+    }
+
+    /// What a peer of `minor` is told in place of this code: itself when the peer knows it, otherwise the code
+    /// of its own minor that says the same (nobody is there to answer).
+    pub const fn for_minor(self, minor: u16) -> Self {
+        if self.min_minor() <= minor { self } else { Self::NobodyPresent }
     }
 }
 
@@ -214,8 +251,30 @@ mod tests {
         assert_eq!(ErrorCode::SasRejected.tag(), 11);
         assert_eq!(ErrorCode::Internal.tag(), 19);
         assert_eq!(ErrorCode::AlreadyPaired.tag(), 21);
-        assert_eq!(ErrorCode::ALL.len(), 22);
-        assert_eq!(ErrorCode::from_tag(22), None);
+        assert_eq!(ErrorCode::AccountAway.tag(), 22);
+        assert_eq!(ErrorCode::ALL.len(), 23);
+        assert_eq!(ErrorCode::from_tag(23), None);
+    }
+
+    #[test]
+    fn every_new_value_names_minor_1() {
+        for code in ErrorCode::ALL {
+            let want = u16::from(*code == ErrorCode::AccountAway);
+            assert_eq!(code.min_minor(), want, "{code:?}");
+            // A peer of minor 0 never gets a code it would refuse; a peer that knows the code gets it as it is.
+            assert_eq!(code.for_minor(0).min_minor(), 0, "{code:?}");
+            assert_eq!(code.for_minor(1), *code);
+            assert_eq!(code.for_minor(u16::MAX), *code);
+        }
+        assert_eq!(ErrorCode::AccountAway.for_minor(0), ErrorCode::NobodyPresent);
+        for desktop in Desktop::ALL {
+            let want = u16::from(*desktop == Desktop::AccountAway);
+            assert_eq!(desktop.min_minor(), want, "{desktop:?}");
+            assert_eq!(desktop.for_minor(0).min_minor(), 0, "{desktop:?}");
+            assert_eq!(desktop.for_minor(1), *desktop);
+        }
+        assert_eq!(Desktop::AccountAway.for_minor(0), Desktop::Locked);
+        assert_eq!((Desktop::AccountAway.tag(), Desktop::ALL.len()), (4, 5));
     }
 
     #[test]
