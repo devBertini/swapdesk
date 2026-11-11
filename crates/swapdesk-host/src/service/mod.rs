@@ -308,7 +308,11 @@ impl Gate {
         }
         let list = crate::netcache::list_async(&self.interfaces).await.map_err(|_| Refusal::UnknownLocalAddress)?;
         let local = local.ok_or(Refusal::UnknownLocalAddress)?;
-        check_incoming(&list, local, remote).map(|_| ())
+        let link = check_incoming(&list, local, remote)?;
+        if let Some(owner) = list.iter().find(|i| i.index == link.if_index) {
+            self.shared.note_link(local, owner.kind);
+        }
+        Ok(())
     }
 
     /// The peer's address is in the trust store's `blocked` list: it gets no answer at all, before any other check

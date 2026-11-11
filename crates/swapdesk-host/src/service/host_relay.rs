@@ -26,7 +26,7 @@ use swapdesk_proto::{
     CodecError, DisplayList, ErrorCode, HostMute, InputEvent, Message as Ctl, PermissionSet, Preset, StreamKind, Wire,
 };
 use swapdesk_session::{ChannelHandler, Forwarded, IncomingStream, SessionCtx, SessionEnd, VIDEO_CONTROL_TYPES};
-use swapdesk_video::{SenderConfig, VideoSender};
+use swapdesk_video::{RateConfig, SenderConfig, VideoSender};
 use tokio::sync::mpsc;
 
 use super::helper_link::HelperLink;
@@ -174,7 +174,9 @@ impl HostRelay {
                 rate.store(kbps, Ordering::Relaxed);
                 let _ = wake.try_send(RelayEv::Wake);
             };
-            VideoSender::new(conn, SenderConfig::default(), Arc::new(sink))
+            // A wired link starts higher than a wireless one; both ramp to the ceiling while the link is clean.
+            let rate = RateConfig::for_link(shared.is_wired(conn.local_ip()));
+            VideoSender::new(conn, SenderConfig { rate, ..SenderConfig::default() }, Arc::new(sink))
         });
         // The video task lives as long as the relay: it ends when `cleanup` closes the path.
         if let Some(sender) = sender.clone() {

@@ -5,7 +5,7 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 <!-- placar:inicio -->
 | Total | validados | revalidar | sem prova | so em aparelho | quebrados |
 |---|---|---|---|---|---|
-| **60** | **44** (73%) | 0 | 12 | 4 | 0 |
+| **60** | **45** (75%) | 0 | 11 | 4 | 0 |
 
 *Recalculado em 2026-11-10 por `check-flows`. Este placar não é escrito à mão.*
 <!-- placar:fim -->
@@ -97,5 +97,5 @@ One flow per row of `docs/SPEC.md` "Flows" (the criteria live there; IDs are the
 | F-VIEW-06 | Encode at the size the viewer's window shows; frame rate negotiated up to 120 |  |  | sem prova | — |
 | F-VIEW-07 | HEVC when both sides have hardware for it and know it, H.264 otherwise |  |  | sem prova | — |
 | F-VIEW-08 | A lost graphics device is created again without ending the session |  |  | sem prova | — |
-| F-VIEW-09 | Bitrate reaches the ceiling within 8 s on a clean link and settles under loss and jitter |  |  | sem prova | — |
+| F-VIEW-09 | Bitrate reaches the ceiling within 8 s on a clean link and settles under loss and jitter | rate.rs<br>host_relay.rs | swapdesk-video/rate::tests::a_clean_link_goes_from_20_to_80_mbps_in_under_8_s<br>swapdesk-video/rate::tests::on_a_modelled_clean_link_the_ceiling_is_reached_in_under_8_s_and_kept<br>swapdesk-video/rate::tests::with_1_percent_loss_and_20_ms_of_jitter_the_target_settles_without_oscillating<br>swapdesk-video/rate::tests::a_try_above_the_settled_rate_that_fails_returns_to_it_and_the_next_waits_longer<br>swapdesk-video/rate::tests::a_wired_link_starts_higher_and_a_wireless_or_unknown_one_at_20_mbps<br>swapdesk-host/service::shared::tests::a_session_is_wired_only_on_an_address_the_gate_saw_on_ethernet | validado | 2026-11-10 |
 | F-VIEW-10 | After the host's monitors change, a new session shows a display that exists and its pointer lands on it, with no service restart | helper.rs | swapdesk-host/helper_tests::a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_streams_the_new_display<br>swapdesk-host/helper_tests::a_pointer_for_a_display_that_appeared_after_the_start_is_applied_after_the_displays_are_listed_again | validado | 2026-11-10 |

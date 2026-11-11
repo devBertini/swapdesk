@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use swapdesk_platform::{Level, TraceSink};
+use swapdesk_platform::{IfKind, Level, TraceSink};
 use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, RedactedLen, VideoHeader};
 use swapdesk_session::{Forwarded, HostService};
 use tokio::runtime::Handle;
@@ -132,6 +132,9 @@ pub(crate) struct Shared {
     events_dropped: AtomicU64,
     /// The shells the user helper runs for the terminal proxy.
     pub ptys: PtyRoutes,
+    /// The kind of the interface behind each local address a peer connected to, as the gate saw it when it let the
+    /// connection in: a session's video starts at the rate of its link (F-VIEW-09) without asking the system again.
+    links: Mutex<HashMap<std::net::IpAddr, IfKind>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -139,6 +142,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    /// The gate let a connection in on `local`, an address of an interface of `kind`.
+    pub fn note_link(&self, local: std::net::IpAddr, kind: IfKind) {
+        lock(&self.links).insert(local, kind);
+    }
+
+    /// Whether the interface that owns `local` is a wired one, as far as the gate saw it. An address the gate never
+    /// judged (loopback in development) is not: the session starts at the wireless rate.
+    pub fn is_wired(&self, local: Option<std::net::IpAddr>) -> bool {
+        local.is_some_and(|ip| lock(&self.links).get(&ip) == Some(&IfKind::Ethernet))
+    }
+
     pub fn new(rt: Handle, trace: Arc<dyn TraceSink>, audio_exclude_pid: u32, events: SyncSender<CoreEvent>) -> Self {
         Self {
             rt,
@@ -150,6 +164,7 @@ impl Shared {
             waker: OnceLock::new(),
             events_dropped: AtomicU64::new(0),
             ptys: PtyRoutes::default(),
+            links: Mutex::default(),
         }
     }
 
@@ -448,5 +463,27 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(CoreEvent::SasRequested { .. })), "the event is queued when the waker runs");
         emitter.join().unwrap();
         assert_eq!(woke.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_session_is_wired_only_on_an_address_the_gate_saw_on_ethernet() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        let shared = Shared::new(rt.handle().clone(), Arc::new(LogCapture::new()), 0, tx);
+        let (cable, wifi, unseen) = (
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        shared.note_link(cable, IfKind::Ethernet);
+        shared.note_link(wifi, IfKind::WiFi);
+        assert!(shared.is_wired(Some(cable)));
+        assert!(!shared.is_wired(Some(wifi)));
+        assert!(!shared.is_wired(Some(unseen)), "an address the gate never judged starts at the wireless rate");
+        assert!(!shared.is_wired(None));
+        // The interface behind an address can change (a dock, a new network): the last look wins.
+        shared.note_link(cable, IfKind::WiFi);
+        assert!(!shared.is_wired(Some(cable)));
     }
 }
