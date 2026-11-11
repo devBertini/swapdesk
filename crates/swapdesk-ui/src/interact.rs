@@ -970,6 +970,8 @@ impl UiState {
     fn elevation_body_key(&self) -> MsgKey {
         match self.this.as_ref().map(|t| t.os) {
             Some(Os::MacOs) => MsgKey::ElevBodyMac,
+            // D56: a standard account is asked for an administrator's name and password.
+            _ if !self.admin_account => MsgKey::ElevBodyWindowsCredentials,
             _ => MsgKey::ElevBodyWindows,
         }
     }
@@ -994,7 +996,7 @@ impl UiState {
     /// The reason line of a failed elevation, by code (`None`: nothing more to say, the body already does).
     fn elevation_failure_line(&self, code: ApiCode) -> Option<String> {
         let key = match code {
-            ApiCode::Refused => return None,
+            ApiCode::Refused => MsgKey::ElevDeclined,
             ApiCode::NotPermitted => MsgKey::ElevNotAdmin,
             ApiCode::Timeout => MsgKey::ElevTimedOut,
             ApiCode::NotFound => MsgKey::ErrNotFound,

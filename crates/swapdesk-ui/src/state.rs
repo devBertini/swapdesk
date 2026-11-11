@@ -600,6 +600,8 @@ pub struct UiState {
     /// The runs of `Elevate` sent so far, for `Elevation::run`.
     pub(crate) elev_runs: u32,
     pub(crate) confirm: Option<ElevatedConfirm>,
+    /// This interface's account is an administrator account (D56: the confirmation's body); true until told.
+    pub(crate) admin_account: bool,
     pub(crate) sessions: Vec<SessionView>,
     pub(crate) swap: Option<SwapView>,
     pub(crate) rename: Option<RenameDraft>,
@@ -686,6 +688,7 @@ impl UiState {
             elevation: None,
             elev_runs: 0,
             confirm: None,
+            admin_account: true,
             sessions: Vec::new(),
             swap: None,
             activity: Vec::new(),
@@ -1328,6 +1331,12 @@ impl UiState {
 
     /// The last run crashed: the app calls this once at launch, after it renamed the marker file (D12). The notice
     /// goes when its action is used, another device is picked or another section opens.
+    /// Whether this interface's account is an administrator account (Windows reads it from its own token): a
+    /// standard account's confirmation says Windows will ask for an administrator's name and password (D56).
+    pub fn set_admin_account(&mut self, admin: bool) {
+        self.admin_account = admin;
+    }
+
     pub fn show_crash_notice(&mut self) {
         self.crash_notice = true;
     }

@@ -329,7 +329,7 @@ Swapdesk.exe --elevated <ticket: exactly 32 lowercase hex digits>
 | `ElevConfirmBody` | "Confirme como administrador para aplicar esta mudança." | "Confirm as an administrator to apply this change." |
 | `ElevConfirm` | "Confirmar" | "Confirm" |
 
-**Proposals, each needing the owner's approval:**
+**Approved by the owner (2026-11-11, D56) and built with S7:** `ElevNotAdmin` (new wording), `ElevDeclined`, `ElevBodyWindowsCredentials` (shown when the interface's own token is not an administrator account's). The table keeps the proposals as they were approved:
 
 | Key | pt-BR | en | Why |
 |---|---|---|---|

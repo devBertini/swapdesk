@@ -38,7 +38,7 @@ pub use pipe::{
 pub use power::KeepAwake;
 pub use sas::{sas_available, send_sas};
 pub use service::{ServiceContext, ServiceError, ServiceStatus, StopSignal, query_service, run_service, service_pid};
-pub use sys::current_user_sid;
+pub use sys::{current_account_is_administrator, current_user_sid};
 pub use trace::FileTrace;
 pub use watcher::{
     SessionEventSender, WinSessionWatcher, WindowWatcher, console_state, session_channel, session_user_name,

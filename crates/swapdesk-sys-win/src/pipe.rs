@@ -171,6 +171,12 @@ pub fn ui_pipe_name(session_id: u32) -> String {
     format!("ui-{session_id}")
 }
 
+/// `elev-<session id>` (ACCOUNTS.md S7, ELEVATION.md 3.3): where an elevated instance of any administrator of the
+/// session confirms a ticket.
+pub fn elev_pipe_name(session_id: u32) -> String {
+    format!("elev-{session_id}")
+}
+
 /// `helper-<role>-<session id>-<128-bit random hex>` (C2.1); the hex part is [`random_hex_128`].
 pub fn helper_pipe_name(role: HelperRole, session_id: u32, random_hex: &str) -> String {
     format!("helper-{}-{session_id}-{random_hex}", role.as_str())
@@ -211,6 +217,17 @@ impl PipeAcl {
     /// Production UI pipe or user-helper pipe: SYSTEM and that user.
     pub fn system_and_user(user_sid: impl Into<String>) -> Self {
         Self { owner: PipeOwner::System, user_sid: Some(user_sid.into()) }
+    }
+
+    /// Production elevator pipe: SYSTEM, and Administrators with the user row's rights. A filtered token holds
+    /// Administrators deny-only, which an allow entry ignores, so only an elevated administrator opens it.
+    pub fn system_and_administrators() -> Self {
+        Self { owner: PipeOwner::System, user_sid: Some(ADMINISTRATORS_SID.to_string()) }
+    }
+
+    /// Development elevator pipe: the current user in SYSTEM's row, and Administrators.
+    pub fn dev_and_administrators() -> Self {
+        Self { owner: PipeOwner::CurrentUser, user_sid: Some(ADMINISTRATORS_SID.to_string()) }
     }
 
     /// Production system-helper pipe: SYSTEM only.
@@ -263,6 +280,11 @@ impl PipeSpec {
     /// `ui-<session id>`: several instances, so the next client can connect while the previous one is closing.
     pub fn ui(session_id: u32, acl: PipeAcl) -> Self {
         Self { name: ui_pipe_name(session_id), acl, max_instances: 4 }
+    }
+
+    /// `elev-<session id>`: a couple of instances, one confirmation at a time is the rule.
+    pub fn elevator(session_id: u32, acl: PipeAcl) -> Self {
+        Self { name: elev_pipe_name(session_id), acl, max_instances: 2 }
     }
 
     /// A helper pipe: one instance, ever.

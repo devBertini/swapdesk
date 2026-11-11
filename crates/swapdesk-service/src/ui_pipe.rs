@@ -45,6 +45,13 @@ pub fn session_user_sid(session: u32) -> Result<String, String> {
 pub type Route = Arc<dyn Fn(&str) -> Result<UiHub, String> + Send + Sync>;
 
 /// What the accept loops share.
+/// The two pipes of a session: the UI's, and the elevator's (ACCOUNTS.md S7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pipe {
+    Ui,
+    Elevator,
+}
+
 pub struct UiPipes {
     route: Route,
     pub trace: Arc<dyn TraceSink>,
@@ -56,6 +63,8 @@ pub struct UiPipes {
     open: Mutex<Vec<(u64, PipeConn)>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     sessions: OpenSessions,
+    /// The sessions whose elevator pipe is open.
+    elev_sessions: OpenSessions,
     next: std::sync::atomic::AtomicU64,
 }
 
@@ -111,6 +120,7 @@ impl UiPipes {
             open: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
             sessions: OpenSessions::default(),
+            elev_sessions: OpenSessions::default(),
             next: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -123,16 +133,23 @@ impl UiPipes {
     /// listener is bound: a failed attempt (no user token yet at the logon screen, a squatted name) is tried again at
     /// the next call, which is the next console change or logon of that session.
     pub fn ensure(self: &Arc<Self>, session: u32) {
-        let Some(listener) = self.sessions.ensure(session, || self.bind(session)) else { return };
-        self.accept_on(session, listener);
+        if let Some(listener) = self.sessions.ensure(session, || self.bind(session, Pipe::Ui)) {
+            self.accept_on(session, listener, Pipe::Ui);
+        }
+        // ACCOUNTS.md S7: beside it, the pipe where an administrator of the session confirms over its user's shoulder.
+        if let Some(listener) = self.elev_sessions.ensure(session, || self.bind(session, Pipe::Elevator)) {
+            self.accept_on(session, listener, Pipe::Elevator);
+        }
     }
 
     /// Creates the listener of `session`'s pipe with the ACL its mode calls for; `None` (logged) when it cannot.
-    fn bind(&self, session: u32) -> Option<PipeListener> {
-        // The user the pipe is for.
-        let acl = match self.mode {
-            Mode::Dev => PipeAcl::dev(),
-            Mode::Production => match session_user_sid(session) {
+    fn bind(&self, session: u32, pipe: Pipe) -> Option<PipeListener> {
+        // The user the pipe is for; the elevator pipe is for the machine's administrators.
+        let acl = match (pipe, self.mode) {
+            (Pipe::Elevator, Mode::Dev) => Ok(PipeAcl::dev_and_administrators()),
+            (Pipe::Elevator, Mode::Production) => Ok(PipeAcl::system_and_administrators()),
+            (Pipe::Ui, Mode::Dev) => PipeAcl::dev(),
+            (Pipe::Ui, Mode::Production) => match session_user_sid(session) {
                 Ok(sid) => Ok(PipeAcl::system_and_user(sid)),
                 Err(e) => {
                     self.log(Level::Error, format_args!("alert: no UI pipe for session {session}: {e}"));
@@ -147,7 +164,10 @@ impl UiPipes {
                 return None;
             }
         };
-        let mut spec = PipeSpec::ui(session, acl);
+        let mut spec = match pipe {
+            Pipe::Ui => PipeSpec::ui(session, acl),
+            Pipe::Elevator => PipeSpec::elevator(session, acl),
+        };
         spec.name.push_str(&self.suffix);
         let listener = match PipeListener::bind(spec) {
             Ok(l) => l,
@@ -166,7 +186,7 @@ impl UiPipes {
 
     /// Accepts the connections of `session`'s pipe on a thread of their own. When the pipe fails or the thread cannot
     /// start, the session is forgotten so the next `ensure` makes a new listener.
-    fn accept_on(self: &Arc<Self>, session: u32, mut listener: PipeListener) {
+    fn accept_on(self: &Arc<Self>, session: u32, mut listener: PipeListener, pipe: Pipe) {
         let me = Arc::clone(self);
         let accept = std::thread::Builder::new().name(format!("ui-pipe-{session}")).spawn(move || {
             while !me.stop.load(Ordering::Acquire) {
@@ -175,7 +195,7 @@ impl UiPipes {
                         let worker = Arc::clone(&me);
                         let spawned = std::thread::Builder::new()
                             .name(format!("ui-conn-{session}"))
-                            .spawn(move || worker.connection(session, conn));
+                            .spawn(move || worker.connection(session, conn, pipe));
                         match spawned {
                             Ok(h) => lock(&me.threads).push(h),
                             Err(e) => me.log(Level::Warn, format_args!("cannot start a connection thread: {e}")),
@@ -183,8 +203,8 @@ impl UiPipes {
                     }
                     Err(PipeError::Timeout) => {}
                     Err(e) => {
-                        me.log(Level::Error, format_args!("the UI pipe of session {session} failed: {e}"));
-                        me.sessions.forget(session);
+                        me.log(Level::Error, format_args!("the {pipe:?} pipe of session {session} failed: {e}"));
+                        me.sessions_of(pipe).forget(session);
                         return;
                     }
                 }
@@ -194,13 +214,23 @@ impl UiPipes {
             Ok(h) => lock(&self.threads).push(h),
             Err(e) => {
                 self.log(Level::Error, format_args!("cannot start the UI pipe thread: {e}"));
-                self.sessions.forget(session);
+                self.sessions_of(pipe).forget(session);
             }
         }
     }
 
-    /// One client of the UI pipe of `session`.
-    fn connection(self: &Arc<Self>, session: u32, conn: PipeConn) {
+    fn sessions_of(&self, pipe: Pipe) -> &OpenSessions {
+        match pipe {
+            Pipe::Ui => &self.sessions,
+            Pipe::Elevator => &self.elev_sessions,
+        }
+    }
+
+    /// One client of the UI pipe of `session`, or of its elevator pipe.
+    fn connection(self: &Arc<Self>, session: u32, conn: PipeConn, pipe: Pipe) {
+        if pipe == Pipe::Elevator {
+            return self.elevator_connection(session, conn);
+        }
         let refuse = |why: &str| {
             self.log(Level::Warn, format_args!("a client of the UI pipe of session {session} was refused: {why}"))
         };
@@ -287,6 +317,79 @@ impl UiPipes {
         lock(&self.open).retain(|(i, _)| *i != id);
         if let Err(e) = end {
             self.log(Level::Debug, format_args!("{what} connection ended: {e}"));
+        }
+    }
+
+    /// One client of `elev-<session>` (ACCOUNTS.md S7, ELEVATION.md 3.3): role `Elevator` only, a process of that
+    /// session whose token is elevated with Administrators enabled, of any user; it answers for the tickets of the
+    /// account whose user is at that session, in that account's hub.
+    fn elevator_connection(self: &Arc<Self>, session: u32, conn: PipeConn) {
+        let refuse = |why: &str| {
+            self.log(Level::Warn, format_args!("a client of the elevator pipe of session {session} was refused: {why}"))
+        };
+        match conn.client_session_id() {
+            Ok(s) if s == session => {}
+            Ok(s) => return refuse(&format!("it runs in session {s}")),
+            Err(e) => return refuse(&e.to_string()),
+        }
+        let (Ok(for_identity), Ok(for_cancel), Ok(for_cut)) = (conn.try_clone(), conn.try_clone(), conn.try_clone())
+        else {
+            return refuse("pipe handle");
+        };
+        let Ok((mut reader_half, writer_half)) = conn.split() else { return refuse("pipe split") };
+        reader_half.set_read_timeout(Some(HELLO_WITHIN));
+        let (mut reader, mut writer) = (FrameReader::new(reader_half), FrameWriter::new(writer_half));
+        let hello = match Handshake::server(&mut reader, &mut writer, session) {
+            Ok(h) => h,
+            Err(e) => return refuse(&format!("handshake: {e}")),
+        };
+        let bye = |writer: &mut FrameWriter<_>, code| {
+            let _ = writer.write_message(&swapdesk_ipc::Message::Bye { code });
+        };
+        if hello.role != IpcRole::Elevator {
+            bye(&mut writer, ErrorCode::NotPermitted);
+            return refuse("its role is not Elevator");
+        }
+        let who = match for_identity.identify_client() {
+            Ok(w) if w.is_admin() => w,
+            Ok(_) => {
+                bye(&mut writer, ErrorCode::NotPermitted);
+                return refuse("its token is not an elevated administrator's");
+            }
+            Err(e) => {
+                bye(&mut writer, ErrorCode::NotPermitted);
+                return refuse(&format!("identify: {e}"));
+            }
+        };
+        // The tickets of this session live in the hub of the account whose user is at it.
+        let asker = match self.mode {
+            Mode::Dev => current_user_sid().map_err(|e| e.to_string()),
+            Mode::Production => session_user_sid(session),
+        };
+        let hub = match asker.and_then(|sid| (self.route)(&sid)) {
+            Ok(h) => h,
+            Err(e) => {
+                bye(&mut writer, ErrorCode::NotPermitted);
+                return refuse(&format!("no account at the session: {e}"));
+            }
+        };
+        let info = ConnInfo {
+            session_id: session,
+            user: UserRef { id: who.user_sid.clone(), name: String::new() },
+            admin: true,
+            can_elevate: true,
+        };
+        let mut reader_half = reader.into_inner();
+        reader_half.set_read_timeout(None);
+        let reader = FrameReader::new(reader_half);
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        lock(&self.open).push((id, for_cancel));
+        let for_cut = Mutex::new(for_cut);
+        let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || lock(&for_cut).cancel_io());
+        let end = hub.serve_elevator_cancellable(reader, writer, info, cancel);
+        lock(&self.open).retain(|(i, _)| *i != id);
+        if let Err(e) = end {
+            self.log(Level::Debug, format_args!("an elevator connection ended: {e}"));
         }
     }
 
@@ -436,6 +539,11 @@ mod tests {
         fn client(&self, role: IpcRole) -> Client {
             Client::open(&self.name, role)
         }
+
+        /// A client of the session's elevator pipe (`elev-<session><suffix>`).
+        fn elevator_client(&self, role: IpcRole) -> Client {
+            Client::open(&self.name.replacen("ui-", "elev-", 1), role)
+        }
     }
 
     impl Drop for DevPipe {
@@ -550,16 +658,20 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_connection_may_ask_for_a_ticket_exactly_when_its_token_holds_administrators() {
+    fn a_ui_connection_of_any_account_may_ask_for_a_ticket() {
         let dev = DevPipe::new();
         let me = own_identity();
-        // A well-formed device that is not paired: past the `can_elevate` gate the answer is `NotFound`; at the gate
-        // it is `NotPermitted`. (A ticket itself needs a paired device, which the hub's own tests make.)
+        // ACCOUNTS.md S7: every account may ask; a well-formed device that is not paired is `NotFound`. (A ticket
+        // itself needs a paired device, which the hub's own tests make.)
         let action = ElevAction::SetGrants { device_id: "ab".repeat(16), grants: 0 };
         let mut ui = dev.client(IpcRole::Ui);
         ui.send(1, UiOp::ElevationBegin { action });
-        let want = if me.administrators_present { ApiCode::NotFound } else { ApiCode::NotPermitted };
-        assert_eq!(ui.reply(1, 35).unwrap_err(), want, "administrators present: {}", me.administrators_present);
+        assert_eq!(
+            ui.reply(1, 35).unwrap_err(),
+            ApiCode::NotFound,
+            "administrators present: {}",
+            me.administrators_present
+        );
     }
 
     #[test]
@@ -587,5 +699,25 @@ mod tests {
         sessions.forget(1);
         assert_eq!(sessions.ensure(1, || Some("pipe-1b")), Some("pipe-1b"));
         assert_eq!(sessions.ensure(3, || Some("again")), None, "forgetting one session leaves the other served");
+    }
+
+    /// ACCOUNTS.md S7: `elev-<session>` serves the role `Elevator` only, and only to an elevated administrator's
+    /// token; a UI there is refused.
+    #[test]
+    fn the_elevator_pipe_serves_only_the_elevator_role() {
+        let dev = DevPipe::new();
+        let me = own_identity();
+        let mut ui = dev.elevator_client(IpcRole::Ui);
+        ui.expect_bye_and_end(ErrorCode::NotPermitted);
+        assert!(dev.lines.has("its role is not Elevator"), "the refusal is logged");
+        let mut elevator = dev.elevator_client(IpcRole::Elevator);
+        if me.is_admin() {
+            // Served by the restricted loop: a ticket nobody opened is not found.
+            elevator.send(1, UiOp::ElevationDescribe { ticket: ElevationTicket([7; 16]) });
+            assert_eq!(elevator.reply(1, 36).unwrap_err(), ApiCode::NotFound);
+        } else {
+            elevator.expect_bye_and_end(ErrorCode::NotPermitted);
+            assert!(dev.lines.has("its token is not an elevated administrator's"));
+        }
     }
 }

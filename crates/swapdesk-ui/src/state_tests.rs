@@ -360,7 +360,8 @@ fn each_failure_code_has_its_line_in_the_step() {
         t.extra
     };
     let tm = |key: MsgKey| Some(Scenario::Elevacao.prepared_state().tm(&Msg::new(key)));
-    assert_eq!(line(ApiCode::Refused), None);
+    // D56: a declined confirmation says so.
+    assert_eq!(line(ApiCode::Refused), tm(MsgKey::ElevDeclined));
     assert_eq!(line(ApiCode::NotPermitted), tm(MsgKey::ElevNotAdmin));
     assert_eq!(line(ApiCode::Timeout), tm(MsgKey::ElevTimedOut));
     assert_eq!(line(ApiCode::NotFound), tm(MsgKey::ErrNotFound));
@@ -2743,4 +2744,17 @@ fn the_banner_of_an_elevated_session_says_controle_elevado() {
     let s = Scenario::Banner.prepared_state();
     let h = s.host_session().unwrap().clone();
     assert!(!s.banner_text("Mesa", &h).contains("Controle elevado"));
+}
+
+/// D56: the confirmation of a standard account says Windows will ask for an administrator's name and password; an
+/// administrator account keeps the body of 1.0.
+#[test]
+fn a_standard_accounts_confirmation_asks_for_an_administrators_name_and_password() {
+    let body = |admin: bool| {
+        let mut s = Scenario::Elevacao.prepared_state();
+        s.set_admin_account(admin);
+        s.dialog_texts(&DialogKind::Elevation).body.join(" ")
+    };
+    assert!(body(false).contains("nome e a senha de um administrador"), "{}", body(false));
+    assert!(!body(true).contains("nome e a senha"), "{}", body(true));
 }

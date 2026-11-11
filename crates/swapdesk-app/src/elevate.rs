@@ -150,7 +150,7 @@ pub fn run_instance(
     ticket: &ElevationTicket,
     confirm: impl FnOnce(&ElevAction, &str, u16) -> bool,
 ) -> u8 {
-    let conn = match connect::open_pipe(options) {
+    let conn = match connect::open_elevator_pipe(options) {
         Ok(c) => c,
         Err(e) => {
             trace(&format!("instance: {e}"));

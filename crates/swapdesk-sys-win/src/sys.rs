@@ -189,6 +189,15 @@ pub fn token_elevation_type(token: HANDLE) -> Result<u32> {
     Ok(unsafe { *info.as_ptr().cast::<i32>() } as u32)
 }
 
+/// Whether this process's account is an administrator account: Administrators is in its token, enabled or
+/// deny-only (a filtered token). Windows then asks for consent; a standard account is asked for an administrator's
+/// name and password (D56).
+pub fn current_account_is_administrator() -> Result<bool> {
+    let token = open_process_token(TOKEN_QUERY)?;
+    let groups = token_groups(token.0)?;
+    Ok(crate::pipe::administrators_present(&groups))
+}
+
 /// The SID of the user this process runs as, as `S-1-5-21-...`.
 pub fn current_user_sid() -> Result<String> {
     let token = open_process_token(TOKEN_QUERY)?;

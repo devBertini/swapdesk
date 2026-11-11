@@ -484,7 +484,7 @@ strings! {
 
     // Elevation step and window. Appended last: a key travels as its index, so a new key in the middle would shift
     // the activity texts of a service built before it.
-    ElevNotAdmin => "Esta conta não é administradora deste computador. Entre com uma conta de administrador para fazer esta mudança.", "This account is not an administrator of this computer. Sign in with an administrator account to make this change.";
+    ElevNotAdmin => "A confirmação não veio de um administrador deste computador.", "The confirmation did not come from an administrator of this computer.";
     ElevTimedOut => "O tempo para confirmar acabou.", "The time to confirm ran out.";
     ElevConfirmBody => "Confirme como administrador para aplicar esta mudança.", "Confirm as an administrator to apply this change.";
     ElevConfirm => "Confirmar", "Confirm";
@@ -514,6 +514,8 @@ strings! {
     ElevateHint => "Controlar também os avisos de administrador e a tela de entrada", "Also control administrator prompts and the sign-in screen";
     PausedAwayBody => "Esta conta não está mais na tela do {0}. A sessão volta quando ela voltar.", "This account is no longer on {0}'s screen. The session resumes when it is back.";
     PausedElevateBody => "O {0} mostra uma tela protegida. Eleve o controle para vê-la e usá-la.", "{0} shows a protected screen. Elevate control to see and use it.";
+    ElevDeclined => "A confirmação foi recusada.", "The confirmation was declined.";
+    ElevBodyWindowsCredentials => "Esta mudança precisa de um administrador deste computador. O Windows vai pedir o nome e a senha de um administrador.", "This change needs an administrator of this computer. Windows will ask for an administrator's name and password.";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

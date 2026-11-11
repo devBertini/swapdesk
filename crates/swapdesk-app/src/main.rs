@@ -44,6 +44,8 @@ fn main() {
     let language = system_language();
     let waker = Arc::new(Waker::new());
     let mut state = UiState::new(language, system_dark());
+    // D56: the confirmation of a standard account asks for an administrator's name and password.
+    state.set_admin_account(swapdesk_sys_win::current_account_is_administrator().unwrap_or(true));
     // D12: a panic leaves a record; the next start announces the last one once (the marker is renamed as the
     // notice is handed to the state, before the first frame).
     if let Some(dir) = swapdesk_sys_win::user_log_dir() {

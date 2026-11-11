@@ -14,7 +14,9 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use swapdesk_sys_win::pipe::{PipeConn, PipeError, connect as connect_pipe, session_of_pid, ui_pipe_name};
+use swapdesk_sys_win::pipe::{
+    PipeConn, PipeError, connect as connect_pipe, elev_pipe_name, session_of_pid, ui_pipe_name,
+};
 use swapdesk_sys_win::service_pid;
 use swapdesk_ui::UiWaker;
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
@@ -60,6 +62,26 @@ pub fn pipe_name(session_id: u32, instance: Option<u32>) -> String {
     match instance {
         Some(n) => format!("{}-{n}", ui_pipe_name(session_id)),
         None => ui_pipe_name(session_id),
+    }
+}
+
+/// `elev-<session>` (`-<n>` with `--instance`): where the elevated instance confirms a ticket, whatever its user
+/// (ACCOUNTS.md S7).
+pub fn elevator_pipe_name(session_id: u32, instance: Option<u32>) -> String {
+    match instance {
+        Some(n) => format!("{}-{n}", elev_pipe_name(session_id)),
+        None => elev_pipe_name(session_id),
+    }
+}
+
+/// The elevated instance's pipe: `elev-<session>`; the UI pipe when that one cannot be opened (the elevated instance
+/// of the session's own user is served there too).
+pub fn open_elevator_pipe(options: &Options) -> Result<PipeConn, ConnectError> {
+    let pid = expected_server_pid(options)?;
+    let session = session_of_pid(std::process::id()).map_err(|e| ConnectError::Session(e.to_string()))?;
+    match connect_pipe(&elevator_pipe_name(session, options.instance), pid, PIPE_TIMEOUT) {
+        Ok(c) => Ok(c),
+        Err(_) => open_pipe(options),
     }
 }
 
@@ -123,6 +145,8 @@ mod tests {
     fn pipe_names_follow_the_contract_and_the_service_lane() {
         assert_eq!(pipe_name(2, None), "ui-2");
         assert_eq!(pipe_name(2, Some(7)), "ui-2-7");
+        assert_eq!(elevator_pipe_name(2, None), "elev-2");
+        assert_eq!(elevator_pipe_name(2, Some(7)), "elev-2-7");
     }
 
     #[test]
