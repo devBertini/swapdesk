@@ -169,10 +169,42 @@ impl Pair {
 }
 
 fn state_of(ui: &mut Client, id: u32, what: &str, f: impl Fn(&TransferWire) -> bool) -> TransferWire {
-    ui.notify(what, |n| match n {
-        Notify::Files(FilesNote::Transfer { transfer_id, state, .. }) if *transfer_id == id && f(state) => Some(*state),
+    state_within(ui, WAIT, id, what, f)
+}
+
+/// How long a step may take whose length is the work itself, not a reaction: a whole file moving (its time grows
+/// with the bytes and with the load of a full parallel suite), or the QUIC idle timeout (6 s) of a cut link. Defect
+/// stage 101: under the full suite these steps passed the 10 s a reaction gets, with nothing wrong.
+const LONG_STEP: Duration = Duration::from_secs(60);
+
+fn state_within(
+    ui: &mut Client,
+    limit: Duration,
+    id: u32,
+    what: &str,
+    f: impl Fn(&TransferWire) -> bool,
+) -> TransferWire {
+    ui.take_within(limit, what, |m| match m {
+        Ipc::UiNotify(Notify::Files(FilesNote::Transfer { transfer_id, state, .. }))
+            if *transfer_id == id && f(state) =>
+        {
+            Some(*state)
+        }
         _ => None,
     })
+}
+
+/// A notification whose wait includes the idle timeout of a cut link: a long step (see [`LONG_STEP`]).
+fn notify_long<T>(ui: &mut Client, what: &str, mut f: impl FnMut(&Notify) -> Option<T>) -> T {
+    ui.take_within(LONG_STEP, what, |m| match m {
+        Ipc::UiNotify(n) => f(n),
+        _ => None,
+    })
+}
+
+/// A transfer finishing: a long step (see [`LONG_STEP`]).
+fn finished(ui: &mut Client, id: u32, what: &str) -> TransferWire {
+    state_within(ui, LONG_STEP, id, what, is_done)
 }
 
 fn is_done(s: &TransferWire) -> bool {
@@ -242,11 +274,11 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
     let secs = started.elapsed().as_secs_f64().max(0.25);
     assert!(f64::from(running) <= 4.0 * secs + 2.0, "{running} progress notes in {secs:.2} s: throttled to 4 a second");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
-    state_of(&mut p.host_ui, id, "the host's user hears of the file", is_done);
+    finished(&mut p.host_ui, id, "the host's user hears of the file");
 
     // The name is taken: the host saves "up (1).bin" and its user's UI is told which name it got.
     let id2 = one_id(p.send(vec![pick], Some("incoming")));
-    state_of(&mut p.viewer_ui, id2, "the second upload", is_done);
+    finished(&mut p.viewer_ui, id2, "the second upload");
     assert!(std::fs::metadata(p.home.join("incoming").join("up (1).bin")).is_ok(), "the first file stays");
     let saved = p.host_ui.notify("saved as", |n| match n {
         Notify::Files(FilesNote::SavedAs { transfer_id, name, .. }) if *transfer_id == id2 => Some(name.0.clone()),
@@ -256,7 +288,7 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
 
     // F-FILE-02 download into the receive folder the UI chose; the second time the name is taken on this side.
     let g1 = one_id(p.get("docs/down.bin"));
-    state_of(&mut p.viewer_ui, g1, "the download", is_done);
+    finished(&mut p.viewer_ui, g1, "the download");
     assert!(same(&std::fs::read(p.recv.join("down.bin")).unwrap(), &down));
     let g2 = one_id(p.get("docs/down.bin"));
     let saved = p.viewer_ui.notify("saved as", |n| match n {
@@ -264,7 +296,7 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
         _ => None,
     });
     assert_eq!(saved, "down (1).bin");
-    state_of(&mut p.viewer_ui, g2, "the second download", is_done);
+    finished(&mut p.viewer_ui, g2, "the second download");
     assert!(same(&std::fs::read(p.recv.join("down (1).bin")).unwrap(), &down));
 
     // Refusals: nothing reaches the host for a request that is not one of this UI's own.
@@ -312,7 +344,7 @@ fn a_transfer_the_user_pauses_waits_for_retomar_and_continues_from_the_verified_
     state_of(&mut p.viewer_ui, id, "paused", |s| matches!(s, TransferWire::Paused { .. }));
     // "Retomar".
     assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
-    state_of(&mut p.viewer_ui, id, "done after Retomar", is_done);
+    finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("big.bin")).unwrap(), &big));
     assert!(!p.home.join("incoming").join("big.bin.swapdesk-part").exists());
     // Cancel removes a transfer and its partial file.
@@ -417,13 +449,15 @@ fn a_cut_link_pauses_the_transfers_and_the_reconnect_offers_them_again_with_no_c
     let relay = p.relay.take().expect("a cut-able pair");
     relay.cut(true);
     for id in [up_id, down_id] {
-        state_of(&mut p.viewer_ui, id, "paused by the lost link", |s| matches!(s, TransferWire::Paused { .. }));
+        state_within(&mut p.viewer_ui, LONG_STEP, id, "paused by the lost link", |s| {
+            matches!(s, TransferWire::Paused { .. })
+        });
     }
     let partial = std::fs::metadata(p.home.join("incoming").join("up.bin.swapdesk-part"))
         .expect("the host keeps the partial file")
         .len();
     assert!(partial < up.len() as u64);
-    p.viewer_ui.notify("Reconectando", |n| match n {
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| match n {
         Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
             if *session_id == p.session && *attempt >= 1 =>
         {
@@ -434,8 +468,8 @@ fn a_cut_link_pauses_the_transfers_and_the_reconnect_offers_them_again_with_no_c
 
     // The network is back: nobody clicks "Retomar", and both finish with the right bytes.
     relay.cut(false);
-    state_of(&mut p.viewer_ui, up_id, "the upload to finish", is_done);
-    state_of(&mut p.viewer_ui, down_id, "the download to finish", is_done);
+    finished(&mut p.viewer_ui, up_id, "the upload to finish");
+    finished(&mut p.viewer_ui, down_id, "the download to finish");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     assert!(same(&std::fs::read(p.recv.join("down.bin")).unwrap(), &std::fs::read(p.home.join("down.bin")).unwrap()));
     assert!(
@@ -457,12 +491,12 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
     state_of(&mut p.viewer_ui, id, "paused", |s| matches!(s, TransferWire::Paused { .. }));
     let relay = p.relay.take().expect("a cut-able pair");
     relay.cut(true);
-    p.viewer_ui.notify("Reconectando", |n| {
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| {
         matches!(n, Notify::Session { state: SessionState::Reconnecting { attempt }, .. } if *attempt >= 1)
             .then_some(())
     });
     relay.cut(false);
-    p.viewer_ui.notify("the session is back", |n| match n {
+    notify_long(&mut p.viewer_ui, "the session is back", |n| match n {
         Notify::Session { session_id, state, .. } if *session_id == p.session => grants_active(state),
         _ => None,
     });
@@ -475,7 +509,7 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
     );
     // "Retomar" after the reconnect offers it again and it finishes.
     assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
-    state_of(&mut p.viewer_ui, id, "done after Retomar", is_done);
+    finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     p.relay = Some(relay);
     p.finish();
@@ -493,7 +527,7 @@ fn after_a_reconnect_the_files_of_another_user_are_still_asked_for() {
 
     let relay = p.relay.take().expect("a cut-able pair");
     relay.cut(true);
-    p.viewer_ui.notify("Reconectando", |n| match n {
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| match n {
         Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
             if *session_id == p.session && *attempt >= 1 =>
         {
@@ -503,7 +537,7 @@ fn after_a_reconnect_the_files_of_another_user_are_still_asked_for() {
     });
     p.viewer_ui.clear();
     relay.cut(false);
-    p.viewer_ui.notify("the session is back", |n| match n {
+    notify_long(&mut p.viewer_ui, "the session is back", |n| match n {
         Notify::Session { session_id, state: SessionState::Active { .. }, .. } if *session_id == p.session => Some(()),
         _ => None,
     });
