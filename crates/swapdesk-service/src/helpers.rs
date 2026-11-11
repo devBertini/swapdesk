@@ -40,6 +40,8 @@ pub enum Launch {
 struct Running {
     child: ChildProcess,
     started: Instant,
+    /// The core it attached to (its address): when another account's core may host now, it moves (ACCOUNTS.md 5.1).
+    core: usize,
     /// A second owner of the pipe handle, to cancel its blocked read at shutdown.
     cancel: PipeConn,
 }
@@ -207,6 +209,21 @@ impl Supervisor {
             }
         }
         let Some(session) = self.session else { return };
+        // A helper attached to a core that may no longer host goes now and starts again on the right one (no backoff:
+        // it did not fail).
+        let current = (self.core)().map(|c| core_id(&c));
+        let attached: Vec<Option<usize>> = self.slots.iter().map(|s| s.running.as_ref().map(|r| r.core)).collect();
+        for i in misplaced(&attached, current) {
+            if let Some(r) = self.slots[i].running.take() {
+                self.trace.log(
+                    Level::Info,
+                    "supervisor",
+                    format_args!("{} helper moves to the account that may host now", self.slots[i].role.as_str()),
+                );
+                end(r);
+                self.slots[i].due = Some(now);
+            }
+        }
         // No account may host yet (nobody has opened Swapdesk): no helper is started, and the slots look again in a
         // second, without counting it as a failure.
         if (self.core)().is_none() {
@@ -393,12 +410,23 @@ fn start_helper(env: &StartEnv, role: HelperRole, ipc: IpcRole, session: u32) ->
     let attached = core.attach_helper_pid(ipc, verified_pid, reader, writer);
     drop(done_tx);
     match attached {
-        Ok(_) => Ok(Running { child, started: Instant::now(), cancel }),
+        Ok(_) => Ok(Running { child, started: Instant::now(), cancel, core: core_id(&core) }),
         Err(e) => {
             let _ = child.kill();
             Err(e.to_string())
         }
     }
+}
+
+fn core_id(core: &Arc<ServiceCore>) -> usize {
+    Arc::as_ptr(core) as usize
+}
+
+/// The slots whose running helper is attached to another core than the one that may host now (review of S3/S4, M4):
+/// at the sign-in screen the hosting account changes from A to B, and B's core has no helper until they move. With no
+/// core that may host, every running helper is misplaced.
+fn misplaced(attached: &[Option<usize>], current: Option<usize>) -> Vec<usize> {
+    attached.iter().enumerate().filter(|(_, a)| a.is_some_and(|a| Some(a) != current)).map(|(i, _)| i).collect()
 }
 
 /// Ends a helper that is still running and unblocks its pipe.
@@ -427,5 +455,15 @@ mod tests {
         assert_eq!(earliest_due(Some(1), &[(true, None), (false, None)]), None);
         // No console session: nothing can start, so nothing to wake for.
         assert_eq!(earliest_due(None, &[(false, at(1)), (false, at(2))]), None);
+    }
+
+    /// Review of S3/S4, M4: a running helper whose core is no longer the one that may host is moved; one on the right
+    /// core stays; with no core that may host, every running helper goes.
+    #[test]
+    fn a_helper_moves_when_the_hosting_account_changes() {
+        assert_eq!(misplaced(&[Some(1), Some(1)], Some(1)), Vec::<usize>::new(), "the right core: they stay");
+        assert_eq!(misplaced(&[Some(1), Some(2)], Some(2)), vec![0], "A's helper moves to B");
+        assert_eq!(misplaced(&[Some(1), None], Some(2)), vec![0], "a slot with nothing running is not counted");
+        assert_eq!(misplaced(&[Some(1), Some(1)], None), vec![0, 1], "nobody may host: both go");
     }
 }
