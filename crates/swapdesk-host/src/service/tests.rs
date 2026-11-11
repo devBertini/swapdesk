@@ -63,11 +63,17 @@ struct AutoUi {
     /// What the user answers a D13 consent question (`None`: nobody answers), and how many were asked.
     consent_answer: Mutex<Option<bool>>,
     consents: AtomicUsize,
+    /// Who owns the console (ACCOUNTS.md 5.1).
+    owner: Mutex<swapdesk_session::ConsoleOwner>,
 }
 
 impl HostUi for AutoUi {
     fn somebody_present(&self) -> bool {
         true
+    }
+
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        *self.owner.lock().unwrap()
     }
 
     fn prompt(&self, _request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
@@ -131,6 +137,7 @@ impl Machine {
             prompts: AtomicUsize::new(0),
             consent_answer: Mutex::new(Some(true)),
             consents: AtomicUsize::new(0),
+            owner: Mutex::new(swapdesk_session::ConsoleOwner::This),
         });
         let deps = ServiceDeps {
             identity: Arc::clone(&identity),
@@ -929,4 +936,79 @@ fn a_ui_that_does_not_read_holds_bounded_video_and_gets_a_keyframe_after_the_gap
         "the host's helper was asked for the keyframe"
     );
     rig.finish();
+}
+
+/// ACCOUNTS.md 5.1, the fence, the service's side: a helper that holds after a desktop switch is let go on only while
+/// this account may host, by the cached console owner and by a fresh read of the console. Another account at the
+/// console, a stale cache that a fresh read contradicts, and a logged-in user who cannot be read all keep it held (the
+/// service also drops what a held helper sends); once the account is back it goes on, and the newest of switches
+/// reported out of order is the one resumed.
+#[test]
+fn a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_account() {
+    use crate::service::ConsoleRead;
+    const A: &str = "S-1-5-21-1-2-3-1001";
+    let host = Machine::new("host-pc", true, false);
+    host.core.set_account(A);
+    let console = Arc::new(Mutex::new(ConsoleRead::User(A.into())));
+    host.core.set_console_probe({
+        let console = Arc::clone(&console);
+        Arc::new(move || console.lock().unwrap().clone())
+    });
+    *host.ui.owner.lock().unwrap() = swapdesk_session::ConsoleOwner::Other;
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let (to_test, from_core) = std::sync::mpsc::channel::<Ipc>();
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+    let helper = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperSystem, 1).expect("client handshake");
+        // The switch: the helper holds and says so.
+        writer.write_message(&Ipc::CaptureHeld { generation: 1 }).unwrap();
+        writer_tx.send(writer).unwrap();
+        while let Ok(Some(m)) = reader.read_message() {
+            if to_test.send(m).is_err() {
+                break;
+            }
+        }
+    });
+    let kind = host.core.attach_helper(IpcRole::HelperSystem, core_end.reader, core_end.writer).expect("attach");
+    let mut writer = writer_rx.recv_timeout(Duration::from_secs(5)).expect("the helper's writer");
+    let resumed = |within: Duration| {
+        let end = Instant::now() + within;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            match from_core.recv_timeout(left) {
+                Ok(Ipc::ResumeCapture { generation }) => return Some(generation),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    };
+    assert_eq!(resumed(Duration::from_millis(600)), None, "another account at the console: the helper stays held");
+    let link = host.core.helper(kind).expect("attached");
+    assert_eq!(link.held.load(Ordering::SeqCst), 1);
+    assert!(link.is_held());
+    // The cache still says this account, but the console already has another user (the logon not yet heard of).
+    *console.lock().unwrap() = ConsoleRead::User("S-1-5-21-1-2-3-1002".into());
+    *host.ui.owner.lock().unwrap() = swapdesk_session::ConsoleOwner::This;
+    assert_eq!(resumed(Duration::from_millis(600)), None, "a fresh read of another user keeps it held");
+    // Someone is logged in and who cannot be read: closed.
+    *console.lock().unwrap() = ConsoleRead::Unreadable;
+    assert_eq!(resumed(Duration::from_millis(600)), None, "an unreadable user keeps it held");
+    // The account is at the console by both reads: the helper goes on.
+    *console.lock().unwrap() = ConsoleRead::User(A.into());
+    assert_eq!(resumed(Duration::from_secs(2)), Some(1));
+    // Two displays report two switches out of order: the newest is resumed and nothing stays held.
+    writer.write_message(&Ipc::CaptureHeld { generation: 3 }).unwrap();
+    writer.write_message(&Ipc::CaptureHeld { generation: 2 }).unwrap();
+    assert_eq!(resumed(Duration::from_secs(2)), Some(3));
+    let end = Instant::now() + Duration::from_secs(2);
+    while link.is_held() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!link.is_held(), "the newest switch was let go on");
+    assert_eq!(link.held.load(Ordering::SeqCst), 3);
+    host.core.shutdown();
+    drop(writer);
+    helper.join().expect("helper thread");
 }

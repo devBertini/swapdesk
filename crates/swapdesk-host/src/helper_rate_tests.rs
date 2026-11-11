@@ -112,6 +112,7 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
         displays: std::sync::Mutex::new(Vec::new()),
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
+        fence: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 20_000, preset: Preset::Auto, backend: VideoBackend::Auto };
     let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };

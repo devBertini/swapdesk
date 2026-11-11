@@ -203,14 +203,22 @@ impl Hub {
         }
     }
 
-    /// Tells this account's sessions the desktop they are on: the console's, or `AccountAway` while another account
-    /// owns it.
+    /// The desktop this account's sessions are on: `AccountAway` while another account owns the console; the
+    /// sign-in screen (nobody at the console) counts as `Locked`, so only a session that entered without a prompt
+    /// goes on there (ACCOUNTS.md 5.1); else the console's.
+    pub fn effective_desktop(&self) -> Desktop {
+        use swapdesk_session::ConsoleOwner;
+        let desktop = *lock(&self.desktop);
+        match self.console_owner() {
+            ConsoleOwner::Other => Desktop::AccountAway,
+            ConsoleOwner::Nobody if desktop == Desktop::Default => Desktop::Locked,
+            _ => desktop,
+        }
+    }
+
+    /// Tells this account's sessions the desktop they are on ([`Hub::effective_desktop`]).
     pub fn push_desktop(&self) {
-        let desktop = if self.console_owner() == swapdesk_session::ConsoleOwner::Other {
-            Desktop::AccountAway
-        } else {
-            *lock(&self.desktop)
-        };
+        let desktop = self.effective_desktop();
         if let Some(core) = self.core() {
             core.host().set_desktop(desktop);
         }

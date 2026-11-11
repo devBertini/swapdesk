@@ -81,6 +81,11 @@ pub enum Message {
         muted: bool,
     },
     Shutdown,
+    /// 0x2A (ACCOUNTS.md 5.1, the fence): the service lets capture and input go on after the desktop switch the
+    /// helper reported as `generation` (`CaptureHeld`).
+    ResumeCapture {
+        generation: u64,
+    },
     // 0x30 to 0x39: helper to service.
     Displays(DisplayList),
     /// The header's `payload_len` equals `payload.len()`.
@@ -99,6 +104,11 @@ pub enum Message {
     HelperFault {
         code: ErrorCode,
         what: Text,
+    },
+    /// 0x3A (the fence): the capture lost its desktop (a switch) and holds, with input, until `ResumeCapture` of this
+    /// generation. Sent ahead of any frame of the new desktop.
+    CaptureHeld {
+        generation: u64,
     },
     /// 0x39: what the helper chose that is worth the service's log at INFO (the encoder serving a display, why a
     /// faster one was not used, a rebuild). Same rule as `HelperFault`: never a never-logged value.
@@ -252,7 +262,7 @@ pub enum Message {
 pub const fn limit_of(ty: u64) -> Option<usize> {
     match ty {
         0x24 | 0x54 => Some(MAX_INPUT_MESSAGE),
-        0x01..=0x03 | 0x20..=0x29 | 0x30 | 0x32 | 0x33 | 0x35..=0x39 => Some(MAX_OTHER_MESSAGE),
+        0x01..=0x03 | 0x20..=0x2A | 0x30 | 0x32 | 0x33 | 0x35..=0x3A => Some(MAX_OTHER_MESSAGE),
         0x40..=0x42 | 0x52 | 0x53 | 0x55 | 0x56 => Some(MAX_OTHER_MESSAGE),
         0x31 | 0x50 => Some(MAX_VIDEO_MESSAGE),
         0x34 => Some(MAX_AUDIO_DATAGRAM),
@@ -390,6 +400,8 @@ impl Message {
             Self::StopAudio => 0x27,
             Self::SetAudioMuted { .. } => 0x28,
             Self::Shutdown => 0x29,
+            Self::ResumeCapture { .. } => 0x2A,
+            Self::CaptureHeld { .. } => 0x3A,
             Self::Displays(_) => 0x30,
             Self::VideoFrame { .. } => 0x31,
             Self::CursorPos(_) => 0x32,
@@ -471,6 +483,7 @@ impl Message {
             Self::CursorShape(s) => s.0.put(w, 0)?,
             Self::AudioPacket(d) => put_datagram(w, d)?,
             Self::AudioMode { mode } => mode.put(w, 0)?,
+            Self::ResumeCapture { generation } | Self::CaptureHeld { generation } => w.put_u64(*generation),
             Self::DesktopChanged(d) => d.put(w, 0)?,
             Self::HelperFault { code, what } => {
                 code.put(w, 0)?;
@@ -598,6 +611,8 @@ impl Message {
             0x27 => Self::StopAudio,
             0x28 => Self::SetAudioMuted { muted: r.bool()? },
             0x29 => Self::Shutdown,
+            0x2A => Self::ResumeCapture { generation: r.u64()? },
+            0x3A => Self::CaptureHeld { generation: r.u64()? },
             0x30 => Self::Displays(DisplayList::get(r, 0)?),
             0x31 => {
                 let (header, payload) = get_video(r)?;

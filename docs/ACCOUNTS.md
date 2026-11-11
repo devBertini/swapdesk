@@ -157,15 +157,16 @@ Rule: a host session of account A is admitted, and keeps its picture and input, 
   - The window is a sign-in **inside the same session**. At the sign-in screen after a restart the console session has no user and the SYSTEM helper runs there for an unattended session; a sign-in turns that same session's desktop into the new account's.
   - Until the service hears of it (`SERVICE_CONTROL_SESSIONCHANGE`, or the helper's `DesktopChanged`), nothing orders "stop" before "next frame": the capture thread re-acquires the new desktop by itself (C2.1 "Switches"), and the switch hook runs on another thread.
 - **The rule.** After **every** desktop switch the system helper holds its capture and its input until the service lets it go on:
-  1. The capture thread, on `DXGI_ERROR_ACCESS_LOST`, sends `DesktopChanged` itself, on the same pipe and so ahead of any frame of the new desktop, and captures nothing more.
+  1. The capture thread, on `DXGI_ERROR_ACCESS_LOST`, sends `CaptureHeld { generation }` (0x3A) itself, on the same pipe and so ahead of any frame of the new desktop, and captures nothing more. (Built: a dedicated message rather than `DesktopChanged`, which other paths also send.)
   2. The input thread drops every input event from the moment it follows a new input desktop.
   3. The service closes the session's gate, so frames and input of the old generation are dropped. It then reads the user of the console session at that moment (the token or the session information it already takes for the user helper).
   4. It sends a new `ResumeCapture { generation }` (service to helper, 0x2A, local IPC) only when that user is the session's account, or nobody for an unattended session at the sign-in screen.
   5. If no user is readable yet on a `Default` desktop, it stays closed and asks again every 200 ms for 10 s (GUESS), then pauses the session as above. It fails closed.
+  - As built (after the review of S3 and S4, 11/11): the service lets a helper go on only when both the console owner it keeps (changed when it hears of a logon) and a fresh read of the console session's user, made at that moment, allow it, since the logon notice may come after the switch. A logged-in user whose SID cannot be read counts as another account, in the fresh read and in the kept owner (read again every second until it can be). The service also drops video, cursor and audio from a held helper. The sign-in screen, with nobody at the console, is `Locked` to the account's sessions, so a session that entered with a prompt pauses there.
 - **Cost.** One round trip to the service at each desktop switch (lock, UAC, the Ctrl+Alt+Del screen). Within one account it adds a few milliseconds (GUESS) before the keyframe that 1.0 already sends.
 - **Proof.**
   - `a_desktop_switch_holds_frames_and_input_until_the_service_resumes`: the helper, with a scripted `AccessLost` on the C7 synthetic source.
-  - `a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_account`: the service with a scripted helper and a scripted console user. An unattended session of A at the sign-in screen, then `DesktopChanged(Default)` with frames, then the console user resolves to B. Zero frames reach A's session, zero input reaches the helper, and the session reads `AccountAway`.
+  - `a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_account`: the service with a scripted helper and a scripted console owner. The helper reports `CaptureHeld`; while another account owns the console no `ResumeCapture` is sent (and the service drops video and cursor of a held helper); once the account owns it again the helper is let go on. The helper side (no frame and no injected input while held) is the test above; the pause after 10 s reuses `AccountAway`, proven by `when_another_account_takes_the_console_the_session_pauses_then_ends`.
   - By hand at the sign-in screen (owner batch): the viewer's frame counter and the host's trace line "fenced" across a sign-in at the keyboard.
 
 So a device paired with account A can type another account's password at the sign-in screen, as a person at the keyboard can, but never sees or controls that account's desktop.
@@ -619,7 +620,8 @@ Tests, red before:
 - `a_desktop_switch_holds_frames_and_input_until_the_service_resumes`;
 - `a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_account`;
 - `no_minor_1_error_code_reaches_a_minor_0_peer_in_any_message`;
-- `terminal_and_files_never_run_as_another_account` (it replaces the D13 consent tests).
+- `terminal_and_files_never_run_as_another_account` (it replaces the D13 consent tests);
+- after the review: `each_console_owner_gives_the_sessions_their_desktop_and_an_unreadable_user_is_away`, `an_account_asked_for_twice_at_once_is_built_once`, `a_session_that_starts_while_its_account_is_away_ends_after_the_minute`. Left as defects of their own: a running helper that does not move when the hosting account changes at the sign-in screen (fails closed), and the pairing port and a not-receiving slot (5.5, 6).
 
 **S5. First start: the 1.0 files left alone.** `crates/swapdesk-host/src/accounts` (the first start, the read of `settings.bin`, the first account's name), `crates/swapdesk-ui` (the notice, only if kept).
 

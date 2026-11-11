@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use swapdesk_capture_win::QpcClock;
 use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts, PORT_HELD};
 use swapdesk_host::netcache::CachedInterfaces;
-use swapdesk_host::service::TerminalEnv;
+use swapdesk_host::service::{ConsoleRead, TerminalEnv};
 use swapdesk_host::service::{
     CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps,
     ServiceError,
@@ -219,17 +219,19 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     }
 }
 
-/// The SID of the user at the console session (`None`: nobody, the sign-in screen). In development the current user
-/// stands for it.
-fn console_user_sid(dev: bool, session: Option<u32>, logged_in: bool) -> Option<String> {
-    if !logged_in {
-        return None;
+/// Who is at the console session now (ACCOUNTS.md 5.1). In development the current user stands for a logged-in user.
+/// A logged-in user whose SID cannot be read is `Unreadable`, never nobody: that fails closed.
+fn read_console(dev: bool) -> ConsoleRead {
+    let Ok(state) = console_state() else { return ConsoleRead::Unreadable };
+    if state.user.is_none() {
+        return ConsoleRead::Nobody;
     }
-    if dev {
-        return current_user_sid().ok();
-    }
-    session.and_then(|s| session_user_sid(s).ok())
+    let sid = if dev { current_user_sid().ok() } else { state.session_id.and_then(|s| session_user_sid(s).ok()) };
+    sid.map_or(ConsoleRead::Unreadable, ConsoleRead::User)
 }
+
+/// How often a console user that could not be read is read again.
+const CONSOLE_RETRY: Duration = Duration::from_secs(1);
 
 /// The event channel of every account's core, with its core.
 type CoreEvents = Arc<Mutex<Vec<(Arc<ServiceCore>, std::sync::mpsc::Receiver<CoreEvent>)>>>;
@@ -365,7 +367,8 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
             hub.set_console_session(active_console_session());
-            hub.set_console_user(console_user_sid(dev_mode, active_console_session(), true));
+            hub.set_console_user(read_console(dev_mode).hub_user());
+            core.set_console_probe(Arc::new(move || read_console(dev_mode)));
             let rx = core.take_events().ok_or("the core's events were taken")?;
             // The loop sleeps until something wakes it: the core says so after each event it queues.
             core.set_event_waker({
@@ -413,9 +416,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let core_of: CoreOf = {
         let (accounts, dev) = (Arc::clone(&accounts), opts.console);
         Arc::new(move || {
-            let console = console_state().ok();
-            let logged_in = console.as_ref().is_some_and(|c| c.user.is_some());
-            let sid = console_user_sid(dev, active_console_session(), logged_in);
+            let sid = read_console(dev).hub_user();
             accounts.host_core(sid.as_deref())
         })
     };
@@ -453,6 +454,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut last_net = interfaces.list().ok();
     let mut next_net = Instant::now() + reconcile;
     let mut next_watchdog = Instant::now() + WATCHDOG;
+    let mut console_retry: Option<Instant> = None;
     let every_hub = |f: &dyn Fn(&UiHub)| {
         for a in accounts.all() {
             f(&a.hub);
@@ -461,11 +463,14 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     while !stop.is_set() {
         // Sleep until the earliest of: a restart that is due, the next network look, the watchdog. A session event, a
         // core event, a finished helper start or the network watcher wakes the loop sooner.
-        let deadline = [supervisor.next_wake(), Some(next_net), Some(next_watchdog)].into_iter().flatten().min();
+        let deadline =
+            [supervisor.next_wake(), Some(next_net), Some(next_watchdog), console_retry].into_iter().flatten().min();
         let timeout = deadline.map_or(WATCHDOG, |d| d.saturating_duration_since(Instant::now()));
         match watcher.next_event(timeout) {
             Ok(Some(SessionEvent::ConsoleChanged(state))) => {
-                let user = console_user_sid(opts.console, state.session_id, state.user.is_some());
+                let read = read_console(opts.console);
+                console_retry = (read == ConsoleRead::Unreadable).then(|| Instant::now() + CONSOLE_RETRY);
+                let user = read.hub_user();
                 every_hub(&|h| {
                     h.set_console_session(state.session_id);
                     h.set_console_user(user.clone());
@@ -507,6 +512,15 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 CoreEvent::HelperGone { pid, .. } => supervisor.helper_gone(pid),
                 CoreEvent::SasRequested { .. } => sas(&core, &*trace),
                 CoreEvent::HelperAttached { .. } | CoreEvent::HelperFault { .. } => {}
+            }
+        }
+        // A logged-in user that could not be read keeps every account away (fails closed) until it can be.
+        if console_retry.is_some_and(|t| Instant::now() >= t) {
+            let read = read_console(opts.console);
+            console_retry = (read == ConsoleRead::Unreadable).then(|| Instant::now() + CONSOLE_RETRY);
+            if read != ConsoleRead::Unreadable {
+                let user = read.hub_user();
+                every_hub(&|h| h.set_console_user(user.clone()));
             }
         }
         supervisor.tick();

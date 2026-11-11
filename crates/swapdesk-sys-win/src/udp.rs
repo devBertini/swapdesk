@@ -11,9 +11,11 @@ use std::os::windows::io::FromRawSocket;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
-use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedUdpTable, MIB_UDPTABLE_OWNER_PID, UDP_TABLE_OWNER_PID};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetExtendedUdpTable, MIB_UDPTABLE_OWNER_PID, UDP_TABLE_OWNER_PID,
+};
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, INVALID_SOCKET, IN_ADDR, IN_ADDR_0, IPPROTO_UDP, SO_EXCLUSIVEADDRUSE, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN,
+    AF_INET, IN_ADDR, IN_ADDR_0, INVALID_SOCKET, IPPROTO_UDP, SO_EXCLUSIVEADDRUSE, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN,
     SOL_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSAGetLastError, WSASocketW, bind, closesocket,
     setsockopt,
 };
@@ -65,8 +67,7 @@ pub fn bind_exclusive(addr: SocketAddrV4) -> io::Result<UdpSocket> {
         sin_zero: [0; 8],
     };
     // SAFETY: `sa` is a valid IPv4 socket address that lives across the call; its size is passed.
-    let bound =
-        unsafe { bind(s, std::ptr::from_ref(&sa).cast::<SOCKADDR>(), size_of::<SOCKADDR_IN>() as i32) };
+    let bound = unsafe { bind(s, std::ptr::from_ref(&sa).cast::<SOCKADDR>(), size_of::<SOCKADDR_IN>() as i32) };
     if bound != 0 {
         return fail(last_wsa());
     }
@@ -87,8 +88,9 @@ pub fn udp_port_owner(port: u16) -> Option<(u32, Option<String>)> {
     let mut buf = vec![0u32; (size as usize).div_ceil(4) + 16];
     size = (buf.len() * 4) as u32;
     // SAFETY: `buf` holds `size` bytes, aligned for the table.
-    let got =
-        unsafe { GetExtendedUdpTable(buf.as_mut_ptr().cast(), &mut size, 0, u32::from(AF_INET), UDP_TABLE_OWNER_PID, 0) };
+    let got = unsafe {
+        GetExtendedUdpTable(buf.as_mut_ptr().cast(), &mut size, 0, u32::from(AF_INET), UDP_TABLE_OWNER_PID, 0)
+    };
     if got != NO_ERROR {
         return None;
     }

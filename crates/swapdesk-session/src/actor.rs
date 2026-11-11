@@ -608,6 +608,10 @@ impl Actor {
         // What the viewer is about to be told; a change after the commit is reported right behind it.
         self.reported = committed.granted;
         self.applied_desktop = Some(info.desktop);
+        // Committed while its account is away (the console changed after the decision): the minute counts from now.
+        if info.desktop == Desktop::AccountAway {
+            self.away_since = Some(now());
+        }
         // The grant is live before the viewer hears of it: its first stream may arrive right behind the message.
         self.ctx.inner.active.send_replace(true);
         self.phase = Phase::Active;

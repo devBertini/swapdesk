@@ -60,6 +60,8 @@ pub struct Accounts {
     store: Arc<dyn SecretStore>,
     index: Mutex<AccountsIndex>,
     live: Mutex<Vec<Arc<Account>>>,
+    /// Held while an account is built (one build at a time).
+    building: Mutex<()>,
     factory: AccountFactory,
     shared: MachineShared,
     own_ids: Arc<Mutex<Vec<DeviceId>>>,
@@ -98,6 +100,7 @@ impl Accounts {
             store,
             index: Mutex::new(index),
             live: Mutex::new(Vec::new()),
+            building: Mutex::new(()),
             factory,
             shared: MachineShared::new(),
             own_ids: Arc::new(Mutex::new(Vec::new())),
@@ -160,6 +163,12 @@ impl Accounts {
     /// The account of `sid` at work, built at its seat the first time it is asked for. A seat whose port another
     /// program holds moves the account to the next free slot, with one trace line naming the holder.
     pub fn account(&self, sid: &str) -> Result<Arc<Account>, String> {
+        if let Some(a) = self.get(sid) {
+            return Ok(a);
+        }
+        // One build at a time: two first calls for one account at once would otherwise build a second core, which
+        // would find the first one's port held and move the account (and keep a core no one reaches).
+        let _building = lock(&self.building);
         if let Some(a) = self.get(sid) {
             return Ok(a);
         }

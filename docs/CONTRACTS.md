@@ -75,6 +75,7 @@ Every connection starts with `Hello` from the client and `HelloAck` from the ser
 | 0x27 | `StopAudio` | service→helper | — |
 | 0x28 | `SetAudioMuted` | service→helper | `muted: bool` |
 | 0x29 | `Shutdown` | service→helper | —; a service that stops sends it and then ends its writing side once what was queued is written, so a helper that missed it reads the end of its pipe |
+| 0x2A | `ResumeCapture` | service→helper | `generation: u64`; the fence (ACCOUNTS.md 5.1): capture and input go on after the switch `CaptureHeld` named, sent only while the core's account may host (its user at the console, or nobody for an unattended session) |
 | 0x30 | `Displays` | helper→service | `DisplayList`; sent at the start and again whenever the list changed (the helper lists the displays again when a video starts and when a capture cannot open or reacquire its display) |
 | 0x31 | `VideoFrame` | helper→service | `VideoHeader` (32 B, PROTOCOL 7.1), payload bytes |
 | 0x32 | `CursorPos` | helper→service | `CursorPosition` |
@@ -85,6 +86,7 @@ Every connection starts with `Hello` from the client and `HelloAck` from the ser
 | 0x37 | `SasRequest` | helper→service | — (honoured only for an `UNATTENDED` session) |
 | 0x38 | `HelperFault` | helper→service | `code: ErrorCode`, `what: str(256)` (never a never-logged value) |
 | 0x39 | `HelperNote` | helper→service | `what: str(256)`: logged by the service at INFO (the encoder serving a display and why, a rebuild); never a never-logged value |
+| 0x3A | `CaptureHeld` | helper→service | `generation: u64`; the fence (ACCOUNTS.md 5.1): a helper started `with_fence` lost its desktop, sends this ahead of any frame of the new one, then captures and injects nothing until `ResumeCapture` of this generation; the service drops video and cursor from a held helper |
 | 0x40 | `UiRequest` | ui→service | `req: u32`, `op: u16`, op body (table below) |
 | 0x41 | `UiReply` | service→ui | `req: u32`, `status: u16` (0 ok, else `ApiCode` + 1), body per op |
 | 0x42 | `UiNotify` | service→ui | `kind: u16`, body (table below) |

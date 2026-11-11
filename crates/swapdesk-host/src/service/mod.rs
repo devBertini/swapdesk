@@ -292,6 +292,34 @@ impl Connector {
 }
 
 /// Hands the host's UI calls through, adding what only the core knows: the displays of the media helper.
+/// Who is at the console, read now (ACCOUNTS.md 5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsoleRead {
+    /// The sign-in screen.
+    Nobody,
+    /// A user, by SID.
+    User(String),
+    /// Someone is logged in but who could not be read: treated as another account (fails closed).
+    Unreadable,
+}
+
+impl ConsoleRead {
+    /// What a hub keeps as the console user: an unreadable user is a value that matches no account.
+    pub fn hub_user(self) -> Option<String> {
+        match self {
+            Self::Nobody => None,
+            Self::User(sid) => Some(sid),
+            Self::Unreadable => Some(UNREADABLE_USER.to_string()),
+        }
+    }
+}
+
+/// The console user a hub keeps while who is logged in cannot be read: not a SID, so no account matches it.
+pub const UNREADABLE_USER: &str = "unreadable";
+
+/// Reads [`ConsoleRead`] now; set by the service on a machine of several accounts.
+pub type ConsoleProbe = Arc<dyn Fn() -> ConsoleRead + Send + Sync>;
+
 struct CoreUi {
     inner: Arc<dyn HostUi>,
     shared: Arc<Shared>,
@@ -300,6 +328,14 @@ struct CoreUi {
 impl HostUi for CoreUi {
     fn somebody_present(&self) -> bool {
         self.inner.somebody_present()
+    }
+
+    fn current_desktop(&self) -> Option<swapdesk_proto::Desktop> {
+        self.inner.current_desktop()
+    }
+
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        self.inner.console_owner()
     }
 
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
@@ -738,6 +774,11 @@ impl ServiceCore {
     /// only as that account (ACCOUNTS.md 5.4).
     pub fn set_account(&self, sid: &str) {
         let _ = self.shared.account.set(sid.to_string());
+    }
+
+    /// How the fence reads who is at the console now (ACCOUNTS.md 5.1).
+    pub fn set_console_probe(&self, probe: ConsoleProbe) {
+        let _ = self.shared.console_probe.set(probe);
     }
 
     /// Whether this account receives connections now (ACCOUNTS.md 6: only with a pairing, or while pairing mode is

@@ -37,6 +37,8 @@ const CAPTURE_POLL: Duration = Duration::from_millis(50);
 /// Longest wait of the audio loop for a datagram.
 const AUDIO_POLL: Duration = Duration::from_millis(20);
 /// Pause between `reacquire` attempts and after a transient capture error.
+/// How often a held capture looks whether the service let it go on.
+const FENCE_POLL: Duration = Duration::from_millis(20);
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
 /// Queued input batches before the reader waits (input is never dropped).
 const INPUT_QUEUE: usize = 256;
@@ -115,6 +117,8 @@ pub struct HelperDeps<S, E, I, A> {
     pty: Option<PtyFactory>,
     /// The disk the service may reach through this helper (the user helper only), or none.
     fs: Option<Arc<swapdesk_files::FsServer>>,
+    /// Hold capture and input after every desktop switch until the service resumes them (ACCOUNTS.md 5.1).
+    fence: bool,
 }
 
 impl<S, E, I, A> HelperDeps<S, E, I, A> {
@@ -142,6 +146,7 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
             actions: None,
             pty: None,
             fs: None,
+            fence: false,
         }
     }
 
@@ -182,6 +187,13 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
     /// Serves the C2.4 disk calls (`FsRequest`) of the service with `server`, on a thread of its own so a slow disk
     /// never holds up the capture or the input. Without it every call is answered `IoFailed`.
     #[must_use]
+    /// Holds capture and input after every desktop switch until the service resumes them (the fence of ACCOUNTS.md
+    /// 5.1; the Windows helper of a machine of several accounts).
+    pub fn with_fence(mut self) -> Self {
+        self.fence = true;
+        self
+    }
+
     pub fn with_fs(mut self, server: Arc<swapdesk_files::FsServer>) -> Self {
         self.fs = Some(server);
         self
@@ -325,6 +337,40 @@ struct CaptureEnv<S, E> {
     input_tx: Mutex<Option<SyncSender<InputCmd>>>,
     /// Bumped on every `AccessLost`; the input thread follows the input desktop when it changes.
     desktop_epoch: Arc<AtomicU64>,
+    /// ACCOUNTS.md 5.1: after a desktop switch, capture and input wait for the service.
+    fence: Arc<Fence>,
+}
+
+/// The fence of ACCOUNTS.md 5.1: after every desktop switch the helper captures and injects nothing until the service
+/// let that switch's generation go on (`ResumeCapture`), so a sign-in that turns the desktop into another account's
+/// never reaches the session of the account before. Off (a helper of one account, the tests that do not ask for it):
+/// nothing is held.
+#[derive(Debug, Default)]
+pub(crate) struct Fence {
+    on: bool,
+    /// The generation of the last switch.
+    held: AtomicU64,
+    /// The last generation the service let go on.
+    resumed: AtomicU64,
+}
+
+impl Fence {
+    fn new(on: bool) -> Self {
+        Self { on, ..Self::default() }
+    }
+
+    /// A switch: the new generation, which holds until it is resumed.
+    fn hold(&self) -> u64 {
+        self.held.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn resume(&self, generation: u64) {
+        self.resumed.fetch_max(generation, Ordering::AcqRel);
+    }
+
+    fn is_held(&self) -> bool {
+        self.on && self.held.load(Ordering::Acquire) > self.resumed.load(Ordering::Acquire)
+    }
 }
 
 impl<S: ScreenSource, E> CaptureEnv<S, E> {
@@ -481,6 +527,12 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                 still.refined = false;
             }
             Err(e) if e.kind == ErrorKind::AccessLost => {
+                // The fence: the service hears of the switch before any frame of the new desktop, and nothing is
+                // captured until it lets this generation go on.
+                if env.fence.on {
+                    let generation = env.fence.hold();
+                    env.outbox.send_control(Message::CaptureHeld { generation });
+                }
                 env.desktop_epoch.fetch_add(1, Ordering::AcqRel);
                 loop {
                     if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
@@ -502,6 +554,12 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                             std::thread::sleep(RETRY_PAUSE);
                         }
                     }
+                }
+                while env.fence.is_held() {
+                    if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(FENCE_POLL);
                 }
                 faulted = false;
                 discontinuity = true;
@@ -721,6 +779,8 @@ fn input_main<I: InputSink, S: ScreenSource, E>(
         }
         let mut failed = None;
         match cmd {
+            // The fence: nothing is injected into a desktop the service has not let go on.
+            InputCmd::Events(_) if env.fence.is_held() => {}
             InputCmd::Events(events) => {
                 for event in &events {
                     // A pointer for a display the sink does not know: the monitors changed since the list it has.
@@ -884,6 +944,7 @@ struct Host<S, E, A> {
     pty: PtyServer,
     /// Disk calls toward the files thread; `None` when this helper serves no disk.
     fs_tx: Option<SyncSender<Message>>,
+    fence: Arc<Fence>,
 }
 
 impl<S, E, A> Host<S, E, A>
@@ -919,6 +980,7 @@ where
             Message::StartAudio { exclude_pid } => self.start_audio((exclude_pid != 0).then_some(exclude_pid)),
             Message::StopAudio => self.stop_audio(),
             Message::SetAudioMuted { muted } => self.muted.store(muted, Ordering::Release),
+            Message::ResumeCapture { generation } => self.fence.resume(generation),
             m @ (Message::ClipChangeCount { .. }
             | Message::ClipRead { .. }
             | Message::ClipWrite { .. }
@@ -1105,6 +1167,7 @@ where
         actions,
         pty,
         fs,
+        fence: fence_on,
     } = deps;
 
     let displays = {
@@ -1120,6 +1183,7 @@ where
     outbox.send_control(Message::Displays(wire_list));
 
     let desktop_epoch = Arc::new(AtomicU64::new(0));
+    let fence = Arc::new(Fence::new(fence_on));
     let (input_tx, input_rx) = sync_channel(INPUT_QUEUE);
     // The display list is shared by the capture threads and the input thread: either may find it stale.
     let capture = Arc::new(CaptureEnv {
@@ -1130,6 +1194,7 @@ where
         displays: Mutex::new(displays),
         input_tx: Mutex::new(Some(input_tx.clone())),
         desktop_epoch: Arc::clone(&desktop_epoch),
+        fence: Arc::clone(&fence),
     });
     let input_thread = {
         let outbox = outbox.clone();
@@ -1183,6 +1248,7 @@ where
         outbox: outbox.clone(),
         pty: PtyServer::new(pty, role, &outbox).map_err(HelperError::Spawn)?,
         fs_tx,
+        fence,
     };
 
     let mut result = loop {
@@ -1212,6 +1278,7 @@ where
         muted: _,
         pty,
         fs_tx,
+        fence: _,
     } = host;
     // The terminal server holds a clone of the outbox too: the writer ends only when every clone is gone.
     drop(pty);

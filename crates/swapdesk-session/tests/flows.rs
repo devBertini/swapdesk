@@ -1698,3 +1698,21 @@ fn when_another_account_takes_the_console_the_session_pauses_then_ends() {
         assert_eq!(end.code, ErrorCode::AccountAway);
     });
 }
+
+/// Review of S4 (ACCOUNTS.md 5.1): a session committed while its account is already away starts paused, and the
+/// minute counts from its start.
+#[test]
+fn a_session_that_starts_while_its_account_is_away_ends_after_the_minute() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.info.lock().unwrap().desktop = Desktop::AccountAway;
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, task) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        let s = s.unwrap();
+        assert!(s.ctx().ended().is_none());
+        let end = tokio::time::timeout(Duration::from_secs(70), task).await.expect("ends").unwrap();
+        assert_eq!(end.code, ErrorCode::AccountAway);
+    });
+}

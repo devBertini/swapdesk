@@ -165,10 +165,20 @@ pub(crate) fn rig_with(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsSe
 
 /// As `rig_with`; with `moved`, the screens follow that flag (see `Tracked::moved`).
 fn rig_moving(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsServer>>, moved: Option<Arc<AtomicBool>>) -> Rig {
+    rig_full(lost_at, fs, moved, false)
+}
+
+fn rig_full(
+    lost_at: Option<u32>,
+    fs: Option<Arc<swapdesk_files::FsServer>>,
+    moved: Option<Arc<AtomicBool>>,
+    fence: bool,
+) -> Rig {
     let input = RecordingInputSink::new();
     let live = Arc::new(AtomicUsize::new(0));
     let (helper_end, service_end) = duplex();
     let d = deps_moving(lost_at, &input, &live, moved);
+    let d = if fence { d.with_fence() } else { d };
     let d = match fs {
         Some(server) => d.with_fs(server),
         None => d,
@@ -413,6 +423,41 @@ fn access_lost_reacquires_and_the_next_frame_is_a_discontinuity_keyframe() {
     assert_eq!(after.frame_id, 3);
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
+}
+
+/// ACCOUNTS.md 5.1, the fence: after a desktop switch the helper tells the service first, then captures nothing and
+/// injects nothing until the service lets that switch's generation go on; then the next frame is a fresh keyframe.
+#[test]
+fn a_desktop_switch_holds_frames_and_input_until_the_service_resumes() {
+    let mut rig = rig_full(Some(3), None, None, true);
+    rig.start_video();
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    // The switch: `CaptureHeld` comes, and before any frame of the new desktop.
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before the service let it"),
+        _ => None,
+    });
+    assert_eq!(generation, 1);
+    // Input sent while held is dropped, and no frame comes.
+    rig.send(&Message::Input { events: Events(vec![InputEvent::Text("nunca".into())]) });
+    let quiet = Instant::now() + Duration::from_millis(400);
+    while let Some(left) = quiet.checked_duration_since(Instant::now()) {
+        if let Ok(m) = rig.inbox.recv_timeout(left) {
+            assert!(!matches!(m, Message::VideoFrame { .. }), "a frame while held");
+        }
+    }
+    assert!(rig.input.events().is_empty(), "nothing injected while held");
+    // The service lets it go on: a fresh keyframe, and input reaches the sink again.
+    rig.send(&Message::ResumeCapture { generation });
+    let (after, _) = rig.next_frame();
+    assert!(after.keyframe && after.discontinuity, "{after:?}");
+    rig.send(&Message::Input { events: Events(vec![InputEvent::Text("sim".into())]) });
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+    assert_eq!(rig.input.events(), vec![InputEvent::Text("sim".into())]);
 }
 
 #[test]

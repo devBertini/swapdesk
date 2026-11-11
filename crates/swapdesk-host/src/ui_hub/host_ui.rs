@@ -232,7 +232,11 @@ impl HostUi for HubHostUi {
         let approved = swapdesk_lan::guard::approved_indexes(&list);
         // Where a viewer may send a Wake-on-LAN packet later: the hardware address of each approved interface.
         let wake_macs = list.iter().filter(|i| approved.contains(&i.index)).filter_map(|i| i.mac).collect();
-        StartInfo { desktop: *lock(&hub.desktop), displays: Vec::new(), wake_macs }
+        StartInfo { desktop: hub.effective_desktop(), displays: Vec::new(), wake_macs }
+    }
+
+    fn current_desktop(&self) -> Option<Desktop> {
+        Some(self.hub.effective_desktop())
     }
 
     fn event(&self, event: HostEvent) {

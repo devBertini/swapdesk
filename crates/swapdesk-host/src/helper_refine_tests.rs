@@ -146,6 +146,7 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
         displays: std::sync::Mutex::new(Vec::new()),
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
+        fence: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 5000, preset: Preset::Auto, backend: VideoBackend::Auto };
     let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };

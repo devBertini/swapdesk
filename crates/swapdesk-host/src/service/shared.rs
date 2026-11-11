@@ -132,6 +132,8 @@ pub(crate) struct Shared {
     events_dropped: AtomicU64,
     /// The account this core serves, on a machine of several (ACCOUNTS.md 5.4); unset for the only one.
     pub account: OnceLock<String>,
+    /// Reads who is at the console now, for the fence (ACCOUNTS.md 5.1); unset: the cached owner alone decides.
+    pub console_probe: OnceLock<super::ConsoleProbe>,
     /// The shells the user helper runs for the terminal proxy.
     pub ptys: PtyRoutes,
     /// The kind of the interface behind each local address a peer connected to, as the gate saw it when it let the
@@ -166,6 +168,7 @@ impl Shared {
             waker: OnceLock::new(),
             events_dropped: AtomicU64::new(0),
             account: OnceLock::new(),
+            console_probe: OnceLock::new(),
             ptys: PtyRoutes::default(),
             links: Mutex::default(),
         }
@@ -323,6 +326,57 @@ impl Shared {
     }
 }
 
+/// How often a held helper is looked at again, and after how long its sessions pause meanwhile (ACCOUNTS.md 5.1,
+/// GUESS values).
+const FENCE_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+const FENCE_PAUSE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The fence, the service's side: the helper's capture and input go on after a desktop switch only once this account
+/// may host now (its user at the console, or nobody for an entry without a prompt). Until then nothing of the new
+/// desktop reaches a session, and after 10 s the sessions pause as away. Fails closed: a newer switch, or a helper that
+/// went, ends the wait.
+async fn resume_when_allowed(shared: Arc<Shared>, host: HostService, link: Arc<HelperLink>, generation: u64) {
+    let started = tokio::time::Instant::now();
+    let mut paused = false;
+    loop {
+        if link.held.load(std::sync::atomic::Ordering::SeqCst) != generation || !link.is_alive() {
+            return;
+        }
+        if fence_allows(&shared, &host) {
+            link.resumed.store(generation, std::sync::atomic::Ordering::SeqCst);
+            link.send_now(swapdesk_ipc::Message::ResumeCapture { generation });
+            shared.log(Level::Info, format_args!("the helper goes on after the switch ({generation})"));
+            if paused {
+                host.set_desktop(host.desktop_now());
+            }
+            return;
+        }
+        if !paused && started.elapsed() >= FENCE_PAUSE_AFTER {
+            shared.log(Level::Info, format_args!("fenced: another account is at the console ({generation})"));
+            host.set_desktop(swapdesk_proto::Desktop::AccountAway);
+            paused = true;
+        }
+        tokio::time::sleep(FENCE_RETRY).await;
+    }
+}
+
+/// Whether the fence may let a helper go on: the cached console owner must allow it, and so must a fresh read of the
+/// console (the cached owner changes only when the service hears of a logon, which may come after the switch). A
+/// user that cannot be read fails closed.
+fn fence_allows(shared: &Shared, host: &HostService) -> bool {
+    use swapdesk_session::ConsoleOwner;
+    if !host.may_host_now() {
+        return false;
+    }
+    let (Some(account), Some(probe)) = (shared.account.get(), shared.console_probe.get()) else { return true };
+    let owner = match probe() {
+        super::ConsoleRead::Nobody => ConsoleOwner::Nobody,
+        super::ConsoleRead::User(u) if u.eq_ignore_ascii_case(account) => ConsoleOwner::This,
+        super::ConsoleRead::User(_) | super::ConsoleRead::Unreadable => ConsoleOwner::Other,
+    };
+    host.may_host_with(owner)
+}
+
 /// Reads a helper's events until its pipe ends: the glue between the reader thread and the sessions.
 pub(crate) async fn pump(
     shared: Arc<Shared>,
@@ -341,6 +395,12 @@ pub(crate) async fn pump(
                     shared.fan(MediaEv::Displays(list.displays)).await;
                 }
             }
+            // The fence: nothing a held helper sends reaches a session (it should send nothing; this is the second lock).
+            HelperEvent::Video { .. }
+            | HelperEvent::CursorPos(_)
+            | HelperEvent::CursorShape(_)
+            | HelperEvent::Audio(_)
+                if link.is_held() => {}
             HelperEvent::Video { header, payload } if is_media => shared.fan(MediaEv::Video { header, payload }).await,
             HelperEvent::CursorPos(p) if is_media => shared.fan(MediaEv::CursorPos(p)).await,
             HelperEvent::CursorShape(s) if is_media => shared.fan(MediaEv::CursorShape(s)).await,
@@ -357,6 +417,12 @@ pub(crate) async fn pump(
                 if is_media {
                     host.set_desktop(desktop);
                 }
+            }
+            HelperEvent::CaptureHeld(generation) => {
+                shared.log(Level::Info, format_args!("{kind:?} helper holds after a desktop switch ({generation})"));
+                // Capture threads of several displays may report out of order: the newest switch counts.
+                link.held.fetch_max(generation, std::sync::atomic::Ordering::SeqCst);
+                shared.rt.spawn(resume_when_allowed(Arc::clone(&shared), host.clone(), Arc::clone(&link), generation));
             }
             HelperEvent::SasRequest => shared.emit(CoreEvent::SasRequested { kind }),
             // Only the user helper runs shells (a system helper refuses them): its words about a terminal count, and

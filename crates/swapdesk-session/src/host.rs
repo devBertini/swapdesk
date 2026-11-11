@@ -227,6 +227,11 @@ pub trait HostUi: Send + Sync + 'static {
     fn consent_closed(&self, _request: &ConsentRequest, _how: PromptEnd) {}
 
     /// "Bloquear ao terminar" (F-SESS-03).
+    /// The desktop the sessions should be on now, as the interface side knows it (`None`: it does not track one).
+    fn current_desktop(&self) -> Option<Desktop> {
+        None
+    }
+
     fn lock_on_end(&self) -> bool {
         false
     }
@@ -486,6 +491,21 @@ impl HostService {
         }
     }
 
+    /// Whether this account may host now (ACCOUNTS.md 5.1): its user owns the console, or nobody does and a session
+    /// of it entered without a prompt. The fence lets a helper go on after a desktop switch only then.
+    pub fn may_host_now(&self) -> bool {
+        self.may_host_with(self.inner.ui.console_owner())
+    }
+
+    /// [`HostService::may_host_now`] for a console owner read elsewhere (the fence reads the console afresh).
+    pub fn may_host_with(&self, owner: ConsoleOwner) -> bool {
+        match owner {
+            ConsoleOwner::This => true,
+            ConsoleOwner::Other => false,
+            ConsoleOwner::Nobody => lock(&self.inner.table).live.values().any(SessionCtx::entered_unattended),
+        }
+    }
+
     /// "Desconectar" (F-SESS-03): `Bye { NO_ERROR }` and the token dies with it.
     pub fn disconnect(&self, session_id: u64) -> bool {
         match self.session(session_id) {
@@ -514,6 +534,11 @@ impl HostService {
 
     /// A desktop switch on the host: `HostState` goes to every live session, paused where the session lacks
     /// `UNATTENDED`.
+    /// The desktop the sessions should be on now (the interface side's, else `Default`).
+    pub fn desktop_now(&self) -> Desktop {
+        self.inner.ui.current_desktop().unwrap_or(Desktop::Default)
+    }
+
     pub fn set_desktop(&self, desktop: Desktop) {
         let live: Vec<SessionCtx> = lock(&self.inner.table).live.values().cloned().collect();
         for ctx in live {

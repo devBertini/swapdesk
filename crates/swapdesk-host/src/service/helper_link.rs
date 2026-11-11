@@ -28,6 +28,8 @@ const EVENT_QUEUE: usize = 64;
 /// What a helper told the service. `Debug` shows sizes, never the pixels, audio, shell output or fault details.
 pub enum HelperEvent {
     Displays(DisplayList),
+    /// The fence (ACCOUNTS.md 5.1): the helper holds capture and input after a desktop switch of this generation.
+    CaptureHeld(u64),
     Video {
         header: swapdesk_proto::VideoHeader,
         payload: bytes::Bytes,
@@ -72,6 +74,7 @@ impl core::fmt::Debug for HelperEvent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Displays(d) => f.debug_tuple("Displays").field(d).finish(),
+            Self::CaptureHeld(g) => f.debug_tuple("CaptureHeld").field(g).finish(),
             Self::Video { header, payload } => {
                 f.debug_struct("Video").field("header", header).field("payload", &RedactedLen(payload.len())).finish()
             }
@@ -139,6 +142,10 @@ pub struct HelperLink {
     rpc: Arc<Rpc>,
     /// The disk proxy toward this helper (C2.4 "Files"): its calls wait for the replies the reader thread routes.
     fs: Arc<PipeCaller>,
+    /// The generation of the desktop switch the helper holds after (the fence, ACCOUNTS.md 5.1); 0: none.
+    pub(crate) held: AtomicU64,
+    /// The last generation the service let go on.
+    pub(crate) resumed: AtomicU64,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -152,6 +159,11 @@ impl HelperLink {
     /// in-process helper): never the one in the helper's `Hello`, which the helper itself writes.
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The helper holds after a desktop switch the service has not let go on (the fence).
+    pub fn is_held(&self) -> bool {
+        self.held.load(Ordering::SeqCst) > self.resumed.load(Ordering::SeqCst)
     }
 
     /// False once the pipe is closed.
@@ -247,7 +259,17 @@ where
         .name(format!("service-helper-{kind:?}"))
         .spawn(move || read_loop(reader, &tx, &closer, &reading, &pending))
         .map_err(AttachError::Spawn)?;
-    let link = HelperLink { id, kind, pid, outbox, displays: Mutex::new(Vec::new()), rpc, fs };
+    let link = HelperLink {
+        id,
+        kind,
+        pid,
+        outbox,
+        displays: Mutex::new(Vec::new()),
+        rpc,
+        fs,
+        held: AtomicU64::new(0),
+        resumed: AtomicU64::new(0),
+    };
     Ok(Attached { link, events })
 }
 
@@ -273,6 +295,7 @@ fn read_loop<R: Read>(
             Message::AudioPacket(d) => HelperEvent::Audio(d.0),
             Message::AudioMode { mode } => HelperEvent::AudioMode(mode),
             Message::DesktopChanged(d) => HelperEvent::Desktop(d),
+            Message::CaptureHeld { generation } => HelperEvent::CaptureHeld(generation),
             Message::SasRequest => HelperEvent::SasRequest,
             Message::HelperFault { code, what } => HelperEvent::Fault { code, what: what.0 },
             Message::HelperNote { what } => HelperEvent::Note { what: what.0 },

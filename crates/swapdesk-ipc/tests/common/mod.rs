@@ -644,6 +644,8 @@ pub fn clip_reply() -> BoxedStrategy<ClipReplyBody> {
 /// replies those add.
 pub fn extra_messages() -> Vec<BoxedStrategy<Message>> {
     vec![
+        any::<u64>().prop_map(|generation| Message::ResumeCapture { generation }).boxed(),
+        any::<u64>().prop_map(|generation| Message::CaptureHeld { generation }).boxed(),
         any::<u32>().prop_map(|req| Message::ClipChangeCount { req }).boxed(),
         any::<u32>().prop_map(|req| Message::ClipRead { req }).boxed(),
         (any::<u32>(), clip_data()).prop_map(|(req, content)| Message::ClipWrite { req, content }).boxed(),

@@ -240,3 +240,45 @@ fn the_helpers_follow_the_console_owners_core() {
     assert_eq!(core_of(Some("S-1-5-21-9-9-9-1500")), None, "a user who has no account here: no helpers");
     assert_eq!(core_of(None), None, "the sign-in screen with nobody hosting: no helpers yet");
 }
+
+/// ACCOUNTS.md 5.1 (review of S4): what an account's sessions are told at each console owner. The sign-in screen is
+/// `Locked`, so a session that entered with a prompt pauses there; a user who cannot be read is another account.
+#[test]
+fn each_console_owner_gives_the_sessions_their_desktop_and_an_unreadable_user_is_away() {
+    let base = free_slots();
+    let (accounts, _built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    a.hub.set_account(A);
+    let at = |user: Option<&str>| {
+        a.hub.set_console_user(user.map(str::to_string));
+        a.hub.hub.effective_desktop()
+    };
+    assert_eq!(at(Some(A)), Desktop::Default);
+    assert_eq!(at(None), Desktop::Locked, "the sign-in screen");
+    assert_eq!(at(Some(B)), Desktop::AccountAway);
+    assert_eq!(at(Some(crate::service::UNREADABLE_USER)), Desktop::AccountAway, "fails closed");
+    a.hub.set_desktop(Desktop::Secure);
+    assert_eq!(at(None), Desktop::Secure, "a secure desktop stays what it is");
+}
+
+/// Review of S3: two first calls for one account at once build it once, at its own slot.
+#[test]
+fn an_account_asked_for_twice_at_once_is_built_once() {
+    let base = free_slots();
+    let (accounts, _built) = machine(base);
+    let accounts = Arc::new(accounts);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let both: Vec<_> = (0..2)
+        .map(|_| {
+            let (accounts, barrier) = (Arc::clone(&accounts), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                barrier.wait();
+                accounts.account(A).unwrap()
+            })
+        })
+        .collect();
+    let got: Vec<Arc<Account>> = both.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(Arc::ptr_eq(&got[0], &got[1]), "one account");
+    assert_eq!(accounts.seat_for(A).unwrap().slot, 0, "not moved by its own twin");
+    assert_eq!(accounts.all().len(), 1);
+}

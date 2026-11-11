@@ -307,6 +307,7 @@ fn a_cursor_shape_that_finds_no_room_is_kept_and_sent_again_and_the_capture_loop
         displays: std::sync::Mutex::new(Vec::new()),
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
+        fence: Arc::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 1000, preset: Preset::Auto, backend: VideoBackend::Auto };
     let ctl = VideoCtl::default();
@@ -357,6 +358,7 @@ fn the_cursor_state_names_a_shape_only_once_its_message_is_queued() {
         displays: std::sync::Mutex::new(Vec::new()),
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
+        fence: Arc::default(),
     };
     let mut state = CursorState::default();
     let mut source = CursorScreen { updates: vec![shape_update(1), shape_update(2)] };
