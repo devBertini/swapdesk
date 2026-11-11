@@ -58,7 +58,14 @@ fn machine(base: u16) -> (Accounts, Registry) {
         cfg.session_port = seat.session_port;
         cfg.machine = Some(shared.clone());
         let cfg = cfg.dev_loopback(lo(seat.session_port));
-        let core = Arc::new(ServiceCore::start(cfg).map_err(|e| e.to_string())?);
+        let core = match ServiceCore::start(cfg) {
+            Ok(c) => Arc::new(c),
+            // As the service does: a held port names its holder and the machine moves the account.
+            Err(crate::service::ServiceError::Bind { addr, .. }) => {
+                return Err(format!("{}{} by the test that holds it", crate::accounts::PORT_HELD, addr.port()));
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         hub.bind_core(&core);
         hub.set_console_session(Some(1));
         reg.lock().unwrap().insert(seat.sid.clone(), Built { identity: Arc::clone(&identity), trust });
@@ -69,9 +76,14 @@ fn machine(base: u16) -> (Accounts, Registry) {
         Arc::new(MemorySecretStore::new()),
         factory,
         Box::new(|| 1_700_000_000_000),
-        Arc::new(LogCapture::new()),
+        Arc::new(LOG.with(Clone::clone)),
     );
     (accounts, built)
+}
+
+thread_local! {
+    /// The trace of the machine a test builds on this thread.
+    static LOG: LogCapture = LogCapture::new();
 }
 
 /// Four free ports in a row on loopback (two slots).
@@ -190,4 +202,25 @@ fn a_ui_connection_reaches_only_its_own_accounts_data() {
     };
     assert!(act_a.is_empty(), "A has an activity log of its own");
     drop((ui_a, ui_b));
+}
+
+#[test]
+fn a_held_port_moves_the_account_to_the_next_free_slot_and_names_the_holder() {
+    let base = free_slots();
+    // Another program holds the session port of slot 0.
+    let holder = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, base)).unwrap();
+    let (accounts, _built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    assert_eq!(a.seat.slot, 1, "moved to the next free slot");
+    assert!(a.core.local_addrs().iter().any(|s| s.port() == base + 2));
+    assert_eq!(accounts.seat_for(A).unwrap().slot, 1, "kept in accounts.bin");
+    let lines = LOG.with(|l| l.lines());
+    assert!(
+        lines.iter().any(|l| l.text.contains("slot 0 cannot be used") && l.text.contains("by the test that holds it")),
+        "the holder is named: {lines:?}"
+    );
+    // The next account takes the slot that is free, not the held one.
+    let b = accounts.account(B).unwrap();
+    assert_eq!(b.seat.slot, 2);
+    drop(holder);
 }

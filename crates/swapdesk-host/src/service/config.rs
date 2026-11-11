@@ -60,7 +60,14 @@ pub struct ServiceConfig {
     /// Whether it listens on the approved addresses from the start (an account without pairings does not; the hub
     /// turns it on with `ServiceCore::set_receiving`).
     pub receiving: bool,
+    /// ACCOUNTS.md 5.5: binds the session port on the wildcard address, exclusively (Windows: `SO_EXCLUSIVEADDRUSE`),
+    /// once at start and whether or not the account receives yet, so no other local account can take it. The guard
+    /// still refuses any connection whose arrival address is not approved. `None`: one socket per approved address.
+    pub wildcard: Option<WildcardBinder>,
 }
+
+/// Binds the session port on the wildcard address (see [`ServiceConfig::wildcard`]).
+pub type WildcardBinder = Arc<dyn Fn(u16) -> std::io::Result<std::net::UdpSocket> + Send + Sync>;
 
 /// The collaborators of a core, the part of the configuration with no sensible default.
 pub struct ServiceDeps {
@@ -97,6 +104,7 @@ impl ServiceConfig {
             proto_minor: swapdesk_proto::PROTO_MINOR,
             machine: None,
             receiving: true,
+            wildcard: None,
             service_actions: None,
         }
     }

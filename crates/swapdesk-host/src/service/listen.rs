@@ -36,6 +36,9 @@ pub(crate) struct Listeners {
     list: Mutex<Vec<Listener>>,
     /// The approved addresses are listened on (an account that receives no connections listens nowhere).
     receiving: std::sync::atomic::AtomicBool,
+    /// The port is one exclusive socket on the wildcard address (ACCOUNTS.md 5.5): never closed by a network change,
+    /// and "not receiving" stops it taking connections instead.
+    wildcard: std::sync::atomic::AtomicBool,
 }
 
 /// What a network change does to the listeners: which listening addresses close, which approved addresses open.
@@ -72,6 +75,7 @@ impl Listeners {
             shared,
             list: Mutex::new(Vec::new()),
             receiving: std::sync::atomic::AtomicBool::new(true),
+            wildcard: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -83,9 +87,31 @@ impl Listeners {
         Ok(local)
     }
 
-    /// Whether the approved addresses are listened on (an account without pairings does not).
+    /// Whether the approved addresses are listened on (an account without pairings does not). On the wildcard
+    /// socket it decides whether new connections are taken; the socket itself stays bound.
     pub fn set_receiving(&self, on: bool) {
         self.receiving.store(on, std::sync::atomic::Ordering::SeqCst);
+        if !self.wildcard.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let config = if on {
+            match swapdesk_trust::tls::session_server_config(&self.identity, self.trust.clone()) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    self.shared.log(Level::Warn, format_args!("the session endpoint cannot take connections: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        for l in lock(&self.list).iter().filter(|l| l.local.ip().is_unspecified()) {
+            l.endpoint.set_server_config(config.clone());
+        }
+    }
+
+    pub fn set_wildcard(&self, on: bool) {
+        self.wildcard.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn receiving(&self) -> bool {
@@ -99,6 +125,10 @@ impl Listeners {
 
     /// Follows the approved addresses of `list`. Returns whether anything changed.
     pub fn follow(&self, list: &[NetInterface]) -> bool {
+        // The wildcard socket covers every address; the guard judges each arrival address.
+        if self.wildcard.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         // An account that receives no connections listens on no approved address (ACCOUNTS.md 6).
         let mut approved: Vec<Ipv4Addr> = if self.receiving.load(std::sync::atomic::Ordering::SeqCst) {
             approved_addrs(list).iter().map(|a| a.addr).collect()

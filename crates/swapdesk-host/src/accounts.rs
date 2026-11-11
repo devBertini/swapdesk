@@ -36,6 +36,10 @@ pub fn slot_ports(base: u16, slot: u8) -> (u16, u16) {
     (session, session.saturating_add(1))
 }
 
+/// What an [`AccountFactory`] error starts with when the seat's port is held by another program: the machine then
+/// gives the account the next free slot (ACCOUNTS.md 5.5). The rest of the message names the holder.
+pub const PORT_HELD: &str = "port held: ";
+
 /// One account at work: its key's device ID, its hub and its core.
 pub struct Account {
     pub seat: AccountSeat,
@@ -134,13 +138,49 @@ impl Accounts {
         Ok(AccountSeat { sid: sid.into(), slot, session_port, pair_port })
     }
 
-    /// The account of `sid` at work, built at its seat the first time it is asked for.
+    /// Gives `sid` the lowest free slot above the ones in `held`, writing it to `accounts.bin`.
+    fn move_seat(&self, sid: &str, held: &[u8]) -> Result<AccountSeat, String> {
+        let mut index = lock(&self.index);
+        let used: Vec<u8> = index.accounts.iter().filter(|a| a.sid != sid).map(|a| a.slot).collect();
+        let Some(slot) = (0..MAX_ACCOUNTS as u8).find(|s| !used.contains(s) && !held.contains(s)) else {
+            return Err("every free slot is held by another program: this account cannot receive connections".into());
+        };
+        let mut next = index.clone();
+        match next.accounts.iter_mut().find(|a| a.sid == sid) {
+            Some(a) => a.slot = slot,
+            None => next.accounts.push(AccountEntry { sid: sid.into(), slot, created_ms: (self.wall_ms)() }),
+        }
+        let bytes = next.encode().map_err(|e| e.to_string())?;
+        self.store.store(ACCOUNTS_NAME, &bytes).map_err(|e| format!("accounts.bin: {e}"))?;
+        *index = next;
+        let (session_port, pair_port) = slot_ports(self.base_port, slot);
+        Ok(AccountSeat { sid: sid.into(), slot, session_port, pair_port })
+    }
+
+    /// The account of `sid` at work, built at its seat the first time it is asked for. A seat whose port another
+    /// program holds moves the account to the next free slot, with one trace line naming the holder.
     pub fn account(&self, sid: &str) -> Result<Arc<Account>, String> {
         if let Some(a) = self.get(sid) {
             return Ok(a);
         }
-        let seat = self.seat_for(sid)?;
-        let account = Arc::new((self.factory)(&seat, &self.shared, self.own_ids())?);
+        let mut seat = self.seat_for(sid)?;
+        let mut held: Vec<u8> = Vec::new();
+        let built = loop {
+            match (self.factory)(&seat, &self.shared, self.own_ids()) {
+                Ok(a) => break a,
+                Err(e) if e.starts_with(PORT_HELD) => {
+                    self.trace.log(
+                        Level::Warn,
+                        "accounts",
+                        format_args!("slot {} cannot be used: {e}; the account moves to the next free slot", seat.slot),
+                    );
+                    held.push(seat.slot);
+                    seat = self.move_seat(sid, &held)?;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let account = Arc::new(built);
         let mut live = lock(&self.live);
         // Another thread may have built it meanwhile: the first one stays.
         if let Some(a) = live.iter().find(|a| a.seat.sid == sid) {

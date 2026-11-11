@@ -613,8 +613,17 @@ impl ServiceCore {
         // One endpoint per approved interface address (PROTOCOL.md 1), and the development addresses.
         // (socket, is a development address)
         let mut sockets = Vec::new();
+        // With a wildcard binder: one exclusive socket on 0.0.0.0, held from the start (ACCOUNTS.md 5.5). A port another
+        // program holds fails the start, so the machine can give the account another slot.
+        if let Some(binder) = &cfg.wildcard {
+            let at = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.session_port);
+            let socket = binder(cfg.session_port).map_err(|e| ServiceError::Bind { addr: at, error: e.to_string() })?;
+            socket.set_ttl(swapdesk_lan::socket::QUIC_TTL).map_err(ServiceError::Runtime)?;
+            sockets.push((socket, true));
+        }
         // An account that receives no connections listens on no approved address (ACCOUNTS.md 6).
-        match cfg.interfaces.list().map(|l| if cfg.receiving { l } else { Vec::new() }) {
+        let per_address = cfg.receiving && cfg.wildcard.is_none();
+        match cfg.interfaces.list().map(|l| if per_address { l } else { Vec::new() }) {
             Ok(list) => {
                 for (addr, socket) in bind_quic_all_approved(&list, cfg.session_port) {
                     match socket {
@@ -663,10 +672,11 @@ impl ServiceCore {
             Arc::clone(&gate),
             Arc::clone(&shared),
         ));
-        listeners.set_receiving(cfg.receiving);
+        listeners.set_wildcard(cfg.wildcard.is_some());
         for (endpoint, extra) in endpoints {
             listeners.adopt(endpoint, extra).map_err(ServiceError::Runtime)?;
         }
+        listeners.set_receiving(cfg.receiving);
         let dialer = Arc::new(Dialer {
             cfg_name: cfg.name.clone(),
             os: cfg.os,

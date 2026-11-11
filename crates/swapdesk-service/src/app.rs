@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use swapdesk_capture_win::QpcClock;
-use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts};
+use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts, PORT_HELD};
 use swapdesk_host::netcache::CachedInterfaces;
 use swapdesk_host::service::TerminalEnv;
 use swapdesk_host::service::{
     CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps,
+    ServiceError,
 };
 use swapdesk_host::ui_hub::presence::FilteredPresence;
 use swapdesk_host::ui_hub::store::{FileAuditLog, load_settings};
@@ -329,8 +330,24 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             cfg = cfg.with_service_actions(swapdesk_sys_win::actions::WinActions::service());
             if dev_loopback {
                 cfg = cfg.dev_loopback(lo(seat.session_port));
+            } else {
+                // ACCOUNTS.md 5.5: the slot's port, exclusively on every address, from the start.
+                cfg.wildcard = Some(Arc::new(|port| {
+                    swapdesk_sys_win::udp::bind_exclusive(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+                }));
             }
-            let core = Arc::new(ServiceCore::start(cfg).map_err(|e| e.to_string())?);
+            let core = match ServiceCore::start(cfg) {
+                Ok(c) => Arc::new(c),
+                // The slot's port is held: name the holder, and the machine gives the account the next free slot.
+                Err(ServiceError::Bind { addr, error }) => {
+                    let holder = swapdesk_sys_win::udp::udp_port_owner(addr.port()).map_or_else(
+                        || "a program that could not be named".to_string(),
+                        |(pid, name)| format!("{} (process {pid})", name.unwrap_or_else(|| "a program".into())),
+                    );
+                    return Err(format!("{PORT_HELD}{} by {holder} ({error})", addr.port()));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
             hub.set_account(&seat.sid);
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
