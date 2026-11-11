@@ -94,11 +94,16 @@ pub fn msg_from_wire(m: &w::Msg) -> CResult<a::Msg> {
 // ---------- DTOs ----------
 
 pub fn this_device_to_wire(v: &a::ThisDevice) -> w::ThisDevice {
-    w::ThisDevice { name: v.name.clone(), os: os_to_wire(v.os), ready: ready_to_wire(v.ready) }
+    w::ThisDevice {
+        name: v.name.clone(),
+        os: os_to_wire(v.os),
+        ready: ready_to_wire(v.ready),
+        legacy_note: v.legacy_note,
+    }
 }
 
 pub fn this_device_from_wire(v: w::ThisDevice) -> a::ThisDevice {
-    a::ThisDevice { name: v.name, os: os_from_wire(v.os), ready: ready_from_wire(v.ready) }
+    a::ThisDevice { name: v.name, os: os_from_wire(v.os), ready: ready_from_wire(v.ready), legacy_note: v.legacy_note }
 }
 
 fn notice_to_wire(n: &a::Notice) -> w::Notice {
@@ -688,7 +693,7 @@ mod tests {
             ],
         };
         assert_eq!(network_from_wire(network_to_wire(&n)), n);
-        let t = a::ThisDevice { name: "PC".into(), os: a::Os::Windows, ready: a::Ready::NoNetwork };
+        let t = a::ThisDevice { name: "PC".into(), os: a::Os::Windows, ready: a::Ready::NoNetwork, legacy_note: true };
         assert_eq!(this_device_from_wire(this_device_to_wire(&t)), t);
         let s = settings();
         assert_eq!(settings_from_wire(settings_to_wire(&s)), s);

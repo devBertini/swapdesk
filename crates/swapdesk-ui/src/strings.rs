@@ -31,6 +31,7 @@ strings! {
     // Sidebar
     SidebarThisComputer => "Este computador", "This computer";
     SidebarPaired => "Pareados", "Paired";
+    SidebarLegacyNote => "Os pareamentos de antes da versão 1.1 não passam para as contas. Pareie de novo com os computadores que você usa.", "Pairings made before version 1.1 do not carry over to accounts. Pair again with the computers you use.";
     SidebarOnNetwork => "Na rede", "On the network";
     AddressLabel => "Adicionar por endereço", "Add by address";
     AddressPlaceholder => "192.168.0.21", "192.168.0.21";

@@ -13,8 +13,7 @@ use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts, PO
 use swapdesk_host::netcache::CachedInterfaces;
 use swapdesk_host::service::{ConsoleRead, TerminalEnv};
 use swapdesk_host::service::{
-    CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps,
-    ServiceError,
+    CoreEvent, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps, ServiceError,
 };
 use swapdesk_host::ui_hub::presence::FilteredPresence;
 use swapdesk_host::ui_hub::store::{FileAuditLog, load_settings};
@@ -219,6 +218,47 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     }
 }
 
+/// What 1.1 reads of the machine's root folder at start (ACCOUNTS.md 10.2, D55): the base port of the slots and
+/// whether a 1.0 install left its key there (for the one-time note). The 1.0 key, trust store, logs and every other
+/// setting are never read: no account receives any 1.0 data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RootFacts {
+    pub port: u16,
+    pub had_1_0: bool,
+}
+
+pub(crate) fn root_facts(root: &WinSecretStore) -> Result<RootFacts, String> {
+    let settings = load_settings(root, "")?;
+    // Only whether the file is there: the 1.0 key is never loaded.
+    let had_1_0 = root.dir().join(swapdesk_trust::identity::IDENTITY_NAME).exists();
+    Ok(RootFacts { port: settings.port, had_1_0 })
+}
+
+/// An account's own data (ACCOUNTS.md 10.1), all from its own folder: a new account gets a new key, an empty trust
+/// store and default settings at its slot's ports.
+pub(crate) struct AccountData {
+    pub store: Arc<WinSecretStore>,
+    pub identity: Arc<Identity>,
+    pub trust: Arc<TrustHandle>,
+    pub settings: swapdesk_host::ui_hub::MachineSettings,
+}
+
+pub(crate) fn open_account_data(
+    root: &WinSecretStore,
+    seat: &AccountSeat,
+    default_name: &str,
+    now_ms: u64,
+    trace: &dyn TraceSink,
+) -> Result<AccountData, String> {
+    let store = Arc::new(root.open_account(&seat.sid, Some(trace)).map_err(|e| format!("account folder: {e}"))?);
+    let identity = Arc::new(Identity::load_or_create(&*store, now_ms).map_err(|e| format!("identity: {e}"))?);
+    let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
+    let mut settings = load_settings(&*store, default_name)?;
+    settings.port = seat.session_port;
+    settings.pair_port = seat.pair_port;
+    Ok(AccountData { store, identity, trust, settings })
+}
+
 /// Who is at the console session now (ACCOUNTS.md 5.1). In development the current user stands for a logged-in user.
 /// A logged-in user whose SID cannot be read is `Unreadable`, never nobody: that fails closed.
 fn read_console(dev: bool) -> ConsoleRead {
@@ -250,11 +290,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         ),
     );
 
-    // The machine's settings (C5.1): its name and the base of the port slots. 1.1 only reads them (ACCOUNTS.md 10.2).
-    let mut machine = load_settings(&*store, &computer_name())?;
+    // What 1.1 reads of the root folder (ACCOUNTS.md 10.2): the base of the port slots and whether 1.0 data is there.
+    let mut machine = root_facts(&store)?;
     if opts.instance.is_some() {
         machine.port = DEFAULT_SESSION_PORT + opts.port_offset();
-        machine.pair_port = DEFAULT_PAIR_PORT + opts.port_offset();
     }
     // The interface list is read at most once a second and again at once when the network changes: the LAN guard asks
     // for it on every incoming connection, pairing and presence on every event.
@@ -273,19 +312,13 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let factory: AccountFactory = {
         let (root, trace, interfaces, clock, term_env) =
             (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
-        let (core_events, events, machine_name) = (Arc::clone(&core_events), ctx_events.clone(), machine.name.clone());
+        let (core_events, events, had_1_0) = (Arc::clone(&core_events), ctx_events.clone(), machine.had_1_0);
         let (dev_loopback, dev_mode) = (opts.dev_loopback, opts.console);
         Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
             let wall = SystemWallClock;
-            let store =
-                Arc::new(root.open_account(&seat.sid, Some(&*trace)).map_err(|e| format!("account folder: {e}"))?);
+            let AccountData { store, identity, trust, settings } =
+                open_account_data(&root, seat, &computer_name(), wall.unix_ms(), &*trace)?;
             let dir = store.dir().to_path_buf();
-            let identity =
-                Arc::new(Identity::load_or_create(&*store, wall.unix_ms()).map_err(|e| format!("identity: {e}"))?);
-            let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
-            let mut settings = load_settings(&*store, &machine_name)?;
-            settings.port = seat.session_port;
-            settings.pair_port = seat.pair_port;
             let audit = Arc::new(
                 FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?,
             );
@@ -363,6 +396,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 Err(e) => return Err(e.to_string()),
             };
             hub.set_account(&seat.sid);
+            hub.set_had_1_0(had_1_0);
             core.set_account(&seat.sid);
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
@@ -552,3 +586,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     trace.log(Level::Info, "service", format_args!("stopped"));
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "first_start_tests.rs"]
+mod first_start_tests;

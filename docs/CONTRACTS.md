@@ -605,7 +605,7 @@ pub enum Os { Windows, MacOs }
 pub enum Permission { View, Control, Audio, Terminal, AdminTerminal, Files, Clipboard, Unattended }
 pub struct Permissions(pub u16);                                    // the PROTOCOL.md 6.1 bit set
 
-pub struct ThisDevice { pub name: String, pub os: Os, pub ready: Ready }
+pub struct ThisDevice { pub name: String, pub os: Os, pub ready: Ready, pub legacy_note: bool } // legacy_note: D55, the note under an empty Pareados after the update from 1.0
 pub enum Ready { ReadyToReceive, ServiceOff, ServiceNeedsApproval, NoNetwork }
 pub struct NetworkStatus { pub label: String, pub address: Option<String>, pub category: Option<NetCategoryView>, pub notices: Vec<Notice> }
 pub enum NetCategoryView { Public, Private, Domain }

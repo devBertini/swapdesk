@@ -159,7 +159,9 @@ impl ApiCode {
 }
 
 wire_struct! {
-    ThisDevice { name: String [MAX_NAME], os: Os, ready: Ready }
+    /// `legacy_note`: show the one-time note that pairings made before 1.1 do not carry over (D55): a 1.0 install
+    /// left its data on this computer and this account has no pairing yet.
+    ThisDevice { name: String [MAX_NAME], os: Os, ready: Ready, legacy_note: bool }
 }
 
 /// A notice on the network status.

@@ -170,7 +170,10 @@ impl Hub {
     }
 
     pub fn this_device(&self) -> ThisDevice {
-        ThisDevice { name: self.settings().name, os: self.p.os, ready: ready_of(&self.interfaces()) }
+        // D55: the note shows only while this account has no pairing, on a computer a 1.0 install left data on.
+        let legacy_note =
+            self.had_1_0.load(std::sync::atomic::Ordering::Relaxed) && self.p.trust.read(|s| s.devices.is_empty());
+        ThisDevice { name: self.settings().name, os: self.p.os, ready: ready_of(&self.interfaces()), legacy_note }
     }
 
     /// The first approved interface that is up, its address and category; the notices the UI shows as banners.

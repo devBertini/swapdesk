@@ -89,7 +89,20 @@ impl Accounts {
                 let _ = store.store("accounts.bin.damaged", &bytes);
                 AccountsIndex::default()
             }),
-            Ok(None) => AccountsIndex::default(),
+            // The first 1.1 start (ACCOUNTS.md 10.1): the index is written with no account, and no account is made
+            // from the 1.0 files beside it.
+            Ok(None) => {
+                let index = AccountsIndex::default();
+                match index.encode() {
+                    Ok(bytes) => {
+                        if let Err(e) = store.store(ACCOUNTS_NAME, &bytes) {
+                            trace.log(Level::Warn, "accounts", format_args!("accounts.bin cannot be written ({e})"));
+                        }
+                    }
+                    Err(e) => trace.log(Level::Warn, "accounts", format_args!("accounts.bin cannot be encoded ({e})")),
+                }
+                index
+            }
             Err(e) => {
                 trace.log(Level::Warn, "accounts", format_args!("accounts.bin cannot be read ({e})"));
                 AccountsIndex::default()

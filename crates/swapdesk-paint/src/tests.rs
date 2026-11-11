@@ -552,3 +552,23 @@ fn a_card_that_stands_alone_sits_in_the_middle_of_its_area() {
     assert_eq!((r.x, r.y, r.w), (small.x, small.y, small.w));
     assert!(r.h > small.h);
 }
+
+/// D55: the note that pairings made before 1.1 do not carry over sits under an empty Pareados, and only there.
+#[test]
+fn the_note_after_the_update_from_1_0_shows_under_an_empty_paired_list_only() {
+    use swapdesk_ui::MsgKey;
+    let drawn = |sc: Scenario| -> Vec<String> {
+        let state = sc.prepared_state();
+        let p = Fixed::default();
+        let ix = Interaction::default();
+        let _ = paint(Frame::new(&p, &state, &ix, design_size(WindowKind::Main), true), WindowKind::Main);
+        p.drawn.take()
+    };
+    let st = Scenario::PareadosAntesDa11.prepared_state();
+    let note = st.t(MsgKey::SidebarLegacyNote);
+    let with = drawn(Scenario::PareadosAntesDa11);
+    let at = with.iter().position(|t| *t == note).expect("the note is drawn");
+    let paired = st.t(MsgKey::SidebarPaired);
+    assert!(with[..at].contains(&paired), "under the Pareados caption");
+    assert!(!drawn(Scenario::Inicio).contains(&note), "not with paired devices");
+}

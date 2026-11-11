@@ -189,6 +189,8 @@ pub(crate) struct Hub {
     /// `Active` states.
     started: Mutex<HashMap<u64, (u64, swapdesk_proto::PermissionSet)>>,
     shutting: AtomicBool,
+    /// A 1.0 install left its data on this computer (D55).
+    had_1_0: AtomicBool,
 }
 
 impl Hub {
@@ -357,6 +359,7 @@ impl UiHub {
             elevation: Mutex::new(elevation::Elevation::default()),
             started: Mutex::new(HashMap::new()),
             shutting: AtomicBool::new(false),
+            had_1_0: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&hub);
         hub.p.presence.set_listener(Arc::new(move || {
@@ -427,6 +430,12 @@ impl UiHub {
     pub fn set_desktop(&self, desktop: Desktop) {
         *lock(&self.hub.desktop) = desktop;
         self.hub.push_desktop();
+    }
+
+    /// A 1.0 install left its data on this computer (ACCOUNTS.md 10.2): this account's empty Pareados list shows the
+    /// one-time note of D55.
+    pub fn set_had_1_0(&self, had: bool) {
+        self.hub.had_1_0.store(had, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether this hub serves the machine's only account (no account SID was set: a machine of one account, the Mac).

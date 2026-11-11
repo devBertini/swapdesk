@@ -282,3 +282,19 @@ fn an_account_asked_for_twice_at_once_is_built_once() {
     assert_eq!(accounts.seat_for(A).unwrap().slot, 0, "not moved by its own twin");
     assert_eq!(accounts.all().len(), 1);
 }
+
+/// D55: an account on a computer a 1.0 install left data on shows the one-time note while it has no pairing; once it
+/// pairs, the note is gone. A computer with no 1.0 data never shows it.
+#[test]
+fn the_note_after_the_update_shows_only_while_the_account_has_no_pairing() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    let note = || a.hub.hub.this_device().legacy_note;
+    assert!(!note(), "no 1.0 data");
+    a.hub.set_had_1_0(true);
+    assert!(note());
+    let viewer = Identity::generate(0).unwrap();
+    pin_viewer(&built.lock().unwrap()[A], &viewer);
+    assert!(!note(), "paired");
+}

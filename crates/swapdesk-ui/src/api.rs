@@ -151,6 +151,8 @@ pub struct ThisDevice {
     pub name: String,
     pub os: Os,
     pub ready: Ready,
+    /// The one-time note under Pareados that pairings made before 1.1 do not carry over (D55).
+    pub legacy_note: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

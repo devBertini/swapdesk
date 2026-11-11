@@ -127,7 +127,14 @@ fn sidebar(f: &mut Frame) {
     let paired_rows: Vec<Row> = paired.iter().map(|&i| make(i)).collect();
     let network_rows: Vec<Row> = network.iter().map(|&i| make(i)).collect();
     if loading_devices || !paired_rows.is_empty() || f.st.fetch(DataKind::Devices) == swapdesk_ui::Fetch::Ready {
-        y += group(f, x, y, w, &f.t(MsgKey::SidebarPaired), &paired_rows, if loading_devices { 2 } else { 0 }) + 22.0;
+        y += group(f, x, y, w, &f.t(MsgKey::SidebarPaired), &paired_rows, if loading_devices { 2 } else { 0 });
+        // D55: an account with no pairing on a computer a 1.0 install left data on says why its list is empty.
+        if !loading_devices && paired_rows.is_empty() && f.st.this_device().is_some_and(|t| t.legacy_note) {
+            let note = p.label_in(&f.t(MsgKey::SidebarLegacyNote), text::SMALL, w - 20.0, Align::Start);
+            p.draw(&note, x + 10.0, y + 6.0, pal.soft);
+            y += 6.0 + note.h;
+        }
+        y += 22.0;
         if loading_devices || !network_rows.is_empty() {
             y += group(f, x, y, w, &f.t(MsgKey::SidebarOnNetwork), &network_rows, if loading_devices { 1 } else { 0 })
                 + 22.0;

@@ -104,7 +104,7 @@ fn devices() -> Vec<DeviceView> {
 }
 
 fn this_device() -> ThisDevice {
-    ThisDevice { name: "Notebook da sala".into(), os: Os::Windows, ready: Ready::ReadyToReceive }
+    ThisDevice { name: "Notebook da sala".into(), os: Os::Windows, ready: Ready::ReadyToReceive, legacy_note: false }
 }
 
 fn network(notices: Vec<Notice>, category: NetCategoryView) -> NetworkStatus {
@@ -237,10 +237,12 @@ pub enum Scenario {
     PermissoesNoMac,
     /// The files panel while the host asks its user (D13), with the seconds left (R-UI-13).
     ArquivosAguardandoConsentimento,
+    /// An account with no pairing on a computer a 1.0 install left data on: the one-time note under Pareados (D55).
+    PareadosAntesDa11,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 44] = [
+    pub const ALL: [Scenario; 45] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -285,6 +287,7 @@ impl Scenario {
         Scenario::TerminalAguardandoConsentimento,
         Scenario::ArquivosAguardandoConsentimento,
         Scenario::PermissoesNoMac,
+        Scenario::PareadosAntesDa11,
     ];
 
     /// The name `--mock` takes.
@@ -327,6 +330,7 @@ impl Scenario {
             Scenario::EstadoFechouInesperado => "estado-fechou-inesperado",
             Scenario::EstadoNenhumComputador => "estado-nenhum-computador",
             Scenario::EstadoNaoPareado => "estado-nao-pareado",
+            Scenario::PareadosAntesDa11 => "pareados-antes-da-1-1",
             Scenario::AtividadeVazia => "atividade-vazia",
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
@@ -385,6 +389,7 @@ impl Scenario {
             Scenario::EstadoFechouInesperado => "new: crash notice (D12)",
             Scenario::EstadoNenhumComputador => "new: no computer found card (F20)",
             Scenario::EstadoNaoPareado => "new: a computer not paired yet (D51)",
+            Scenario::PareadosAntesDa11 => "new: the note under an empty Pareados after the update from 1.0 (D55)",
             Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
@@ -695,6 +700,19 @@ impl Scenario {
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
             Scenario::EstadoNenhumComputador => vec![Event(UiEvent::DevicesChanged(Vec::new())), Ticks(10)],
             Scenario::EstadoNaoPareado => vec![Select(AIR)],
+            Scenario::PareadosAntesDa11 => vec![
+                Event(UiEvent::Reply {
+                    ticket: Ticket(0),
+                    result: Ok(Reply::ThisDevice(ThisDevice { legacy_note: true, ..this_device() })),
+                }),
+                Event(UiEvent::DevicesChanged(
+                    devices()
+                        .into_iter()
+                        .filter(|d| matches!(d.status, DeviceStatus::OnNetworkUnpaired { .. }))
+                        .collect(),
+                )),
+                Ticks(10),
+            ],
             Scenario::AtividadeVazia => vec![Goto(Nav::Activity)],
             Scenario::Carregando => vec![Startup, ArmPlaceholders],
             Scenario::AtividadeCarregando => vec![Goto(Nav::Activity), BeginFetch(DataKind::Activity), ArmPlaceholders],
@@ -1213,6 +1231,7 @@ mod tests {
             (Scenario::TerminalAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::ArquivosAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::PermissoesNoMac, Screen::Devices, &[Main]),
+            (Scenario::PareadosAntesDa11, Screen::Home, &[Main]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {

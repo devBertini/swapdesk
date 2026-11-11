@@ -628,9 +628,11 @@ Tests, red before:
 Tests, red before:
 - `a_first_1_1_start_on_1_0_files_gives_no_account_any_1_0_data`;
 - `the_1_0_root_files_stay_byte_for_byte_and_still_load_with_the_1_0_decoder`;
-- `the_first_account_gets_a_new_key_slot_0_and_the_1_0_name`;
-- `a_peer_that_pinned_the_1_0_key_fails_the_handshake_and_can_pair_again_with_replaces` (two cores on loopback, the peer re-pairs through its old entry);
-- `a_second_start_after_a_downgrade_finds_its_accounts_and_still_ignores_the_root_data`.
+- `the_first_account_gets_a_new_key_and_slot_0_on_the_1_0_port` (the name is S8's, D55);
+- a peer that pinned the 1.0 key: `a_key_pinned_by_one_account_fails_the_handshake_on_the_other` (another key at the slot's port fails the handshake) and `a_key_that_is_already_pinned_gets_already_paired_and_a_changed_key_replaces_after_a_full_ceremony` (pairing again through the old entry replaces the key);
+- `a_second_start_after_a_downgrade_finds_its_accounts_and_still_ignores_the_root_data`;
+- the note (D55): `the_note_after_the_update_shows_only_while_the_account_has_no_pairing`, `the_note_after_the_update_from_1_0_shows_under_an_empty_paired_list_only`, `a_computer_with_no_1_0_data_shows_no_note`.
+- As built: these tests run the service's own `root_facts` and `open_account_data` over the real folder store in a temporary folder with 1.0 files written by the 1.0 code paths. Only the root `settings.bin` `port` is read, and whether `identity.bin` exists.
 
 **S6. Unattended entry, the elevation step and the viewer-side confirmation.**
 - `swapdesk-session`: `policy.rs` (the unattended grant by minor, without the two bits); `actor.rs` and `host.rs` (`Elevate` through `modify_granted`, the audit event).

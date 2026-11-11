@@ -31,7 +31,7 @@ proptest! {
         (op, body) in prop_oneof![
             Just((6u16, ReplyBody::Done)),
             Just((20u16, ReplyBody::Done)),
-            (txt(64), pick(Os::ALL), pick(Ready::ALL)).prop_map(|(name, os, ready)| (1u16, ReplyBody::ThisDevice(ThisDevice { name, os, ready }))),
+            (txt(64), pick(Os::ALL), pick(Ready::ALL), any::<bool>()).prop_map(|(name, os, ready, legacy_note)| (1u16, ReplyBody::ThisDevice(ThisDevice { name, os, ready, legacy_note }))),
             network().prop_map(|n| (2u16, ReplyBody::Network(n))),
             vec(device(), 0..3).prop_map(|d| (3u16, ReplyBody::Devices(d))),
             device().prop_map(|d| (4u16, ReplyBody::Device(d))),
