@@ -197,3 +197,24 @@ fn over_quic_a_stream_or_a_datagram_after_the_sync_is_a_violation() {
         }
     });
 }
+
+/// GRANTS-SYNC.md 8 S9 (ACCOUNTS.md 5.6): a sync takes no host reservation. Another account's core hosts a session
+/// on the same machine (the reservation is held); a sync to this core is still answered.
+#[test]
+fn a_sync_takes_no_host_reservation() {
+    run_paused(async {
+        let hosting = swapdesk_session::MachineHosting::new();
+        let ui_b = TestUi::accepting(PermissionSet::CONTROL);
+        let core_b = Mem::with(ui_b, swapdesk_session::Registry::new(), |c| c.machine = Some(hosting.clone()));
+        let ui_a = TestUi::accepting(PermissionSet::CONTROL);
+        let core_a = Mem::with(ui_a, swapdesk_session::Registry::new(), |c| c.machine = Some(hosting.clone()));
+        let (a, b) = (Who::new(), Who::new());
+        pin(&core_a.trust, &a, PermissionSet::VIEW);
+        pin(&core_b.trust, &b, PermissionSet::CONTROL);
+        let (s, _task) = core_b.open(&b, viewer_config(PermissionSet::CONTROL)).await;
+        let _s = s.expect("the other account's session is live");
+        let (mut io, _sync) = sync_from(&core_a, &a, PermissionSet::EMPTY).await;
+        assert_eq!(the_answer(&mut io).await.grants, PermissionSet::VIEW, "answered while another core hosts");
+        assert_eq!(core_b.host.sessions().len(), 1, "the other session goes on");
+    });
+}

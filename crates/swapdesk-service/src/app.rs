@@ -176,6 +176,12 @@ fn open_env(opts: &Options) -> Result<Env, String> {
     Ok(Env { store: Arc::new(store), trace })
 }
 
+/// The discovery record of an account (ACCOUNTS.md 6, GRANTS-SYNC.md 4.5): its slot's session port, and the `minor`
+/// key every 1.1 record carries.
+pub(crate) fn account_discovery(seat: &AccountSeat) -> DnsSdConfig {
+    DnsSdConfig { service_port: seat.session_port, ..DnsSdConfig::default() }
+}
+
 /// The name a peer sees of an account until its user changes it (D55): "<computer> · <Windows account>", the
 /// computer's name alone when the account's name cannot be read.
 fn default_account_name(sid: &str) -> String {
@@ -349,7 +355,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                     fingerprint: identity.device_id(),
                     pairing: false,
                 };
-                let config = DnsSdConfig { service_port: seat.session_port, ..DnsSdConfig::default() };
+                let config = account_discovery(seat);
                 match DnsSdPresence::start(Arc::clone(&interfaces), own_txt, config) {
                     Ok(p) => Arc::new(FilteredPresence::new(Arc::new(p), own)),
                     Err(e) => {

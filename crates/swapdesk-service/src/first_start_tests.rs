@@ -193,3 +193,16 @@ fn every_account_is_named_computer_dot_account() {
     let me = swapdesk_sys_win::current_user_sid().unwrap();
     assert!(!swapdesk_sys_win::account_name_of_sid(&me).unwrap().is_empty());
 }
+
+/// GRANTS-SYNC.md 8 S9: each account's record announces its own slot's port and carries `minor`.
+#[test]
+fn each_accounts_record_carries_minor() {
+    let t = Temp::new("minor");
+    let root = Arc::new(open_root(&t.0));
+    let accounts = accounts_over(&root, 47_820);
+    for (sid, port) in [(A, 47_820u16), ("S-1-5-21-1-2-3-1002", 47_822)] {
+        let config = super::account_discovery(&accounts.seat_for(sid).unwrap());
+        assert_eq!((config.service_port, config.minor), (port, swapdesk_proto::PROTO_MINOR));
+        assert!(config.minor >= 1);
+    }
+}

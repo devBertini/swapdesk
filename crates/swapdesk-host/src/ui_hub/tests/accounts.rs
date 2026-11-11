@@ -362,3 +362,130 @@ fn a_busy_port_pair_moves_to_the_next_slot_and_stays_there() {
     assert_eq!(first_free_pair((47_820, 47_821), MAC_SLOTS, |p| p != 47_821), Some((47_822, 47_823)));
     assert_eq!(first_free_pair((47_820, 47_821), 3, |_| false), None, "nothing free within reach");
 }
+
+/// A viewer machine paired with `who` (both sides pinned), and the address of `port` on loopback.
+fn viewer_of(who: &Built) -> Machine {
+    let v = Machine::new("viewer-pc");
+    pin_viewer(who, &v.identity);
+    v.trust
+        .update(|s| {
+            s.devices.push(PairedDevice::new_paired(
+                *who.identity.spki(),
+                "host".into(),
+                Os::Windows,
+                "11".into(),
+                1,
+                None,
+            ));
+        })
+        .unwrap();
+    v
+}
+
+fn lo(port: u16) -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+}
+
+/// GRANTS-SYNC.md 8 S9: a device paired with account A that dials B's port fails the handshake, and B's store is
+/// untouched; at A's port it is answered.
+#[test]
+fn a_sync_reaches_only_the_account_whose_port_it_dials() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let (a, b) = (accounts.account(A).unwrap(), accounts.account(B).unwrap());
+    let ka = built.lock().unwrap()[A].clone();
+    let kb = built.lock().unwrap()[B].clone();
+    let v = viewer_of(&ka);
+    a.hub.hub.update_receiving();
+    let sync = |port| v.core.runtime().block_on(v.core.sync_grants_async(lo(port), ka.identity.device_id()));
+    assert!(sync(a.seat.session_port).is_ok(), "A answers its own device");
+    assert!(sync(b.seat.session_port).is_err(), "B presents another key");
+    assert!(kb.trust.read(|s| s.devices.is_empty()), "B's store is untouched");
+    v.finish();
+}
+
+/// GRANTS-SYNC.md 8 S9: the console rule (ACCOUNTS.md 5.1) is for sessions; a sync to an account whose user is not
+/// at the console is answered, without a prompt.
+#[test]
+fn a_sync_to_an_account_not_at_the_console_is_answered_without_a_prompt() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    let ka = built.lock().unwrap()[A].clone();
+    a.hub.set_account(A);
+    a.hub.set_console_user(Some(B.into()));
+    let v = viewer_of(&ka);
+    a.hub.hub.update_receiving();
+    let got = v.core.runtime().block_on(v.core.sync_grants_async(lo(a.seat.session_port), ka.identity.device_id()));
+    assert_eq!(got.expect("answered").grants, PermissionSet::CONTROL, "what A stored for the device");
+    v.finish();
+}
+
+/// GRANTS-SYNC.md 8 S9: a device out of discovery is dialled at its last address and at the port it was last seen
+/// on (`peers.bin`), so an account on a slot other than 0 is reached.
+#[test]
+fn a_device_out_of_discovery_is_synced_at_its_port_in_peers_bin() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    let ka = built.lock().unwrap()[A].clone();
+    let peer = Identity::generate(0).unwrap();
+    ka.trust
+        .update(|s| {
+            s.devices.push(PairedDevice::new_paired(
+                *peer.spki(),
+                "peer".into(),
+                Os::MacOs,
+                "15".into(),
+                1,
+                Some([192, 168, 0, 21]),
+            ));
+        })
+        .unwrap();
+    let id = peer.device_id();
+    assert_eq!(a.hub.hub.address_of(&id).map(|s| s.port()), Some(crate::service::DEFAULT_SESSION_PORT));
+    a.hub.hub.note_peer_port(&id, 47_824);
+    assert_eq!(a.hub.hub.address_of(&id), Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 21), 47_824)));
+}
+
+/// GRANTS-SYNC.md 8 S9: what account A changes for its device is pushed to that device only; B's device hears
+/// nothing.
+#[test]
+fn a_grant_change_in_one_account_is_pushed_only_to_that_accounts_devices() {
+    let base = free_slots();
+    let (accounts, built) = machine(base);
+    let (a, b) = (accounts.account(A).unwrap(), accounts.account(B).unwrap());
+    let ka = built.lock().unwrap()[A].clone();
+    let kb = built.lock().unwrap()[B].clone();
+    let (va, vb) = (viewer_of(&ka), viewer_of(&kb));
+    for (k, v) in [(&ka, &va), (&kb, &vb)] {
+        let port = v.core.local_addrs()[0].port();
+        k.trust
+            .update(|s| {
+                let id = v.identity.device_id();
+                if let Some(d) = s.devices.iter_mut().find(|d| d.device_id == id) {
+                    d.last_addrs = vec![[127, 0, 0, 1]];
+                }
+            })
+            .unwrap();
+        v.hub.hub.update_receiving();
+        let hub = if std::ptr::eq(k, &ka) { &a.hub } else { &b.hub };
+        hub.hub.note_peer_port(&v.identity.device_id(), port);
+        // Out of discovery: the minor it said over an authenticated exchange (a sync is never sent to a 1.0 device).
+        hub.host_ui().event(swapdesk_session::HostEvent::PeerMinor { device: v.identity.device_id(), minor: 1 });
+    }
+    let mut ui_a = Client::connect(&a.hub, ConnInfo { session_id: 1, user: user(A), admin: false, can_elevate: false });
+    let now = PermissionSet::VIEW;
+    let op = UiOp::SetGrants { device_id: device_id_hex(&va.identity.device_id()), grants: now.bits() };
+    assert!(ui_a.call(op).is_ok(), "narrowing needs no administrator");
+    let there = |v: &Machine| v.trust.read(|s| s.devices[0].grants_there);
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while there(&va) != Some(now) && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(there(&va), Some(now), "A's device learns the change");
+    assert_eq!(there(&vb), None, "B's device hears nothing");
+    drop(ui_a);
+    va.finish();
+    vb.finish();
+}

@@ -223,8 +223,10 @@ impl Hub {
         if self.p.trust.read(|s| s.find_by_id(device).is_none()) {
             return None;
         }
+        // Never toward a device not known to be minor 1 (by its record, or what it said over an authenticated
+        // exchange); one out of discovery is dialled at its last address and port (GRANTS-SYNC.md 3.6, peers.bin).
         let hint = self.minor_hint(device);
-        if hint.is_none() || self.known_minor(device, hint) < 1 || self.session_carries(device) {
+        if self.known_minor(device, hint) < 1 || self.session_carries(device) {
             return None;
         }
         self.address_of(device).map(SocketAddr::V4)
