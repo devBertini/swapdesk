@@ -166,3 +166,40 @@ fn the_pairing_endpoint_ignores_a_blocked_address_before_any_handshake() {
     a.finish();
     b.finish();
 }
+
+/// ACCOUNTS.md 5.6: what only narrows the account's own reach is open to any session of the account's own user, a
+/// session switched away from the console included; widening stays the console's, and another user gets nothing.
+#[test]
+fn a_narrowing_from_a_switched_out_session_of_the_same_user_is_accepted() {
+    let m = Machine::new("sala");
+    m.hub.set_account("S-1-5-21-1");
+    let (other, third) = (Machine::new("other"), Machine::new("third"));
+    m.pin(&other, PermissionSet::CONTROL.union(PermissionSet::FILES));
+    m.pin(&third, PermissionSet::CONTROL);
+    let (id, id3) = (other.hex(), third.hex());
+    // The account's own user, in a session that is not the console's.
+    let mut switched = m.client(ConnInfo { session_id: 9, user: user("S-1-5-21-1"), admin: false, can_elevate: false });
+    let denied = ApiCode::NotPermitted;
+    assert_eq!(
+        switched
+            .call(UiOp::SetGrants {
+                device_id: id.clone(),
+                grants: PermissionSet::CONTROL.union(PermissionSet::AUDIO).bits()
+            })
+            .unwrap_err(),
+        denied,
+        "adding a permission is the console's"
+    );
+    assert!(switched.call(UiOp::SetGrants { device_id: id.clone(), grants: PermissionSet::VIEW.bits() }).is_ok());
+    assert_eq!(m.trust.read(|s| s.find_by_id(&other.id()).unwrap().grants_here), PermissionSet::VIEW, "narrowed");
+    assert_eq!(switched.call(UiOp::PairOpen { device_id: None }).unwrap_err(), denied, "pairing is the console's");
+    // Another user of the machine, even away from the console, narrows nothing here.
+    let mut stranger = background(&m, false);
+    assert_eq!(stranger.call(UiOp::ForgetDevice { device_id: id3.clone() }).unwrap_err(), denied);
+    assert!(switched.call(UiOp::ForgetDevice { device_id: id3 }).is_ok(), "the own user forgets a device");
+    assert!(m.trust.read(|s| s.find_by_id(&third.id()).is_none()));
+    drop((switched, stranger));
+    m.finish();
+    other.finish();
+    third.finish();
+}

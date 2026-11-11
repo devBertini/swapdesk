@@ -149,6 +149,8 @@ pub(crate) struct Hub {
     pub p: HubParams,
     core: Mutex<Weak<ServiceCore>>,
     rt: OnceLock<Handle>,
+    /// The SID of the account this hub serves, on a machine of several (ACCOUNTS.md 7.1); unset for the only one.
+    account: OnceLock<String>,
     settings: Mutex<MachineSettings>,
     conns: Mutex<Vec<Arc<Conn>>>,
     next_conn: AtomicU64,
@@ -296,6 +298,7 @@ impl UiHub {
             p: params,
             core: Mutex::new(Weak::new()),
             rt: OnceLock::new(),
+            account: OnceLock::new(),
             settings: Mutex::new(settings),
             conns: Mutex::new(Vec::new()),
             next_conn: AtomicU64::new(1),
@@ -338,6 +341,12 @@ impl UiHub {
     /// The audit sink the pairing code and the host events write to (the same log `ActivityList` reads).
     pub fn audit_sink(&self) -> Arc<dyn swapdesk_trust::AuditSink> {
         Arc::new(views::HubAudit { hub: Arc::downgrade(&self.hub) })
+    }
+
+    /// The account this hub serves (its user's SID), on a machine of several accounts: a connection of that user from
+    /// a session that is not the console's may still narrow the account's reach (ACCOUNTS.md 5.6).
+    pub fn set_account(&self, sid: &str) {
+        let _ = self.hub.account.set(sid.to_string());
     }
 
     /// Hands the started core to the hub (weakly) and takes its runtime. Call it once, right after

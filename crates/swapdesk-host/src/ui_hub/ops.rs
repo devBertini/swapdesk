@@ -173,17 +173,31 @@ impl Hub {
     }
 
     fn op(self: &Arc<Self>, conn: &Arc<Conn>, op: UiOp) -> OpResult {
-        // Before any argument is looked at, so a refused UI learns nothing about the device list.
-        if matches!(
-            op,
-            UiOp::PairOpen { .. }
-                | UiOp::PairStart { .. }
-                | UiOp::PairConfirm { .. }
-                | UiOp::PairCancel { .. }
-                | UiOp::SetGrants { .. }
-                | UiOp::ForgetDevice { .. }
-                | UiOp::RenameDevice { .. }
-        ) {
+        // Before any argument is looked at, so a refused UI learns nothing about the device list. What only narrows this
+        // account's own reach (forgetting a device, taking permissions away) is open to any interactive session of the
+        // account's own user, which is every connection that reaches this hub (ACCOUNTS.md 5.6): a user switched away
+        // from the console can still cut a device off.
+        let own_user = self.account.get().is_some_and(|a| a.eq_ignore_ascii_case(&conn.info.user.id));
+        let narrows = own_user
+            && match &op {
+                UiOp::ForgetDevice { .. } => true,
+                UiOp::SetGrants { device_id, grants } => parse_device_id(device_id).is_some_and(|id| {
+                    self.p.trust.read(|s| s.find_by_id(&id).is_some_and(|d| grants & !d.grants_here.bits() == 0))
+                }),
+                _ => false,
+            };
+        if !narrows
+            && matches!(
+                op,
+                UiOp::PairOpen { .. }
+                    | UiOp::PairStart { .. }
+                    | UiOp::PairConfirm { .. }
+                    | UiOp::PairCancel { .. }
+                    | UiOp::SetGrants { .. }
+                    | UiOp::ForgetDevice { .. }
+                    | UiOp::RenameDevice { .. }
+            )
+        {
             self.require_console(
                 conn,
                 "a pairing, grants, rename or forget request from a UI that is not the console's",
