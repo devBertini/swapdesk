@@ -288,7 +288,7 @@ pub(crate) fn open_account_data(
 fn machine_updater(
     store: &Arc<WinSecretStore>,
     dev: bool,
-    live_sessions: LiveSessions,
+    (live_sessions, ui_sessions): (LiveSessions, UiSessions),
     trace: Arc<dyn TraceSink>,
 ) -> Option<Arc<swapdesk_host::ui_hub::update::Updater>> {
     use swapdesk_update::manager::{FIRST_DELAY_MS, PERIOD_JITTER_MS, Setup, UpdateManager};
@@ -330,6 +330,10 @@ fn machine_updater(
         ready: Box::new(move |path, version| {
             // The applier stops this service: while it runs, this call waits. Its return means the applier ended with
             // the service still up (it refused, or could not write its journal), which is told as a failed install.
+            // The sessions whose interface closes now get it back after the update (UPDATES.md 6.2 step 7).
+            let sessions = ui_sessions.get().map_or_else(Vec::new, |s| s());
+            let listed = sessions.iter().map(|s| format!("{s}\n")).collect::<String>();
+            let _ = std::fs::write(update_dir.join(UI_SESSIONS), listed);
             let ended = run_applier(&update_dir, &path, &running_version(), version);
             if let Err(e) = &ended {
                 ready_trace.log(Level::Error, "update", format_args!("the update to {version} did not run: {e}"));
@@ -352,6 +356,42 @@ fn running_version() -> swapdesk_update::Version {
 
 /// Live sessions of the whole machine, known once the accounts exist (after the updater is built).
 type LiveSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>>;
+
+/// The Windows sessions with an interface connected, known once the pipes exist.
+type UiSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> Vec<u32> + Send + Sync>>>;
+
+/// The file in the update folder that lists the sessions whose interface closed for an update.
+const UI_SESSIONS: &str = "ui-sessions.txt";
+
+/// UPDATES.md 6.2 step 7: after a commit, `Swapdesk.exe` opens again in each session that had it, as that session's
+/// user (the user helper's token path), from the install folder checked by the install policy. The list goes.
+fn reopen_interfaces(update: &std::path::Path, trace: &dyn TraceSink) {
+    let list = update.join(UI_SESSIONS);
+    let text = std::fs::read_to_string(&list).unwrap_or_default();
+    let _ = std::fs::remove_file(&list);
+    let exe = match std::env::current_exe().map(|e| e.with_file_name("Swapdesk.exe")) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let verified = match InstallPolicy::production()
+        .map_err(|e| e.to_string())
+        .and_then(|p| p.verify(&exe).map_err(|e| e.to_string()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            trace.log(Level::Warn, "update", format_args!("the interface is not reopened: {e}"));
+            return;
+        }
+    };
+    for session in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+        match swapdesk_sys_win::launch_helper(swapdesk_sys_win::HelperRole::User, &verified, &[], session) {
+            Ok(_) => trace.log(Level::Info, "update", format_args!("the interface reopened in session {session}")),
+            Err(e) => {
+                trace.log(Level::Warn, "update", format_args!("the interface did not reopen in session {session}: {e}"))
+            }
+        }
+    }
+}
 
 /// UPDATES.md 6.2 step 4: stages the verified package (deleted once staged), then starts the applier and waits for it.
 /// An `Ok` never comes back in practice: the applier stops this service. An `Err` says why nothing was replaced.
@@ -608,10 +648,11 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     // UPDATES.md 2.2 and 13: one updater for the machine, in the service, shared by the account hubs. A development
     // instance never checks and never installs.
     let live_sessions: LiveSessions = Arc::default();
+    let ui_sessions: UiSessions = Arc::default();
     let updater = machine_updater(
         &store,
         opts.console || opts.instance.is_some(),
-        Arc::clone(&live_sessions),
+        (Arc::clone(&live_sessions), Arc::clone(&ui_sessions)),
         Arc::clone(&trace),
     );
     let factory: AccountFactory = {
@@ -744,6 +785,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     if let Some(s) = session {
         pipes.ensure(s);
     }
+    {
+        let pipes = Arc::clone(&pipes);
+        let _ = ui_sessions.set(Box::new(move || pipes.sessions_with_ui()));
+    }
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("swapdesk-helper.exe");
     let launch = if opts.console {
@@ -777,6 +822,9 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     // The pipes and endpoints are up: an update that started this version is committed (UPDATES.md 6.2 step 6).
     if !(opts.console || opts.instance.is_some()) {
         let ended = update_journal_at_start(&store.dir().join("update"), &*trace);
+        if matches!(ended, Some(Ok(()))) {
+            reopen_interfaces(&store.dir().join("update"), &*trace);
+        }
         if let Some(u) = &updater {
             match ended {
                 Some(Ok(())) => u.updated(),

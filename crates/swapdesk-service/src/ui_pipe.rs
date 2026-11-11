@@ -59,8 +59,9 @@ pub struct UiPipes {
     /// `-<n>` with `--instance`, else empty.
     pub suffix: String,
     pub stop: Arc<AtomicBool>,
-    /// A second owner of every open connection's pipe, to cancel its blocked read at shutdown.
-    open: Mutex<Vec<(u64, PipeConn)>>,
+    /// A second owner of every open connection's pipe, to cancel its blocked read at shutdown, with the Windows
+    /// session of an interface (`None` for an elevator).
+    open: Mutex<Vec<(u64, Option<u32>, PipeConn)>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
     sessions: OpenSessions,
     /// The sessions whose elevator pipe is open.
@@ -303,7 +304,8 @@ impl UiPipes {
         reader_half.set_read_timeout(None);
         let reader = FrameReader::new(reader_half);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        lock(&self.open).push((id, for_cancel));
+        let ui_session = (hello.role == IpcRole::Ui).then_some(session);
+        lock(&self.open).push((id, ui_session, for_cancel));
         // Cancelling the pipe's I/O unblocks the thread that reads it. A UI that stops reading its messages is cut by the
         // hub this way: `serve` ends and the pipe closes, so the UI sees the end of the pipe and reconnects. The
         // elevator loop does it when it ends, so its reading thread ends with it.
@@ -314,7 +316,7 @@ impl UiPipes {
         } else {
             ("a UI", hub.serve_cancellable(reader, writer, info, cancel))
         };
-        lock(&self.open).retain(|(i, _)| *i != id);
+        lock(&self.open).retain(|(i, _, _)| *i != id);
         if let Err(e) = end {
             self.log(Level::Debug, format_args!("{what} connection ended: {e}"));
         }
@@ -383,20 +385,28 @@ impl UiPipes {
         reader_half.set_read_timeout(None);
         let reader = FrameReader::new(reader_half);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        lock(&self.open).push((id, for_cancel));
+        lock(&self.open).push((id, None, for_cancel));
         let for_cut = Mutex::new(for_cut);
         let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || lock(&for_cut).cancel_io());
         let end = hub.serve_elevator_cancellable(reader, writer, info, cancel);
-        lock(&self.open).retain(|(i, _)| *i != id);
+        lock(&self.open).retain(|(i, _, _)| *i != id);
         if let Err(e) = end {
             self.log(Level::Debug, format_args!("an elevator connection ended: {e}"));
         }
     }
 
+    /// The Windows sessions that have an interface connected (an update reopens it there, UPDATES.md 6.2 step 7).
+    pub fn sessions_with_ui(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = lock(&self.open).iter().filter_map(|(_, s, _)| *s).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     /// The service stops: unblocks every connection and waits for the threads.
     pub fn stop_all(&self) {
         self.stop.store(true, Ordering::Release);
-        for (_, c) in lock(&self.open).iter() {
+        for (_, _, c) in lock(&self.open).iter() {
             c.cancel_io();
         }
         let threads: Vec<_> = lock(&self.threads).drain(..).collect();
@@ -655,6 +665,20 @@ mod tests {
         let mut ui = dev.client(IpcRole::Ui);
         ui.send(1, UiOp::ElevationDescribe { ticket: ElevationTicket([7; 16]) });
         assert_eq!(ui.reply(1, 36).unwrap_err(), ApiCode::NotPermitted);
+    }
+
+    #[test]
+    fn the_sessions_with_an_interface_are_listed_for_the_update_and_an_elevator_is_not() {
+        let dev = DevPipe::new();
+        assert!(dev.pipes.sessions_with_ui().is_empty());
+        let mut elevator = dev.client(IpcRole::Elevator);
+        elevator.send(1, UiOp::ElevationDescribe { ticket: ElevationTicket([7; 16]) });
+        let _ = elevator.reply(1, 36);
+        assert!(dev.pipes.sessions_with_ui().is_empty(), "an elevator is not an interface");
+        let mut ui = dev.client(IpcRole::Ui);
+        ui.send(1, UiOp::GetThisDevice);
+        let _ = ui.reply(1, 1);
+        assert_eq!(dev.pipes.sessions_with_ui(), vec![own_session()]);
     }
 
     #[test]
