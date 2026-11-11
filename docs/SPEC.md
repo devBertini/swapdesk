@@ -171,7 +171,7 @@ Assets: the screen and keyboard of each machine, SYSTEM/root execution on the ho
 | R11 | A rustls or quinn default re-enables resumption or early data | Stage 10 test: a client that offers a ticket and 0-RTT gets a full handshake and the gate runs |
 | R12 | Injection from the user helper (medium token) on the input desktop while the SYSTEM helper captures | Stage 16 and 18: input reaches a medium window and not an elevated one |
 | R13 | Whether launchd or SMAppService refuses a modified daemon binary (UNPROVEN) | Stage 24 probe; the daemon's self-check stays either way |
-| R14 | The elevated or authorized connection for admin-only changes (UAC-started UI instance, Authorization Services right) | Stage 18 (Windows), stage 24 (macOS) |
+| R14 | The elevated or authorized connection for admin-only changes (UAC-started UI instance, Authorization Services right) | Built in 1.1 (`ELEVATION.md`, `ELEVATION-MAC.md`, D54); the real UAC prompt and macOS dialog are the owner's hand check |
 | R15 | Two native shells cost more UI work (GUESS +40 to 60% over one toolkit), and the Mac shell is written here but proven only on the MacBook | State, strings and tokens live once in `swapdesk-ui`; stage 23 grows to the whole AppKit shell |
 | R16 | AccessKit's Windows adapter does not cover every element type or property, and a custom-drawn window is blank to Narrator without a complete tree | Stage 11: a Narrator pass over every control of every screen is part of the proof |
 | R17 | IME and focus in a custom-drawn Win32 window | Native `EDIT` child controls for the few text inputs; the shell's own focus order, tested in stage 11 |

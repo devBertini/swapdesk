@@ -102,7 +102,7 @@ These are marked UNPROVEN or GUESS in the design documents. They are risks, not 
 | Default ACL of `%ProgramData%` and whether a standard user could pre-create the folder or a DPAPI blob | UNPROVEN, GUESS | CONTRACTS C5.2 |
 | Whether `WTSQueryUserToken` returns the filtered or the elevated token for an administrator | The user helper was measured not elevated (`TokenElevationType` limited) on an administrator account | CONTRACTS C2.1 |
 | Whether a medium-integrity helper can use the default input desktop (injection for prompted sessions) | UNPROVEN, risk R12 | CONTRACTS C2.1; SPEC R12 |
-| The elevated or authorized connection for admin-only changes (UAC-started instance, Authorization Services) | Risk R14 (UNPROVEN for macOS) | SPEC R14; CONTRACTS C2.3 |
+| The elevated or authorized connection for admin-only changes (UAC-started instance, Authorization Services) | Built (`ELEVATION.md`, `ELEVATION-MAC.md`; the threat table is `ELEVATION.md` 5). Windows: UAC, the elevated instance's own window and a single-use pass bound to the asking connection and the exact action. macOS 1.x: the check runs in the app's own process (D54): it stops a person at the keyboard who is not an administrator, not code running as the same user. Still a hand check: the real UAC prompt and the real macOS password dialog (owner batch) | SPEC R14; CONTRACTS C2.3; D54 |
 | `SoftwareSASGeneration` on Windows 11 Home | Risk R5, not tested yet (unattended access is not in 1.0) | SPEC R5 |
 | Whether launchd or `SMAppService` refuse a modified daemon binary on macOS | UNPROVEN, risk R13 | CONTRACTS C2.2 |
 | macOS peer-token calls and code-signature requirement strings | Not used in 1.0 (no daemon on macOS) | CONTRACTS C2.2 |
