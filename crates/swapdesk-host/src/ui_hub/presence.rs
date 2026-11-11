@@ -224,6 +224,39 @@ impl Presence for FakePresence {
     }
 }
 
+/// The presence of one account on a machine with several: the records of this machine's other accounts are not
+/// peers (ACCOUNTS.md 6, "this machine's other accounts are not listed").
+pub struct FilteredPresence {
+    inner: Arc<dyn Presence>,
+    own: Arc<Mutex<Vec<DeviceId>>>,
+}
+
+impl FilteredPresence {
+    /// `own`: the device IDs of this machine's accounts, kept up to date by the machine as accounts appear.
+    pub fn new(inner: Arc<dyn Presence>, own: Arc<Mutex<Vec<DeviceId>>>) -> Self {
+        Self { inner, own }
+    }
+}
+
+impl Presence for FilteredPresence {
+    fn peers(&self) -> Vec<PresencePeer> {
+        let own = lock(&self.own).clone();
+        self.inner.peers().into_iter().filter(|p| !own.contains(&p.device_id)).collect()
+    }
+    fn set_pairing(&self, on: bool) {
+        self.inner.set_pairing(on);
+    }
+    fn refresh(&self) {
+        self.inner.refresh();
+    }
+    fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        self.inner.set_listener(f);
+    }
+    fn set_announced(&self, on: bool) {
+        self.inner.set_announced(on);
+    }
+}
+
 #[cfg(test)]
 mod found_tests {
     use super::*;
@@ -283,38 +316,5 @@ mod found_tests {
         ]);
         let minors: Vec<u16> = fake.peers().iter().map(|p| p.proto_minor).collect();
         assert_eq!(minors, [1, 0]);
-    }
-}
-
-/// The presence of one account on a machine with several: the records of this machine's other accounts are not
-/// peers (ACCOUNTS.md 6, "this machine's other accounts are not listed").
-pub struct FilteredPresence {
-    inner: Arc<dyn Presence>,
-    own: Arc<Mutex<Vec<DeviceId>>>,
-}
-
-impl FilteredPresence {
-    /// `own`: the device IDs of this machine's accounts, kept up to date by the machine as accounts appear.
-    pub fn new(inner: Arc<dyn Presence>, own: Arc<Mutex<Vec<DeviceId>>>) -> Self {
-        Self { inner, own }
-    }
-}
-
-impl Presence for FilteredPresence {
-    fn peers(&self) -> Vec<PresencePeer> {
-        let own = lock(&self.own).clone();
-        self.inner.peers().into_iter().filter(|p| !own.contains(&p.device_id)).collect()
-    }
-    fn set_pairing(&self, on: bool) {
-        self.inner.set_pairing(on);
-    }
-    fn refresh(&self) {
-        self.inner.refresh();
-    }
-    fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        self.inner.set_listener(f);
-    }
-    fn set_announced(&self, on: bool) {
-        self.inner.set_announced(on);
     }
 }
