@@ -44,6 +44,42 @@ impl Default for Saved {
     }
 }
 
+impl Saved {
+    /// The file's text: one `key value` per line (the service keeps it in its protected folder).
+    pub fn to_text(&self) -> String {
+        let mut t = format!("swapdesk-update-state 1\ncheck {}\n", u8::from(self.check_on));
+        if let Some(ms) = self.last_check_ms {
+            t.push_str(&format!("last {ms}\n"));
+        }
+        if let Some(v) = &self.dismissed {
+            t.push_str(&format!("dismissed {v}\n"));
+        }
+        for v in &self.rolled_back {
+            t.push_str(&format!("rolled-back {v}\n"));
+        }
+        t
+    }
+
+    /// Reads [`Saved::to_text`]; what does not read gives the defaults (the switch on), never an error.
+    pub fn from_text(text: &str) -> Saved {
+        let mut lines = text.lines();
+        if lines.next() != Some("swapdesk-update-state 1") {
+            return Saved::default();
+        }
+        let mut s = Saved::default();
+        for line in lines {
+            match line.split_once(' ') {
+                Some(("check", v)) => s.check_on = v != "0",
+                Some(("last", v)) => s.last_check_ms = v.parse().ok(),
+                Some(("dismissed", v)) => s.dismissed = Version::parse(v).ok(),
+                Some(("rolled-back", v)) => s.rolled_back.extend(Version::parse(v).ok()),
+                _ => {}
+            }
+        }
+        s
+    }
+}
+
 /// Where [`Saved`] lives.
 pub trait SavedStore: Send + Sync {
     fn load(&self) -> Saved;

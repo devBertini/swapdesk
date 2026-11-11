@@ -298,3 +298,16 @@ fn a_rolled_back_version_is_not_offered_again_by_itself() {
     r.m.check(START + 2 * PERIOD_MS, 0).unwrap();
     assert_eq!(r.m.view().phase, Phase::Offered { version: v("1.1.2"), manual: false });
 }
+
+#[test]
+fn the_saved_state_round_trips_and_a_bad_file_is_the_defaults() {
+    let s = Saved {
+        check_on: false,
+        last_check_ms: Some(1_700_000_000_000),
+        dismissed: Some(v("1.1.1")),
+        rolled_back: vec![v("1.1.2"), v("1.1.3")],
+    };
+    assert_eq!(Saved::from_text(&s.to_text()), s);
+    assert_eq!(Saved::from_text("garbage"), Saved::default());
+    assert!(Saved::from_text("").check_on, "the switch is on by default");
+}

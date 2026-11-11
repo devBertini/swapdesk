@@ -30,6 +30,7 @@ mod queue;
 pub mod store;
 mod sync_dial;
 mod terminal;
+pub mod update;
 mod views;
 
 #[cfg(test)]
@@ -194,6 +195,8 @@ pub(crate) struct Hub {
     shutting: AtomicBool,
     /// A 1.0 install left its data on this computer (D55).
     had_1_0: AtomicBool,
+    /// The machine's updater (UPDATES.md 13), shared by the account hubs; none in a development instance.
+    updater: std::sync::OnceLock<Arc<update::Updater>>,
 }
 
 impl Hub {
@@ -363,6 +366,7 @@ impl UiHub {
             started: Mutex::new(HashMap::new()),
             shutting: AtomicBool::new(false),
             had_1_0: AtomicBool::new(false),
+            updater: std::sync::OnceLock::new(),
         });
         let weak = Arc::downgrade(&hub);
         hub.p.presence.set_listener(Arc::new(move || {
@@ -433,6 +437,12 @@ impl UiHub {
     pub fn set_desktop(&self, desktop: Desktop) {
         *lock(&self.hub.desktop) = desktop;
         self.hub.push_desktop();
+    }
+
+    /// The machine's updater: this account's interfaces reach it (ops 51 to 56) and hear of its changes.
+    pub fn set_updater(&self, updater: Arc<update::Updater>) {
+        updater.subscribe(&self.hub);
+        let _ = self.hub.updater.set(updater);
     }
 
     /// A 1.0 install left its data on this computer (ACCOUNTS.md 10.2): this account's empty Pareados list shows the

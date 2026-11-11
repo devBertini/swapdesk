@@ -19,6 +19,8 @@ pub enum ConvertError {
     UnknownMsgKey(u16),
     /// A reply body only the elevation worker reads (ops 35, 36, 38) came to the general reply path.
     ElevationReply,
+    /// The updater's view (op 51, kinds 18 and 19): the interface shows it from UPDATES.md slice U7 on.
+    UpdateNotShownYet,
 }
 
 type CResult<T> = Result<T, ConvertError>;
@@ -418,6 +420,7 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
         w::ReplyBody::ElevationTicket { .. }
         | w::ReplyBody::ElevationAction { .. }
         | w::ReplyBody::ElevationOutcome(_) => return Err(ConvertError::ElevationReply),
+        w::ReplyBody::Update(_) => return Err(ConvertError::UpdateNotShownYet),
         w::ReplyBody::ThisDevice(v) => a::Reply::ThisDevice(this_device_from_wire(v)),
         w::ReplyBody::Network(v) => a::Reply::Network(network_from_wire(v)),
         w::ReplyBody::Devices(v) => a::Reply::Devices(devices_from_wire(v)),
@@ -459,6 +462,7 @@ pub fn term_outcome_error(outcome: w::TermOutcome) -> a::ApiError {
 pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
     use a::UiEvent as E;
     Ok(match n {
+        w::Notify::UpdateChanged(_) | w::Notify::UpdateRestarting => return Err(ConvertError::UpdateNotShownYet),
         w::Notify::DevicesChanged(v) => E::DevicesChanged(devices_from_wire(v)),
         w::Notify::NetworkChanged(v) => E::NetworkChanged(network_from_wire(v)),
         w::Notify::Pairing { pairing_id, state } => E::Pairing { pairing_id, state: pairing_from_wire(state) },

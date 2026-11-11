@@ -1443,3 +1443,93 @@ fn pairing_does_not_open_when_its_port_is_held_by_another_program() {
     drop(ui);
     m.finish();
 }
+
+/// An HTTP client that never answers (the hub's update tests need no download).
+struct NoNet;
+
+impl swapdesk_update::http::HttpGet for NoNet {
+    fn get(
+        &self,
+        _url: &str,
+        _max: u64,
+        _sink: &mut dyn std::io::Write,
+        _progress: &mut dyn FnMut(u64),
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), swapdesk_update::http::HttpError> {
+        Err(swapdesk_update::http::HttpError::Network("no network in this test".into()))
+    }
+}
+
+struct NoSaved;
+
+impl swapdesk_update::manager::SavedStore for NoSaved {
+    fn load(&self) -> swapdesk_update::manager::Saved {
+        swapdesk_update::manager::Saved::default()
+    }
+
+    fn save(&self, _saved: &swapdesk_update::manager::Saved) {}
+}
+
+struct NoFolder;
+
+impl swapdesk_update::manager::UpdateFolder for NoFolder {
+    fn create(&self, _name: &str) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        Err(std::io::Error::other("no folder in this test"))
+    }
+
+    fn remove(&self, _name: &str) {}
+
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        name.into()
+    }
+}
+
+/// UPDATES.md 10 and 13 (U4): the updater through the hub: the view, the install refused from a UI that is not the
+/// console's and with a live session unless confirmed, the switch only from the console, and nothing without an
+/// updater (a development instance).
+#[test]
+fn the_updater_answers_through_the_hub_with_its_refusals() {
+    use swapdesk_update::manager::{Setup, UpdateManager};
+    let m = Machine::new("sala");
+    let mut ui = m.client(info(false));
+    assert_eq!(ui.call(UiOp::UpdateGet).unwrap_err(), ApiCode::NotFound, "no updater: a development instance");
+    let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let setup = Setup {
+        running: swapdesk_update::Version::parse("1.1.0").unwrap(),
+        target: "windows-x64".into(),
+        base: "https://example.invalid/releases".into(),
+        keys: Vec::new(),
+        dev: false,
+        first_delay_ms: 60_000,
+    };
+    let manager = UpdateManager::new(setup, Arc::new(NoNet), Arc::new(NoSaved), Arc::new(NoFolder), 0);
+    let hooks = super::update::UpdaterHooks {
+        now_ms: Box::new(|| 0),
+        jitter_ms: Box::new(|| 0),
+        live_sessions: {
+            let live = Arc::clone(&live);
+            Box::new(move || live.load(std::sync::atomic::Ordering::SeqCst))
+        },
+        ready: Box::new(|_| {}),
+    };
+    m.hub.set_updater(super::update::Updater::new(manager, hooks));
+    let ReplyBody::Update(view) = ui.call(UiOp::UpdateGet).unwrap() else { panic!() };
+    assert_eq!((view.running.as_str(), view.check_on), ("1.1.0", true));
+    let install = || UiOp::UpdateInstall { version: "1.1.1".into(), end_sessions: false };
+    // Not the console's interface: refused, as the switch is.
+    let mut other = m.client(ConnInfo { session_id: 2, ..info(false) });
+    assert_eq!(other.call(install()).unwrap_err(), ApiCode::NotPermitted);
+    assert_eq!(other.call(UiOp::UpdateSetCheck { on: false }).unwrap_err(), ApiCode::NotPermitted);
+    // The console's, with a live session and no confirmation: refused until "Encerrar e atualizar".
+    live.store(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ui.call(install()).unwrap_err(), ApiCode::Busy);
+    // The switch from the console: told to the interfaces.
+    assert!(ui.call(UiOp::UpdateSetCheck { on: false }).is_ok());
+    let told = ui.notify("UpdateChanged", |n| match n {
+        Notify::UpdateChanged(v) => Some(v.check_on),
+        _ => None,
+    });
+    assert!(!told);
+    drop((ui, other));
+    m.finish();
+}

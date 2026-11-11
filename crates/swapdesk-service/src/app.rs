@@ -283,6 +283,91 @@ pub(crate) fn open_account_data(
     Ok(AccountData { store, identity, trust, settings })
 }
 
+/// The machine's updater (UPDATES.md 2.2, 13), or none for a development instance. Its folder is `update` inside the
+/// protected folder (only SYSTEM and Administrators open it, 6.3), its state `update-state.txt` beside it.
+fn machine_updater(
+    store: &Arc<WinSecretStore>,
+    dev: bool,
+    trace: Arc<dyn TraceSink>,
+) -> Option<Arc<swapdesk_host::ui_hub::update::Updater>> {
+    use swapdesk_update::manager::{FIRST_DELAY_MS, PERIOD_JITTER_MS, Setup, UpdateManager};
+    if dev {
+        return None;
+    }
+    let running = match swapdesk_update::Version::parse(env!("CARGO_PKG_VERSION")) {
+        Ok(v) => v,
+        Err(e) => {
+            trace.log(Level::Warn, "update", format_args!("this build's version does not read ({e:?}): no updater"));
+            return None;
+        }
+    };
+    let dir = store.dir().join("update");
+    // A cheap random number for the first delay and the jitter: the low bits of the clock (spreading, not secrecy).
+    let spread =
+        || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as u64);
+    let setup = Setup {
+        running,
+        target: "windows-x64".into(),
+        base: "https://github.com/devBertini/swapdesk/releases".into(),
+        keys: swapdesk_update::keys::RELEASE_KEYS.to_vec(),
+        dev: false,
+        first_delay_ms: FIRST_DELAY_MS.0 + spread() % (FIRST_DELAY_MS.1 - FIRST_DELAY_MS.0),
+    };
+    let now = || SystemWallClock.unix_ms();
+    let manager = UpdateManager::new(
+        setup,
+        Arc::new(swapdesk_sys_win::http::WinHttp::new()),
+        Arc::new(StateFile(dir.join("update-state.txt"))),
+        Arc::new(UpdateDir(dir)),
+        now(),
+    );
+    let ready_trace = Arc::clone(&trace);
+    let hooks = swapdesk_host::ui_hub::update::UpdaterHooks {
+        now_ms: Box::new(now),
+        jitter_ms: Box::new(move || (spread() % (2 * PERIOD_JITTER_MS)) as i64 - PERIOD_JITTER_MS as i64),
+        live_sessions: Box::new(|| 0),
+        ready: Box::new(move |path| {
+            // The applier is slice U5 of UPDATES.md: until it is built, a verified package waits in the folder.
+            ready_trace.log(Level::Info, "update", format_args!("a verified package is ready: {}", path.display()));
+        }),
+    };
+    Some(swapdesk_host::ui_hub::update::Updater::new(manager, hooks))
+}
+
+/// The updater's state file.
+struct StateFile(PathBuf);
+
+impl swapdesk_update::manager::SavedStore for StateFile {
+    fn load(&self) -> swapdesk_update::manager::Saved {
+        std::fs::read_to_string(&self.0).map(|t| swapdesk_update::manager::Saved::from_text(&t)).unwrap_or_default()
+    }
+
+    fn save(&self, saved: &swapdesk_update::manager::Saved) {
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&self.0, saved.to_text());
+    }
+}
+
+/// The updater's folder inside the protected folder.
+struct UpdateDir(PathBuf);
+
+impl swapdesk_update::manager::UpdateFolder for UpdateDir {
+    fn create(&self, name: &str) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        std::fs::create_dir_all(&self.0)?;
+        Ok(Box::new(std::fs::File::create(self.0.join(name))?))
+    }
+
+    fn remove(&self, name: &str) {
+        let _ = std::fs::remove_file(self.0.join(name));
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
 /// Who is at the console session now (ACCOUNTS.md 5.1). In development the current user stands for a logged-in user.
 /// A logged-in user whose SID cannot be read is `Unreadable`, never nobody: that fails closed.
 fn read_console(dev: bool) -> ConsoleRead {
@@ -333,10 +418,14 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
 
     // ACCOUNTS.md 15 S3: one identity, trust store, hub and core per account, built the first time the account needs
     // one (its user opens Swapdesk), and at start for every account the machine knows.
+    // UPDATES.md 2.2 and 13: one updater for the machine, in the service, shared by the account hubs. A development
+    // instance never checks and never installs.
+    let updater = machine_updater(&store, opts.console || opts.instance.is_some(), Arc::clone(&trace));
     let factory: AccountFactory = {
         let (root, trace, interfaces, clock, term_env) =
             (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
         let (core_events, events, had_1_0) = (Arc::clone(&core_events), ctx_events.clone(), machine.had_1_0);
+        let updater = updater.clone();
         let (dev_loopback, dev_mode) = (opts.dev_loopback, opts.console);
         Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
             let wall = SystemWallClock;
@@ -421,6 +510,9 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             };
             hub.set_account(&seat.sid);
             hub.set_had_1_0(had_1_0);
+            if let Some(u) = &updater {
+                hub.set_updater(Arc::clone(u));
+            }
             core.set_account(&seat.sid);
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
@@ -582,6 +674,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             }
         }
         supervisor.tick();
+        // The update schedule (UPDATES.md 2.2): the first check minutes after the start, then every day.
+        if let Some(u) = &updater {
+            u.tick();
+        }
         let now = Instant::now();
         if now >= next_net {
             next_net = now + reconcile;

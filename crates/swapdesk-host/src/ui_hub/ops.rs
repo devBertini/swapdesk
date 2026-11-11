@@ -205,6 +205,12 @@ impl Hub {
             )?;
         }
         match op {
+            UiOp::UpdateGet
+            | UiOp::UpdateCheckNow
+            | UiOp::UpdateInstall { .. }
+            | UiOp::UpdateCancel
+            | UiOp::UpdateDismiss { .. }
+            | UiOp::UpdateSetCheck { .. } => self.update_op(conn, &op),
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),

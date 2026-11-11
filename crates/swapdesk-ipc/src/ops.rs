@@ -173,6 +173,22 @@ pub enum UiOp {
     },
     /// Ops 40 to 49: the files feature (stage 44), see [`FilesOp`].
     Files(FilesOp),
+    /// Ops 51 to 56: the machine's updater (UPDATES.md 10, 13). `UpdateGet` answers `Update(view)`; the others
+    /// `Done` (the result arrives as `UpdateChanged`). `UpdateInstall` is refused (`NotPermitted`) from a UI that is not
+    /// the console's, and (`Busy`) with a live session unless `end_sessions` ("Encerrar e atualizar").
+    UpdateGet,
+    UpdateCheckNow,
+    UpdateInstall {
+        version: String,
+        end_sessions: bool,
+    },
+    UpdateCancel,
+    UpdateDismiss {
+        version: String,
+    },
+    UpdateSetCheck {
+        on: bool,
+    },
     /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
     /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
     /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
@@ -225,6 +241,12 @@ impl UiOp {
             Self::RefreshGrants { .. } => 39,
             Self::Files(f) => f.code(),
             Self::ElevateSession { .. } => 50,
+            Self::UpdateGet => 51,
+            Self::UpdateCheckNow => 52,
+            Self::UpdateInstall { .. } => 53,
+            Self::UpdateCancel => 54,
+            Self::UpdateDismiss { .. } => 55,
+            Self::UpdateSetCheck { .. } => 56,
         }
     }
 
@@ -322,6 +344,13 @@ impl UiOp {
             Self::ElevationDescribe { ticket } | Self::ElevationEnd { ticket } => ticket.put(w, 0)?,
             Self::RefreshGrants { device_id } => w.put_str(device_id, MAX_NAME)?,
             Self::ElevateSession { session_id } => w.put_u64(*session_id),
+            Self::UpdateGet | Self::UpdateCheckNow | Self::UpdateCancel => {}
+            Self::UpdateInstall { version, end_sessions } => {
+                w.put_str(version, crate::types::MAX_VERSION)?;
+                w.put_bool(*end_sessions);
+            }
+            Self::UpdateDismiss { version } => w.put_str(version, crate::types::MAX_VERSION)?,
+            Self::UpdateSetCheck { on } => w.put_bool(*on),
             Self::ElevationConfirm { ticket, approve } => {
                 ticket.put(w, 0)?;
                 w.put_bool(*approve);
@@ -373,6 +402,12 @@ impl UiOp {
             39 => Self::RefreshGrants { device_id: r.str(MAX_NAME)? },
             40..=49 => Self::Files(FilesOp::get_body(op, r)?),
             50 => Self::ElevateSession { session_id: r.u64()? },
+            51 => Self::UpdateGet,
+            52 => Self::UpdateCheckNow,
+            53 => Self::UpdateInstall { version: r.str(crate::types::MAX_VERSION)?, end_sessions: r.bool()? },
+            54 => Self::UpdateCancel,
+            55 => Self::UpdateDismiss { version: r.str(crate::types::MAX_VERSION)? },
+            56 => Self::UpdateSetCheck { on: r.bool()? },
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }
@@ -428,6 +463,8 @@ pub enum ReplyBody {
     TransferIds(Vec<u32>),
     /// The transfer number of `FilesGet` (op 42).
     TransferId(u32),
+    /// The machine's updater (op 51).
+    Update(crate::types::UpdateView),
 }
 
 impl ReplyBody {
@@ -465,6 +502,7 @@ impl ReplyBody {
             Self::Listing(v) => v.put(&mut w, 0)?,
             Self::TransferIds(v) => v.put(&mut w, crate::files::MAX_PICKS)?,
             Self::TransferId(v) => w.put_u32(*v),
+            Self::Update(v) => v.put(&mut w, 0)?,
         }
         Ok(w.into_bytes())
     }
@@ -499,7 +537,8 @@ impl ReplyBody {
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 => Self::Done,
+            51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=56 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;
@@ -583,6 +622,10 @@ pub enum Notify {
         feature: Feature,
         remaining_s: u16,
     },
+    /// Kind 18: the machine's updater changed (UPDATES.md 10.2).
+    UpdateChanged(crate::types::UpdateView),
+    /// Kind 19: the install runs now: the service stops in a moment and comes back updated (10.2 "Installing").
+    UpdateRestarting,
     /// Kinds 20 to 24: the files feature (stage 44), see [`FilesNote`].
     Files(FilesNote),
 }
@@ -607,6 +650,8 @@ impl Notify {
             Self::ClipboardSkipped { .. } => 14,
             Self::TermExited { .. } => 16,
             Self::ConsentPending { .. } => 17,
+            Self::UpdateChanged(_) => 18,
+            Self::UpdateRestarting => 19,
             Self::Files(f) => f.kind(),
         }
     }
@@ -666,6 +711,8 @@ impl Notify {
                 feature.put(w, 0)?;
                 w.put_u16(*remaining_s);
             }
+            Self::UpdateChanged(view) => view.put(w, 0)?,
+            Self::UpdateRestarting => {}
             Self::Files(f) => f.put_body(w)?,
         }
         Ok(())
@@ -689,6 +736,8 @@ impl Notify {
             14 => Self::ClipboardSkipped { session_id: r.u64()?, reason: ApiCode::get(r, 0)? },
             16 => Self::TermExited { term_id: r.u32()?, exit_code: <Option<i32>>::get(r, 0)? },
             17 => Self::ConsentPending { session_id: r.u64()?, feature: Feature::get(r, 0)?, remaining_s: r.u16()? },
+            18 => Self::UpdateChanged(crate::types::UpdateView::get(r, 0)?),
+            19 => Self::UpdateRestarting,
             20..=24 => Self::Files(FilesNote::get_body(kind, r)?),
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));

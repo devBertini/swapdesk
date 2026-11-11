@@ -616,3 +616,95 @@ wire_struct! {
     /// A chat message as the UI shows it. The text is as private as input: its `Debug` prints a length only.
     ChatItem { msg_id: u32, text: Text [MAX_CHAT_TEXT], sent_at_ms: u64 }
 }
+
+/// Where the machine's updater is (UPDATES.md 10.2), as the interfaces show it. Versions travel as their text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePhase {
+    Idle,
+    Checking,
+    /// A newer version; `manual`: it needs the installer (the interface links to its release page).
+    Offered {
+        version: String,
+        manual: bool,
+    },
+    Downloading {
+        version: String,
+        done: u64,
+        total: u64,
+    },
+    Verifying {
+        version: String,
+    },
+    /// Downloaded and verified: the install runs now.
+    Ready {
+        version: String,
+    },
+    /// An install that did not happen or stopped; `reason`: `swapdesk_update::manager::InstallFailure` as a tag.
+    Failed {
+        reason: u8,
+    },
+}
+
+impl Wire for UpdatePhase {
+    const MIN_SIZE: usize = 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::Idle => w.put_u8(0),
+            Self::Checking => w.put_u8(1),
+            Self::Offered { version, manual } => {
+                w.put_u8(2);
+                w.put_str(version, MAX_VERSION)?;
+                w.put_bool(*manual);
+            }
+            Self::Downloading { version, done, total } => {
+                w.put_u8(3);
+                w.put_str(version, MAX_VERSION)?;
+                w.put_u64(*done);
+                w.put_u64(*total);
+            }
+            Self::Verifying { version } => {
+                w.put_u8(4);
+                w.put_str(version, MAX_VERSION)?;
+            }
+            Self::Ready { version } => {
+                w.put_u8(5);
+                w.put_str(version, MAX_VERSION)?;
+            }
+            Self::Failed { reason } => {
+                w.put_u8(6);
+                w.put_u8(*reason);
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        Ok(match r.u8()? {
+            0 => Self::Idle,
+            1 => Self::Checking,
+            2 => Self::Offered { version: r.str(MAX_VERSION)?, manual: r.bool()? },
+            3 => Self::Downloading { version: r.str(MAX_VERSION)?, done: r.u64()?, total: r.u64()? },
+            4 => Self::Verifying { version: r.str(MAX_VERSION)? },
+            5 => Self::Ready { version: r.str(MAX_VERSION)? },
+            6 => Self::Failed { reason: r.u8()? },
+            t => return Err(unknown_tag("UpdatePhase", t)),
+        })
+    }
+}
+
+/// The longest version text (`1.10.0-preview.3`).
+pub const MAX_VERSION: usize = 32;
+
+wire_struct! {
+    /// The machine's updater (UPDATES.md 10): what runs, where it is, the switch, the last check, the version whose
+    /// card is hidden, and why the last "Procurar agora" failed (0 network, 1 rate limited, 2 signature).
+    UpdateView {
+        running: String [MAX_VERSION],
+        phase: UpdatePhase,
+        check_on: bool,
+        last_check_ms: Option<u64>,
+        dismissed: Option<String> [MAX_VERSION],
+        last_failure: Option<u8>,
+    }
+}

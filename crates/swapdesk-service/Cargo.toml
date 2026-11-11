@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
 swapdesk-host = { path = "../swapdesk-host" }
+swapdesk-update = { path = "../swapdesk-update" }
 swapdesk-ipc = { path = "../swapdesk-ipc" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-proto = { path = "../swapdesk-proto" }

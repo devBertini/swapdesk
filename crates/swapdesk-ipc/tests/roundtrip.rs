@@ -194,3 +194,47 @@ fn elev_action_tags_2_and_3_round_trip_and_tag_1_is_a_codec_error() {
         assert!(decode_message(&bytes).is_err(), "tag {bad}");
     }
 }
+
+/// UPDATES.md 13: the updater's ops 51 to 56, its view and its two notifications round-trip.
+#[test]
+fn update_ops_round_trip() {
+    let ops = [
+        (UiOp::UpdateGet, 51),
+        (UiOp::UpdateCheckNow, 52),
+        (UiOp::UpdateInstall { version: "1.1.1".into(), end_sessions: true }, 53),
+        (UiOp::UpdateCancel, 54),
+        (UiOp::UpdateDismiss { version: "1.1.1".into() }, 55),
+        (UiOp::UpdateSetCheck { on: false }, 56),
+    ];
+    for (op, code) in ops {
+        assert_eq!(op.code(), code);
+        let msg = Message::UiRequest { req: 3, op };
+        assert_eq!(decode_message(&encode_message(&msg).unwrap()).unwrap(), msg);
+    }
+    let phases = [
+        UpdatePhase::Idle,
+        UpdatePhase::Checking,
+        UpdatePhase::Offered { version: "1.1.1".into(), manual: false },
+        UpdatePhase::Downloading { version: "1.1.1".into(), done: 4_100_000, total: 12_400_000 },
+        UpdatePhase::Verifying { version: "1.1.1".into() },
+        UpdatePhase::Ready { version: "1.1.1".into() },
+        UpdatePhase::Failed { reason: 5 },
+    ];
+    for phase in phases {
+        let view = UpdateView {
+            running: "1.1.0".into(),
+            phase,
+            check_on: true,
+            last_check_ms: Some(1_700_000_000_000),
+            dismissed: Some("1.1.1".into()),
+            last_failure: Some(1),
+        };
+        let reply =
+            Message::UiReply { req: 3, status: 0, body: Bytes(ReplyBody::Update(view.clone()).encode().unwrap()) };
+        assert_eq!(decode_message(&encode_message(&reply).unwrap()).unwrap(), reply);
+        let note = Message::UiNotify(Notify::UpdateChanged(view));
+        assert_eq!(decode_message(&encode_message(&note).unwrap()).unwrap(), note);
+    }
+    let restarting = Message::UiNotify(Notify::UpdateRestarting);
+    assert_eq!(decode_message(&encode_message(&restarting).unwrap()).unwrap(), restarting);
+}
