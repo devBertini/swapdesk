@@ -198,8 +198,8 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
     }
     b.ue()?; // max_num_ref_frames
     b.bit()?; // gaps allowed
-    let mbs_w = b.ue()? + 1;
-    let map_h = b.ue()? + 1;
+    let mbs_w = b.ue()?.checked_add(1)?;
+    let map_h = b.ue()?.checked_add(1)?;
     let frame_mbs_only = b.bit()?;
     if frame_mbs_only == 0 {
         b.bit()?;
@@ -219,8 +219,12 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
         _ => (1, 1),
     };
     let crop_unit_y = sub_h * (2 - frame_mbs_only);
-    let width = mbs_w * 16 - (cl + cr) * sub_w;
-    let height = (2 - frame_mbs_only) * map_h * 16 - (ct + cb) * crop_unit_y;
+    // A crop as large as the picture, or sizes past the integer range, are a broken SPS: refused (found by fuzzing).
+    let width = mbs_w.checked_mul(16)?.checked_sub(cl.checked_add(cr)?.checked_mul(sub_w)?)?;
+    let height = (2 - frame_mbs_only)
+        .checked_mul(map_h)?
+        .checked_mul(16)?
+        .checked_sub(ct.checked_add(cb)?.checked_mul(crop_unit_y)?)?;
     let mut num_reorder_frames = None;
     let mut color = None;
     if b.bit()? == 1 {
@@ -286,6 +290,18 @@ fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Found by the fuzz target `annex_b` (stage 13): a short SPS whose fields run past its end must be refused, not
+    /// panic.
+    #[test]
+    fn a_truncated_sps_from_the_fuzzer_is_refused_without_a_panic() {
+        let data = [0x00, 0x00, 0x01, 0x27, 0x2b, 0x01, 0x00, 0xef, 0xff, 0x01, 0xff];
+        let _ = scan(&data);
+        let _ = parameter_sets(&data);
+        let _ = is_idr(&data);
+        let _ = sps_profile_level(&data);
+        let _ = parse_sps(&data);
+    }
 
     struct BitWriter {
         bytes: Vec<u8>,
