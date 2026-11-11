@@ -20,6 +20,7 @@ mod clip_actions;
 mod elevation;
 mod extras;
 mod files;
+mod grants_sync;
 mod host_ui;
 mod ops;
 mod pairing;
@@ -162,6 +163,8 @@ pub(crate) struct Hub {
     learned: Mutex<HashMap<DeviceId, SocketAddrV4>>,
     /// The protocol minor each paired device said it speaks, beside the hint of its discovery record.
     minors: Mutex<peer_minor::PeerMinors>,
+    /// The writes of what each paired device reported it allows here (`grants_there`), at most one a second.
+    peer_writes: Mutex<grants_sync::PeerWrites>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
@@ -283,6 +286,7 @@ impl UiHub {
             manual: Mutex::new(Vec::new()),
             learned: Mutex::new(HashMap::new()),
             minors: Mutex::new(peer_minor::PeerMinors::default()),
+            peer_writes: Mutex::new(grants_sync::PeerWrites::default()),
             live_sessions: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),

@@ -81,6 +81,8 @@ pub enum ViewerOut {
     State(StateChange),
     /// A terminal's bytes or its end, in order (the UI queue holds them for room instead of dropping them).
     Term(TermOut),
+    /// What the host stored for this machine (`StoredGrants`, minor 1): kept for Permissões, display only.
+    PeerGrants(swapdesk_proto::PermissionSet),
 }
 
 /// What a terminal of this session sends the UI.
@@ -685,7 +687,11 @@ impl Drive {
                     Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms) })
                 }
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
-                ViewerEvent::PromptPending { .. } | ViewerEvent::PeerGrants(_) => None,
+                ViewerEvent::PromptPending { .. } => None,
+                ViewerEvent::PeerGrants(grants) => {
+                    let _ = self.out.send(ViewerOut::PeerGrants(grants)).await;
+                    None
+                }
                 ViewerEvent::Message(Ctl::DisplayList(list)) => {
                     let ids: Vec<u16> = list.displays.iter().map(|d| d.id).collect();
                     self.receiver.set_displays(&ids);

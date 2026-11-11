@@ -303,7 +303,7 @@ impl HostUi for HubHostUi {
             HostEvent::ConsentAsked { device, feature, answer } => {
                 hub.audit(device, AuditEvent::ConsentAsked { feature, answer }, None);
             }
-            HostEvent::PeerGrants { .. } => {}
+            HostEvent::PeerGrants { device, grants } => hub.apply_peer_grants(device, grants),
         }
     }
 }

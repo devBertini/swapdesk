@@ -360,6 +360,12 @@ impl Hub {
         if let Some(core) = self.core() {
             core.host().stored_grants_changed(&id);
         }
+        // This machine's viewer sessions with the device tell it too (GRANTS-SYNC.md 3.2).
+        for conn in lock(&self.conns).iter() {
+            for v in lock(&conn.viewers).values().filter(|v| v.device == id) {
+                v.handle.ctx().set_own_stored(new);
+            }
+        }
         self.devices_changed();
         Ok(())
     }
@@ -388,6 +394,7 @@ impl Hub {
         }
         lock(&self.learned).remove(&id);
         lock(&self.minors).forget(&id);
+        lock(&self.peer_writes).forget(&id);
         self.devices_changed();
         Ok(())
     }
@@ -676,6 +683,7 @@ impl Hub {
                         conn.queue.realtime(m);
                     }
                 },
+                ViewerOut::PeerGrants(grants) => self.apply_peer_grants(device, grants),
                 ViewerOut::Displays { session_id: sid, list } => {
                     let views = display_views(&list);
                     // Kept for `ListDisplays`, which a UI sends once per session and may send after this arrived.

@@ -1,0 +1,171 @@
+//! What the other side stored for a paired device (GRANTS-SYNC.md 3.4): kept as `grants_there`, written at most once a
+//! second per device and only when it changed, pushed to the interfaces with `DevicesChanged`; in a session both
+//! machines learn it from each other.
+
+use super::extras::active_as;
+use super::*;
+
+const TRUST: &str = "trust.bin";
+
+fn there_of(list: &[swapdesk_ipc::DeviceView], id: &str) -> Option<Option<u16>> {
+    list.iter().find(|d| d.id == id).map(|d| d.grants_there)
+}
+
+fn listed_there(ui: &mut Client, id: &str) -> Option<u16> {
+    let ReplyBody::Devices(list) = ui.call(UiOp::ListDevices).unwrap() else { panic!("a list") };
+    there_of(&list, id).expect("the device is listed")
+}
+
+#[test]
+fn a_peers_stored_grants_reach_the_device_view_and_devices_changed() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    let mut ui = m.client(info(false));
+    let id = other.hex();
+
+    m.hub.hub.apply_peer_grants(other.id(), PermissionSet::VIEW.union(PermissionSet::FILES));
+    let want = PermissionSet::VIEW.union(PermissionSet::FILES).bits();
+    ui.notify("DevicesChanged with what the other side allows", |n| match n {
+        Notify::DevicesChanged(l) if there_of(l, &id) == Some(Some(want)) => Some(()),
+        _ => None,
+    });
+    assert_eq!(listed_there(&mut ui, &id), Some(want));
+    assert_eq!(
+        m.trust.read(|s| s.devices[0].grants_there),
+        Some(PermissionSet::VIEW.union(PermissionSet::FILES)),
+        "kept in the trust store"
+    );
+    assert_eq!(
+        m.trust.read(|s| s.devices[0].grants_here),
+        PermissionSet::CONTROL,
+        "what this side allows is untouched"
+    );
+
+    // A value for a device that is not paired is dropped.
+    let stranger = Machine::new("stranger");
+    m.hub.hub.apply_peer_grants(stranger.id(), PermissionSet::VIEW);
+    assert_eq!(m.trust.read(|s| s.devices.len()), 1);
+
+    drop(ui);
+    stranger.finish();
+    m.finish();
+    other.finish();
+}
+
+#[test]
+fn an_unchanged_peer_value_writes_nothing() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    let base = m.secrets.writes(TRUST);
+    let hub = &m.hub.hub;
+
+    hub.apply_peer_grants(other.id(), PermissionSet::VIEW);
+    assert_eq!(m.secrets.writes(TRUST), base + 1, "a new value is written at once");
+    hub.apply_peer_grants(other.id(), PermissionSet::VIEW);
+    hub.apply_peer_grants(other.id(), PermissionSet::VIEW);
+    assert_eq!(m.secrets.writes(TRUST), base + 1, "the same value again writes nothing");
+
+    // Inside the second after a write, values wait; the latest is written once at its end.
+    hub.apply_peer_grants(other.id(), PermissionSet::CONTROL);
+    hub.apply_peer_grants(other.id(), PermissionSet::FILES);
+    hub.apply_peer_grants(other.id(), PermissionSet::CONTROL.union(PermissionSet::AUDIO));
+    assert_eq!(m.secrets.writes(TRUST), base + 1, "nothing written inside the gap");
+    wait_for("the value that waited", || (m.secrets.writes(TRUST) == base + 2).then_some(()));
+    assert_eq!(m.trust.read(|s| s.devices[0].grants_there), Some(PermissionSet::CONTROL.union(PermissionSet::AUDIO)));
+    std::thread::sleep(Duration::from_millis(1300));
+    assert_eq!(m.secrets.writes(TRUST), base + 2, "one write for the burst");
+
+    // A peer that repeats a value forever costs no write.
+    for _ in 0..50 {
+        hub.apply_peer_grants(other.id(), PermissionSet::CONTROL.union(PermissionSet::AUDIO));
+    }
+    std::thread::sleep(Duration::from_millis(1300));
+    assert_eq!(m.secrets.writes(TRUST), base + 2);
+
+    m.finish();
+    other.finish();
+}
+
+#[test]
+fn the_device_view_of_a_never_reported_device_is_none() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    let mut ui = m.client(info(false));
+    assert_eq!(listed_there(&mut ui, &other.hex()), None, "never reported: the column shows a dash");
+    drop(ui);
+    m.finish();
+    other.finish();
+}
+
+/// A host and a viewer of minor 1 in a session: each learns what the other stored for it.
+fn session_of_minor_1(host_stores: PermissionSet, viewer_stores: PermissionSet) -> (Machine, Machine, Client, Client) {
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, host_stores);
+    viewer.pin(&host, viewer_stores);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees_minor(&host, false, 1);
+    host.hub.set_console_session(Some(1));
+    let mut host_ui = host.client(info(false));
+    let mut viewer_ui = viewer.client(info(false));
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let incoming = host_ui.notify("IncomingRequest", |n| match n {
+        Notify::IncomingRequest(r) => Some(r.clone()),
+        _ => None,
+    });
+    host_ui
+        .call(UiOp::AnswerIncoming { request_id: incoming.request_id, decision: Decision::Accept, grants: ALL.bits() })
+        .expect("accepted");
+    viewer_ui.connected(req);
+    active_as(&mut host_ui, Role::Host, &[]);
+    (host, viewer, host_ui, viewer_ui)
+}
+
+fn learns(ui: &mut Client, id: &str, want: PermissionSet, what: &str) {
+    ui.notify(what, |n| match n {
+        Notify::DevicesChanged(l) if there_of(l, id) == Some(Some(want.bits())) => Some(()),
+        _ => None,
+    });
+}
+
+#[test]
+fn two_cores_in_a_session_learn_each_others_stored_grants() {
+    let host_stores = ALL;
+    let viewer_stores = PermissionSet::VIEW.union(PermissionSet::FILES);
+    let (host, viewer, mut host_ui, mut viewer_ui) = session_of_minor_1(host_stores, viewer_stores);
+    learns(&mut viewer_ui, &host.hex(), host_stores, "what the host allows, on the viewer");
+    learns(&mut host_ui, &viewer.hex(), viewer_stores, "what the viewer allows, on the host");
+    assert_eq!(viewer.trust.read(|s| s.devices[0].grants_there), Some(host_stores));
+    assert_eq!(host.trust.read(|s| s.devices[0].grants_there), Some(viewer_stores));
+    drop((host_ui, viewer_ui));
+    viewer.finish();
+    host.finish();
+}
+
+#[test]
+fn a_grant_change_on_the_host_during_a_session_shows_on_the_viewer_within_a_second() {
+    let (host, viewer, mut host_ui, mut viewer_ui) = session_of_minor_1(ALL, PermissionSet::VIEW);
+    learns(&mut viewer_ui, &host.hex(), ALL, "the first value");
+    // The first value was written just now: the change below may wait for the end of that second, never longer.
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let narrowed = PermissionSet::VIEW.union(PermissionSet::AUDIO);
+    let t = Instant::now();
+    host_ui.call(UiOp::SetGrants { device_id: viewer.hex(), grants: narrowed.bits() }).expect("narrowed");
+    learns(&mut viewer_ui, &host.hex(), narrowed, "the new value on the viewer");
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+
+    // And the other way: the viewer's user changes what the host may do there.
+    let t = Instant::now();
+    viewer_ui.call(UiOp::SetGrants { device_id: host.hex(), grants: PermissionSet::EMPTY.bits() }).expect("changed");
+    learns(&mut host_ui, &viewer.hex(), PermissionSet::EMPTY, "the new value on the host");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+
+    drop((host_ui, viewer_ui));
+    viewer.finish();
+    host.finish();
+}

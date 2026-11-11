@@ -5,9 +5,9 @@ use swapdesk_platform::{Result, SecretStore};
 
 use crate::lock;
 
-/// A `SecretStore` in memory. Deleting a name that is not there succeeds.
+/// A `SecretStore` in memory. Deleting a name that is not there succeeds. It counts the writes of each name.
 #[derive(Default)]
-pub struct MemorySecretStore(Mutex<HashMap<String, Vec<u8>>>);
+pub struct MemorySecretStore(Mutex<HashMap<String, Vec<u8>>>, Mutex<HashMap<String, usize>>);
 
 impl MemorySecretStore {
     pub fn new() -> Self {
@@ -19,6 +19,11 @@ impl MemorySecretStore {
         names.sort();
         names
     }
+
+    /// How many times `name` was stored.
+    pub fn writes(&self, name: &str) -> usize {
+        lock(&self.1).get(name).copied().unwrap_or(0)
+    }
 }
 
 impl SecretStore for MemorySecretStore {
@@ -28,6 +33,7 @@ impl SecretStore for MemorySecretStore {
 
     fn store(&self, name: &str, bytes: &[u8]) -> Result<()> {
         lock(&self.0).insert(name.to_string(), bytes.to_vec());
+        *lock(&self.1).entry(name.to_string()).or_default() += 1;
         Ok(())
     }
 
@@ -54,5 +60,14 @@ mod tests {
         s.delete("device.key").unwrap();
         s.delete("device.key").unwrap();
         assert_eq!(s.load("device.key").unwrap(), None);
+    }
+
+    #[test]
+    fn every_store_of_a_name_is_counted() {
+        let s = MemorySecretStore::new();
+        s.store("a", &[1]).unwrap();
+        s.store("a", &[1]).unwrap();
+        s.store("b", &[2]).unwrap();
+        assert_eq!((s.writes("a"), s.writes("b"), s.writes("c")), (2, 1, 0));
     }
 }

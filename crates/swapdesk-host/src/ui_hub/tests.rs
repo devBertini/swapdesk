@@ -38,6 +38,7 @@ mod connect;
 mod elevation;
 mod extras;
 mod files;
+mod grants_sync;
 mod presence;
 mod security;
 mod terminal;

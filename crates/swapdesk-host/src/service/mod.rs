@@ -162,9 +162,9 @@ impl Connector {
                 .map_err(|_| ConnectError::Refused(Refusal::UnknownLocalAddress))?;
             find_on_link(&list, *v4.ip()).map_err(ConnectError::Refused)?.local
         };
-        let spki = d
+        let (spki, stored) = d
             .trust
-            .read(|s| s.devices.iter().find(|p| p.device_id == device).map(|p| p.spki))
+            .read(|s| s.devices.iter().find(|p| p.device_id == device).map(|p| (p.spki, p.grants_here)))
             .ok_or(ConnectError::UnknownDevice)?;
         let socket = bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(ConnectError::Socket)?;
         let endpoint = endpoint_from_socket(socket, None)
@@ -182,6 +182,8 @@ impl Connector {
             if unattended { requested_for(intent).union(PermissionSet::UNATTENDED) } else { requested_for(intent) };
         cfg.requested = cfg.requested.union(extra);
         cfg.swap_token = swap_token;
+        // A host of minor 1 hears what this machine stored for it (GRANTS-SYNC.md 3.2).
+        cfg.stored_grants = Some(stored);
         let opened = viewer::open(
             viewer::OpenParams {
                 rt: self.shared.rt.clone(),
