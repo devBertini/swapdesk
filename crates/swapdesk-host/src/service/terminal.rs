@@ -311,6 +311,7 @@ impl HostInner {
             granted_by: granted_by.as_deref(),
             console_user: console_user.as_deref(),
             admin_terminal: req.admin,
+            account: self.shared.account.get().map(String::as_str),
         };
         let answer = match consent_step(&ctx, &facts).await {
             Err(code) => Err(code),

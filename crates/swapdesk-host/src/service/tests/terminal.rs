@@ -472,6 +472,7 @@ fn the_consent_step_follows_run_consent() {
         granted_by,
         console_user,
         admin_terminal: admin,
+        account: None,
     };
     assert_eq!(consent_need(&facts(false, Some(SID_A), Some(SID_B), false)), ConsentNeed::NotNeeded);
     assert_eq!(consent_need(&facts(true, Some(SID_A), Some(SID_A), false)), ConsentNeed::NotNeeded);

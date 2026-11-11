@@ -130,6 +130,8 @@ pub(crate) struct Shared {
     waker: OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Advisory events dropped because the owner was not reading.
     events_dropped: AtomicU64,
+    /// The account this core serves, on a machine of several (ACCOUNTS.md 5.4); unset for the only one.
+    pub account: OnceLock<String>,
     /// The shells the user helper runs for the terminal proxy.
     pub ptys: PtyRoutes,
     /// The kind of the interface behind each local address a peer connected to, as the gate saw it when it let the
@@ -163,6 +165,7 @@ impl Shared {
             events,
             waker: OnceLock::new(),
             events_dropped: AtomicU64::new(0),
+            account: OnceLock::new(),
             ptys: PtyRoutes::default(),
             links: Mutex::default(),
         }

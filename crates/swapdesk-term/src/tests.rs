@@ -389,7 +389,13 @@ impl ConsentAsker for Asker {
 }
 
 fn facts<'a>(unattended: bool, granter: Option<&'a str>, user: Option<&'a str>) -> ConsentFacts<'a> {
-    ConsentFacts { session_unattended: unattended, granted_by: granter, console_user: user, admin_terminal: false }
+    ConsentFacts {
+        account: None,
+        session_unattended: unattended,
+        granted_by: granter,
+        console_user: user,
+        admin_terminal: false,
+    }
 }
 
 #[test]
@@ -424,4 +430,28 @@ fn the_consent_step_asks_once_and_obeys_the_answer() {
         Err(ErrorCode::NobodyPresent)
     );
     assert!(never.asked.is_empty(), "nothing is asked when the answer is already known");
+}
+
+/// ACCOUNTS.md 5.4: on a machine of several accounts the terminal and the files run only as the session's own
+/// account; nobody is asked, nobody logged in is "unavailable", and the administrator terminal still opens.
+#[test]
+fn terminal_and_files_never_run_as_another_account() {
+    let at = |console: Option<&'static str>, admin: bool| ConsentFacts {
+        session_unattended: true,
+        granted_by: Some("S-1-5-21-1"),
+        console_user: console,
+        admin_terminal: admin,
+        account: Some("S-1-5-21-1"),
+    };
+    assert_eq!(consent_need(&at(Some("S-1-5-21-1"), false)), ConsentNeed::NotNeeded, "its own account");
+    assert_eq!(consent_need(&at(Some("s-1-5-21-1"), false)), ConsentNeed::NotNeeded, "SIDs compare without case");
+    assert_eq!(consent_need(&at(Some("S-1-5-21-2"), false)), ConsentNeed::Refuse(ErrorCode::AccountAway));
+    assert_eq!(consent_need(&at(None, false)), ConsentNeed::Refuse(ErrorCode::Unavailable));
+    assert_eq!(consent_need(&at(None, true)), ConsentNeed::NotNeeded, "the administrator terminal");
+    // Never a question: no fact ever gives `Ask`.
+    for console in [None, Some("S-1-5-21-1"), Some("S-1-5-21-2")] {
+        for admin in [false, true] {
+            assert_ne!(consent_need(&at(console, admin)), ConsentNeed::Ask);
+        }
+    }
 }

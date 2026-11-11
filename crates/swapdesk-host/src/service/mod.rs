@@ -734,6 +734,12 @@ impl ServiceCore {
         self.listeners.addrs()
     }
 
+    /// The account this core serves (its user's SID), on a machine of several: the terminal and the files then run
+    /// only as that account (ACCOUNTS.md 5.4).
+    pub fn set_account(&self, sid: &str) {
+        let _ = self.shared.account.set(sid.to_string());
+    }
+
     /// Whether this account receives connections now (ACCOUNTS.md 6: only with a pairing, or while pairing mode is
     /// open). Off closes every approved address's endpoint (the sessions on them go on until they end); on listens on
     /// them again. Returns whether the listening addresses changed.

@@ -14,6 +14,9 @@ pub struct ConsentFacts<'a> {
     pub console_user: Option<&'a str>,
     /// An administrator terminal (a SYSTEM or root shell outside any user's session) is being opened.
     pub admin_terminal: bool,
+    /// The account the session belongs to, on a machine of several accounts (ACCOUNTS.md 5.4); `None`: the machine
+    /// has one, and D13 holds.
+    pub account: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,19 @@ pub enum ConsentNeed {
 
 /// Whether opening the terminal needs the logged-in user's yes.
 pub fn consent_need(f: &ConsentFacts<'_>) -> ConsentNeed {
+    // ACCOUNTS.md 5.4, which replaces D13 on a machine of several accounts: the terminal and the files run only as the
+    // session's own account, and nobody is ever asked. With nobody logged in they are unavailable, except the
+    // administrator terminal, which holds no user's data.
+    if let Some(account) = f.account {
+        if f.admin_terminal {
+            return ConsentNeed::NotNeeded;
+        }
+        return match f.console_user {
+            None => ConsentNeed::Refuse(ErrorCode::Unavailable),
+            Some(user) if user.eq_ignore_ascii_case(account) => ConsentNeed::NotNeeded,
+            Some(_) => ConsentNeed::Refuse(ErrorCode::AccountAway),
+        };
+    }
     if !f.session_unattended || f.admin_terminal {
         // A prompted session had its user's say already; the administrator terminal holds no user's data.
         return ConsentNeed::NotNeeded;

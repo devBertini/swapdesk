@@ -41,6 +41,10 @@ pub(crate) trait ConsentEnv: Send + Sync + 'static {
     fn granted_by(&self, device: &DeviceId) -> Option<String>;
     /// The account (SID) of the user logged in at the console now.
     fn console_user(&self) -> Option<String>;
+    /// The account this core serves, on a machine of several (ACCOUNTS.md 5.4).
+    fn account(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The machine's file service: the host gate and the way events reach the UI.
@@ -94,6 +98,10 @@ impl ConsentEnv for FilesService {
 
     fn console_user(&self) -> Option<String> {
         self.hooks.get().and_then(|h| h.console_user())
+    }
+
+    fn account(&self) -> Option<String> {
+        self.shared.account.get().cloned()
     }
 }
 
@@ -188,6 +196,7 @@ fn refuse(ctx: &SessionCtx, msg: &Message, code: ErrorCode) {
 async fn decide(env: &dyn ConsentEnv, ctx: &SessionCtx) -> Result<(), ErrorCode> {
     let granted_by = ctx.device().and_then(|d| env.granted_by(&d));
     let console_user = env.console_user();
+    let account = env.account();
     let facts = ConsentFacts {
         // How the session entered, kept by the session itself across a resume: a table of this service's own lost
         // it there (a resume starts the session again with the mode `Resumed`).
@@ -195,6 +204,7 @@ async fn decide(env: &dyn ConsentEnv, ctx: &SessionCtx) -> Result<(), ErrorCode>
         granted_by: granted_by.as_deref(),
         console_user: console_user.as_deref(),
         admin_terminal: false,
+        account: account.as_deref(),
     };
     match consent_need(&facts) {
         ConsentNeed::NotNeeded => Ok(()),

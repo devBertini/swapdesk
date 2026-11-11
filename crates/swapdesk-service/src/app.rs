@@ -361,6 +361,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 Err(e) => return Err(e.to_string()),
             };
             hub.set_account(&seat.sid);
+            core.set_account(&seat.sid);
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
             hub.set_console_session(active_console_session());
