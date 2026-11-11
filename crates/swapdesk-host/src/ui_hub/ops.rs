@@ -201,6 +201,10 @@ impl Hub {
             UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
             UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
             UiOp::RenameDevice { device_id, name } => done(self.rename_device(&device_id, &name)),
+            UiOp::RefreshGrants { device_id } => {
+                let id = parse_device_id(&device_id).ok_or(ApiCode::Invalid)?;
+                done(self.refresh_grants(id))
+            }
             UiOp::Connect { .. } => Err(ApiCode::Internal),
             UiOp::Disconnect { session_id } => done(self.disconnect(conn, session_id)),
             UiOp::AnswerIncoming { request_id, decision, grants } => {

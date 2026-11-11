@@ -166,6 +166,11 @@ pub enum UiOp {
     ElevationEnd {
         ticket: ElevationTicket,
     },
+    /// Op 39: the interface opened a paired device's Permissões: the service syncs that device's grants if its last
+    /// sync is older than 30 s (GRANTS-SYNC.md 6). `Done` at once; the result arrives as `DevicesChanged`.
+    RefreshGrants {
+        device_id: String,
+    },
     /// Ops 40 to 49: the files feature (stage 44), see [`FilesOp`].
     Files(FilesOp),
 }
@@ -211,6 +216,7 @@ impl UiOp {
             Self::ElevationDescribe { .. } => 36,
             Self::ElevationConfirm { .. } => 37,
             Self::ElevationEnd { .. } => 38,
+            Self::RefreshGrants { .. } => 39,
             Self::Files(f) => f.code(),
         }
     }
@@ -307,6 +313,7 @@ impl UiOp {
             Self::TermClose { term_id } => w.put_u32(*term_id),
             Self::ElevationBegin { action } => action.put(w, 0)?,
             Self::ElevationDescribe { ticket } | Self::ElevationEnd { ticket } => ticket.put(w, 0)?,
+            Self::RefreshGrants { device_id } => w.put_str(device_id, MAX_NAME)?,
             Self::ElevationConfirm { ticket, approve } => {
                 ticket.put(w, 0)?;
                 w.put_bool(*approve);
@@ -355,6 +362,7 @@ impl UiOp {
             36 => Self::ElevationDescribe { ticket: ElevationTicket::get(r, 0)? },
             37 => Self::ElevationConfirm { ticket: ElevationTicket::get(r, 0)?, approve: r.bool()? },
             38 => Self::ElevationEnd { ticket: ElevationTicket::get(r, 0)? },
+            39 => Self::RefreshGrants { device_id: r.str(MAX_NAME)? },
             40..=49 => Self::Files(FilesOp::get_body(op, r)?),
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
@@ -482,7 +490,7 @@ impl ReplyBody {
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 43..=45 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;

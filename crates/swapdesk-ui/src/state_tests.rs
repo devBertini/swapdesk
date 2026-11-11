@@ -2622,3 +2622,21 @@ fn on_a_mac_the_administrator_terminal_switch_is_off_and_inert_with_its_line() {
     let s = Scenario::Permissoes.prepared_state();
     assert!(s.grant_available(Permission::AdminTerminal), "Windows serves it");
 }
+
+/// GRANTS-SYNC.md 8 S7: opening Permissões of a paired device asks the service to refresh what the other side
+/// allows, once per opening; a device that is not paired has no such column.
+#[test]
+fn opening_permissions_asks_the_service_to_refresh_that_device() {
+    let mut s = base();
+    s.take_followups();
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    let device = s.selected_device().unwrap().id.clone();
+    assert_eq!(s.take_followups(), vec![Command::RefreshGrants { device_id: device }]);
+    // Already on the tab: nothing more.
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    assert!(s.take_followups().is_empty());
+    // Away and back: once more.
+    s.activate(ControlId::Tab(DeviceTab::Overview));
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    assert_eq!(s.take_followups().len(), 1);
+}

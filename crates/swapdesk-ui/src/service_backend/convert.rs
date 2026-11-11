@@ -565,6 +565,7 @@ pub fn route(c: &a::Command) -> Route {
         C::SetGrants { device_id, grants } => O::SetGrants { device_id: device_id.clone(), grants: grants.0 },
         C::ForgetDevice { device_id } => O::ForgetDevice { device_id: device_id.clone() },
         C::RenameDevice { device_id, name } => O::RenameDevice { device_id: device_id.clone(), name: name.clone() },
+        C::RefreshGrants { device_id } => O::RefreshGrants { device_id: device_id.clone() },
         C::Connect { device_id, intent, unattended } => {
             O::Connect { device_id: device_id.clone(), intent: intent_to_wire(*intent), unattended: *unattended }
         }

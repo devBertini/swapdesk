@@ -701,7 +701,9 @@ mod tests {
         assert_eq!(state.elevation().map(|e| e.phase.clone()), Some(ElevPhase::Waiting));
         send_all(&rig, &mut state, a.commands);
         settle(&rig, &mut state, "the step closing", |s| s.elevation().is_none());
-        let followups = state.take_followups();
+        // Opening Permissões also asked for a refresh of the column (op 39); the resend is the point here.
+        let followups: Vec<Command> =
+            state.take_followups().into_iter().filter(|c| !matches!(c, Command::RefreshGrants { .. })).collect();
         assert!(matches!(followups.as_slice(), [Command::SetGrants { .. }]), "{followups:?}");
         send_all(&rig, &mut state, followups);
         settle(&rig, &mut state, "the grant in the list", |s| unattended_here(s, &rig.device));
@@ -737,7 +739,10 @@ mod tests {
         settle(&rig, &mut state, "the failure", |s| {
             s.elevation().is_some_and(|e| e.phase == ElevPhase::Failed(ApiCode::Refused))
         });
-        assert!(state.take_followups().is_empty(), "nothing is sent again");
+        assert!(
+            state.take_followups().iter().all(|c| matches!(c, Command::RefreshGrants { .. })),
+            "nothing is sent again"
+        );
         assert_eq!(confirm.calls(), 1);
         assert_eq!(rig.grants_here(), initial_grants().0, "nothing changed");
         assert!(!unattended_here(&state, &rig.device));

@@ -28,6 +28,8 @@ use crate::service::SyncError;
 pub(super) const PUSH_DELAY: Duration = Duration::from_millis(1000);
 /// How long the machine with the higher device ID waits before it dials a device that appeared.
 pub(super) const TIE_DELAY: Duration = Duration::from_secs(3);
+/// The least time between two refreshes a tab asks for (op 39).
+pub(super) const REFRESH_GAP: Duration = Duration::from_secs(30);
 /// Syncs in flight at once.
 const MAX_IN_FLIGHT: usize = 4;
 
@@ -43,6 +45,8 @@ struct Slot {
     last_ok: Option<Instant>,
     /// When a value the peer pushed was last applied.
     peer_applied_at: Option<Instant>,
+    /// When op 39 last asked for a sync.
+    refreshed_at: Option<Instant>,
     /// What discovery showed last (address, session port, minor); `None` while it is away.
     seen: Option<(Option<SocketAddrV4>, u16)>,
 }
@@ -65,6 +69,16 @@ impl SyncState {
         self.answered
     }
 
+    /// Moves the last sync and the last refresh of `device` `by` into the past.
+    #[cfg(test)]
+    pub fn age_for_test(&mut self, device: &DeviceId, by: Duration) {
+        if let Some(slot) = self.per.get_mut(device) {
+            let back = |t: Instant| t.checked_sub(by).unwrap_or(t);
+            slot.last_ok = slot.last_ok.map(back);
+            slot.refreshed_at = slot.refreshed_at.map(back);
+        }
+    }
+
     /// Whether the handshake of `device` refused this machine's key (`None`: never synced).
     #[cfg(test)]
     pub fn per_unknown_key(&self, device: &DeviceId) -> Option<bool> {
@@ -83,6 +97,29 @@ impl Hub {
         let now = Instant::now();
         lock(&self.sync).per.entry(device).or_default().changed_at = Some(now);
         self.sync_later(device, PUSH_DELAY, Some(now));
+    }
+
+    /// Op 39: the interface opened Permissões of `device`. A sync goes when the last one is older than 30 s (or there
+    /// was none); either way the answer is `Done` and the value arrives as `DevicesChanged`.
+    pub(super) fn refresh_grants(self: &Arc<Self>, device: DeviceId) -> Result<(), swapdesk_ipc::ApiCode> {
+        if self.p.trust.read(|s| s.find_by_id(&device).is_none()) {
+            return Err(swapdesk_ipc::ApiCode::NotFound);
+        }
+        let fresh = {
+            let mut st = lock(&self.sync);
+            let slot = st.per.entry(device).or_default();
+            let now = Instant::now();
+            let fresh = slot.refreshed_at.is_some_and(|t| now.saturating_duration_since(t) < REFRESH_GAP)
+                || slot.last_ok.is_some_and(|t| now.saturating_duration_since(t) < REFRESH_GAP);
+            if !fresh {
+                slot.refreshed_at = Some(now);
+            }
+            fresh
+        };
+        if !fresh {
+            self.try_sync(device);
+        }
+        Ok(())
     }
 
     /// The user acted on `device` (Connect, Pair): a key it refused may be pinned again now.

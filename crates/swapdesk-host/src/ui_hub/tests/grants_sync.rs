@@ -348,3 +348,36 @@ fn a_peer_of_minor_0_is_never_dialled_for_a_sync() {
     a.finish();
     b.finish();
 }
+
+/// GRANTS-SYNC.md 8 S7: op 39 syncs the device when its last sync is older than 30 s, and not again within them;
+/// a device that is not paired is `NotFound`.
+#[test]
+fn refresh_grants_is_limited_to_once_per_30_s_per_device() {
+    let (a, b) = paired(PermissionSet::CONTROL, PermissionSet::VIEW);
+    // A sees B as minor 1; B does not see A, so only the refresh dials.
+    a.sees_minor(&b, false, 1);
+    let t = Instant::now();
+    while dialled(&a) < 1 {
+        assert!(t.elapsed() < Duration::from_secs(6), "the appearance syncs once");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_there(&a, PermissionSet::VIEW, Duration::from_secs(6), "the first answer");
+    let mut ui = a.client(info(false));
+    // Right after a sync: no new one.
+    assert!(ui.call(UiOp::RefreshGrants { device_id: b.hex() }).is_ok());
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(dialled(&a), 1, "the last sync is fresh");
+    // Pretend the last sync is old: the refresh dials once, and a second refresh at once does not.
+    {
+        let mut st = lock(&a.hub.hub.sync);
+        st.age_for_test(&b.id(), super::super::sync_dial::REFRESH_GAP + Duration::from_secs(1));
+    }
+    assert!(ui.call(UiOp::RefreshGrants { device_id: b.hex() }).is_ok());
+    assert!(ui.call(UiOp::RefreshGrants { device_id: b.hex() }).is_ok());
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(dialled(&a), 2, "one refresh within the 30 s");
+    assert_eq!(ui.call(UiOp::RefreshGrants { device_id: device_id_hex(&[7; 16]) }).unwrap_err(), ApiCode::NotFound);
+    drop(ui);
+    a.finish();
+    b.finish();
+}

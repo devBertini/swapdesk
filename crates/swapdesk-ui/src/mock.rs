@@ -1014,6 +1014,10 @@ impl World {
                 self.devices.retain(|d| d.id != device_id);
                 Ok(Reply::Done)
             }
+            Command::RefreshGrants { device_id } => {
+                self.device(&device_id)?;
+                Ok(Reply::Done)
+            }
             Command::RenameDevice { device_id, name } => {
                 let name = name.trim();
                 if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {

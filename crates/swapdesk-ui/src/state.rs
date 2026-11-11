@@ -1513,6 +1513,13 @@ impl UiState {
     }
 
     pub fn select_tab(&mut self, tab: DeviceTab) -> Changed {
+        // Opening Permissões of a paired device asks the service for what the other side allows now (op 39).
+        if tab == DeviceTab::Permissions
+            && self.tab != DeviceTab::Permissions
+            && let Some(d) = self.selected_device().filter(|d| d.paired)
+        {
+            self.followups.push(Command::RefreshGrants { device_id: d.id.clone() });
+        }
         self.tab = tab;
         self.rename = None;
         Changed::MAIN

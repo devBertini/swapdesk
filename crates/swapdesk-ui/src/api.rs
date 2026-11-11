@@ -605,6 +605,11 @@ pub enum Command {
         device_id: String,
         name: String,
     },
+    /// Op 39: Permissões of this device opened: the service refreshes what the other side allows (at most once per
+    /// 30 s per device).
+    RefreshGrants {
+        device_id: String,
+    },
     Elevate {
         action: ElevatedAction,
         /// What the step shows, in the interface's language: the Mac's system dialog shows it as its extra text.
@@ -774,6 +779,7 @@ impl core::fmt::Debug for Command {
             Self::SetGrants { device_id, grants } => dbg_fields!("SetGrants", device_id, grants),
             Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
             Self::RenameDevice { device_id, name } => dbg_fields!("RenameDevice", device_id, name),
+            Self::RefreshGrants { device_id } => dbg_fields!("RefreshGrants", device_id),
             Self::Elevate { action, run, .. } => dbg_fields!("Elevate", action, run),
             Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
             Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),
