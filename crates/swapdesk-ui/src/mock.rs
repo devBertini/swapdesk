@@ -1015,14 +1015,14 @@ impl World {
                 sh.later(ms(50), UiEvent::DevicesChanged(devices));
                 Ok(Reply::Done)
             }
-            Command::Elevate { action } => {
+            Command::Elevate { action, run, .. } => {
                 if let ElevatedAction::SetGrants { device_id, grants } = &action
                     && let Ok(d) = self.device(device_id)
                 {
                     d.grants_here = *grants;
                 }
                 let devices = self.devices.clone();
-                sh.later(ms(900), UiEvent::ElevationResult { action, result: Ok(()) });
+                sh.later(ms(900), UiEvent::ElevationResult { action, run, result: Ok(()) });
                 sh.later(ms(950), UiEvent::DevicesChanged(devices));
                 Ok(Reply::Done)
             }
@@ -1464,7 +1464,15 @@ mod tests {
 
     #[test]
     fn r_ui_7_a_refused_admin_prompt_or_a_slow_connect_have_their_own_limits() {
-        assert_eq!(Command::Elevate { action: ElevatedAction::OpenAdminTerminal { session_id: 1 } }.timeout_s(), 120);
+        assert_eq!(
+            Command::Elevate {
+                action: ElevatedAction::OpenAdminTerminal { session_id: 1 },
+                line: String::new(),
+                run: 1
+            }
+            .timeout_s(),
+            120
+        );
         // Connect and Wake answer at once with the entry's id: the wait is told by notifications, so 5 s is for the
         // reply and the interface's own 60 s safety net (`CONNECT_GIVE_UP_S`) is for news that never comes.
         assert_eq!(Command::Connect { device_id: "x".into(), intent: Intent::View, unattended: false }.timeout_s(), 5);

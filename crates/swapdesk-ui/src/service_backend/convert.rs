@@ -546,7 +546,7 @@ pub enum Route {
     /// The command's arguments cannot be sent (a picked file with no name): answered `Invalid` at once.
     Invalid,
     /// `Elevate`: a worker thread asks for a ticket, runs the platform's elevator, ends the ticket and reports.
-    Elevate(a::ElevatedAction),
+    Elevate(a::ElevatedAction, String, u32),
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -614,7 +614,7 @@ pub fn route(c: &a::Command) -> Route {
         C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } | C::SetReleaseKey { .. } => {
             return Route::LocalDone;
         }
-        C::Elevate { action } => return Route::Elevate(action.clone()),
+        C::Elevate { action, line, run } => return Route::Elevate(action.clone(), line.clone(), *run),
         C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }

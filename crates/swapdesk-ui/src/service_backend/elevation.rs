@@ -28,7 +28,9 @@ const SERVICE_WAIT: Duration = Duration::from_secs(30);
 pub trait Elevator: Send + Sync {
     /// Asks the system for an administrator and lets the elevated side confirm `ticket` with the service.
     /// Blocks until that side ended or `deadline` passed. It never decides the outcome; the service does (op 38).
-    fn run(&self, ticket: &ElevationTicket, deadline: Instant) -> ElevatorRun;
+    /// `line` is what the step shows: the Mac's system dialog shows it as its extra text; Windows' elevated window
+    /// shows the action as the service holds it instead.
+    fn run(&self, ticket: &ElevationTicket, line: &str, deadline: Instant) -> ElevatorRun;
 }
 
 /// How the elevated side ended, as far as the platform could tell.
@@ -71,18 +73,18 @@ fn wire_action(action: &ElevatedAction) -> Option<ElevAction> {
 }
 
 /// Starts the worker of an `Elevate` command; its ticket is answered when the worker is done.
-pub(super) fn spawn(inner: &Arc<Inner>, ticket: Ticket, action: ElevatedAction) {
+pub(super) fn spawn(inner: &Arc<Inner>, ticket: Ticket, action: ElevatedAction, line: String, run: u32) {
     let Some(out) = lock(&inner.out).clone() else {
         inner.reply(ticket, Err(ApiError::new(ApiCode::ServiceDown)));
         return;
     };
     let worker = Arc::clone(inner);
     let spawned = thread::Builder::new().name("swapdesk-ui-elevate".into()).spawn(move || {
-        let result = elevate(&worker, &out, &action).map_err(ApiError::new);
+        let result = elevate(&worker, &out, &action, &line).map_err(ApiError::new);
         // One batch: the step learns how it ended before the `Elevate` ticket is answered, and the answer is a plain
         // `Done` so the error strip never shows a second message.
         worker.push(vec![
-            UiEvent::ElevationResult { action, result },
+            UiEvent::ElevationResult { action, run, result },
             UiEvent::Reply { ticket, result: Ok(Reply::Done) },
         ]);
     });
@@ -92,7 +94,7 @@ pub(super) fn spawn(inner: &Arc<Inner>, ticket: Ticket, action: ElevatedAction) 
 }
 
 /// The whole flow of one elevation, as the result the step shows.
-fn elevate(inner: &Inner, out: &mpsc::Sender<Item>, action: &ElevatedAction) -> Result<(), ApiCode> {
+fn elevate(inner: &Inner, out: &mpsc::Sender<Item>, action: &ElevatedAction, line: &str) -> Result<(), ApiCode> {
     let elevator = lock(&inner.elevator).clone().ok_or(ApiCode::Internal)?;
     let wire = wire_action(action).ok_or(ApiCode::Internal)?;
 
@@ -100,7 +102,7 @@ fn elevate(inner: &Inner, out: &mpsc::Sender<Item>, action: &ElevatedAction) -> 
         ReplyBody::ElevationTicket { ticket, .. } => ticket,
         _ => return Err(ApiCode::Internal),
     };
-    let run = elevator.run(&ticket, Instant::now() + RUN_FOR);
+    let run = elevator.run(&ticket, line, Instant::now() + RUN_FOR);
 
     // The ticket is always ended, whatever the run said: it closes an open one and tells the outcome.
     let outcome = match request(inner, out, UiOp::ElevationEnd { ticket }) {

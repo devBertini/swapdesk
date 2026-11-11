@@ -85,6 +85,8 @@ fn ask<R: Read, W: Write>(
                 };
             }
             Ok(Some(Message::Bye { code: ErrorCode::NotPermitted })) => return Err(ElevatedExit::Refused),
+            // The elevator connection's lifetime ran out: the ticket is no longer usable either.
+            Ok(Some(Message::Bye { code: ErrorCode::Timeout })) => return Err(ElevatedExit::Expired),
             Ok(Some(Message::Bye { .. })) | Ok(None) | Err(IpcError::Io(_)) => return Err(ElevatedExit::Unreachable),
             Err(_) => return Err(ElevatedExit::Internal),
             // An elevator connection gets no notification; anything else is not an answer to this request.

@@ -139,8 +139,9 @@ impl MacElevator {
 }
 
 impl Elevator for MacElevator {
-    fn run(&self, ticket: &ElevationTicket, deadline: Instant) -> ElevatorRun {
-        self.run_with_line(ticket, "", deadline)
+    /// The step's line goes to macOS's dialog as its extra text (D54, the owner's pick of 10/11).
+    fn run(&self, ticket: &ElevationTicket, line: &str, deadline: Instant) -> ElevatorRun {
+        self.run_with_line(ticket, line, deadline)
     }
 }
 
@@ -221,8 +222,8 @@ mod tests {
     struct Within(Arc<MacElevator>, Duration);
 
     impl Elevator for Within {
-        fn run(&self, ticket: &ElevationTicket, _deadline: Instant) -> ElevatorRun {
-            self.0.run(ticket, Instant::now() + self.1)
+        fn run(&self, ticket: &ElevationTicket, line: &str, _deadline: Instant) -> ElevatorRun {
+            self.0.run(ticket, line, Instant::now() + self.1)
         }
     }
 
@@ -292,8 +293,8 @@ mod tests {
         let rig = Rig::start("busy", None);
         let mac = elevator(&rig, &confirm);
         let ticket = ElevationTicket([7; 16]);
-        assert_eq!(mac.run(&ticket, Instant::now() + Duration::from_millis(150)), ElevatorRun::TimedOut);
-        let second = mac.run(&ticket, Instant::now() + Duration::from_millis(150));
+        assert_eq!(mac.run(&ticket, "", Instant::now() + Duration::from_millis(150)), ElevatorRun::TimedOut);
+        let second = mac.run(&ticket, "", Instant::now() + Duration::from_millis(150));
         assert_eq!(second, ElevatorRun::Failed(ApiCode::Busy), "the first dialog is still open");
         assert_eq!(confirm.calls(), 1, "no second dialog is stacked");
         // When the first dialog ends the elevator is free again.

@@ -332,7 +332,7 @@ impl ServiceBackend {
                             writing.reply(ticket, Ok(Reply::Done));
                         }
                         Route::Invalid => writing.reply(ticket, Err(ApiError::new(ApiCode::Invalid))),
-                        Route::Elevate(action) => elevation::spawn(&writing, ticket, action),
+                        Route::Elevate(action, line, run) => elevation::spawn(&writing, ticket, action, line, run),
                         Route::Op(op) => {
                             let req = writing.next_req.fetch_add(1, Ordering::Relaxed);
                             {

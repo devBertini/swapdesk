@@ -241,6 +241,17 @@ impl Specs {
     }
 }
 
+/// A device name as an administrator's confirmation shows it: control and direction-override characters removed, so
+/// a name a paired device chose cannot break or reorder the line (review of the elevation, finding 8).
+pub fn shown_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect()
+}
+
 /// The line that says what an elevation is for, in `lang`: the step shows it and so does the elevated window.
 /// `peer_name` is the device the action concerns (unused by actions that name none).
 pub fn elevation_action_text(lang: Language, action: &ElevatedAction, peer_name: &str) -> String {
@@ -251,16 +262,23 @@ pub fn elevation_action_text(lang: Language, action: &ElevatedAction, peer_name:
         }
         crate::strings::text(lang, &msg)
     };
+    let peer = shown_name(peer_name);
+    let peer_name = peer.as_str();
     match action {
         ElevatedAction::SetGrants { grants, .. } => {
-            let key = if grants.has(Permission::Unattended) {
-                MsgKey::ElevActGrantUnattended
-            } else if grants.has(Permission::AdminTerminal) {
-                MsgKey::ElevActGrantAdminTerminal
-            } else {
-                MsgKey::ElevActGrants
-            };
-            say(key, &[peer_name])
+            // One line per machine-level permission the result holds, so a change that also adds the administrator
+            // terminal never reads as "Entrar sem perguntar" alone (review of the elevation, finding 1).
+            let mut lines = Vec::new();
+            if grants.has(Permission::Unattended) {
+                lines.push(say(MsgKey::ElevActGrantUnattended, &[peer_name]));
+            }
+            if grants.has(Permission::AdminTerminal) {
+                lines.push(say(MsgKey::ElevActGrantAdminTerminal, &[peer_name]));
+            }
+            if lines.is_empty() {
+                lines.push(say(MsgKey::ElevActGrants, &[peer_name]));
+            }
+            lines.join("\n")
         }
         ElevatedAction::ConnectUnattended { .. } => say(MsgKey::ElevActConnectUnattended, &[peer_name]),
         ElevatedAction::OpenAdminTerminal { .. } => say(MsgKey::ElevActAdminTerminalOpen, &[]),
@@ -1674,7 +1692,11 @@ impl UiState {
                 match (&el.phase, primary) {
                     (ElevPhase::Ask | ElevPhase::Failed(_), true) => {
                         el.phase = ElevPhase::Waiting;
-                        a.commands.push(Command::Elevate { action: el.action.clone() });
+                        self.elev_runs = self.elev_runs.wrapping_add(1);
+                        el.run = self.elev_runs;
+                        let (action, run) = (el.action.clone(), el.run);
+                        let line = self.elevation_action_text(&action);
+                        a.commands.push(Command::Elevate { action, line, run });
                     }
                     _ => self.elevation = None,
                 }

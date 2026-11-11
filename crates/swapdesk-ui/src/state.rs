@@ -206,6 +206,8 @@ pub enum ElevPhase {
 pub struct Elevation {
     pub action: ElevatedAction,
     pub phase: ElevPhase,
+    /// The run of the last `Elevate` this step sent (0 before the first).
+    pub run: u32,
 }
 
 /// What the elevated instance's own window asks (ELEVATION.md 3.5): the action as the service holds it, the
@@ -591,6 +593,8 @@ pub struct UiState {
     pub(crate) pairing: Option<PairingView>,
     pub(crate) incoming: Option<IncomingView>,
     pub(crate) elevation: Option<Elevation>,
+    /// The runs of `Elevate` sent so far, for `Elevation::run`.
+    pub(crate) elev_runs: u32,
     pub(crate) confirm: Option<ElevatedConfirm>,
     pub(crate) sessions: Vec<SessionView>,
     pub(crate) swap: Option<SwapView>,
@@ -676,6 +680,7 @@ impl UiState {
             pairing: None,
             incoming: None,
             elevation: None,
+            elev_runs: 0,
             confirm: None,
             sessions: Vec::new(),
             swap: None,
@@ -1891,7 +1896,7 @@ impl UiState {
                 self.set_settings(s);
                 Changed::ALL
             }
-            UiEvent::ElevationResult { action, result } => self.apply_elevation_result(action, result),
+            UiEvent::ElevationResult { action, run, result } => self.apply_elevation_result(action, run, result),
             UiEvent::ThemeChanged { dark } => self.set_dark(dark),
             UiEvent::LanguageChanged(l) => self.set_language(l),
         }
@@ -2030,8 +2035,10 @@ impl UiState {
         Changed::ALL
     }
 
-    fn apply_elevation_result(&mut self, action: ElevatedAction, result: Result<(), ApiError>) -> Changed {
-        if self.elevation.as_ref().is_none_or(|e| e.action != action) {
+    fn apply_elevation_result(&mut self, action: ElevatedAction, run: u32, result: Result<(), ApiError>) -> Changed {
+        // Only the run this step waits for: a worker of a step that was cancelled, or of an earlier press, may end
+        // later and must not decide a newer step.
+        if self.elevation.as_ref().is_none_or(|e| e.action != action || e.run != run || e.phase != ElevPhase::Waiting) {
             return Changed::NONE;
         }
         match result {
@@ -2214,7 +2221,7 @@ impl UiState {
             return Changed::ALL;
         };
         // The step tells how the confirmation failed (a timeout of its own 120 s too): no strip over the content.
-        if let Command::Elevate { action } = &pending.command {
+        if let Command::Elevate { action, .. } = &pending.command {
             return match &mut self.elevation {
                 Some(el) if el.action == *action => {
                     el.phase = ElevPhase::Failed(error.code);
@@ -2298,7 +2305,7 @@ impl UiState {
                 _ => None,
             };
             if let Some(action) = action {
-                self.elevation = Some(Elevation { action, phase: ElevPhase::Ask });
+                self.elevation = Some(Elevation { action, phase: ElevPhase::Ask, run: 0 });
                 return Changed::ALL;
             }
         }

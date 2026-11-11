@@ -553,7 +553,9 @@ impl Hub {
         //
         // Only for an administrator account of this machine, for now: the other machine gave its grant to this
         // machine's one key, which every local account dials with, so without this any account here would walk
-        // into a host that trusted one person (D10). It goes when each account has its own key (D44).
+        // into a host that trusted one person (D10). It goes when each account has its own key (D44). The Mac's app
+        // connection says `can_elevate` for every account: there each account already runs its own service with its
+        // own key (D31), so the grant was made to that account alone.
         let hint = self.minor_hint(&id);
         let unattended = (conn.info.admin || conn.info.can_elevate) && self.known_minor(&id, hint) >= 1;
         // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides

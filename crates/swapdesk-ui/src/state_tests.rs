@@ -270,16 +270,24 @@ fn the_elevation_step_runs_its_phases() {
     let mut s = Scenario::Elevacao.prepared_state();
     assert_eq!(s.dialog(WindowKind::Main), Some(DialogKind::Elevation));
     let a = s.activate(ControlId::DialogPrimary);
-    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
     assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
     // The wrong action's result is ignored.
-    s.apply(UiEvent::ElevationResult { action: ElevatedAction::OpenAdminTerminal { session_id: 1 }, result: Ok(()) });
+    s.apply(UiEvent::ElevationResult {
+        action: ElevatedAction::OpenAdminTerminal { session_id: 1 },
+        run,
+        result: Ok(()),
+    });
     assert!(s.elevation().is_some());
-    s.apply(UiEvent::ElevationResult { action: action.clone(), result: Err(ApiError::new(ApiCode::Refused)) });
+    s.apply(UiEvent::ElevationResult { action: action.clone(), run, result: Err(ApiError::new(ApiCode::Refused)) });
     assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Refused));
     let a = s.activate(ControlId::DialogPrimary);
-    assert!(matches!(a.commands[0], Command::Elevate { .. }), "retry");
-    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    let Command::Elevate { run: retry, .. } = a.commands[0].clone() else { panic!("retry") };
+    assert_ne!(retry, run, "a retry is a new run");
+    // A late result of the first run does not decide the retry.
+    s.apply(UiEvent::ElevationResult { action: action.clone(), run, result: Ok(()) });
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
+    s.apply(UiEvent::ElevationResult { action, run: retry, result: Ok(()) });
     assert!(s.elevation().is_none());
 
     let mut s = Scenario::Elevacao.prepared_state();
@@ -291,10 +299,10 @@ fn the_elevation_step_runs_its_phases() {
 fn a_confirmed_elevation_resends_the_command_that_needed_it() {
     let mut s = Scenario::Elevacao.prepared_state();
     let a = s.activate(ControlId::DialogPrimary);
-    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
     let ElevatedAction::SetGrants { device_id, grants } = action.clone() else { panic!("{action:?}") };
     let _ = s.take_followups();
-    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
     assert!(s.elevation().is_none(), "the step closes");
     assert_eq!(s.take_followups(), vec![Command::SetGrants { device_id, grants }]);
     assert!(s.take_followups().is_empty(), "sent once");
@@ -302,18 +310,19 @@ fn a_confirmed_elevation_resends_the_command_that_needed_it() {
     // A failure resends nothing.
     let mut s = Scenario::Elevacao.prepared_state();
     let a = s.activate(ControlId::DialogPrimary);
-    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
     let _ = s.take_followups();
-    s.apply(UiEvent::ElevationResult { action, result: Err(ApiError::new(ApiCode::Refused)) });
+    s.apply(UiEvent::ElevationResult { action, run, result: Err(ApiError::new(ApiCode::Refused)) });
     assert!(s.take_followups().is_empty());
 
     // The other two actions are on hold: their step closes and nothing is resent.
     let mut s = viewer();
     let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
     tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
-    let action = s.elevation().unwrap().action.clone();
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
     let _ = s.take_followups();
-    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
     assert!(s.elevation().is_none());
     assert!(s.take_followups().is_empty());
 }
@@ -352,8 +361,8 @@ fn each_failure_code_has_its_line_in_the_step() {
     let line = |code: ApiCode| {
         let mut s = Scenario::Elevacao.prepared_state();
         let a = s.activate(ControlId::DialogPrimary);
-        let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
-        s.apply(UiEvent::ElevationResult { action, result: Err(ApiError::new(code)) });
+        let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
+        s.apply(UiEvent::ElevationResult { action, run, result: Err(ApiError::new(code)) });
         let t = s.dialog_texts(&DialogKind::Elevation);
         assert_eq!(t.title, s.tm(&Msg::new(MsgKey::ElevFailedTitle)));
         assert_eq!(t.body, vec![s.tm(&Msg::new(MsgKey::ElevFailedBody))], "{code:?}");
@@ -2570,4 +2579,25 @@ fn a_reconnected_service_ends_the_old_sessions_and_the_data_is_asked_for_again()
     for c in [Command::GetThisDevice, Command::GetNetwork, Command::ListDevices, Command::GetSettings] {
         assert!(again.contains(&c), "{c:?} is asked again: {again:?}");
     }
+}
+
+/// Review of the elevation, findings 1 and 8: the confirmation names every machine-level permission the change
+/// leaves, and a device name cannot carry control or direction-override characters into it.
+#[test]
+fn the_confirmation_names_every_machine_level_permission_and_a_clean_device_name() {
+    use crate::interact::{elevation_action_text, shown_name};
+    let both = Permissions(Permission::Unattended.bit() | Permission::AdminTerminal.bit() | Permission::View.bit());
+    let action = ElevatedAction::SetGrants { device_id: MAC.into(), grants: both };
+    let text = elevation_action_text(Language::PtBr, &action, "Mac");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("Entrar sem perguntar") && lines[1].contains("terminal de administrador"), "{text}");
+    let only_terminal = ElevatedAction::SetGrants {
+        device_id: MAC.into(),
+        grants: Permissions(Permission::AdminTerminal.bit() | Permission::View.bit()),
+    };
+    assert_eq!(elevation_action_text(Language::PtBr, &only_terminal, "Mac").lines().count(), 1);
+    assert_eq!(shown_name("Mac\u{202e}cod.exe\n\u{2066}x\u{7}"), "Maccod.exex");
+    let named = elevation_action_text(Language::PtBr, &action, "Ma\u{202e}c");
+    assert!(!named.contains('\u{202e}'), "{named:?}");
 }

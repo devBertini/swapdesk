@@ -607,6 +607,10 @@ pub enum Command {
     },
     Elevate {
         action: ElevatedAction,
+        /// What the step shows, in the interface's language: the Mac's system dialog shows it as its extra text.
+        line: String,
+        /// Which press of "Continuar" this run answers: a result of an earlier run never lands on a later step.
+        run: u32,
     },
     Connect {
         device_id: String,
@@ -770,7 +774,7 @@ impl core::fmt::Debug for Command {
             Self::SetGrants { device_id, grants } => dbg_fields!("SetGrants", device_id, grants),
             Self::ForgetDevice { device_id } => dbg_fields!("ForgetDevice", device_id),
             Self::RenameDevice { device_id, name } => dbg_fields!("RenameDevice", device_id, name),
-            Self::Elevate { action } => dbg_fields!("Elevate", action),
+            Self::Elevate { action, run, .. } => dbg_fields!("Elevate", action, run),
             Self::Connect { device_id, intent, unattended } => dbg_fields!("Connect", device_id, intent, unattended),
             Self::Disconnect { session_id } => dbg_fields!("Disconnect", session_id),
             Self::AnswerIncoming { request_id, decision } => dbg_fields!("AnswerIncoming", request_id, decision),
@@ -925,6 +929,8 @@ pub enum UiEvent {
     ServiceReconnected,
     ElevationResult {
         action: ElevatedAction,
+        /// The `run` of the `Elevate` this answers.
+        run: u32,
         result: Result<(), ApiError>,
     },
     ThemeChanged {

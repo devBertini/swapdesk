@@ -930,9 +930,10 @@ pub(crate) mod test_support {
                 device_id: self.device.clone(),
                 grants: grants_with_unattended(),
             };
-            self.backend.send(Command::Elevate { action: action.clone() });
+            self.backend.send(Command::Elevate { action: action.clone(), line: String::new(), run: 1 });
             let event = self.inbox.wait_for(|e| matches!(e, UiEvent::ElevationResult { .. }));
-            let UiEvent::ElevationResult { action: got, result } = event else { unreachable!() };
+            let UiEvent::ElevationResult { action: got, run, result } = event else { unreachable!() };
+            assert_eq!(run, 1, "the run it answers");
             assert_eq!(got, action);
             result.map_err(|e| e.code)
         }

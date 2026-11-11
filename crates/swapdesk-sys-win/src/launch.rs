@@ -508,13 +508,36 @@ pub struct InstallPolicy {
     pub trusted_sids: Vec<String>,
 }
 
+/// The Program Files folder as the system knows it (`SHGetKnownFolderPath(FOLDERID_ProgramFiles)`).
+pub fn program_files() -> Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath};
+    let mut path: windows_sys::core::PWSTR = null_mut();
+    // SAFETY: the GUID is a static of windows-sys; `path` receives a buffer the call allocates, freed below with
+    // `CoTaskMemFree` whatever the result (the documented contract, also on failure).
+    let hr = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, null_mut(), &mut path) };
+    let out = if hr == 0 && !path.is_null() {
+        // SAFETY: on success `path` is a NUL-terminated UTF-16 string owned until the free.
+        let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
+        // SAFETY: `len` units were just read from the same live buffer.
+        let wide = unsafe { std::slice::from_raw_parts(path, len) };
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(wide)))
+    } else {
+        Err(invalid("InstallPolicy::production", format!("SHGetKnownFolderPath failed: {hr:#x}")))
+    };
+    // SAFETY: the buffer came from `SHGetKnownFolderPath`; null is allowed.
+    unsafe { CoTaskMemFree(path.cast()) };
+    out
+}
+
 impl InstallPolicy {
-    /// C2.1: under `%ProgramFiles%`, writable only by SYSTEM, Administrators and TrustedInstaller.
+    /// C2.1: under the Program Files folder, writable only by SYSTEM, Administrators and TrustedInstaller. The
+    /// folder comes from the system (`FOLDERID_ProgramFiles`), not from `%ProgramFiles%`, which a process of the same
+    /// user could set for a program it starts (review of the elevation, finding 7).
     pub fn production() -> Result<Self> {
-        let pf = std::env::var_os("ProgramFiles")
-            .ok_or_else(|| invalid("InstallPolicy::production", "%ProgramFiles% is not set"))?;
         Ok(Self {
-            root: PathBuf::from(pf),
+            root: program_files()?,
             trusted_sids: vec!["S-1-5-18".into(), "S-1-5-32-544".into(), TRUSTED_INSTALLER_SID.into()],
         })
     }

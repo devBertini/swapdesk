@@ -107,6 +107,10 @@ impl WinElevator {
     }
 }
 
+/// The ticket's life (120 s, ELEVATION.md 3.1) minus how long the asking interface waits for the run
+/// (`swapdesk_ui::service_backend::elevation::RUN_FOR`, 110 s).
+pub const WINDOW_MARGIN_S: u16 = 10;
+
 /// The person's answer, from the instance's own window (ELEVATION.md 3.5): it shows the action as the service holds
 /// it, in this process's display language, with "Cancelar" and "Confirmar", and closes as declined when the
 /// ticket's time runs out. Only a real click or key on "Confirmar" approves; a window that cannot be shown
@@ -114,6 +118,9 @@ impl WinElevator {
 pub fn confirm_in_window(action: &ElevAction, peer_name: &str, remaining_s: u16) -> bool {
     let lang = swapdesk_shell_win::system_language();
     let line = elevated_client::action_line(lang, action, peer_name);
+    // The service's seconds are the ticket's (120 s); the asking interface gives up 10 s earlier (`RUN_FOR`, 110 s),
+    // so the window ends with it and never offers "Confirmar" for a step already shown as timed out.
+    let remaining_s = remaining_s.saturating_sub(WINDOW_MARGIN_S);
     let state = swapdesk_ui::UiState::for_elevated_confirm(lang, swapdesk_shell_win::system_dark(), line, remaining_s);
     match swapdesk_shell_win::run_confirm(state) {
         Ok(answer) => answer == Some(true),
@@ -166,7 +173,7 @@ fn trace(line: &str) {
 }
 
 impl Elevator for WinElevator {
-    fn run(&self, ticket: &ElevationTicket, deadline: Instant) -> ElevatorRun {
+    fn run(&self, ticket: &ElevationTicket, _line: &str, deadline: Instant) -> ElevatorRun {
         let exe = match self.verified_exe() {
             Ok(exe) => exe,
             Err(why) => {
@@ -260,7 +267,7 @@ mod tests {
         // The program is the one the policy returned (its canonical path), not the text it was given.
         let given = exe.parent().unwrap().join(".").join("cmd.exe");
         let elevator = WinElevator::with(given, ExeCheck::Policy(policy.clone()), &options, launch);
-        assert_eq!(elevator.run(&TICKET, soon()), ElevatorRun::Ended { exit_code: Some(0) });
+        assert_eq!(elevator.run(&TICKET, "", soon()), ElevatorRun::Ended { exit_code: Some(0) });
         {
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), 1);
@@ -270,13 +277,13 @@ mod tests {
 
         // Without the development flags only the ticket goes; it is always 32 lowercase digits.
         let (launch, calls, _) = launcher(Ok(WaitOutcome::Ended { exit_code: Some(0) }));
-        WinElevator::with(exe, ExeCheck::Policy(policy), &Options::default(), launch).run(&TICKET, soon());
+        WinElevator::with(exe, ExeCheck::Policy(policy), &Options::default(), launch).run(&TICKET, "", soon());
         assert_eq!(calls.lock().unwrap()[0].1, format!("--elevated {HEX}"));
         // A development build started with `--service-pid` skips the check and gets its own path as it is.
         let (launch, calls, _) = launcher(Ok(WaitOutcome::Ended { exit_code: Some(0) }));
         let dev = Options { service_pid: Some(7), ..Options::default() };
         let built = PathBuf::from(r"D:\build\Swapdesk.exe");
-        WinElevator::with(built.clone(), ExeCheck::Skipped, &dev, launch).run(&TICKET, soon());
+        WinElevator::with(built.clone(), ExeCheck::Skipped, &dev, launch).run(&TICKET, "", soon());
         assert_eq!(calls.lock().unwrap()[0].0, built);
         // What goes on the command line is what the instance's own parser takes back.
         let parsed = cli::parse(&["--elevated".to_owned(), HEX.to_owned()]).unwrap();
@@ -288,7 +295,7 @@ mod tests {
         let exe = PathBuf::from(r"C:\Program Files\Swapdesk\Swapdesk.exe");
         let run = |result: Result<WaitOutcome, RunAsError>| {
             let (launch, _, _) = launcher(result);
-            WinElevator::with(exe.clone(), ExeCheck::Skipped, &Options::default(), launch).run(&TICKET, soon())
+            WinElevator::with(exe.clone(), ExeCheck::Skipped, &Options::default(), launch).run(&TICKET, "", soon())
         };
         // UAC "No" or a closed credentials prompt.
         assert_eq!(run(Err(RunAsError::Declined)), ElevatorRun::Declined);
@@ -333,9 +340,9 @@ mod tests {
         let exe = PathBuf::from(r"C:\Program Files\Swapdesk\Swapdesk.exe");
         let (launch, _, asked) = launcher(Ok(WaitOutcome::TimedOut));
         let elevator = WinElevator::with(exe, ExeCheck::Skipped, &Options::default(), launch);
-        elevator.run(&TICKET, Instant::now() + Duration::from_secs(100));
+        elevator.run(&TICKET, "", Instant::now() + Duration::from_secs(100));
         // A deadline already behind asks for no wait at all.
-        elevator.run(&TICKET, Instant::now() - Duration::from_secs(1));
+        elevator.run(&TICKET, "", Instant::now() - Duration::from_secs(1));
         let asked = asked.lock().unwrap();
         assert!(asked[0] > Duration::from_secs(90) && asked[0] <= Duration::from_secs(100));
         assert_eq!(asked[1], Duration::ZERO);
@@ -355,19 +362,19 @@ mod tests {
         // Inside the root, but written by an account the policy does not trust (or owned by one).
         let why = elevator.verified_exe().unwrap_err();
         assert!(why.contains("grants write access") || why.contains("is owned by"), "{why}");
-        assert_eq!(elevator.run(&TICKET, soon()), ElevatorRun::Failed(ApiCode::Internal));
+        assert_eq!(elevator.run(&TICKET, "", soon()), ElevatorRun::Failed(ApiCode::Internal));
         // The production policy refuses the same file as outside %ProgramFiles%.
         let (launch2, calls2, _) = launcher(Ok(WaitOutcome::Ended { exit_code: Some(0) }));
         let production = ExeCheck::Policy(InstallPolicy::production().unwrap());
         let elevator = WinElevator::with(exe, production, &Options::default(), launch2);
         assert!(elevator.verified_exe().unwrap_err().contains("outside the install root"));
-        assert_eq!(elevator.run(&TICKET, soon()), ElevatorRun::Failed(ApiCode::Internal));
+        assert_eq!(elevator.run(&TICKET, "", soon()), ElevatorRun::Failed(ApiCode::Internal));
         // A file that does not exist, and a policy that could not be built, refuse too.
         let (launch3, calls3, _) = launcher(Ok(WaitOutcome::Ended { exit_code: Some(0) }));
         let missing = ExeCheck::Policy(InstallPolicy::production().unwrap());
         let elevator = WinElevator::with(dir.join("missing.exe"), missing, &Options::default(), launch3);
         assert!(elevator.verified_exe().is_err());
-        assert_eq!(elevator.run(&TICKET, soon()), ElevatorRun::Failed(ApiCode::Internal));
+        assert_eq!(elevator.run(&TICKET, "", soon()), ElevatorRun::Failed(ApiCode::Internal));
         let (launch4, calls4, _) = launcher(Ok(WaitOutcome::Ended { exit_code: Some(0) }));
         let elevator = WinElevator::with(
             dir.join("Swapdesk.exe"),
@@ -375,7 +382,7 @@ mod tests {
             &Options::default(),
             launch4,
         );
-        assert_eq!(elevator.run(&TICKET, soon()), ElevatorRun::Failed(ApiCode::Internal));
+        assert_eq!(elevator.run(&TICKET, "", soon()), ElevatorRun::Failed(ApiCode::Internal));
         let _ = std::fs::remove_dir_all(&dir);
         for c in [calls, calls2, calls3, calls4] {
             assert!(c.lock().unwrap().is_empty());

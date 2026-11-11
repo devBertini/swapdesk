@@ -245,7 +245,7 @@ struct FakeElevator {
 }
 
 impl Elevator for FakeElevator {
-    fn run(&self, ticket: &ElevationTicket, _deadline: Instant) -> ElevatorRun {
+    fn run(&self, ticket: &ElevationTicket, _line: &str, _deadline: Instant) -> ElevatorRun {
         let run = match &self.uac {
             Uac::No => ElevatorRun::Declined,
             Uac::Yes { info, approve } => {
