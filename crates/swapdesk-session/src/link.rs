@@ -64,8 +64,9 @@ impl Outbox {
         Self { tx, peer_minor: Arc::new(AtomicU16::new(0)) }
     }
 
-    /// The peer announced `minor`: from now on it may be sent what that minor knows.
-    pub(crate) fn set_peer_minor(&self, minor: u16) {
+    /// The peer announced `minor`: from now on it may be sent what that minor knows. The session sets it from the
+    /// handshake; a raw link (a test playing the other side) sets it itself.
+    pub fn set_peer_minor(&self, minor: u16) {
         self.peer_minor.store(minor, Ordering::SeqCst);
     }
 

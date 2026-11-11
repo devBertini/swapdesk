@@ -1321,3 +1321,241 @@ fn a_minor_0_viewer_is_never_sent_a_minor_1_value_or_type() {
         .await;
     });
 }
+
+// ---------- GRANTS-SYNC.md 3: `StoredGrants` in a session ----------
+
+fn peer_grants_of(ui: &TestUi) -> Vec<PermissionSet> {
+    ui.events()
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PeerGrants { grants, .. } => Some(*grants),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The host tells what it stored for the viewer, not what this session holds: a prompted pick that differs from the
+/// store does not change the value.
+#[test]
+fn the_viewer_hears_the_hosts_stored_grants_not_the_sessions() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL | PermissionSet::FILES);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::VIEW);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::CONTROL | PermissionSet::FILES).await;
+        assert!(s.grant().granted.contains(PermissionSet::FILES), "the session holds the pick");
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the stored grants of the host",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::VIEW),
+        )
+        .await;
+        assert!(s.granted().contains(PermissionSet::FILES), "display only: the session is unchanged");
+    });
+}
+
+#[test]
+fn the_host_hears_the_viewers_stored_grants() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW | PermissionSet::FILES);
+        let (s, _task) = mem.open(&who, cfg).await;
+        let s = s.unwrap();
+        eventually(Duration::from_secs(1), "PeerGrants on the host", || {
+            peer_grants_of(&ui) == vec![PermissionSet::VIEW | PermissionSet::FILES]
+        })
+        .await;
+        let about = ui.find_event(|e| match e {
+            HostEvent::PeerGrants { device, .. } => Some(*device),
+            _ => None,
+        });
+        assert_eq!(about, Some(who.id), "about the authenticated device");
+        assert_eq!(s.granted(), PermissionSet::CONTROL, "display only: the session is unchanged");
+    });
+}
+
+/// A change on either side while the session lives reaches the other; an unchanged value is not told again.
+#[test]
+fn a_stored_grants_change_during_a_session_reaches_the_peer() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW);
+        let (s, _task) = mem.open(&who, cfg).await;
+        let mut s = s.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the first value",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::CONTROL),
+        )
+        .await;
+
+        // The user at the host changes Permissões.
+        set_stored(&mem.trust, &who, PermissionSet::VIEW | PermissionSet::FILES);
+        mem.host.stored_grants_changed(&who.id);
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the new value of the host",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::VIEW | PermissionSet::FILES),
+        )
+        .await;
+
+        // The user at the viewer changes Permissões on that side; the same value again is not told twice.
+        let new = PermissionSet::CONTROL | PermissionSet::CLIPBOARD;
+        s.ctx().set_own_stored(new);
+        s.ctx().set_own_stored(new);
+        eventually(Duration::from_secs(1), "the new value of the viewer on the host", || {
+            peer_grants_of(&ui).last() == Some(&new)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(peer_grants_of(&ui), vec![PermissionSet::VIEW, new], "each value once");
+    });
+}
+
+/// Before `SessionGrant` it is a protocol violation, on the host and on the viewer.
+#[test]
+fn stored_grants_before_the_grant_is_a_protocol_violation() {
+    run_paused(async {
+        // The host: a raw viewer of minor 1 sends it right after its `Hello`.
+        let mem = Mem::new(TestUi::accepting(PermissionSet::CONTROL), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (io, task) = mem.connect_raw(&who);
+        io.out.set_peer_minor(PROTO_MINOR);
+        io.out.send(hello_of_minor(PROTO_MINOR)).await.unwrap();
+        io.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::ProtocolViolation));
+
+        // The viewer: a raw host of minor 1 sends it before the grant.
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, viewer_config(PermissionSet::CONTROL)));
+        raw_host_handshake(&mut host, PROTO_MINOR).await;
+        host.out.set_peer_minor(PROTO_MINOR);
+        host.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        assert!(open.await.unwrap().is_err(), "the session does not open");
+    });
+}
+
+/// A host that announced minor 0 cannot have sent it: the viewer ends the session with `UNSUPPORTED_VERSION`.
+/// (The host side of the same rule: `a_minor_1_message_from_a_peer_that_announced_minor_0_ends_the_session`.)
+#[test]
+fn stored_grants_from_a_minor_0_peer_is_unsupported_version() {
+    run_paused(async {
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, viewer_config(PermissionSet::CONTROL)));
+        raw_host_handshake(&mut host, 0).await;
+        raw_grant(&mut host).await;
+        let s = open.await.unwrap().expect("the session opens");
+        // The send path of the raw host would drop it for a minor-0 peer; it plays a broken 1.0 host on purpose.
+        host.out.set_peer_minor(PROTO_MINOR);
+        host.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = s.ctx().wait_ended().await;
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::UnsupportedVersion));
+    });
+}
+
+/// Guard (green before and after): a viewer and a host that announce minor 0 are sent only types of 1.0, whatever
+/// the other side has stored.
+#[test]
+fn a_minor_0_peer_is_sent_exactly_the_1_0_sequence() {
+    run_paused(async {
+        // A 1.0 viewer of a host that stored grants for it.
+        let mem = Mem::new(TestUi::accepting(PermissionSet::CONTROL), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut io, _task) = mem.connect_raw(&who);
+        raw_hello(&mut io, PermissionSet::CONTROL, None, None).await;
+        let mut seen = Vec::new();
+        let mut keep = |m: &Message, want: fn(&Message) -> bool| {
+            seen.push(m.type_id());
+            want(m).then_some(())
+        };
+        next_matching(&mut io, "the grant", |m| keep(m, |m| matches!(m, Message::SessionGrant(_)))).await;
+        set_stored(&mem.trust, &who, PermissionSet::VIEW);
+        mem.host.stored_grants_changed(&who.id);
+        next_matching(&mut io, "the narrowed session", |m| keep(m, |m| matches!(m, Message::PermissionsChanged(_))))
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(m) = io.rx.try_recv() {
+            seen.push(m.unwrap().type_id());
+        }
+        for t in seen {
+            assert_eq!(Message::type_min_minor(t), 0, "{t:#06x} reached a 1.0 viewer");
+        }
+
+        // A 1.0 host of a viewer that stored grants for it: the viewer sends it nothing of minor 1.
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW);
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, cfg));
+        let mut sent = raw_host_handshake(&mut host, 0).await;
+        raw_grant(&mut host).await;
+        let s = open.await.unwrap().expect("the session opens");
+        s.ctx().set_own_stored(PermissionSet::CONTROL);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(m) = host.rx.try_recv() {
+            sent.push(m.unwrap());
+        }
+        for m in sent {
+            assert_eq!(Message::type_min_minor(m.type_id()), 0, "{:#06x} reached a 1.0 host", m.type_id());
+        }
+    });
+}
+
+fn hello_of_minor(minor: u16) -> Hello {
+    Hello {
+        proto_minor: minor,
+        app_version: "t".into(),
+        name: "raw".into(),
+        os: Os::MacOs,
+        os_version: "15".into(),
+        intent: Intent::Control,
+        requested: PermissionSet::CONTROL,
+        resume: None,
+        swap_token: None,
+    }
+}
+
+/// Plays a host of `minor` up to the decision: reads the `Hello` and `Capabilities` of the viewer, answers both.
+/// Returns what the viewer sent.
+async fn raw_host_handshake(host: &mut swapdesk_session::ControlIo, minor: u16) -> Vec<Message> {
+    let hello = next_msg(host, "Hello").await;
+    let caps = next_msg(host, "Capabilities").await;
+    host.out
+        .send(HelloAck {
+            proto_minor: minor,
+            app_version: "t".into(),
+            name: "raw-host".into(),
+            os: Os::Windows,
+            os_version: "11".into(),
+        })
+        .await
+        .unwrap();
+    host.out.send(capabilities()).await.unwrap();
+    vec![hello, caps]
+}
+
+async fn raw_grant(host: &mut swapdesk_session::ControlIo) {
+    host.out
+        .send(SessionGrant {
+            session_id: 7,
+            granted: PermissionSet::CONTROL,
+            mode: GrantMode::Prompted,
+            resume_token: [1; 16],
+        })
+        .await
+        .unwrap();
+}

@@ -48,6 +48,9 @@ pub struct ViewerConfig {
     pub registry: Registry,
     /// Called with the countdown when the host starts a prompt ("Aguardando <host>"), before the session opens.
     pub on_prompt: Option<Arc<dyn Fn(u16) + Send + Sync>>,
+    /// What this viewer's account has stored for the host (`grants_here` of the host's record): told to a host of
+    /// minor 1 with `StoredGrants` when the grant comes. `None`: not known, nothing is told.
+    pub stored_grants: Option<PermissionSet>,
 }
 
 impl ViewerConfig {
@@ -76,6 +79,7 @@ impl ViewerConfig {
             clock,
             registry: Registry::new(),
             on_prompt: None,
+            stored_grants: None,
         }
     }
 
@@ -140,6 +144,8 @@ pub enum ViewerEvent {
         timeout_s: u16,
     },
     PermissionsChanged(PermissionSet),
+    /// What the host's account has stored for this viewer (`StoredGrants`, minor 1): display only.
+    PeerGrants(PermissionSet),
     HostState {
         desktop: Desktop,
         paused: bool,
@@ -157,6 +163,7 @@ impl std::fmt::Debug for ViewerEvent {
         match self {
             Self::PromptPending { timeout_s } => f.debug_struct("PromptPending").field("timeout_s", timeout_s).finish(),
             Self::PermissionsChanged(g) => f.debug_tuple("PermissionsChanged").field(g).finish(),
+            Self::PeerGrants(g) => f.debug_tuple("PeerGrants").field(g).finish(),
             Self::HostState { desktop, paused } => {
                 f.debug_struct("HostState").field("desktop", desktop).field("paused", paused).finish()
             }
@@ -228,7 +235,9 @@ impl ViewerSession {
         host: Option<DeviceId>,
         cfg: ViewerConfig,
     ) -> Result<Self, OpenError> {
-        let ViewerConfig { liveness, grant_wait, caps, clock, registry, on_prompt, capabilities, .. } = cfg.clone();
+        let ViewerConfig {
+            liveness, grant_wait, caps, clock, registry, on_prompt, capabilities, stored_grants, ..
+        } = cfg.clone();
         io.out.send(cfg.hello()).await.map_err(|_| OpenError::Lost)?;
         io.out.send(capabilities).await.map_err(|_| OpenError::Lost)?;
         let (ev_tx, ev_rx) = mpsc::channel(256);
@@ -244,12 +253,16 @@ impl ViewerSession {
             clock,
             consent: None,
         });
+        if let Some(grants) = stored_grants {
+            ctx.set_own_stored(grants);
+        }
         let side = Side::Viewer {
             events: events_tx,
             opened: Some(opened_tx),
             deadline: now() + grant_wait,
             peer: None,
             on_prompt,
+            own_minor: cfg.proto_minor,
         };
         let actor = Actor::new(side, ctx.clone(), io, conn, ev_tx, ev_rx, Arc::new(registry), liveness, now());
         let task = tokio::spawn(actor.run());

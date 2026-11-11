@@ -59,6 +59,8 @@ pub(crate) enum Side {
         deadline: Instant,
         peer: Option<HelloAck>,
         on_prompt: Option<Arc<dyn Fn(u16) + Send + Sync>>,
+        /// The minor this viewer announced in its `Hello` (a test may play a 1.0 viewer).
+        own_minor: u16,
     },
 }
 
@@ -162,6 +164,8 @@ pub(crate) struct Actor {
     ping_nonce: u32,
     /// The grants the viewer was last told (host side): a difference from `ctx.granted()` is a change to report.
     reported: PermissionSet,
+    /// The stored grants last told to the peer with `StoredGrants` (`None`: nothing told yet).
+    stored_told: Option<PermissionSet>,
     /// The desktop the state machine last applied (host side).
     applied_desktop: Option<Desktop>,
     /// Messages that must arrive, waiting for room in the outgoing queue.
@@ -246,6 +250,7 @@ impl Actor {
             helpers,
             ping_nonce: 0,
             reported: PermissionSet::EMPTY,
+            stored_told: None,
             applied_desktop: None,
             pending: VecDeque::new(),
             stalled_since: None,
@@ -367,6 +372,11 @@ impl Actor {
         }
         if !self.pending.is_empty()
             && let Some(f) = self.flush_pending()
+        {
+            return Some(f);
+        }
+        if self.phase == Phase::Active
+            && let Some(f) = self.tell_stored()
         {
             return Some(f);
         }
@@ -609,6 +619,10 @@ impl Actor {
         {
             return Some(f);
         }
+        // Minor 1: what this host stored for the viewer, in the grant's batch and before any stream.
+        if let Some(f) = self.tell_stored() {
+            return Some(f);
+        }
         service.ui.event(HostEvent::SessionStarted {
             device,
             session_id: committed.session_id,
@@ -621,7 +635,29 @@ impl Actor {
         None
     }
 
-    /// A request in a live session: direction was checked; now the permission, the handler and the caps.
+    /// `StoredGrants` (GRANTS-SYNC.md 3.2): what this side stored for the peer's device, told once the session is
+    /// granted and again when it changes, latest value wins. Only when both sides speak minor 1: a 1.0 peer would end
+    /// the session on a type it does not know, and a peer of minor 1 ends it on one from a side that said minor 0.
+    fn tell_stored(&mut self) -> Option<Finish> {
+        if self.phase != Phase::Active {
+            return None;
+        }
+        let want = self.ctx.own_stored()?;
+        if self.stored_told == Some(want) {
+            return None;
+        }
+        let own = match &self.side {
+            Side::Host { .. } => PROTO_MINOR,
+            Side::Viewer { own_minor, .. } => *own_minor,
+        };
+        let msg = Message::from(swapdesk_proto::StoredGrants { grants: want });
+        if own.min(self.ctx.peer_minor()) < Message::type_min_minor(msg.type_id()) {
+            return None;
+        }
+        self.stored_told = Some(want);
+        self.emit(msg, true)
+    }
+
     /// The messages of protocol minor 1 that a session takes after the grant, on either side. `None`: not one of them.
     fn minor_1_message(&mut self, msg: &Message) -> Option<Option<Finish>> {
         if !matches!(msg, Message::StoredGrants(_) | Message::Elevate(_)) {
@@ -632,9 +668,19 @@ impl Actor {
             return Some(Some(Finish::violation(ErrorCode::UnsupportedVersion)));
         }
         Some(match msg {
-            // What the other side stored for this device: for display, kept by the grants sync when it is built.
-            // Until then it is taken and dropped, so a later build that sends it is not cut off.
-            Message::StoredGrants(_) => None,
+            // What the other side stored for this device: display only, for the column "Este computador pode, no X".
+            // It never touches this session's grants.
+            Message::StoredGrants(s) => {
+                match &self.side {
+                    Side::Host { service, device, .. } => {
+                        service.ui.event(HostEvent::PeerGrants { device: *device, grants: s.grants });
+                    }
+                    Side::Viewer { events, .. } => {
+                        let _ = events.try_send(ViewerEvent::PeerGrants(s.grants));
+                    }
+                }
+                None
+            }
             // The elevation step is not built: the answer is the one of a session that may not elevate.
             _ => self.reply(ErrorMessage {
                 code: ErrorCode::NotPermitted,
@@ -766,6 +812,10 @@ impl Actor {
         };
         if let Some(tx) = opened.take() {
             let _ = tx.send(Ok(info));
+        }
+        // Minor 1: what this viewer's account stored for the host, as soon as the session is granted.
+        if let Some(f) = self.tell_stored() {
+            return Some(f);
         }
         for h in self.registry.handlers() {
             h.on_start(&self.ctx);

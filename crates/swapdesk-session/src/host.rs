@@ -167,6 +167,12 @@ pub enum HostEvent {
         feature: Feature,
         answer: ErrorCode,
     },
+    /// What the viewer's account has stored for this host (`StoredGrants`, minor 1): display only, for the
+    /// column "Este computador pode, no X". It never widens or narrows a session.
+    PeerGrants {
+        device: DeviceId,
+        grants: PermissionSet,
+    },
 }
 
 /// The host's user and desktop, as the session layer needs them. The service implements it over the session
@@ -425,6 +431,8 @@ impl HostService {
             // Only what was revoked goes; what the host's user added for this session alone stays (D8).
             let seen = std::mem::replace(&mut *lock(&ctx.inner.stored_seen), stored);
             ctx.modify_granted(|granted| policy::without_revoked(granted, seen, stored));
+            // The viewer of minor 1 hears what is stored now (display only on its side).
+            ctx.set_own_stored(stored);
         }
     }
 
@@ -680,6 +688,7 @@ impl HostInner {
         ctx.inner.session_id.store(committed.session_id, Ordering::SeqCst);
         ctx.set_granted(committed.granted);
         *lock(&ctx.inner.stored_seen) = stored_now;
+        *lock(&ctx.inner.own_stored) = Some(stored_now);
         t.live.insert(committed.session_id, ctx.clone());
         Ok(committed)
     }

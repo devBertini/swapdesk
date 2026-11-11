@@ -685,7 +685,7 @@ impl Drive {
                     Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms) })
                 }
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
-                ViewerEvent::PromptPending { .. } => None,
+                ViewerEvent::PromptPending { .. } | ViewerEvent::PeerGrants(_) => None,
                 ViewerEvent::Message(Ctl::DisplayList(list)) => {
                     let ids: Vec<u16> = list.displays.iter().map(|d| d.id).collect();
                     self.receiver.set_displays(&ids);

@@ -123,6 +123,9 @@ pub(crate) struct CtxInner {
     /// The stored grants of the device as the session last saw them (host side): a change of what is stored removes
     /// only what it revoked from them.
     pub stored_seen: Mutex<PermissionSet>,
+    /// What this side's account has stored for the peer's device (`grants_here` of its record): told to a peer of
+    /// minor 1 with `StoredGrants` after the grant and again on every change. `None`: not known, nothing is told.
+    pub own_stored: Mutex<Option<PermissionSet>>,
     /// Set when the session starts to close: nothing is started for it from then on.
     closing: AtomicBool,
 }
@@ -177,6 +180,7 @@ impl SessionCtx {
                 peer_minor: AtomicU16::new(0),
                 entered_unattended: AtomicBool::new(false),
                 stored_seen: Mutex::new(PermissionSet::EMPTY),
+                own_stored: Mutex::new(None),
                 closing: AtomicBool::new(false),
             }),
         }
@@ -249,6 +253,17 @@ impl SessionCtx {
     }
 
     /// What this session may do now.
+    /// What this side has stored for the peer's device changed (or is known now): a live session with a peer of
+    /// minor 1 tells it (`StoredGrants`, GRANTS-SYNC.md 3.2). It is about the stores, never about this session.
+    pub fn set_own_stored(&self, grants: PermissionSet) {
+        *lock(&self.inner.own_stored) = Some(grants);
+        self.inner.wake.notify_one();
+    }
+
+    pub(crate) fn own_stored(&self) -> Option<PermissionSet> {
+        *lock(&self.inner.own_stored)
+    }
+
     pub fn granted(&self) -> PermissionSet {
         *self.inner.grants.borrow()
     }
