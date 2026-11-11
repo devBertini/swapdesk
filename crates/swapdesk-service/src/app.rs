@@ -219,6 +219,18 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     }
 }
 
+/// The SID of the user at the console session (`None`: nobody, the sign-in screen). In development the current user
+/// stands for it.
+fn console_user_sid(dev: bool, session: Option<u32>, logged_in: bool) -> Option<String> {
+    if !logged_in {
+        return None;
+    }
+    if dev {
+        return current_user_sid().ok();
+    }
+    session.and_then(|s| session_user_sid(s).ok())
+}
+
 /// The event channel of every account's core, with its core.
 type CoreEvents = Arc<Mutex<Vec<(Arc<ServiceCore>, std::sync::mpsc::Receiver<CoreEvent>)>>>;
 
@@ -260,7 +272,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         let (root, trace, interfaces, clock, term_env) =
             (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
         let (core_events, events, machine_name) = (Arc::clone(&core_events), ctx_events.clone(), machine.name.clone());
-        let dev_loopback = opts.dev_loopback;
+        let (dev_loopback, dev_mode) = (opts.dev_loopback, opts.console);
         Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
             let wall = SystemWallClock;
             let store =
@@ -352,6 +364,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             hub.bind_core(&core);
             core.set_terminal_env(term_env.clone());
             hub.set_console_session(active_console_session());
+            hub.set_console_user(console_user_sid(dev_mode, active_console_session(), true));
             let rx = core.take_events().ok_or("the core's events were taken")?;
             // The loop sleeps until something wakes it: the core says so after each event it queues.
             core.set_event_waker({
@@ -399,16 +412,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let core_of: CoreOf = {
         let (accounts, dev) = (Arc::clone(&accounts), opts.console);
         Arc::new(move || {
-            let sid = if dev {
-                current_user_sid().ok()
-            } else {
-                active_console_session().and_then(|s| session_user_sid(s).ok())
-            };
-            if let Some(a) = sid.and_then(|sid| accounts.get(&sid)) {
-                return Some(Arc::clone(&a.core));
-            }
-            let all = accounts.all();
-            (all.len() == 1).then(|| Arc::clone(&all[0].core))
+            let console = console_state().ok();
+            let logged_in = console.as_ref().is_some_and(|c| c.user.is_some());
+            let sid = console_user_sid(dev, active_console_session(), logged_in);
+            accounts.host_core(sid.as_deref())
         })
     };
     let mut supervisor = Supervisor::new(
@@ -457,19 +464,18 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         let timeout = deadline.map_or(WATCHDOG, |d| d.saturating_duration_since(Instant::now()));
         match watcher.next_event(timeout) {
             Ok(Some(SessionEvent::ConsoleChanged(state))) => {
-                every_hub(&|h| h.set_console_session(state.session_id));
+                let user = console_user_sid(opts.console, state.session_id, state.user.is_some());
+                every_hub(&|h| {
+                    h.set_console_session(state.session_id);
+                    h.set_console_user(user.clone());
+                });
                 term_env.set_session(state.session_id);
                 if let Some(s) = state.session_id {
                     pipes.ensure(s);
                 }
                 supervisor.console_changed(state.session_id, state.user.is_some());
             }
-            Ok(Some(SessionEvent::DesktopSwitched(d))) => {
-                for a in accounts.all() {
-                    a.hub.set_desktop(d);
-                    a.core.host().set_desktop(d);
-                }
-            }
+            Ok(Some(SessionEvent::DesktopSwitched(d))) => every_hub(&|h| h.set_desktop(d)),
             Ok(Some(SessionEvent::NetworkChanged)) => {
                 cached.invalidate();
                 last_net = interfaces.list().ok();

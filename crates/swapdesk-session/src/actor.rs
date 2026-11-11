@@ -34,6 +34,15 @@ use crate::viewer::{GrantInfo, OpenError, ViewerEvent};
 
 /// How often the state machine looks at its timers.
 const TICK: Duration = Duration::from_millis(250);
+/// How long a host session waits for its account to come back to the console before it ends with `ACCOUNT_AWAY`
+/// (ACCOUNTS.md 5.1, GUESS).
+pub const ACCOUNT_AWAY_LIMIT: Duration = Duration::from_secs(60);
+
+/// Whether a host session is paused on `desktop`: always while its account is away from the console; on a secure
+/// desktop unless it holds `UNATTENDED`.
+fn paused_for(desktop: Desktop, granted: PermissionSet) -> bool {
+    desktop == Desktop::AccountAway || (desktop != Desktop::Default && !granted.contains(PermissionSet::UNATTENDED))
+}
 /// How long a closing session waits to hand its last message (`Bye`, `Error`) to the peer.
 const SAY_LIMIT: Duration = Duration::from_millis(500);
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
@@ -166,6 +175,8 @@ pub(crate) struct Actor {
     reported: PermissionSet,
     /// The stored grants last told to the peer with `StoredGrants` (`None`: nothing told yet).
     stored_told: Option<PermissionSet>,
+    /// When the session's account left the console (host side; `None` while it is there).
+    away_since: Option<Instant>,
     /// The desktop the state machine last applied (host side).
     applied_desktop: Option<Desktop>,
     /// Messages that must arrive, waiting for room in the outgoing queue.
@@ -251,6 +262,7 @@ impl Actor {
             ping_nonce: 0,
             reported: PermissionSet::EMPTY,
             stored_told: None,
+            away_since: None,
             applied_desktop: None,
             pending: VecDeque::new(),
             stalled_since: None,
@@ -440,6 +452,9 @@ impl Actor {
         if let Some(f) = self.flush_pending() {
             return Some(f);
         }
+        if self.away_since.is_some_and(|t| at.saturating_duration_since(t) >= ACCOUNT_AWAY_LIMIT) {
+            return Some(Finish::local_bye(ErrorCode::AccountAway));
+        }
         match self.phase {
             Phase::Active => {
                 let tick = self.liveness.tick(at);
@@ -588,7 +603,7 @@ impl Actor {
             }
         };
         let info = service.ui.start_info();
-        let paused = info.desktop != Desktop::Default && !committed.granted.contains(PermissionSet::UNATTENDED);
+        let paused = paused_for(info.desktop, committed.granted);
         self.ctx.inner.state.send_replace(DesktopState { desktop: info.desktop, paused });
         // What the viewer is about to be told; a change after the commit is reported right behind it.
         self.reported = committed.granted;
@@ -719,7 +734,7 @@ impl Actor {
 
     fn on_grants_changed(&mut self, old: PermissionSet, new: PermissionSet) -> Option<Finish> {
         let desktop = self.ctx.desktop_state().desktop;
-        let paused = desktop != Desktop::Default && !new.contains(PermissionSet::UNATTENDED);
+        let paused = paused_for(desktop, new);
         if let Some(f) = self.emit(PermissionsChanged { granted: new }, true) {
             return Some(f);
         }
@@ -744,7 +759,13 @@ impl Actor {
     }
 
     fn on_desktop(&mut self, desktop: Desktop) -> Option<Finish> {
-        let paused = desktop != Desktop::Default && !self.ctx.granted().contains(PermissionSet::UNATTENDED);
+        let paused = paused_for(desktop, self.ctx.granted());
+        // ACCOUNTS.md 5.1: another account took the console. The session waits for it to come back, then ends.
+        if desktop == Desktop::AccountAway {
+            self.away_since.get_or_insert_with(now);
+        } else {
+            self.away_since = None;
+        }
         self.ctx.inner.state.send_replace(DesktopState { desktop, paused });
         if let Some(f) = self.emit(HostState { desktop, paused }, true) {
             return Some(f);

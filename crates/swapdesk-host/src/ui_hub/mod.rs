@@ -151,6 +151,8 @@ pub(crate) struct Hub {
     rt: OnceLock<Handle>,
     /// The SID of the account this hub serves, on a machine of several (ACCOUNTS.md 7.1); unset for the only one.
     account: OnceLock<String>,
+    /// The SID of the user at the console (`None`: the sign-in screen), for the console rule of ACCOUNTS.md 5.1.
+    console_user: Mutex<Option<String>>,
     settings: Mutex<MachineSettings>,
     conns: Mutex<Vec<Arc<Conn>>>,
     next_conn: AtomicU64,
@@ -190,6 +192,30 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
+    /// Who owns the console, seen from this account (ACCOUNTS.md 5.1).
+    pub fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        use swapdesk_session::ConsoleOwner;
+        let Some(account) = self.account.get() else { return ConsoleOwner::This };
+        match lock(&self.console_user).as_deref() {
+            None => ConsoleOwner::Nobody,
+            Some(u) if u.eq_ignore_ascii_case(account) => ConsoleOwner::This,
+            Some(_) => ConsoleOwner::Other,
+        }
+    }
+
+    /// Tells this account's sessions the desktop they are on: the console's, or `AccountAway` while another account
+    /// owns it.
+    pub fn push_desktop(&self) {
+        let desktop = if self.console_owner() == swapdesk_session::ConsoleOwner::Other {
+            Desktop::AccountAway
+        } else {
+            *lock(&self.desktop)
+        };
+        if let Some(core) = self.core() {
+            core.host().set_desktop(desktop);
+        }
+    }
+
     /// Whether this account receives connections: with a pairing, or while its pairing mode is open (ACCOUNTS.md 6).
     /// Its endpoint listens and its record is announced exactly then.
     pub fn wants_to_receive(&self) -> bool {
@@ -299,6 +325,7 @@ impl UiHub {
             core: Mutex::new(Weak::new()),
             rt: OnceLock::new(),
             account: OnceLock::new(),
+            console_user: Mutex::new(None),
             settings: Mutex::new(settings),
             conns: Mutex::new(Vec::new()),
             next_conn: AtomicU64::new(1),
@@ -387,8 +414,23 @@ impl UiHub {
     }
 
     /// The host's desktop state (a lock or a UAC prompt is not "somebody present", PROTOCOL.md 6.2).
+    /// The desktop of the console changed: kept for the interface, and told to this account's sessions, which see
+    /// `AccountAway` instead while another account owns the console (ACCOUNTS.md 5.1).
     pub fn set_desktop(&self, desktop: Desktop) {
         *lock(&self.hub.desktop) = desktop;
+        self.hub.push_desktop();
+    }
+
+    /// Whether this hub serves the machine's only account (no account SID was set: a machine of one account, the Mac).
+    pub fn single_account(&self) -> bool {
+        self.hub.account.get().is_none()
+    }
+
+    /// The user at the console changed (`None`: the sign-in screen). Sessions of this account pause while another
+    /// account owns the console and end after a minute; they go on when it comes back.
+    pub fn set_console_user(&self, sid: Option<String>) {
+        *lock(&self.hub.console_user) = sid;
+        self.hub.push_desktop();
     }
 
     /// The network changed: the session endpoint follows the approved addresses, the presence re-reads the

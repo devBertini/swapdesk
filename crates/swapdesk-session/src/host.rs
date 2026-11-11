@@ -190,11 +190,28 @@ pub enum HostEvent {
     },
 }
 
+/// Who is at the console, seen from one account's core (ACCOUNTS.md 5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleOwner {
+    /// This core's account (or the machine has one account only).
+    This,
+    /// Nobody: the sign-in screen.
+    Nobody,
+    /// Another account of the machine.
+    Other,
+}
+
 /// The host's user and desktop, as the session layer needs them. The service implements it over the session
 /// watcher and the UI connection; tests script it.
 pub trait HostUi: Send + Sync + 'static {
     /// "Someone at the host" (PROTOCOL.md 6.2): a UI is connected from the console session and it is unlocked.
     fn somebody_present(&self) -> bool;
+
+    /// Who owns the console: a session of this account is admitted only while it is this account, or nobody for an
+    /// entry without a prompt (ACCOUNTS.md 5.1). A machine of one account always says `This`.
+    fn console_owner(&self) -> ConsoleOwner {
+        ConsoleOwner::This
+    }
 
     /// Shows the request. The answer comes through the channel; dropping the sender is a refusal.
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer>;
@@ -557,6 +574,13 @@ impl HostInner {
     pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
         let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
         let stored_grants = stored.grants_here;
+
+        // ACCOUNTS.md 5.1: another account at the console hosts nothing for this one. The code is ACCOUNT_AWAY; a peer
+        // of 1.0 reads it as NOBODY_PRESENT (the send path maps it). Nobody at the console admits only an entry
+        // without a prompt (the prompt below finds nobody present).
+        if self.ui.console_owner() == ConsoleOwner::Other {
+            return Decision::Refuse(ErrorCode::AccountAway);
+        }
 
         // A resume: the token is checked, and a token whose old connection is not yet known lost waits for it.
         // (The host being busy with another session is decided at the commit, after the old connection is gone.)

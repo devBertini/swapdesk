@@ -105,6 +105,10 @@ impl HostUi for HubHostUi {
         !hub.console_conns().is_empty() && *lock(&hub.desktop) == Desktop::Default
     }
 
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        self.hub.console_owner()
+    }
+
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
         let hub = &self.hub;
         let (tx, rx) = oneshot::channel();

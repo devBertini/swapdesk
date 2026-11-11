@@ -1611,3 +1611,90 @@ fn two_unattended_entries_at_the_sign_in_screen_at_once_admit_exactly_one() {
         assert!(again.is_ok(), "the other account hosts now");
     });
 }
+
+// ---------- ACCOUNTS.md 5.1: an account hosts only its own console ----------
+
+fn set_owner(ui: &TestUi, owner: swapdesk_session::ConsoleOwner) {
+    *lock(&ui.owner) = owner;
+}
+
+/// Another account at the console: a request is refused, `ACCOUNT_AWAY` to a viewer of minor 1 and
+/// `NOBODY_PRESENT` to one of 1.0, whatever it holds.
+#[test]
+fn a_request_to_an_account_not_at_the_console_is_refused_account_away_or_nobody_present_by_minor() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Other);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let asks = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        let (s, _t) = mem.open(&who, viewer_config(asks)).await;
+        assert_refused(s, ErrorCode::AccountAway);
+        let (s, _t) = mem.open(&who, viewer_config_1_0(asks)).await;
+        assert_refused(s, ErrorCode::NobodyPresent);
+        assert_eq!(ui.prompt_count(), 0, "nobody was asked");
+    });
+}
+
+/// The sign-in screen belongs to no account: a device holding `UNATTENDED` enters, a prompted request finds nobody.
+#[test]
+fn at_the_sign_in_screen_an_unattended_device_of_any_account_enters() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.set_present(false);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Nobody);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, _t) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        assert_eq!(s.expect("enters").grant().mode, GrantMode::Unattended);
+    });
+}
+
+#[test]
+fn a_prompted_request_at_the_sign_in_screen_is_nobody_present() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.set_present(false);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Nobody);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (s, _t) = mem.open(&who, viewer_config(PermissionSet::CONTROL)).await;
+        assert_refused(s, ErrorCode::NobodyPresent);
+    });
+}
+
+/// During a session another account takes the console: the session pauses at once (`AccountAway` to minor 1,
+/// `Locked` paused to 1.0), goes on if the account comes back within the minute, and ends with `ACCOUNT_AWAY`
+/// otherwise.
+#[test]
+fn when_another_account_takes_the_console_the_session_pauses_then_ends() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, task) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        let mut s = s.unwrap();
+        // It leaves and comes back within the minute: the session goes on.
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "paused", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::AccountAway, paused: true })
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        mem.host.set_desktop(Desktop::Default);
+        wait_event(&mut s, Duration::from_secs(1), "resumed", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Default, paused: false })
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        assert!(s.ctx().ended().is_none(), "the minute counts from the last departure");
+        // It leaves for good: the session ends after the minute.
+        mem.host.set_desktop(Desktop::AccountAway);
+        let end = tokio::time::timeout(Duration::from_secs(70), task).await.expect("ends").unwrap();
+        assert_eq!(end.code, ErrorCode::AccountAway);
+    });
+}

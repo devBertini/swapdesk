@@ -206,6 +206,24 @@ impl Accounts {
         lock(&self.live).clone()
     }
 
+    /// The core the helpers attach to (ACCOUNTS.md 5.1): the account of the user at the console; at the sign-in screen
+    /// (`console_sid` `None`), the account that hosts a session now; with one account only, that one. `None`: no
+    /// account may host now, and no helper is attached.
+    pub fn host_core(&self, console_sid: Option<&str>) -> Option<Arc<ServiceCore>> {
+        let all = self.all();
+        if let Some(sid) = console_sid {
+            if let Some(a) = all.iter().find(|a| a.seat.sid.eq_ignore_ascii_case(sid)) {
+                return Some(Arc::clone(&a.core));
+            }
+            // A user with no account at the console: another account's helpers would show that user's desktop.
+            return (all.len() == 1 && all[0].hub.single_account()).then(|| Arc::clone(&all[0].core));
+        }
+        if let Some(a) = all.iter().find(|a| !a.core.host().sessions().is_empty()) {
+            return Some(Arc::clone(&a.core));
+        }
+        (all.len() == 1).then(|| Arc::clone(&all[0].core))
+    }
+
     /// Builds every account of the index, so an account with pairings listens from the start, logged in or not.
     /// Returns the SIDs that could not be built, with why.
     pub fn start_known(&self) -> Vec<(String, String)> {

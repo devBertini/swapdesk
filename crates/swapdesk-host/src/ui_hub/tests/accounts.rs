@@ -224,3 +224,19 @@ fn a_held_port_moves_the_account_to_the_next_free_slot_and_names_the_holder() {
     assert_eq!(b.seat.slot, 2);
     drop(holder);
 }
+
+/// ACCOUNTS.md 5.1: the helpers follow the core of the account at the console; at the sign-in screen, the one that
+/// hosts; nobody's helpers serve a user who is not an account of the machine.
+#[test]
+fn the_helpers_follow_the_console_owners_core() {
+    let base = free_slots();
+    let (accounts, _built) = machine(base);
+    let (a, b) = (accounts.account(A).unwrap(), accounts.account(B).unwrap());
+    a.hub.set_account(A);
+    b.hub.set_account(B);
+    let core_of = |sid: Option<&str>| accounts.host_core(sid).map(|c| Arc::as_ptr(&c));
+    assert_eq!(core_of(Some(A)), Some(Arc::as_ptr(&a.core)));
+    assert_eq!(core_of(Some(B)), Some(Arc::as_ptr(&b.core)));
+    assert_eq!(core_of(Some("S-1-5-21-9-9-9-1500")), None, "a user who has no account here: no helpers");
+    assert_eq!(core_of(None), None, "the sign-in screen with nobody hosting: no helpers yet");
+}

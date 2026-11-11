@@ -86,6 +86,8 @@ pub struct TestUi {
     pub event_delay: Mutex<Option<Duration>>,
     /// How each consent card was closed.
     pub consents_closed: Mutex<Vec<PromptEnd>>,
+    /// Who owns the console (ACCOUNTS.md 5.1); `This` unless a test says otherwise.
+    pub owner: Mutex<swapdesk_session::ConsoleOwner>,
 }
 
 impl TestUi {
@@ -106,6 +108,7 @@ impl TestUi {
             panic_on_prompt: AtomicBool::new(false),
             event_delay: Mutex::new(None),
             consents_closed: Mutex::new(Vec::new()),
+            owner: Mutex::new(swapdesk_session::ConsoleOwner::This),
         })
     }
 
@@ -148,6 +151,10 @@ impl TestUi {
 impl HostUi for TestUi {
     fn somebody_present(&self) -> bool {
         self.present.load(Ordering::SeqCst)
+    }
+
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        *lock(&self.owner)
     }
 
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {

@@ -34,8 +34,8 @@ pub use caps::{CapTracker, CapVerdict, Caps};
 pub use ctx::{DesktopState, EndKind, SessionCtx, SessionEnd};
 pub use forward::{ForwardHandler, Forwarded, VIDEO_CONTROL_TYPES};
 pub use host::{
-    ConsentRequest, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest, SessionInfo,
-    StartInfo,
+    ConsentRequest, ConsoleOwner, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest,
+    SessionInfo, StartInfo,
 };
 pub use link::{CONTROL_PRIORITY, ControlIo, Inbound, LinkError, Outbox, SendError, memory_pair};
 pub use liveness::{Liveness, LivenessConfig, Verdict};
