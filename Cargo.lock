@@ -1373,6 +1373,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "swapdesk-update"
+version = "1.0.0"
+dependencies = [
+ "proptest",
+ "ring",
+]
+
+[[package]]
 name = "swapdesk-video"
 version = "1.0.0"
 dependencies = [

@@ -815,6 +815,8 @@ All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` a
 | `swapdesk-audio-mac` | lib | `AudioSink` | yes | 23 |
 | `swapdesk-sys-mac` | lib | SMAppService, the LoginWindow plist writer, Unix sockets and peer checks (`libc`), `SessionWatcher`, `ActionRunner`, the `openpty` `PtySpawner`, `TraceSink` | yes | 24 |
 | `swapdesk-daemon` / `swapdesk-agent` | bin | macOS processes of C2.2 | no | 24 |
+| `swapdesk-update` | lib (later also the bins `swapdesk-pack` and `swapdesk-release-sign`, never shipped) | the update core of D53 (`UPDATES.md` 3, 4, 13): `Version`, the release manifest and its Ed25519 signature over `"swapdesk-update-manifest
+"` + the manifest (keys compiled in `keys::RELEASE_KEYS`, empty until the key ceremony of slice U2), the `.sdpkg` package read only after its size and SHA-256 match, `policy::offer` (stable only, never equal or lower, not a rolled-back version); depends on `ring` only, no OS call, `unsafe` forbidden | no | 1.1 (D53·U1) |
 
 ## Lane map (M1 to M4)
 

@@ -1,0 +1,17 @@
+[package]
+name = "swapdesk-update"
+description = "The update core of Swapdesk (docs/UPDATES.md): versions, the Ed25519-signed release manifest, the .sdpkg package and the rule of what is offered. No OS call, no network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ring = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
