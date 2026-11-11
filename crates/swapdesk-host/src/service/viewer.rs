@@ -295,8 +295,6 @@ impl CtxCell {
 
 pub(crate) struct Inner {
     session_id: u64,
-    /// How the host let this session in.
-    mode: swapdesk_proto::GrantMode,
     cell: Arc<CtxCell>,
     device: DeviceId,
     input: mpsc::Sender<Vec<InputEvent>>,
@@ -329,11 +327,42 @@ impl Drop for Inner {
 
 /// The answer to this session's `Elevate` (ACCOUNTS.md 9.3), filled by the event pump: the host's
 /// `PermissionsChanged` holding `UNATTENDED`, or its `Error` about 0x000C.
-#[derive(Default)]
 pub(crate) struct ElevationWait {
     waiting: Mutex<Option<tokio::sync::oneshot::Sender<Result<(), ErrorCode>>>>,
     /// D56: this machine confirmed "Elevar controle" for a session a host of minor 0 let in with `UNATTENDED`.
     released: AtomicBool,
+    /// How the host let the session in, as of its last entry (a reconnect that enters again changes it; a resume
+    /// keeps it).
+    mode: Mutex<swapdesk_proto::GrantMode>,
+    /// What the host stored for this device, as it last told (`StoredGrants`); `None` before it did.
+    peer_stored: Mutex<Option<PermissionSet>>,
+}
+
+impl ElevationWait {
+    fn new(mode: swapdesk_proto::GrantMode) -> Self {
+        Self {
+            waiting: Mutex::new(None),
+            released: AtomicBool::new(false),
+            mode: Mutex::new(mode),
+            peer_stored: Mutex::new(None),
+        }
+    }
+
+    fn mode(&self) -> swapdesk_proto::GrantMode {
+        *lock(&self.mode)
+    }
+
+    /// A new entry after a lost link (not a resume): its mode, and nothing of the last entry's confirmation.
+    fn entered_again(&self, mode: swapdesk_proto::GrantMode) {
+        if mode != swapdesk_proto::GrantMode::Resumed {
+            *lock(&self.mode) = mode;
+            self.released.store(false, Ordering::Release);
+        }
+    }
+
+    fn set_peer_stored(&self, grants: PermissionSet) {
+        *lock(&self.peer_stored) = Some(grants);
+    }
 }
 
 impl ElevationWait {
@@ -345,6 +374,10 @@ impl ElevationWait {
 
     fn released(&self) -> bool {
         self.released.load(Ordering::Acquire)
+    }
+
+    fn peer_stored(&self) -> Option<PermissionSet> {
+        *lock(&self.peer_stored)
     }
 
     fn answer(&self, result: Result<(), ErrorCode>) {
@@ -375,7 +408,7 @@ impl ViewerHandle {
 
     /// How the host let this session in: after a question to its user, without one, or as a swap.
     pub fn mode(&self) -> swapdesk_proto::GrantMode {
-        self.inner.mode
+        self.inner.elevation.mode()
     }
 
     /// What the host lets this session do now.
@@ -469,7 +502,7 @@ impl ViewerHandle {
 
     /// Whether the session can be elevated: 0 no, 1 yes ("Elevar controle"), 2 elevated (ACCOUNTS.md 9.3, D56).
     pub fn elevation(&self) -> u8 {
-        elevation_of(&self.inner.cell.get(), self.inner.mode, self.inner.elevation.released())
+        elevation_of(&self.inner.cell.get(), &self.inner.elevation)
     }
 
     /// "Elevar controle" (ACCOUNTS.md 9.3), after the confirmation on this machine: sends `Elevate` and waits for the
@@ -482,7 +515,7 @@ impl ViewerHandle {
         // sent (a 1.0 host knows no `Elevate`).
         if held_by_d56(&ctx, self.inner.elevation.released()) {
             self.inner.elevation.released.store(true, Ordering::Release);
-            let state = active(&ctx, self.inner.since_ms, self.inner.mode, true);
+            let state = active(&ctx, self.inner.since_ms, &self.inner.elevation);
             let change = StateChange { session_id: self.inner.session_id, device: self.inner.device, state, end: None };
             let _ = self.inner.out.send(ViewerOut::State(change)).await;
             return Ok(());
@@ -493,7 +526,7 @@ impl ViewerHandle {
         if ctx.peer_minor() < 1 {
             return Err(ErrorCode::UnsupportedVersion);
         }
-        if self.inner.mode != swapdesk_proto::GrantMode::Unattended {
+        if self.inner.elevation.mode() != swapdesk_proto::GrantMode::Unattended {
             return Err(ErrorCode::NotPermitted);
         }
         let rx = self.inner.elevation.arm();
@@ -731,27 +764,29 @@ struct Drive {
     redial: Arc<Redial>,
     terms: Arc<ViewerTerms>,
     elevation: Arc<ElevationWait>,
-    /// How the host let this session in (for whether it can be elevated).
-    mode: swapdesk_proto::GrantMode,
 }
 
-fn active(ctx: &SessionCtx, since_ms: u64, mode: swapdesk_proto::GrantMode, released: bool) -> SessionState {
+fn active(ctx: &SessionCtx, since_ms: u64, w: &ElevationWait) -> SessionState {
     SessionState::Active {
         since_ms,
         role: swapdesk_ipc::Role::Viewer,
         granted: ctx.granted().bits(),
-        elevation: elevation_of(ctx, mode, released),
+        elevation: elevation_of(ctx, w),
     }
 }
 
 /// ACCOUNTS.md 9.3: 2 elevated (the session holds `UNATTENDED`), 1 available (it entered without a prompt toward a
 /// host of minor 1 or newer, or it is held by D56), 0 not available.
-pub(crate) fn elevation_of(ctx: &SessionCtx, mode: swapdesk_proto::GrantMode, released: bool) -> u8 {
-    if held_by_d56(ctx, released) {
+pub(crate) fn elevation_of(ctx: &SessionCtx, w: &ElevationWait) -> u8 {
+    if held_by_d56(ctx, w.released()) {
         1
     } else if ctx.granted().contains(PermissionSet::UNATTENDED) {
         2
-    } else if mode == swapdesk_proto::GrantMode::Unattended && ctx.peer_minor() >= 1 {
+    } else if w.mode() == swapdesk_proto::GrantMode::Unattended
+        && ctx.peer_minor() >= 1
+        // The host no longer stores `UNATTENDED` for this device: its `Elevate` would be refused (review of S6, 7).
+        && w.peer_stored().is_none_or(|p| p.contains(PermissionSet::UNATTENDED))
+    {
         1
     } else {
         0
@@ -803,19 +838,20 @@ impl Drive {
                     if granted.contains(PermissionSet::UNATTENDED) {
                         self.elevation.answer(Ok(()));
                     }
-                    Some(active(&ctx, self.since_ms, self.mode, self.elevation.released()))
+                    Some(active(&ctx, self.since_ms, &self.elevation))
                 }
-                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, self.mode, self.elevation.released())),
+                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, &self.elevation)),
                 ViewerEvent::HostState { desktop, paused } => Some(if paused {
                     SessionState::Paused { desktop }
                 } else {
-                    active(&ctx, self.since_ms, self.mode, self.elevation.released())
+                    active(&ctx, self.since_ms, &self.elevation)
                 }),
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
                 ViewerEvent::PromptPending { .. } => None,
                 ViewerEvent::PeerGrants(grants) => {
+                    self.elevation.set_peer_stored(grants);
                     let _ = self.out.send(ViewerOut::PeerGrants(grants)).await;
-                    None
+                    Some(active(&ctx, self.since_ms, &self.elevation))
                 }
                 ViewerEvent::Message(Ctl::DisplayList(list)) => {
                     let ids: Vec<u16> = list.displays.iter().map(|d| d.id).collect();
@@ -871,9 +907,10 @@ impl Drive {
         match result {
             Either::Left(Ok(session)) => {
                 let ctx = session.ctx().clone();
+                self.elevation.entered_again(session.grant().mode);
                 self.cell.replace(ctx.clone());
                 self.start_datagrams(&ctx);
-                self.emit(active(&ctx, self.since_ms, self.mode, self.elevation.released()), None).await;
+                self.emit(active(&ctx, self.since_ms, &self.elevation), None).await;
                 Some(session)
             }
             Either::Left(Err(why)) => {
@@ -933,7 +970,6 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let _ = registry.register(clip.clone());
     let _ = registry.register(actions.clone());
     let terms = ViewerTerms::new(out_tx.clone(), rt.clone());
-    let elevation = Arc::new(ElevationWait::default());
     let _ = registry.register(terms.clone());
     let _ = registry.register(files.channel());
     cfg.registry = registry;
@@ -948,6 +984,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     *lock(&session) = Some(ctx.clone());
     let session_id = session_handle.grant().session_id;
     let mode = session_handle.grant().mode;
+    let elevation = Arc::new(ElevationWait::new(mode));
     clip_session.store(session_id, std::sync::atomic::Ordering::Release);
     files.set_session(session_id);
     let since_ms = wall.unix_ms();
@@ -965,9 +1002,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         redial: Arc::new(Redial { endpoint: endpoint.clone(), identity, addr, expected, cfg: redial_cfg }),
         terms: Arc::clone(&terms),
         elevation: Arc::clone(&elevation),
-        mode,
     };
-    drive.emit(active(&ctx, since_ms, mode, false), None).await;
+    drive.emit(active(&ctx, since_ms, &elevation), None).await;
 
     // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
     // the queue is full) the frame is dropped, and so is every P-frame after it until a keyframe, which is asked for.
@@ -1117,7 +1153,6 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         out: out_tx.clone(),
         since_ms,
         session_id,
-        mode,
         cell,
         device,
         input: input_tx,

@@ -664,3 +664,97 @@ fn a_ui_outside_the_console_neither_hears_nor_answers_nor_asks_for_a_swap_that_m
     drop(console);
     d.finish();
 }
+
+/// ACCOUNTS.md 5.6 (review of S6, finding 8): the elevation kills the resume token, so after a lost link the viewer
+/// enters again without a prompt, unelevated, and the button is offered again.
+#[test]
+fn a_reconnect_after_elevate_enters_again_unelevated() {
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    let relay = Relay::start(host.session_addr());
+    viewer.presence.set(vec![PresencePeer {
+        device_id: host.id(),
+        name: "host-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::LOCALHOST],
+        session_port: relay.port,
+        pair_port: 0,
+        proto_minor: 1,
+    }]);
+    host.hub.set_console_session(Some(1));
+    viewer.hub.set_console_session(Some(1));
+    let mut viewer_ui = viewer.client(ConnInfo { can_elevate: true, ..info(false) });
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let s = active_as(&mut viewer_ui, Role::Viewer, &[entry]);
+    let elevation_of = |ui: &mut Client| {
+        ui.notify("the session's state", |n| match n {
+            Notify::Session { session_id, state: SessionState::Active { elevation, .. }, .. } if *session_id == s => {
+                Some(*elevation)
+            }
+            _ => None,
+        })
+    };
+    let ReplyBody::ElevationTicket { ticket, .. } = viewer_ui
+        .call(UiOp::ElevationBegin { action: swapdesk_ipc::ElevAction::ElevateSession { session_id: s } })
+        .expect("a ticket")
+    else {
+        panic!()
+    };
+    viewer.hub.confirm_elevation(&ticket, &ConnInfo { admin: true, can_elevate: true, ..info(false) }, true).unwrap();
+    assert!(viewer_ui.call(UiOp::ElevateSession { session_id: s }).is_ok());
+    assert!(host.core.host().sessions()[0].granted.contains(PermissionSet::UNATTENDED));
+
+    // The Wi-Fi drops, then comes back: no resume (the token died with the elevation), a new entry without a prompt.
+    relay.cut(true);
+    viewer_ui.notify("Reconectando", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
+            if *session_id == s && *attempt >= 1 =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    viewer_ui.clear();
+    relay.cut(false);
+    assert_eq!(elevation_of(&mut viewer_ui), 1, "back, unelevated, the button offered again");
+    wait_for("the host's new session", || {
+        let hosted = host.core.host().sessions();
+        (hosted.len() == 1 && !hosted[0].granted.contains(PermissionSet::UNATTENDED)).then_some(())
+    });
+    drop(viewer_ui);
+    drop(relay);
+    viewer.finish();
+    host.finish();
+}
+
+/// Review of S6, finding 7: once the host no longer stores `UNATTENDED` for this device, the session offers no
+/// elevation (its `Elevate` would be refused).
+#[test]
+fn the_button_goes_when_the_host_revokes_unattended() {
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees_minor(&host, false, 1);
+    host.hub.set_console_session(Some(1));
+    let mut host_ui = host.client(info(true));
+    let mut viewer_ui = viewer.client(info(false));
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let s = active_as(&mut viewer_ui, Role::Viewer, &[entry]);
+    assert_eq!(viewer.core.viewer(s).unwrap().elevation(), 1);
+    let revoke = UiOp::SetGrants { device_id: viewer.hex(), grants: PermissionSet::CONTROL.bits() };
+    assert!(host_ui.call(revoke).is_ok());
+    wait_for("the button to go", || (viewer.core.viewer(s)?.elevation() == 0).then_some(()));
+    drop((host_ui, viewer_ui));
+    viewer.finish();
+    host.finish();
+}
