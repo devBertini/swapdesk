@@ -1795,3 +1795,33 @@ fn elevate_adds_the_administrator_terminal_only_when_it_was_requested() {
         .await;
     });
 }
+
+/// Review of S6, finding 1: `Elevate` adds the two machine-level bits only; what the host's person took from the
+/// session (here the terminal, in the banner) is not given back, and without the terminal no administrator terminal
+/// comes with the elevation.
+#[test]
+fn elevate_never_gives_back_what_the_host_took_from_the_session() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        assert!(s.grant().granted.contains(PermissionSet::TERMINAL));
+        assert!(mem.host.set_session_grants(s.grant().session_id, PermissionSet::CONTROL));
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "narrowed",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::CONTROL),
+        )
+        .await;
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "elevated without the terminal", |e| {
+            matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::CONTROL | PermissionSet::UNATTENDED)
+        })
+        .await;
+    });
+}

@@ -108,6 +108,10 @@ pub enum ControlId {
     TbFiles,
     TbChat,
     TbSwap,
+    /// "Elevar controle" on the session bar (ACCOUNTS.md 9).
+    TbElevate,
+    /// "Elevar controle" on the card over a paused picture.
+    PausedElevate,
     TbDisconnect,
     DrawerTab(DrawerTab),
     DrawerClose,
@@ -1045,7 +1049,15 @@ impl UiState {
             s.button(ControlId::ReconnectDisconnect, self.name_of(MsgKey::Disconnect));
             return s.v;
         }
-        if let Some(SwapView { phase: SwapPhase::Declined(_), .. }) = &self.swap {
+        // The card over the picture: as the painter picks it (a swap wait, else a pause, else a declined swap).
+        let paused = if self.swap_wait().is_none() { self.paused_card() } else { None };
+        if let Some((body, elevate)) = &paused {
+            s.text(UiRole::Text, body.clone());
+            if *elevate {
+                s.button(ControlId::PausedElevate, self.name_of(MsgKey::ElevateButton));
+            }
+        }
+        if let (None, Some(SwapView { phase: SwapPhase::Declined(_), .. })) = (&paused, &self.swap) {
             let (title, body) = self.swap_declined_texts();
             s.text(UiRole::Heading, title);
             s.text(UiRole::Text, body);
@@ -1102,6 +1114,9 @@ impl UiState {
             {
                 c.disabled = true;
             }
+        }
+        if self.can_elevate_session() {
+            s.button(ControlId::TbElevate, self.name_of(MsgKey::ElevateButton));
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
         // What each button does (the hint under it while the pointer is on it) is its description, where that says
@@ -1239,13 +1254,20 @@ impl UiState {
         if self.swap_requested() && self.swap.as_ref().is_some_and(|w| w.session_id == h.id) {
             return (self.tm(&Msg::new(MsgKey::SwapWaitingTitle).with(peer)), String::new());
         }
-        let (controls, since) = match &h.state {
-            SessionState::Active { since_ms, granted, .. } => (granted.has(Permission::Control), *since_ms),
-            _ => (true, self.clock.now_ms),
+        let (controls, since, elevated) = match &h.state {
+            SessionState::Active { since_ms, granted, .. } => {
+                (granted.has(Permission::Control), *since_ms, granted.has(Permission::Unattended))
+            }
+            _ => (true, self.clock.now_ms, false),
         };
         let key = if controls { MsgKey::BannerControls } else { MsgKey::BannerViews };
         let who = self.tm(&Msg::new(key).with(peer));
         let secs = (self.clock.now_ms.saturating_sub(since) / 1000) as u32;
+        // ACCOUNTS.md 9.2: the host's person sees that the session was elevated (D55: "Controle elevado"), in place
+        // of how long ago it started, so the line keeps its length.
+        if elevated {
+            return (who, format!("· {}", self.t(MsgKey::AuditElevated)));
+        }
         (who, self.tm(&Msg::new(MsgKey::BannerSince).with(format::short_minutes(self.lang, secs))))
     }
 
@@ -1552,6 +1574,11 @@ impl UiState {
                     a.commands.push(Command::SendKeys { session_id, keys: SpecialKeys::CtrlAltDel });
                 }
                 a.changed = Changed::VIEWER;
+            }
+            ControlId::TbElevate | ControlId::PausedElevate => {
+                if let Some(session_id) = self.viewer_session().filter(|_| self.can_elevate_session()).map(|v| v.id) {
+                    a.commands.push(Command::ElevateSession { session_id });
+                }
             }
             ControlId::TbTerminal => self.toggle_drawer(DrawerTab::Terminal, &mut a),
             ControlId::TbFiles => self.toggle_drawer(DrawerTab::Files, &mut a),

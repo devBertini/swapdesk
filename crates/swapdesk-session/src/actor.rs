@@ -714,18 +714,35 @@ impl Actor {
             return self.reply(refuse(ErrorCode::NotPermitted));
         };
         let (service, device) = (Arc::clone(service), *device);
-        let add = match service.elevation_for(&self.ctx, &device) {
-            Ok(add) => add,
-            Err(code) => return self.reply(refuse(code)),
-        };
-        let current = self.ctx.granted();
-        if current.contains(add) {
-            // Already elevated: the same answer again.
-            return self.emit(PermissionsChanged { granted: current }, true);
-        }
+        // Decided inside the grant change, from the store as it is then (review of S6, finding 3).
+        let mut outcome = Err(ErrorCode::NotPermitted);
+        let ctx = self.ctx.clone();
         self.elevating = true;
-        self.ctx.modify_granted(|g| g | add);
-        None
+        self.ctx.modify_granted(|current| match service.elevated_grant(&ctx, &device, current) {
+            Ok(new) => {
+                outcome = Ok(new != current);
+                new
+            }
+            Err(code) => {
+                outcome = Err(code);
+                current
+            }
+        });
+        match outcome {
+            Ok(true) => {
+                service.forget_resume(self.ctx.session_id());
+                None
+            }
+            // Already elevated: the same answer again.
+            Ok(false) => {
+                self.elevating = false;
+                self.emit(PermissionsChanged { granted: self.ctx.granted() }, true)
+            }
+            Err(code) => {
+                self.elevating = false;
+                self.reply(refuse(code))
+            }
+        }
     }
 
     fn host_active(&mut self, msg: Message) -> Option<Finish> {

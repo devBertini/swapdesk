@@ -500,3 +500,47 @@ fn the_consent_step_follows_run_consent() {
     assert_eq!(consent_need(&facts(true, Some(SID_A), None, false)), ConsentNeed::Refuse(ErrorCode::NobodyPresent));
     assert_eq!(consent_need(&facts(true, Some(SID_A), Some(SID_B), true)), ConsentNeed::NotNeeded);
 }
+
+/// Review of S4, L10 (ACCOUNTS.md 5.1): while the session's account is away from the console, another account is
+/// at the keyboard: not even an elevated session opens the administrator terminal. Back at the console, it does.
+#[test]
+fn the_administrator_terminal_never_opens_while_the_account_is_away() {
+    let rig =
+        Rig::build(TERM.union(PermissionSet::UNATTENDED).union(PermissionSet::ADMIN_TERMINAL), Some(SID_B), true, true);
+    rig.host
+        .trust
+        .update(|s| {
+            s.devices
+                .iter_mut()
+                .for_each(|d| d.unattended_granted_by = Some(UserRef { id: SID_A.into(), name: "someone".into() }))
+        })
+        .expect("store");
+    let (handle, _msgs) = rig
+        .viewer
+        .core
+        .connect_asking(
+            rig.host.addr(),
+            rig.host.device(),
+            Intent::Control,
+            true,
+            PermissionSet::TERMINAL.union(PermissionSet::ADMIN_TERMINAL),
+        )
+        .expect("the unattended session opens");
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Ok(()));
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::AccountAway);
+    assert_eq!(rig.open(&handle, 1, true), Err(ErrorCode::AccountAway));
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::Default);
+    assert!(rig.open(&handle, 2, true).is_ok());
+    rig.finish();
+}
+
+/// Review of S6, finding 4: a terminal that runs when the session's account leaves the console ends then.
+#[test]
+fn a_running_terminal_ends_when_the_account_leaves_the_console() {
+    let rig = Rig::new(TERM);
+    let (handle, mut seen) = rig.prompted();
+    assert!(rig.open(&handle, 1, false).is_ok());
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::AccountAway);
+    assert_eq!(exited(&mut seen, 1), None, "the host ended it");
+    rig.finish();
+}

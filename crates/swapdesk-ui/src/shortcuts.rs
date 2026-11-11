@@ -130,6 +130,7 @@ impl UiState {
             ControlId::TbFiles => MsgKey::TipFiles,
             ControlId::TbChat => MsgKey::TipChat,
             ControlId::TbSwap => MsgKey::TipSwap,
+            ControlId::TbElevate => MsgKey::ElevateHint,
             ControlId::TbDisconnect => {
                 let keys = self.shortcut_keys(ViewerAction::Disconnect);
                 return Some(self.tm(&Msg::new(MsgKey::TipDisconnect).with(keys)));

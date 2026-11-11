@@ -2699,3 +2699,48 @@ fn a_confirmed_admin_terminal_opens_the_administrator_terminal() {
     assert_eq!(s.take_followups(), vec![Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }]);
     assert_eq!(s.term_phase(), &TermPhase::Opening { admin: true });
 }
+
+/// ACCOUNTS.md 9 and D55: a session that entered without a prompt offers "Elevar controle" on its bar and, paused at
+/// a protected screen, on a card over the picture; both send op 50. A prompted session offers neither.
+#[test]
+fn an_unattended_session_offers_elevar_controle_on_the_bar_and_on_the_paused_card() {
+    let mut s = Scenario::VisualizadorElevar.prepared_state();
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate));
+    let a = s.activate(ControlId::TbElevate);
+    assert_eq!(a.commands, vec![Command::ElevateSession { session_id: 1 }]);
+    assert!(s.toolbar_hint(ControlId::TbElevate).is_some_and(|h| h.contains("tela de entrada")));
+
+    let mut s = Scenario::VisualizadorPausadoElevar.prepared_state();
+    let (body, button) = s.paused_card().expect("the card");
+    assert!(body.contains("tela protegida") && button);
+    let a = s.activate(ControlId::PausedElevate);
+    assert_eq!(a.commands, vec![Command::ElevateSession { session_id: 1 }]);
+
+    // The account left the console: the card says so, with nothing to press.
+    let s = Scenario::VisualizadorContaAusente.prepared_state();
+    let (body, button) = s.paused_card().expect("the card");
+    assert!(body.contains("Esta conta não está mais na tela") && !button);
+    assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate), "nothing to elevate");
+
+    // A prompted session: no button, and a pause shows no card (the 1.0 pause).
+    let mut s = viewer();
+    assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate));
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: MAC.into(),
+        state: SessionState::Paused { desktop: DesktopKind::Locked },
+    });
+    assert!(s.paused_card().is_none());
+    assert!(s.activate(ControlId::TbElevate).commands.is_empty());
+}
+
+/// ACCOUNTS.md 9.2: the host's banner says that the session was elevated.
+#[test]
+fn the_banner_of_an_elevated_session_says_controle_elevado() {
+    let s = Scenario::BannerElevado.prepared_state();
+    let h = s.host_session().unwrap().clone();
+    assert_eq!(s.banner_text("Mesa", &h), "Mesa controla este computador · Controle elevado");
+    let s = Scenario::Banner.prepared_state();
+    let h = s.host_session().unwrap().clone();
+    assert!(!s.banner_text("Mesa", &h).contains("Controle elevado"));
+}

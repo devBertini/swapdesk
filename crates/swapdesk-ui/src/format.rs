@@ -141,7 +141,7 @@ pub fn where_phrase(lang: Language, desktop: DesktopKind) -> String {
     let key = match desktop {
         DesktopKind::Default => MsgKey::WhereDefault,
         DesktopKind::Secure => MsgKey::WhereSecure,
-        DesktopKind::Locked => MsgKey::WhereLocked,
+        DesktopKind::Locked | DesktopKind::AccountAway => MsgKey::WhereLocked,
         DesktopKind::LoginWindow => MsgKey::WhereLogin,
     };
     text(lang, &Msg::new(key))

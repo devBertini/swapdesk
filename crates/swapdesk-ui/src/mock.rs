@@ -239,10 +239,18 @@ pub enum Scenario {
     ArquivosAguardandoConsentimento,
     /// An account with no pairing on a computer a 1.0 install left data on: the one-time note under Pareados (D55).
     PareadosAntesDa11,
+    /// A session that entered without a prompt: "Elevar controle" on the bar (ACCOUNTS.md 9, D55).
+    VisualizadorElevar,
+    /// The same session paused at the other computer's lock screen: the card with "Elevar controle".
+    VisualizadorPausadoElevar,
+    /// The session's account left the other computer's console: the card that says so (ACCOUNTS.md 5.1, D55).
+    VisualizadorContaAusente,
+    /// The host's banner of an elevated session: "Controle elevado" (ACCOUNTS.md 9.2, D55).
+    BannerElevado,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 45] = [
+    pub const ALL: [Scenario; 49] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -288,6 +296,10 @@ impl Scenario {
         Scenario::ArquivosAguardandoConsentimento,
         Scenario::PermissoesNoMac,
         Scenario::PareadosAntesDa11,
+        Scenario::VisualizadorElevar,
+        Scenario::VisualizadorPausadoElevar,
+        Scenario::VisualizadorContaAusente,
+        Scenario::BannerElevado,
     ];
 
     /// The name `--mock` takes.
@@ -331,6 +343,10 @@ impl Scenario {
             Scenario::EstadoNenhumComputador => "estado-nenhum-computador",
             Scenario::EstadoNaoPareado => "estado-nao-pareado",
             Scenario::PareadosAntesDa11 => "pareados-antes-da-1-1",
+            Scenario::VisualizadorElevar => "visualizador-elevar",
+            Scenario::VisualizadorPausadoElevar => "visualizador-pausado-elevar",
+            Scenario::VisualizadorContaAusente => "visualizador-conta-ausente",
+            Scenario::BannerElevado => "banner-elevado",
             Scenario::AtividadeVazia => "atividade-vazia",
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
@@ -390,6 +406,10 @@ impl Scenario {
             Scenario::EstadoNenhumComputador => "new: no computer found card (F20)",
             Scenario::EstadoNaoPareado => "new: a computer not paired yet (D51)",
             Scenario::PareadosAntesDa11 => "new: the note under an empty Pareados after the update from 1.0 (D55)",
+            Scenario::VisualizadorElevar => "new: Elevar controle on the session bar (D55)",
+            Scenario::VisualizadorPausadoElevar => "new: the paused picture with Elevar controle (D55)",
+            Scenario::VisualizadorContaAusente => "new: the session's account left the console (D55)",
+            Scenario::BannerElevado => "new: the host banner of an elevated session (D55)",
             Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
@@ -446,6 +466,28 @@ impl Scenario {
                 elevation: Default::default(),
             },
         }
+    }
+
+    /// A session that entered without a prompt and can be elevated, or is (`elevated`).
+    fn unattended_session(elevated: bool) -> UiEvent {
+        let mut granted = vec![Permission::View, Permission::Control, Permission::Audio, Permission::Files];
+        if elevated {
+            granted.push(Permission::Unattended);
+        }
+        UiEvent::Session {
+            session_id: 1,
+            device_id: MAC.into(),
+            state: SessionState::Active {
+                since_ms: NOW_MS - 3 * MIN,
+                role: Role::Viewer,
+                granted: perms(&granted),
+                elevation: if elevated { ElevationLevel::Elevated } else { ElevationLevel::Available },
+            },
+        }
+    }
+
+    fn paused(desktop: DesktopKind) -> UiEvent {
+        UiEvent::Session { session_id: 1, device_id: MAC.into(), state: SessionState::Paused { desktop } }
     }
 
     fn host_session_to(device: &str) -> UiEvent {
@@ -702,6 +744,23 @@ impl Scenario {
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
             Scenario::EstadoNenhumComputador => vec![Event(UiEvent::DevicesChanged(Vec::new())), Ticks(10)],
             Scenario::EstadoNaoPareado => vec![Select(AIR)],
+            Scenario::VisualizadorElevar => vec![mac(), Event(Self::unattended_session(false))],
+            Scenario::VisualizadorPausadoElevar => {
+                vec![mac(), Event(Self::unattended_session(false)), Event(Self::paused(DesktopKind::Locked))]
+            }
+            Scenario::VisualizadorContaAusente => {
+                vec![mac(), Event(Self::unattended_session(false)), Event(Self::paused(DesktopKind::AccountAway))]
+            }
+            Scenario::BannerElevado => vec![Event(UiEvent::Session {
+                session_id: 2,
+                device_id: DESKTOP.into(),
+                state: SessionState::Active {
+                    since_ms: NOW_MS - 12 * MIN,
+                    role: Role::Host,
+                    granted: perms(&[Permission::View, Permission::Control, Permission::Unattended]),
+                    elevation: Default::default(),
+                },
+            })],
             Scenario::PareadosAntesDa11 => vec![
                 Event(UiEvent::Reply {
                     ticket: Ticket(0),
@@ -1235,6 +1294,10 @@ mod tests {
             (Scenario::ArquivosAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::PermissoesNoMac, Screen::Devices, &[Main]),
             (Scenario::PareadosAntesDa11, Screen::Home, &[Main]),
+            (Scenario::VisualizadorElevar, Screen::Devices, &[Main, Viewer]),
+            (Scenario::VisualizadorPausadoElevar, Screen::Devices, &[Main, Viewer]),
+            (Scenario::VisualizadorContaAusente, Screen::Devices, &[Main, Viewer]),
+            (Scenario::BannerElevado, Screen::Home, &[Main, Banner]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {

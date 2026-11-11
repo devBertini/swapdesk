@@ -48,6 +48,7 @@ pub fn desktop_to_wire(v: a::DesktopKind) -> p::Desktop {
         a::DesktopKind::Default => p::Desktop::Default,
         a::DesktopKind::Secure => p::Desktop::Secure,
         a::DesktopKind::Locked => p::Desktop::Locked,
+        a::DesktopKind::AccountAway => p::Desktop::AccountAway,
         a::DesktopKind::LoginWindow => p::Desktop::LoginWindow,
     }
 }
@@ -58,7 +59,8 @@ pub fn desktop_from_wire(v: p::Desktop) -> a::DesktopKind {
     match v {
         p::Desktop::Default => a::DesktopKind::Default,
         p::Desktop::Secure => a::DesktopKind::Secure,
-        p::Desktop::Locked | p::Desktop::AccountAway => a::DesktopKind::Locked,
+        p::Desktop::Locked => a::DesktopKind::Locked,
+        p::Desktop::AccountAway => a::DesktopKind::AccountAway,
         p::Desktop::LoginWindow => a::DesktopKind::LoginWindow,
     }
 }

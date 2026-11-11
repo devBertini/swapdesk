@@ -617,3 +617,28 @@ fn an_admin_terminal_pass_opens_one_terminal() {
     assert_eq!(admin_open(&mut p.viewer_ui, session).unwrap_err(), ApiCode::NeedsAdmin, "used once");
     p.finish();
 }
+
+/// Review of S6, finding 2: a host of minor 0 (a 1.0 build, or one a forged record made look newer) lets a session
+/// in with the machine-level bits already. This machine never confirmed that: its administrator terminal still asks
+/// for the confirmation here.
+#[test]
+fn a_session_the_host_let_in_elevated_still_asks_this_machine_for_the_administrator_terminal() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+    let mut host = Machine::with_minor("host-pc", 0);
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, stored);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees_minor(&host, false, 1);
+    host.hub.set_console_session(Some(1));
+    let host_ui = host.client(info(false));
+    let viewer_ui = viewer.client(administrator_account());
+    let mut p = Pair { host, viewer, host_ui, viewer_ui };
+    let entry = p.press();
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    let hosted = p.host.core.host().sessions();
+    assert!(hosted[0].granted.contains(PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL), "1.0's grant");
+    assert_eq!(admin_open(&mut p.viewer_ui, session).unwrap_err(), ApiCode::NeedsAdmin);
+    p.finish();
+}

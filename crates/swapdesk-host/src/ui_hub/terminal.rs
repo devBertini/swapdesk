@@ -35,14 +35,17 @@ impl Hub {
         if !dims_ok(cols, rows) {
             return reply(conn, req, Err(self.api_error(ApiCode::Invalid, "terminal size")));
         }
-        let Some(handle) = lock(&conn.viewers).get(&session_id).map(|v| v.handle.clone()) else {
+        let Some((handle, elevated)) = lock(&conn.viewers).get(&session_id).map(|v| (v.handle.clone(), v.elevated))
+        else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
         // ELEVATION.md 3.2: the administrator terminal of another machine needs this machine's confirmation: an
-        // administrator connection, a session already elevated (confirmed then), or the pass of a confirmation.
+        // administrator connection, a session this machine elevated (confirmed then), or the pass of a confirmation.
+        // A session the host let in with the machine-level bits already (a 1.0 host) is not one this machine
+        // confirmed (review of S6, finding 2).
         if admin
             && !(conn.info.admin
-                || handle.granted().contains(swapdesk_proto::PermissionSet::UNATTENDED)
+                || elevated
                 || self.take_pass(conn, &swapdesk_ipc::ElevAction::OpenAdminTerminal { session_id }))
         {
             return reply(
@@ -93,7 +96,12 @@ impl Hub {
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
         rt.spawn(async move {
             let result = match handle.elevate().await {
-                Ok(()) => Ok(ReplyBody::Done),
+                Ok(()) => {
+                    if let Some(v) = lock(&c.viewers).get_mut(&session_id) {
+                        v.elevated = true;
+                    }
+                    Ok(ReplyBody::Done)
+                }
                 Err(code) => {
                     me.log(
                         swapdesk_platform::Level::Info,

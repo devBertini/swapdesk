@@ -138,6 +138,9 @@ pub(crate) struct Viewer {
     pub view_only: bool,
     /// The host's display list as last relayed (`Notify::Displays`); what `ListDisplays` answers.
     pub displays: Vec<swapdesk_ipc::DisplayView>,
+    /// This machine elevated the session (op 50 after its confirmation): its administrator terminal needs no
+    /// second pass (ELEVATION.md 3.2). A session the host let in already elevated does not count.
+    pub elevated: bool,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

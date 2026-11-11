@@ -84,6 +84,8 @@ pub fn paint_viewer(f: &mut Frame) {
     } else {
         if let Some(wait) = f.st.swap_wait() {
             swap_wait_card(f, video, &wait);
+        } else if let Some((body, elevate)) = f.st.paused_card() {
+            paused_card(f, video, &body, elevate);
         } else if matches!(f.st.swap().map(|s| &s.phase), Some(SwapPhase::Declined(_))) {
             swap_declined_card(f, video);
         }
@@ -183,6 +185,19 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
             id: ControlId::TbSwap,
             icon: Some(icons::SWAP.to_owned()),
             label: Some(f.t(MsgKey::TbSwap)),
+            pressed: false,
+            color: white,
+            weight_bold: false,
+            chevron: false,
+            sep_before: true,
+        });
+    }
+    // ACCOUNTS.md 9: an entry without a prompt offers its elevation, after the confirmation on this machine.
+    if f.st.can_elevate_session() {
+        tools.push(Tool {
+            id: ControlId::TbElevate,
+            icon: None,
+            label: Some(f.t(MsgKey::ElevateButton)),
             pressed: false,
             color: white,
             weight_bold: false,
@@ -334,6 +349,21 @@ fn reconnecting_card(f: &mut Frame, col: Rect, peer: &str, attempt: u32) {
         buttons: &buttons,
     }
     .paint_in(f, col, card::W.min(col.w - 40.0));
+}
+
+/// The picture is paused (ACCOUNTS.md 5.1 and 9): why, and "Elevar controle" where the session can be elevated.
+fn paused_card(f: &mut Frame, video: Rect, body: &str, elevate: bool) {
+    let buttons: Vec<(ControlId, String, Kind)> =
+        if elevate { vec![(ControlId::PausedElevate, f.t(MsgKey::ElevateButton), Kind::Primary)] } else { Vec::new() };
+    Card {
+        look: Look::Dark,
+        icon: Some(Icon::Ring(icons::SHIELD)),
+        title: None,
+        body: Some(body),
+        bar: None,
+        buttons: &buttons,
+    }
+    .paint_in(f, video, card::W.min(video.w - 40.0));
 }
 
 /// The other side did not swap: the card says why (F-SWAP-02).
@@ -648,9 +678,18 @@ pub fn paint_banner(f: &mut Frame) {
     let who_l = p.label(&who, text::NAME);
     let tx = 18.0 + 10.0 + 14.0;
     p.draw(&who_l, tx, cy - who_l.h / 2.0, pal.ink);
-    // A wait (a swap asked from here, a session reconnecting) is the first part alone.
+    // A wait (a swap asked from here, a session reconnecting) is the first part alone. The second part never runs
+    // under the buttons: it is trimmed to the room they leave.
     if !since.is_empty() {
-        let since_l = p.label(&format!(" {since}"), text::BODY);
+        let disc_w = p.label(&f.t(MsgKey::Disconnect), text::BTN_PRIMARY).w + 28.0 + 2.0 * p.hairline();
+        let swap_w = if f.st.swap_offered(&h) {
+            14.0 + p.label(&f.t(MsgKey::TbSwap), text::BTN).w + 28.0 + 2.0 * p.hairline() + 16.0 + 8.0
+        } else {
+            0.0
+        };
+        let buttons_x = f.w - 8.0 - disc_w - swap_w - 14.0 - 36.0;
+        let room = (buttons_x - 14.0 - (tx + who_l.w)).max(0.0);
+        let since_l = p.label_ellipsis(&format!(" {since}"), text::BODY, room);
         p.draw(&since_l, tx + who_l.w, cy - since_l.h / 2.0, pal.soft);
     }
 
@@ -686,5 +725,5 @@ pub fn paint_banner(f: &mut Frame) {
 
 /// The banner window's size in DIPs: wide enough for its text and buttons.
 pub fn banner_size() -> (f32, f32) {
-    (760.0, 52.0)
+    (820.0, 52.0)
 }

@@ -584,23 +584,38 @@ impl HostService {
 }
 
 impl HostInner {
-    /// What `Elevate` adds to a session (ACCOUNTS.md 9.3): `UNATTENDED`, and `ADMIN_TERMINAL` when it is stored and
-    /// was requested. Refused (`NOT_PERMITTED`) unless the session entered without a prompt and the device still holds
-    /// `UNATTENDED` in this account's store. The session's resume token dies: a reconnect enters again, unelevated.
-    pub(crate) fn elevation_for(&self, ctx: &SessionCtx, device: &DeviceId) -> Result<PermissionSet, ErrorCode> {
-        if !ctx.entered_unattended() {
-            return Err(ErrorCode::NotPermitted);
-        }
+    /// The grants of a session after `Elevate` (ACCOUNTS.md 9.3), from `current` and the store read now: the bit
+    /// `UNATTENDED`, and the bit `ADMIN_TERMINAL` when it is stored and was requested and the session still holds the
+    /// terminal. Only those two bits: what the host's person took from this session (the view, the terminal) is never
+    /// given back. Refused (`NOT_PERMITTED`) unless the session entered without a prompt, still holds `VIEW`, and the
+    /// device still holds `UNATTENDED` in this account's store. Called inside the grant change, so a revoke in
+    /// Permissões either comes first and refuses it, or comes after and takes it back.
+    pub(crate) fn elevated_grant(
+        &self,
+        ctx: &SessionCtx,
+        device: &DeviceId,
+        current: PermissionSet,
+    ) -> Result<PermissionSet, ErrorCode> {
         let stored = self.stored(device).map(|d| d.grants_here).unwrap_or(PermissionSet::EMPTY);
-        if !stored.contains(PermissionSet::UNATTENDED) {
+        if !ctx.entered_unattended()
+            || !stored.contains(PermissionSet::UNATTENDED)
+            || !current.contains(PermissionSet::VIEW)
+        {
             return Err(ErrorCode::NotPermitted);
         }
-        let mut add = PermissionSet::UNATTENDED;
-        if stored.contains(PermissionSet::ADMIN_TERMINAL) && ctx.requested().contains(PermissionSet::ADMIN_TERMINAL) {
-            add = add | PermissionSet::ADMIN_TERMINAL;
+        let mut bits = current.bits() | PermissionSet::BIT_UNATTENDED;
+        if stored.contains(PermissionSet::ADMIN_TERMINAL)
+            && ctx.requested().contains(PermissionSet::ADMIN_TERMINAL)
+            && current.contains(PermissionSet::TERMINAL)
+        {
+            bits |= PermissionSet::BIT_ADMIN_TERMINAL;
         }
-        lock(&self.table).resume.invalidate(ctx.session_id());
-        Ok(add)
+        PermissionSet::from_bits(bits).ok_or(ErrorCode::Internal)
+    }
+
+    /// The session's resume token dies: a reconnect enters again, unelevated (ACCOUNTS.md 5.6).
+    pub(crate) fn forget_resume(&self, session_id: u64) {
+        lock(&self.table).resume.invalidate(session_id);
     }
 
     pub(crate) fn stored(&self, device: &DeviceId) -> Option<swapdesk_trust::PairedDevice> {
@@ -795,7 +810,12 @@ impl HostInner {
                     // Entry without a prompt needs the stored `UNATTENDED` still: a revocation that raced the
                     // decision refuses it, and the viewer's next request is asked about.
                     // What it holds depends on the viewer's minor: 1.1 enters without the machine-level bits.
-                    Basis::Unattended => match policy::unattended_grant(stored_now, requested, ctx.peer_minor()) {
+                    // Both sides' minor counts: a host that announces minor 0 grants as 1.0 does.
+                    Basis::Unattended => match policy::unattended_grant(
+                        stored_now,
+                        requested,
+                        ctx.peer_minor().min(self.cfg.proto_minor),
+                    ) {
                         Some(g) if !g.is_empty() => (g, GrantMode::Unattended),
                         _ => return Err(ErrorCode::NotPermitted),
                     },

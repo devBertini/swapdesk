@@ -245,6 +245,8 @@ pub struct SessionView {
     /// Seconds left of the reconnect minute, counted by the interface from the first `Reconnecting` attempt (the
     /// service sends attempts, not a deadline); `None` outside a reconnect or before its first attempt.
     pub reconnect_left_s: Option<u16>,
+    /// Whether the session can be elevated, from its last `Active` state, kept while it is `Paused`.
+    pub elevation: ElevationLevel,
 }
 
 impl SessionView {
@@ -263,6 +265,7 @@ impl SessionView {
             cancel_asked: false,
             role: None,
             reconnect_left_s: None,
+            elevation: ElevationLevel::Unavailable,
         };
         view.note_state();
         view
@@ -271,9 +274,10 @@ impl SessionView {
     /// What the current state says about the role and the reconnect minute.
     fn note_state(&mut self) {
         match &self.state {
-            SessionState::Active { role, .. } => {
+            SessionState::Active { role, elevation, .. } => {
                 self.role = Some(*role);
                 self.reconnect_left_s = None;
+                self.elevation = *elevation;
             }
             SessionState::Reconnecting { attempt } => {
                 if *attempt >= 1 && self.reconnect_left_s.is_none() {
@@ -947,6 +951,29 @@ impl UiState {
     /// The session shown in the viewer window, if any.
     pub fn viewer_session(&self) -> Option<&SessionView> {
         self.sessions.iter().find(|s| s.is_viewer())
+    }
+
+    /// The card over the paused picture of the viewer's session (ACCOUNTS.md 5.1 and 9, D55): its text and whether it
+    /// offers "Elevar controle". `None`: not paused, or paused with nothing to offer (the 1.0 pause).
+    pub fn paused_card(&self) -> Option<(String, bool)> {
+        let v = self.viewer_session()?;
+        let SessionState::Paused { desktop } = v.state else { return None };
+        let peer = self.device_by_id(&v.device_id).map(|d| d.name.clone()).unwrap_or_default();
+        match desktop {
+            DesktopKind::AccountAway => Some((self.tm(&Msg::new(MsgKey::PausedAwayBody).with(peer)), false)),
+            _ if v.elevation == ElevationLevel::Available => {
+                Some((self.tm(&Msg::new(MsgKey::PausedElevateBody).with(peer)), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the viewer's session offers "Elevar controle" (ACCOUNTS.md 9.3).
+    pub fn can_elevate_session(&self) -> bool {
+        self.viewer_session().is_some_and(|v| {
+            v.elevation == ElevationLevel::Available
+                && !matches!(v.state, SessionState::Paused { desktop: DesktopKind::AccountAway })
+        })
     }
 
     /// The session that makes this computer a host (the banner).

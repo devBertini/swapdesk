@@ -258,8 +258,10 @@ impl Hub {
             duration_s: None,
         });
         handle.files().bind(conn.fs.clone());
-        lock(&conn.viewers)
-            .insert(session_id, Viewer { handle: handle.clone(), device, view_only: false, displays: Vec::new() });
+        lock(&conn.viewers).insert(
+            session_id,
+            Viewer { handle: handle.clone(), device, view_only: false, displays: Vec::new(), elevated: false },
+        );
         let me = Arc::clone(self);
         rt.spawn(
             async move { me.pump_viewer(conn, session_id, device, handle, messages, GrantMode::Swap, None).await },

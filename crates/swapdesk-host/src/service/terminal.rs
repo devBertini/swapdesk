@@ -313,8 +313,15 @@ impl HostInner {
             admin_terminal: req.admin,
             account: self.shared.account.get().map(String::as_str),
         };
-        let answer = match consent_step(&ctx, &facts).await {
+        // ACCOUNTS.md 5.1 (review of S4, L10): while the session's account is away from the console another account
+        // is at the keyboard: no terminal opens, the administrator terminal included (and the running ones end).
+        let away = ctx.desktop_state().desktop == swapdesk_proto::Desktop::AccountAway;
+        let answer = match if away { Err(ErrorCode::AccountAway) } else { consent_step(&ctx, &facts).await } {
             Err(code) => Err(code),
+            // Asked again after the question, which can take its time: the account may have left meanwhile.
+            Ok(()) if ctx.desktop_state().desktop == swapdesk_proto::Desktop::AccountAway => {
+                Err(ErrorCode::AccountAway)
+            }
             Ok(()) => {
                 let user_present = console_user.is_some();
                 let (inner, run2, ctx2, req2) = (Arc::clone(&self), Arc::clone(&run), ctx.clone(), req.clone());
@@ -548,6 +555,14 @@ impl ChannelHandler for HostTerminals {
             }
             drop(inner);
         });
+    }
+
+    /// ACCOUNTS.md 5.1 (review of S6, finding 4): when the session's account leaves the console, another account is
+    /// at the keyboard: every shell of the session ends, the administrator terminal included.
+    fn on_state(&self, ctx: &SessionCtx, desktop: swapdesk_proto::Desktop, _paused: bool) {
+        if desktop == swapdesk_proto::Desktop::AccountAway {
+            self.on_permissions(ctx, PermissionSet::EMPTY, PermissionSet::EMPTY);
+        }
     }
 
     fn on_end(&self, ctx: &SessionCtx, _end: &SessionEnd) {

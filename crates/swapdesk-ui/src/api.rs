@@ -235,6 +235,8 @@ pub enum DesktopKind {
     Secure,
     Locked,
     LoginWindow,
+    /// The session's account is not at the other computer's console (ACCOUNTS.md 5.1).
+    AccountAway,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

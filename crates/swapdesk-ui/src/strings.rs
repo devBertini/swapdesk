@@ -512,6 +512,7 @@ strings! {
     AuditElevated => "Controle elevado", "Elevated control";
     ElevateButton => "Elevar controle", "Elevate control";
     ElevateHint => "Controlar também os avisos de administrador e a tela de entrada", "Also control administrator prompts and the sign-in screen";
+    PausedAwayBody => "Esta conta não está mais na tela do {0}. A sessão volta quando ela voltar.", "This account is no longer on {0}'s screen. The session resumes when it is back.";
     PausedElevateBody => "O {0} mostra uma tela protegida. Eleve o controle para vê-la e usá-la.", "{0} shows a protected screen. Elevate control to see and use it.";
 }
 
