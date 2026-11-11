@@ -23,6 +23,8 @@ pub enum Handling {
     ChooseFiles,
     /// An open panel for the folder to receive into, then `UiState::set_receive_dir`.
     ChooseFolder,
+    /// The page of `UiState::take_web_page` opens in the browser.
+    OpenWebPage,
 }
 
 impl Handling {
@@ -31,7 +33,11 @@ impl Handling {
     pub fn waits_for_a_person(self) -> bool {
         match self {
             Handling::Menu(_) | Handling::SaveLogPanel | Handling::ChooseFiles | Handling::ChooseFolder => true,
-            Handling::Focus(_) | Handling::FocusControl(_) | Handling::Submit(_) | Handling::OpenLogsFolder => false,
+            Handling::Focus(_)
+            | Handling::FocusControl(_)
+            | Handling::Submit(_)
+            | Handling::OpenLogsFolder
+            | Handling::OpenWebPage => false,
         }
     }
 }
@@ -47,5 +53,6 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::OpenLogs => Handling::OpenLogsFolder,
         Effect::PickFiles => Handling::ChooseFiles,
         Effect::PickReceiveFolder => Handling::ChooseFolder,
+        Effect::OpenWebPage => Handling::OpenWebPage,
     }
 }

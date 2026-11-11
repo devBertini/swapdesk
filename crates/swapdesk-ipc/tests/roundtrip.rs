@@ -228,6 +228,8 @@ fn update_ops_round_trip() {
             last_check_ms: Some(1_700_000_000_000),
             dismissed: Some("1.1.1".into()),
             last_failure: Some(1),
+            rolled_back: Some("1.1.2".into()),
+            updated: true,
         };
         let reply =
             Message::UiReply { req: 3, status: 0, body: Bytes(ReplyBody::Update(view.clone()).encode().unwrap()) };

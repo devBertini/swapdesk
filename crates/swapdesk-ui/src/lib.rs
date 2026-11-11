@@ -26,6 +26,7 @@ pub mod state;
 pub mod strings;
 pub mod tokens;
 pub mod trace;
+pub mod update_card;
 
 #[cfg(test)]
 mod a11y_tests;
@@ -35,6 +36,8 @@ mod notice_tests;
 mod shortcut_tests;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod update_tests;
 
 pub use api::*;
 pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRole};

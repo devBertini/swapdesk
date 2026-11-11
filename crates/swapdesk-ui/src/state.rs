@@ -543,6 +543,9 @@ pub enum Effect {
     PickReceiveFolder,
     /// Move the keyboard focus to this control of the main window (the one that was activated has gone).
     Focus(ControlId),
+    /// Open the web page of [`UiState::take_web_page`] in the system's browser (the release page of an update,
+    /// UPDATES.md 10).
+    OpenWebPage,
 }
 
 /// What to restore when an optimistic change is refused.
@@ -658,6 +661,22 @@ pub struct UiState {
     pub(crate) crash_notice: bool,
     /// Seconds the device list has been answered and empty (F20): the "no computer found" card shows at 10.
     pub(crate) empty_s: u16,
+    /// The machine's updater (UPDATES.md 10); `None` while unknown or when the service has none (a development
+    /// instance).
+    pub(crate) update: Option<crate::api::UpdateInfo>,
+    /// "Atualizar agora" met a live session: the confirmation (10.3) shows.
+    pub(crate) update_confirm: bool,
+    /// The download's rate (bytes a second, measured over the last second) for the time left, and the bytes at the
+    /// last tick.
+    pub(crate) update_rate: u64,
+    pub(crate) update_prev_done: Option<u64>,
+    /// The size of the package last seen downloading (the disk failure says how much it needs).
+    pub(crate) update_size: u64,
+    /// An update is being installed: the shell saves its window state and closes (Windows; on the Mac the app's own
+    /// updater quits the app once the swap is done).
+    pub(crate) quit_request: bool,
+    /// The page [`Effect::OpenWebPage`] opens.
+    pub(crate) web_page: Option<String>,
 }
 
 impl Default for UiState {
@@ -729,6 +748,13 @@ impl UiState {
             pair_confirming: false,
             swap_left_s: 0,
             crash_notice: false,
+            update: None,
+            update_confirm: false,
+            update_rate: 0,
+            update_prev_done: None,
+            update_size: 0,
+            quit_request: false,
+            web_page: None,
             empty_s: 0,
             rename: None,
         }
@@ -1647,6 +1673,7 @@ impl UiState {
             Command::ListDevices,
             Command::GetSettings,
             Command::ActivityList { before_ms: None, limit: 200 },
+            Command::GetUpdate,
         ];
         for c in &commands {
             if let Some(k) = fetch_kind(c) {
@@ -1658,6 +1685,17 @@ impl UiState {
 
     /// One second passed: counts every countdown down by one and fails the commands that waited too long (R-UI-7).
     pub fn tick(&mut self) -> Changed {
+        // The download's rate over the last second, for its time left.
+        if let Some(crate::api::UpdateInfo { phase: crate::api::UpdatePhase::Downloading { done, .. }, .. }) =
+            &self.update
+        {
+            if let Some(prev) = self.update_prev_done {
+                let now = done.saturating_sub(prev);
+                // A light smoothing: the time left does not jump with each second.
+                self.update_rate = if self.update_rate == 0 { now } else { (self.update_rate * 3 + now) / 4 };
+            }
+            self.update_prev_done = Some(*done);
+        }
         let mut changed = Changed::NONE;
         if self.devices.is_empty()
             && self.fetch(DataKind::Devices) == Fetch::Ready
@@ -1942,7 +1980,40 @@ impl UiState {
             UiEvent::ElevationResult { action, run, result } => self.apply_elevation_result(action, run, result),
             UiEvent::ThemeChanged { dark } => self.set_dark(dark),
             UiEvent::LanguageChanged(l) => self.set_language(l),
+            UiEvent::UpdateChanged(u) => self.set_update(u),
+            UiEvent::UpdateRestarting => {
+                self.quit_request = true;
+                Changed::ALL
+            }
         }
+    }
+
+    /// The updater's new view (UPDATES.md 10.2).
+    pub(crate) fn set_update(&mut self, u: crate::api::UpdateInfo) -> Changed {
+        use crate::api::UpdatePhase as P;
+        match &u.phase {
+            P::Downloading { total, .. } => self.update_size = *total,
+            _ => {
+                self.update_prev_done = None;
+                self.update_rate = 0;
+            }
+        }
+        // The confirmation goes once the install runs or the offer is gone.
+        if !matches!(u.phase, P::Offered { .. }) {
+            self.update_confirm = false;
+        }
+        self.update = Some(u);
+        Changed::ALL
+    }
+
+    /// The page an [`Effect::OpenWebPage`] opens (once).
+    pub fn take_web_page(&mut self) -> Option<String> {
+        self.web_page.take()
+    }
+
+    /// The shell asks after each batch of events whether to close for an update (once).
+    pub fn take_quit_request(&mut self) -> bool {
+        std::mem::take(&mut self.quit_request)
     }
 
     fn set_settings(&mut self, s: Settings) {
@@ -2247,6 +2318,7 @@ impl UiState {
                 self.set_settings(s);
                 Changed::ALL
             }
+            Reply::Update(u) => self.set_update(u),
             Reply::MissingPermissions(missing) => {
                 if let Some(n) = &mut self.network {
                     n.notices.retain(|x| !matches!(x, Notice::MacPermissionsMissing(_)));
@@ -2280,6 +2352,21 @@ impl UiState {
             self.error = Some(error);
             return Changed::ALL;
         };
+        // The updater's refusals have their own place (UPDATES.md 10): a service without an updater (a development
+        // instance) answers NotFound and the interface shows nothing; a live session asks for the confirmation.
+        match &pending.command {
+            Command::UpdateInstall { end_sessions: false, .. } if error.code == ApiCode::Busy => {
+                self.update_confirm = true;
+                return Changed::ALL;
+            }
+            Command::GetUpdate
+            | Command::UpdateCheckNow
+            | Command::UpdateInstall { .. }
+            | Command::UpdateCancel
+            | Command::UpdateDismiss { .. }
+            | Command::UpdateSetCheck { .. } => return Changed::NONE,
+            _ => {}
+        }
         // The step tells how the confirmation failed (a timeout of its own 120 s too): no strip over the content.
         if let Command::Elevate { action, .. } = &pending.command {
             return match &mut self.elevation {

@@ -785,6 +785,22 @@ pub enum Command {
         target: SettingsTarget,
     },
     RequestOsPermissions,
+    /// The machine's updater (UPDATES.md 10, ops 51 to 56).
+    GetUpdate,
+    UpdateCheckNow,
+    UpdateInstall {
+        version: String,
+        /// "Encerrar e atualizar" was pressed (a live session ends).
+        end_sessions: bool,
+    },
+    UpdateCancel,
+    /// "Agora não" (or closing the rollback card) for this version.
+    UpdateDismiss {
+        version: String,
+    },
+    UpdateSetCheck {
+        on: bool,
+    },
 }
 
 /// Typed chat text and terminal input are never logged (CONTRACTS.md C2.3): `Debug` shows their size only. Written
@@ -851,6 +867,12 @@ impl core::fmt::Debug for Command {
             Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),
             Self::OpenSystemSettings { target } => dbg_fields!("OpenSystemSettings", target),
             Self::RequestOsPermissions => f.write_str("RequestOsPermissions"),
+            Self::GetUpdate => f.write_str("GetUpdate"),
+            Self::UpdateCheckNow => f.write_str("UpdateCheckNow"),
+            Self::UpdateInstall { version, end_sessions } => dbg_fields!("UpdateInstall", version, end_sessions),
+            Self::UpdateCancel => f.write_str("UpdateCancel"),
+            Self::UpdateDismiss { version } => dbg_fields!("UpdateDismiss", version),
+            Self::UpdateSetCheck { on } => dbg_fields!("UpdateSetCheck", on),
             Self::TermWrite { term_id, bytes } => f
                 .debug_struct("TermWrite")
                 .field("term_id", term_id)
@@ -884,6 +906,72 @@ pub enum Reply {
     Activity(Vec<AuditView>),
     Settings(Settings),
     MissingPermissions(Vec<OsPermission>),
+    Update(UpdateInfo),
+}
+
+// ---------- updates (UPDATES.md 10) ----------
+
+/// Where the machine's updater is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePhase {
+    Idle,
+    Checking,
+    /// `manual`: this version must be installed by hand.
+    Offered {
+        version: String,
+        manual: bool,
+    },
+    Downloading {
+        version: String,
+        done: u64,
+        total: u64,
+    },
+    Verifying {
+        version: String,
+    },
+    /// Verified and handed to the installer: Swapdesk closes and opens again.
+    Installing {
+        version: String,
+    },
+    Failed(UpdateFailure),
+}
+
+/// Why an install failed (the service's `InstallFailure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateFailure {
+    NotConsole,
+    NeedsConfirmation,
+    NotOffered,
+    Busy,
+    Download,
+    Mismatch,
+    Disk,
+    Cancelled,
+}
+
+/// Why the last "Procurar agora" failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckFailure {
+    Network,
+    RateLimited,
+    Signature,
+}
+
+/// The machine's updater as the interface shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateInfo {
+    /// The running version.
+    pub running: String,
+    pub phase: UpdatePhase,
+    pub check_on: bool,
+    pub last_check_ms: Option<u64>,
+    /// The card is hidden for this version ("Agora não").
+    pub dismissed: Option<String>,
+    pub last_failure: Option<CheckFailure>,
+    /// The version that did not start and was replaced by the running one.
+    pub rolled_back: Option<String>,
+    /// The running version came by an update at this start ("Swapdesk atualizado para X", once).
+    pub updated: bool,
 }
 
 // ---------- events ----------
@@ -973,6 +1061,10 @@ pub enum UiEvent {
         dark: bool,
     },
     LanguageChanged(Language),
+    /// The updater changed (UPDATES.md 10).
+    UpdateChanged(UpdateInfo),
+    /// An update is being installed: the interface saves its window state and closes (UPDATES.md 6.2 step 4).
+    UpdateRestarting,
 }
 
 impl Command {
@@ -985,6 +1077,8 @@ impl Command {
                 | Command::GetNetwork
                 | Command::ListDevices
                 | Command::GetSettings
+                | Command::GetUpdate
+                | Command::UpdateSetCheck { .. }
                 | Command::ActivityList { .. }
                 | Command::ListDisplays { .. }
                 | Command::FilesList { .. }

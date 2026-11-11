@@ -247,10 +247,22 @@ pub enum Scenario {
     VisualizadorContaAusente,
     /// The host's banner of an elevated session: "Controle elevado" (ACCOUNTS.md 9.2, D55).
     BannerElevado,
+    /// Início with a new version on offer (UPDATES.md 10.2).
+    AtualizacaoOferecida,
+    /// The download running, with its bar and the time left.
+    AtualizacaoBaixando,
+    /// "Atualizar agora" with a live session: the confirmation (10.3).
+    AtualizacaoSessaoAtiva,
+    /// Ajustes after a check whose manifest did not carry the Swapdesk signature.
+    AtualizacaoFalhaAssinatura,
+    /// The version installed did not start and the old one was restored.
+    AtualizacaoRevertida,
+    /// The first start after an update.
+    Atualizado,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 49] = [
+    pub const ALL: [Scenario; 55] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -300,6 +312,12 @@ impl Scenario {
         Scenario::VisualizadorPausadoElevar,
         Scenario::VisualizadorContaAusente,
         Scenario::BannerElevado,
+        Scenario::AtualizacaoOferecida,
+        Scenario::AtualizacaoBaixando,
+        Scenario::AtualizacaoSessaoAtiva,
+        Scenario::AtualizacaoFalhaAssinatura,
+        Scenario::AtualizacaoRevertida,
+        Scenario::Atualizado,
     ];
 
     /// The name `--mock` takes.
@@ -347,6 +365,12 @@ impl Scenario {
             Scenario::VisualizadorPausadoElevar => "visualizador-pausado-elevar",
             Scenario::VisualizadorContaAusente => "visualizador-conta-ausente",
             Scenario::BannerElevado => "banner-elevado",
+            Scenario::AtualizacaoOferecida => "update-offered",
+            Scenario::AtualizacaoBaixando => "update-downloading",
+            Scenario::AtualizacaoSessaoAtiva => "update-live-session",
+            Scenario::AtualizacaoFalhaAssinatura => "update-failed-signature",
+            Scenario::AtualizacaoRevertida => "update-rolled-back",
+            Scenario::Atualizado => "updated",
             Scenario::AtividadeVazia => "atividade-vazia",
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
@@ -410,6 +434,12 @@ impl Scenario {
             Scenario::VisualizadorPausadoElevar => "new: the paused picture with Elevar controle (D55)",
             Scenario::VisualizadorContaAusente => "new: the session's account left the console (D55)",
             Scenario::BannerElevado => "new: the host banner of an elevated session (D55)",
+            Scenario::AtualizacaoOferecida => "new: the update card on Início (UPDATES.md 10, D58)",
+            Scenario::AtualizacaoBaixando => "new: the update downloading, with the time left (D58)",
+            Scenario::AtualizacaoSessaoAtiva => "new: updating with a live session (UPDATES.md 10.3, D58)",
+            Scenario::AtualizacaoFalhaAssinatura => "new: Ajustes after a manifest without the signature (D58)",
+            Scenario::AtualizacaoRevertida => "new: the update that did not start, rolled back (D58)",
+            Scenario::Atualizado => "new: the first start after an update (D58)",
             Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
@@ -442,6 +472,8 @@ impl Scenario {
             reply(Ok(Reply::Devices(devices()))),
             reply(Ok(Reply::Settings(settings()))),
             reply(Ok(Reply::Activity(logged))),
+            // The machine's updater: 1.1.0, nothing on offer (Ajustes shows its section).
+            reply(Ok(Reply::Update(update_idle()))),
         ]
     }
 
@@ -761,6 +793,46 @@ impl Scenario {
                     elevation: Default::default(),
                 },
             })],
+            Scenario::AtualizacaoOferecida => vec![Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Offered {
+                version: "1.1.1".into(),
+                manual: false,
+            })))],
+            Scenario::AtualizacaoBaixando => vec![
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Downloading {
+                    version: "1.1.1".into(),
+                    done: 2_100_000,
+                    total: 12_400_000,
+                }))),
+                Ticks(1),
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Downloading {
+                    version: "1.1.1".into(),
+                    done: 4_100_000,
+                    total: 12_400_000,
+                }))),
+                Ticks(1),
+            ],
+            Scenario::AtualizacaoSessaoAtiva => vec![
+                Event(Self::viewer_session(12)),
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Offered {
+                    version: "1.1.1".into(),
+                    manual: false,
+                }))),
+                Goto(Nav::Home),
+                ActivateRefused(ControlId::Update(crate::update_card::UpdAction::Install), ApiCode::Busy),
+            ],
+            Scenario::AtualizacaoFalhaAssinatura => vec![
+                Event(UiEvent::UpdateChanged(UpdateInfo {
+                    last_failure: Some(CheckFailure::Signature),
+                    ..update_idle()
+                })),
+                Goto(Nav::Settings),
+            ],
+            Scenario::AtualizacaoRevertida => {
+                vec![Event(UiEvent::UpdateChanged(UpdateInfo { rolled_back: Some("1.1.1".into()), ..update_idle() }))]
+            }
+            Scenario::Atualizado => {
+                vec![Event(UiEvent::UpdateChanged(UpdateInfo { updated: true, ..update_idle() }))]
+            }
             Scenario::PareadosAntesDa11 => vec![
                 Event(UiEvent::Reply {
                     ticket: Ticket(0),
@@ -920,6 +992,25 @@ struct Faults {
     stall_next: bool,
 }
 
+/// The mock machine's updater: 1.1.0, nothing on offer, checked an hour before the scenarios' clock.
+pub fn update_idle() -> UpdateInfo {
+    UpdateInfo {
+        running: "1.1.0".into(),
+        phase: UpdatePhase::Idle,
+        check_on: true,
+        last_check_ms: Some(NOW_MS - 3_600_000),
+        dismissed: None,
+        last_failure: None,
+        rolled_back: None,
+        updated: false,
+    }
+}
+
+/// The mock updater in a phase.
+pub fn update_with(phase: UpdatePhase) -> UpdateInfo {
+    UpdateInfo { phase, ..update_idle() }
+}
+
 /// How long the mock "service" takes for a command: reads are quick, the activity log and folder listings are slow
 /// enough to show placeholders (R-UI-1).
 pub fn latency(command: &Command) -> Duration {
@@ -1029,6 +1120,7 @@ impl World {
             Command::GetNetwork => Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private))),
             Command::ListDevices => Ok(Reply::Devices(self.devices.clone())),
             Command::GetSettings => Ok(Reply::Settings(self.settings.clone())),
+            Command::GetUpdate => Ok(Reply::Update(update_idle())),
             Command::ActivityList { .. } => Ok(Reply::Activity(activity())),
             Command::SetSettings { settings } => {
                 self.settings = settings.clone();
@@ -1298,6 +1390,12 @@ mod tests {
             (Scenario::VisualizadorPausadoElevar, Screen::Devices, &[Main, Viewer]),
             (Scenario::VisualizadorContaAusente, Screen::Devices, &[Main, Viewer]),
             (Scenario::BannerElevado, Screen::Home, &[Main, Banner]),
+            (Scenario::AtualizacaoOferecida, Screen::Home, &[Main]),
+            (Scenario::AtualizacaoBaixando, Screen::Home, &[Main]),
+            (Scenario::AtualizacaoSessaoAtiva, Screen::Home, &[Main, Viewer]),
+            (Scenario::AtualizacaoFalhaAssinatura, Screen::Settings, &[Main]),
+            (Scenario::AtualizacaoRevertida, Screen::Home, &[Main]),
+            (Scenario::Atualizado, Screen::Home, &[Main]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {
@@ -1384,7 +1482,11 @@ mod tests {
         let b = MockBackend::new(Arc::new(NoWake));
         let mut s = UiState::default();
         let commands = s.startup_commands();
-        assert_eq!(commands.len(), 5, "identity, network, devices, settings and activity are asked together");
+        assert_eq!(
+            commands.len(),
+            6,
+            "identity, network, devices, settings, activity and the updater are asked together"
+        );
         // Before any answer nothing is drawn in between (R-UI-1) ...
         assert!(s.has_pending_fetch());
         assert!(!s.placeholder(DataKind::Devices));

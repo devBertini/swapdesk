@@ -125,6 +125,30 @@ impl UiState {
         if let Some(chip) = &home.network {
             s.text(UiRole::Text, chip.text.clone());
         }
+        // The update card comes first on Início (UPDATES.md 10.1).
+        if let Some(c) = self.update_card() {
+            // A wait (downloading, verifying, installing) is a polite live region, announced when its phase changes;
+            // the bar is a progress node outside it, read when focused, never announced each second (R-UI-13).
+            let waits = c.icon == crate::update_card::UpdIcon::Wait;
+            if waits {
+                s.region(crate::interact::Region::Status);
+            }
+            s.text(UiRole::Heading, c.title);
+            for text in c.body.into_iter().chain(c.note) {
+                s.text(UiRole::Text, text);
+            }
+            if waits {
+                s.region(crate::interact::Region::Content);
+            }
+            if let Some(bar) = c.bar {
+                let label = bar.text.clone().unwrap_or_default();
+                let p = s.add(ControlId::Static(u16::MAX - 1), UiRole::Progress, label);
+                p.value = Some(format!("{:.0}", bar.fraction * 100.0));
+            }
+            for (id, label, _) in c.buttons {
+                s.button(id, label);
+            }
+        }
         self.crash_and_empty_controls(s);
         for card in &home.cards {
             match card {

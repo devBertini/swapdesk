@@ -586,7 +586,7 @@ fn the_palette_follows_the_theme_setting_and_sistema_follows_the_os() {
     let canvas = |state: &swapdesk_ui::UiState| {
         render(state, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default())
             .unwrap()
-            .rgb_at(600, 745)
+            .rgb_at(252, 745)
     };
     let mut s = Scenario::Ajustes.prepared_state();
     assert_eq!(s.theme(), Theme::System);

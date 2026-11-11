@@ -86,6 +86,8 @@ pub enum ControlId {
     Notice(NoticeKind),
     /// The "no computer found" card's action: focus the address field (F20).
     NoComputerAddress,
+    /// A button of the update card or the Ajustes section "Atualizações" (UPDATES.md 10).
+    Update(crate::update_card::UpdAction),
     WakeCancel,
     /// "Cancelar" on the connect card: asks the service to drop the entry.
     ConnectCancel,
@@ -225,7 +227,7 @@ impl Specs {
     fn new(region: Region) -> Specs {
         Specs { v: Vec::new(), next_static: 0, region }
     }
-    fn region(&mut self, region: Region) {
+    pub(crate) fn region(&mut self, region: Region) {
         self.region = region;
     }
     pub(crate) fn add(&mut self, id: ControlId, role: UiRole, label: impl Into<String>) -> &mut ControlSpec {
@@ -728,6 +730,21 @@ impl UiState {
         );
         s.switch(ControlId::LockOnEnd, self.name_of(MsgKey::LockOnEnd), set.lock_on_end, None);
         s.switch(ControlId::KeepAwake, self.name_of(MsgKey::KeepAwake), set.keep_awake, None);
+        // UPDATES.md 10.1: "Atualizações", the last group of the left column.
+        if let (Some(u), Some(lines)) = (&self.update, self.update_lines()) {
+            use crate::update_card::UpdAction;
+            s.text(UiRole::Heading, self.name_of(MsgKey::UpdSection));
+            s.switch(
+                ControlId::Update(UpdAction::Switch),
+                self.name_of(MsgKey::UpdSwitch),
+                u.check_on,
+                Some(self.name_of(MsgKey::UpdSwitchHint)),
+            );
+            for line in lines {
+                s.text(UiRole::Text, line);
+            }
+            s.button(ControlId::Update(UpdAction::CheckNow), self.name_of(MsgKey::UpdCheckNow));
+        }
         let c = s.add(ControlId::Select(SelectId::Quality), UiRole::ComboBox, self.name_of(MsgKey::Quality));
         c.value = Some(self.select_value(SelectId::Quality));
         s.switch(ControlId::ShowStats, self.name_of(MsgKey::ShowStats), set.show_stats, None);
@@ -1482,6 +1499,7 @@ impl UiState {
                 }
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),
+            ControlId::Update(action) => self.activate_update(action, &mut a),
             ControlId::WakeCancel | ControlId::ConnectCancel => {
                 let device_id = self.selected_device().map(|d| d.id.clone());
                 if let Some(device_id) = device_id

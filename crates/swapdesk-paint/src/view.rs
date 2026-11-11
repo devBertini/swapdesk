@@ -343,6 +343,9 @@ pub fn button_style(kind: Kind) -> TextStyle {
 
 /// Icons of the design (24-unit viewBox, stroke), one path each.
 pub mod icons {
+    /// An arrow into a tray: a new version to download (UPDATES.md 10).
+    pub const DOWNLOAD: &str = "M12 4v11M7 10l5 5 5-5M5 20h14";
+    pub const CHECK: &str = "M5 12l5 5 9-9";
     pub const CHEVRON: &str = "M6 9l6 6 6-6";
     pub const FIT: &str = "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5";
     pub const AUDIO: &str = "M4 10v4h4l5 4V6L8 10H4zM16 9a4 4 0 0 1 0 6";

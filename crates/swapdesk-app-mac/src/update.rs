@@ -188,8 +188,9 @@ pub fn watch(pid: &str, old: &str, new: &str, running: &str) -> i32 {
 
 /// What a starting app does with the journal: the new version commits (its bundle was checked whole before the swap,
 /// so there is no mixed set to finish on a Mac); the old version that finds `applying` with no watcher alive was never
-/// swapped or was swapped back, and records `failed`. Returns the version rolled back to this one.
-pub fn at_start(support: &Path, trace: &dyn TraceSink) -> Option<Version> {
+/// swapped or was swapped back, and records `failed`. Returns how the last update ended, once: `Ok` this version came
+/// by it, `Err` the version rolled back to this one. The journal goes once the update has ended.
+pub fn at_start(support: &Path, trace: &dyn TraceSink) -> Option<Result<(), Version>> {
     let dir = support.join(FOLDER);
     let journal = dir.join(swapdesk_sys_mac::update_mac::JOURNAL);
     let me = running_version();
@@ -198,10 +199,15 @@ pub fn at_start(support: &Path, trace: &dyn TraceSink) -> Option<Version> {
     match last {
         Journal::Applying { new, .. } if new == me => {
             match append_journal(&journal, &Journal::Committed { new: me.clone() }) {
-                Ok(()) => trace.log(Level::Info, "update", format_args!("updated to {me}: committed")),
-                Err(e) => trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}")),
+                Ok(()) => {
+                    trace.log(Level::Info, "update", format_args!("updated to {me}: committed"));
+                    Some(Ok(()))
+                }
+                Err(e) => {
+                    trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}"));
+                    None
+                }
             }
-            None
         }
         Journal::Applying { old, new } if old == me => {
             let watcher_alive = executable_of(&hidden_path(&running, &new))
@@ -214,12 +220,14 @@ pub fn at_start(support: &Path, trace: &dyn TraceSink) -> Option<Version> {
         Journal::Committed { new } => {
             // The old bundle at the hidden path goes (the watcher removes it; a power cut may have left it).
             let _ = std::fs::remove_dir_all(hidden_path(&running, &new));
+            let _ = std::fs::remove_file(&journal);
             None
         }
         Journal::Failed { old, new } if old == me => {
             let _ = std::fs::remove_dir_all(hidden_path(&running, &new));
+            let _ = std::fs::remove_file(&journal);
             trace.log(Level::Warn, "update", format_args!("{new} did not start; {me} was restored"));
-            Some(new)
+            Some(Err(new))
         }
         Journal::Broken { old, new } => {
             trace.log(

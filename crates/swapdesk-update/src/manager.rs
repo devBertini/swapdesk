@@ -180,6 +180,12 @@ pub struct UpdateView {
     pub dismissed: Option<Version>,
     /// The last "Procurar agora" that failed, and why.
     pub last_failure: Option<CheckFailure>,
+    /// The version that did not start and was replaced by the running one, in this run of the service, until its
+    /// card is closed ("A versão X não iniciou", UPDATES.md 10.4).
+    pub rolled_back: Option<Version>,
+    /// The running version was installed by an update that committed at this start, until its card is closed
+    /// ("Swapdesk atualizado para X").
+    pub updated: bool,
 }
 
 /// What an install request knows of the asking interface and the machine.
@@ -196,6 +202,10 @@ struct Inner {
     saved: Saved,
     next_check_ms: Option<u64>,
     last_failure: Option<CheckFailure>,
+    /// See [`UpdateView::rolled_back`].
+    rolled_back_now: Option<Version>,
+    /// See [`UpdateView::updated`].
+    updated_now: bool,
     /// The entry of the version on offer (from the verified manifest).
     entry: Option<FileEntry>,
 }
@@ -253,6 +263,8 @@ impl UpdateManager {
                 saved,
                 next_check_ms: next,
                 last_failure: None,
+                rolled_back_now: None,
+                updated_now: false,
                 entry: None,
             }),
         }
@@ -267,6 +279,8 @@ impl UpdateManager {
             last_check_ms: i.saved.last_check_ms,
             dismissed: i.saved.dismissed.clone(),
             last_failure: i.last_failure,
+            rolled_back: i.rolled_back_now.clone(),
+            updated: i.updated_now,
         }
     }
 
@@ -365,13 +379,29 @@ impl UpdateManager {
     /// "Agora não": the card hides for `version`.
     pub fn dismiss(&self, version: &Version) {
         let mut i = lock(&self.inner);
+        if i.rolled_back_now.as_ref() == Some(version) {
+            // Closing the rollback card.
+            i.rolled_back_now = None;
+            return;
+        }
+        if *version == self.setup.running && i.updated_now {
+            // Closing the "updated" card.
+            i.updated_now = false;
+            return;
+        }
         i.saved.dismissed = Some(version.clone());
         self.store.save(&i.saved);
+    }
+
+    /// The running version was installed by an update that committed at this start: its card shows once.
+    pub fn updated(&self) {
+        lock(&self.inner).updated_now = true;
     }
 
     /// The applier reported that `version` did not commit (UPDATES.md 6.4): it is not offered again by itself.
     pub fn rolled_back(&self, version: &Version) {
         let mut i = lock(&self.inner);
+        i.rolled_back_now = Some(version.clone());
         if !i.saved.rolled_back.contains(version) {
             i.saved.rolled_back.push(version.clone());
         }

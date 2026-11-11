@@ -63,6 +63,8 @@ pub fn view_to_wire(v: &swapdesk_update::manager::UpdateView) -> UpdateView {
             CheckFailure::RateLimited => 1,
             CheckFailure::Signature => 2,
         }),
+        rolled_back: v.rolled_back.as_ref().map(ToString::to_string),
+        updated: v.updated,
     }
 }
 
@@ -93,6 +95,12 @@ impl Updater {
     /// again by itself.
     pub fn rolled_back(&self, version: &Version) {
         self.manager.rolled_back(version);
+        self.changed();
+    }
+
+    /// The running version came by an update that committed at this start: its card shows once.
+    pub fn updated(&self) {
+        self.manager.updated();
         self.changed();
     }
 

@@ -517,6 +517,43 @@ strings! {
     NameNetworkHint => "Outros computadores da rede veem este nome.", "Other computers on the network see this name.";
     ElevDeclined => "A confirmação foi recusada.", "The confirmation was declined.";
     ElevBodyWindowsCredentials => "Esta mudança precisa de um administrador deste computador. O Windows vai pedir o nome e a senha de um administrador.", "This change needs an administrator of this computer. Windows will ask for an administrator's name and password.";
+
+    // Updates (UPDATES.md 10.4, approved by the owner 2026-11-11, D58). New keys go at the end: the wire carries a
+    // key's index.
+    UpdTitle => "Nova versão: {0}", "New version: {0}";
+    UpdBody => "Você usa a {0}. A atualização vem do GitHub, é conferida pela assinatura do Swapdesk e instalada; o Swapdesk fecha e abre de novo.", "You have {0}. The update comes from GitHub, is checked against the Swapdesk signature and installed; Swapdesk closes and opens again.";
+    UpdInstall => "Atualizar agora", "Update now";
+    UpdLater => "Agora não", "Not now";
+    UpdNotes => "O que mudou", "What changed";
+    UpdLiveBody => "Há uma sessão ativa com {0}. Atualizar agora encerra a sessão.", "A session with {0} is active. Updating now ends it.";
+    UpdLiveRemote => "Se você controla este computador de longe, conecte-se de novo em um minuto. Sem \"Entrar sem perguntar\", alguém aqui terá de aceitar.", "If you control this computer from elsewhere, connect again in a minute. Without \"Enter without asking\", someone here has to accept.";
+    UpdLiveConfirm => "Encerrar e atualizar", "End and update";
+    UpdDownloading => "Baixando {0} de {1}", "Downloading {0} of {1}";
+    UpdVerifying => "Conferindo a assinatura", "Checking the signature";
+    UpdInstalling => "Instalando. O Swapdesk vai fechar e abrir de novo.", "Installing. Swapdesk will close and open again.";
+    UpdDone => "Swapdesk atualizado para {0}.", "Swapdesk was updated to {0}.";
+    UpdErrNetwork => "Não foi possível falar com o GitHub. Confira a conexão com a internet.", "Could not reach GitHub. Check the internet connection.";
+    UpdErrWait => "O GitHub pediu para esperar. Tente mais tarde.", "GitHub asked to wait. Try again later.";
+    UpdErrSignature => "O que foi baixado não tem a assinatura do Swapdesk. Foi apagado e nada foi instalado.", "What was downloaded does not carry the Swapdesk signature. It was deleted and nothing was installed.";
+    UpdErrMismatch => "O arquivo baixado não confere com a versão anunciada. Foi apagado e nada foi instalado.", "The downloaded file does not match the announced version. It was deleted and nothing was installed.";
+    UpdErrDisk => "Falta espaço em disco: a atualização precisa de {0}.", "Not enough disk space: the update needs {0}.";
+    UpdErrRolledBack => "A versão {0} não iniciou. A {1} foi restaurada e continua funcionando.", "Version {0} did not start. {1} was restored and keeps working.";
+    UpdErrMacAdmin => "Só um administrador deste Mac pode substituir o Swapdesk em Aplicativos.", "Only an administrator of this Mac can replace Swapdesk in Applications.";
+    UpdErrMacLocation => "Mova o Swapdesk para a pasta Aplicativos para que ele possa se atualizar.", "Move Swapdesk to the Applications folder so it can update itself.";
+    UpdManual => "Esta versão precisa ser instalada à mão.", "This version must be installed by hand.";
+    UpdSection => "Atualizações", "Updates";
+    UpdVersion => "Versão {0}", "Version {0}";
+    UpdSwitch => "Procurar novas versões no GitHub", "Check GitHub for new versions";
+    UpdSwitchHint => "Uma vez por dia este computador pergunta ao GitHub qual é a versão mais recente. Nada sobre você ou este computador é enviado.", "Once a day this computer asks GitHub which version is the latest. Nothing about you or this computer is sent.";
+    UpdCheckNow => "Procurar agora", "Check now";
+    UpdLast => "Última procura: {0}", "Last check: {0}";
+    UpdLatest => "Você tem a versão mais recente.", "You have the latest version.";
+    UpdRetry => "Tentar de novo", "Try again";
+    UpdTryLater => "Tentar mais tarde", "Try later";
+    UpdOpenRelease => "Abrir a página da versão", "Open the release page";
+    UpdDownloadByHand => "Baixar à mão", "Download by hand";
+    UpdClose => "Fechar", "Close";
+    UpdCancel => "Cancelar", "Cancel";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).

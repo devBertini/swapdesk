@@ -698,7 +698,9 @@ pub const MAX_VERSION: usize = 32;
 
 wire_struct! {
     /// The machine's updater (UPDATES.md 10): what runs, where it is, the switch, the last check, the version whose
-    /// card is hidden, and why the last "Procurar agora" failed (0 network, 1 rate limited, 2 signature).
+    /// card is hidden, why the last "Procurar agora" failed (0 network, 1 rate limited, 2 signature), and the version
+    /// that did not start and was rolled back in this run of the service; `updated`: the running version came by an
+    /// update that committed at this start.
     UpdateView {
         running: String [MAX_VERSION],
         phase: UpdatePhase,
@@ -706,5 +708,7 @@ wire_struct! {
         last_check_ms: Option<u64>,
         dismissed: Option<String> [MAX_VERSION],
         last_failure: Option<u8>,
+        rolled_back: Option<String> [MAX_VERSION],
+        updated: bool,
     }
 }

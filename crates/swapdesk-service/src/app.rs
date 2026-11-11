@@ -405,9 +405,12 @@ fn spawn_applier(update: &std::path::Path, args: &[&str]) -> Result<std::process
 }
 
 /// What a starting service does with the update journal (UPDATES.md 6.2 step 6, 6.4; the decision is
-/// `swapdesk_update::apply::at_start`). Returns the version that was rolled back to this one, which the updater does not
-/// offer again by itself.
-fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> Option<swapdesk_update::Version> {
+/// `swapdesk_update::apply::at_start`). Returns how the last update ended, once: `Ok` this version came by it, `Err`
+/// the version that was rolled back to this one (not offered again by itself). The journal goes with the cleaning.
+fn update_journal_at_start(
+    update: &std::path::Path,
+    trace: &dyn TraceSink,
+) -> Option<Result<(), swapdesk_update::Version>> {
     use swapdesk_sys_win::update_apply::{
         APPLIER, Layout, ROLLBACK, append_journal, complete, programs_inside, read_journal,
     };
@@ -418,13 +421,16 @@ fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> O
     let applier_alive = !programs_inside(&layout.applier()).is_empty();
     match at_start(last.as_ref(), &me, applier_alive, complete(&layout.staging())) {
         AtStart::Nothing => None,
-        AtStart::Commit => {
-            match append_journal(&layout.journal(), &Journal::Committed { new: me.clone() }) {
-                Ok(()) => trace.log(Level::Info, "update", format_args!("updated to {me}: committed")),
-                Err(e) => trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}")),
+        AtStart::Commit => match append_journal(&layout.journal(), &Journal::Committed { new: me.clone() }) {
+            Ok(()) => {
+                trace.log(Level::Info, "update", format_args!("updated to {me}: committed"));
+                Some(Ok(()))
             }
-            None
-        }
+            Err(e) => {
+                trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}"));
+                None
+            }
+        },
         AtStart::Finish { old, new } | AtStart::RollBack { old, new } => {
             let finish = complete(&layout.staging());
             let what =
@@ -442,10 +448,12 @@ fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> O
             let _ = std::fs::remove_dir_all(update.join(APPLIER));
             let _ = std::fs::remove_dir_all(layout.staging());
             let _ = std::fs::remove_dir_all(layout.swap());
-            if let Some(new) = &rolled_back {
+            let _ = std::fs::remove_file(layout.journal());
+            // After a commit the "updated" card was told at the commit's own start; a rollback is told here, once.
+            rolled_back.map(|new| {
                 trace.log(Level::Warn, "update", format_args!("{new} did not start; {me} was restored"));
-            }
-            rolled_back
+                Err(new)
+            })
         }
         AtStart::Broken { old, new } => {
             // The rollback folder stays: the way out is install.cmd from the release zip (UPDATES.md 6.4).
@@ -768,9 +776,13 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     trace.log(Level::Info, "service", format_args!("running; console session {session:?}"));
     // The pipes and endpoints are up: an update that started this version is committed (UPDATES.md 6.2 step 6).
     if !(opts.console || opts.instance.is_some()) {
-        let rolled_back = update_journal_at_start(&store.dir().join("update"), &*trace);
-        if let (Some(u), Some(v)) = (&updater, rolled_back) {
-            u.rolled_back(&v);
+        let ended = update_journal_at_start(&store.dir().join("update"), &*trace);
+        if let Some(u) = &updater {
+            match ended {
+                Some(Ok(())) => u.updated(),
+                Some(Err(v)) => u.rolled_back(&v),
+                None => {}
+            }
         }
     }
 

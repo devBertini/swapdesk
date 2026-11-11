@@ -19,8 +19,6 @@ pub enum ConvertError {
     UnknownMsgKey(u16),
     /// A reply body only the elevation worker reads (ops 35, 36, 38) came to the general reply path.
     ElevationReply,
-    /// The updater's view (op 51, kinds 18 and 19): the interface shows it from UPDATES.md slice U7 on.
-    UpdateNotShownYet,
 }
 
 type CResult<T> = Result<T, ConvertError>;
@@ -411,6 +409,43 @@ fn chat_to_wire(m: &a::ChatView) -> w::ChatItem {
 
 // ---------- replies and notifications ----------
 
+/// The updater's wire view as the interface keeps it.
+pub fn update_from_wire(v: w::UpdateView) -> a::UpdateInfo {
+    use a::UpdateFailure as F;
+    let phase = match v.phase {
+        w::UpdatePhase::Idle => a::UpdatePhase::Idle,
+        w::UpdatePhase::Checking => a::UpdatePhase::Checking,
+        w::UpdatePhase::Offered { version, manual } => a::UpdatePhase::Offered { version, manual },
+        w::UpdatePhase::Downloading { version, done, total } => a::UpdatePhase::Downloading { version, done, total },
+        w::UpdatePhase::Verifying { version } => a::UpdatePhase::Verifying { version },
+        w::UpdatePhase::Ready { version } => a::UpdatePhase::Installing { version },
+        w::UpdatePhase::Failed { reason } => a::UpdatePhase::Failed(match reason {
+            0 => F::NotConsole,
+            1 => F::NeedsConfirmation,
+            2 => F::NotOffered,
+            3 => F::Busy,
+            4 => F::Download,
+            5 => F::Mismatch,
+            6 => F::Disk,
+            _ => F::Cancelled,
+        }),
+    };
+    a::UpdateInfo {
+        running: v.running,
+        phase,
+        check_on: v.check_on,
+        last_check_ms: v.last_check_ms,
+        dismissed: v.dismissed,
+        last_failure: v.last_failure.map(|f| match f {
+            0 => a::CheckFailure::Network,
+            1 => a::CheckFailure::RateLimited,
+            _ => a::CheckFailure::Signature,
+        }),
+        rolled_back: v.rolled_back,
+        updated: v.updated,
+    }
+}
+
 /// The C6 `Reply` of a decoded reply body.
 pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
     Ok(match body {
@@ -420,7 +455,7 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
         w::ReplyBody::ElevationTicket { .. }
         | w::ReplyBody::ElevationAction { .. }
         | w::ReplyBody::ElevationOutcome(_) => return Err(ConvertError::ElevationReply),
-        w::ReplyBody::Update(_) => return Err(ConvertError::UpdateNotShownYet),
+        w::ReplyBody::Update(v) => a::Reply::Update(update_from_wire(v)),
         w::ReplyBody::ThisDevice(v) => a::Reply::ThisDevice(this_device_from_wire(v)),
         w::ReplyBody::Network(v) => a::Reply::Network(network_from_wire(v)),
         w::ReplyBody::Devices(v) => a::Reply::Devices(devices_from_wire(v)),
@@ -462,7 +497,8 @@ pub fn term_outcome_error(outcome: w::TermOutcome) -> a::ApiError {
 pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
     use a::UiEvent as E;
     Ok(match n {
-        w::Notify::UpdateChanged(_) | w::Notify::UpdateRestarting => return Err(ConvertError::UpdateNotShownYet),
+        w::Notify::UpdateChanged(v) => E::UpdateChanged(update_from_wire(v)),
+        w::Notify::UpdateRestarting => E::UpdateRestarting,
         w::Notify::DevicesChanged(v) => E::DevicesChanged(devices_from_wire(v)),
         w::Notify::NetworkChanged(v) => E::NetworkChanged(network_from_wire(v)),
         w::Notify::Pairing { pairing_id, state } => E::Pairing { pairing_id, state: pairing_from_wire(state) },
@@ -650,6 +686,14 @@ pub fn route(c: &a::Command) -> Route {
         | C::BlockAddress { .. }
         | C::OpenSystemSettings { .. }
         | C::RequestOsPermissions => return Route::Unsupported,
+        C::GetUpdate => O::UpdateGet,
+        C::UpdateCheckNow => O::UpdateCheckNow,
+        C::UpdateInstall { version, end_sessions } => {
+            O::UpdateInstall { version: version.clone(), end_sessions: *end_sessions }
+        }
+        C::UpdateCancel => O::UpdateCancel,
+        C::UpdateDismiss { version } => O::UpdateDismiss { version: version.clone() },
+        C::UpdateSetCheck { on } => O::UpdateSetCheck { on: *on },
     })
 }
 

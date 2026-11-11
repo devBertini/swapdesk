@@ -149,6 +149,18 @@ pub fn open_logs_folder() -> bool {
     result.0 as isize > 32
 }
 
+/// Opens an `https://` page in the default browser (the release page of an update). Anything else is refused.
+pub fn open_web_page(url: &str) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    if !url.starts_with("https://") {
+        return false;
+    }
+    // SAFETY: the strings outlive the call; no window is the parent.
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    result.0 as isize > 32
+}
+
 pub fn loword(v: isize) -> u16 {
     (v & 0xFFFF) as u16
 }

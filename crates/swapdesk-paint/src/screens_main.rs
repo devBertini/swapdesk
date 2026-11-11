@@ -344,16 +344,47 @@ fn home_main(f: &mut Frame) {
     }
 }
 
-/// The crash notice, the "no computer found" card or the empty line. Each is one card across the page among the
-/// page's other cards, with its content centred (D51). Returns the height used, with the gap after it.
+/// The update card, the crash notice, the "no computer found" card or the empty line. Each is one card across the
+/// page among the page's other cards, with its content centred (D51). Returns the height used, with the gap after it.
 fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
     let (p, pal) = (f.p, f.pal);
     let mut used = 0.0;
+    // UPDATES.md 10.1: the update card comes first.
+    if let Some(u) = f.st.update_card() {
+        use swapdesk_ui::update_card::UpdIcon;
+        let icon = match u.icon {
+            UpdIcon::New => Icon::Circle(pal.link_tint, pal.link, icons::DOWNLOAD),
+            UpdIcon::Wait => Icon::Spinner,
+            UpdIcon::Done => Icon::Circle(pal.link_tint, pal.link, icons::CHECK),
+            UpdIcon::Warn => Icon::Circle(pal.danger_tint, pal.danger, icons::SHIELD_ALERT),
+        };
+        let body = match (&u.body, &u.note) {
+            (Some(b), Some(n)) => Some(format!("{b}\n{n}")),
+            (Some(b), None) => Some(b.clone()),
+            (None, n) => n.clone(),
+        };
+        let buttons: Vec<(ControlId, String, Kind)> = u
+            .buttons
+            .iter()
+            .map(|(id, label, primary)| (*id, label.clone(), if *primary { Kind::Primary } else { Kind::Default }))
+            .collect();
+        let c = Card {
+            look: Look::Inline,
+            icon: Some(icon),
+            title: Some(&u.title),
+            body: body.as_deref(),
+            bar: u.bar.as_ref(),
+            buttons: &buttons,
+        };
+        let h = c.height(f, a.cw);
+        c.paint(f, Rect::new(a.x, y, a.cw, h));
+        used += h + 20.0;
+    }
     if f.st.fetch(DataKind::Devices) != swapdesk_ui::Fetch::Ready {
         return used;
     }
     if f.st.crash_notice() {
-        used += notice_card(f, Look::Inline, NoticeKind::Crash, Rect::new(a.x, y, a.cw, 0.0)).h + 20.0;
+        used += notice_card(f, Look::Inline, NoticeKind::Crash, Rect::new(a.x, y + used, a.cw, 0.0)).h + 20.0;
     }
     if f.st.no_computer_card() {
         // F20: discovery found nothing for 10 s; the action focuses the address field.
@@ -1149,10 +1180,37 @@ fn activity_main(f: &mut Frame) {
 // Ajustes
 
 enum SettingRow {
-    Edit { label: String, hint: Option<String>, value: String, width: f32 },
-    Select { id: SelectId, label: String, hint: Option<String>, value: String, width: f32 },
-    Toggle { id: ControlId, label: String, hint: Option<String>, on: bool },
-    Status { label: String, hint: Option<String>, value: Option<(String, Color)> },
+    Edit {
+        label: String,
+        hint: Option<String>,
+        value: String,
+        width: f32,
+    },
+    Select {
+        id: SelectId,
+        label: String,
+        hint: Option<String>,
+        value: String,
+        width: f32,
+    },
+    Toggle {
+        id: ControlId,
+        label: String,
+        hint: Option<String>,
+        on: bool,
+    },
+    Status {
+        label: String,
+        hint: Option<String>,
+        value: Option<(String, Color)>,
+    },
+    /// A label and its hint with a button at the row's end ("Procurar agora").
+    Button {
+        id: ControlId,
+        label: String,
+        hint: Option<String>,
+        button: String,
+    },
 }
 
 fn settings_main(f: &mut Frame) {
@@ -1313,6 +1371,32 @@ fn settings_main(f: &mut Frame) {
             vec![SettingRow::Status { label: net_row, hint: Some(f.t(MsgKey::NetworkHint)), value: None }],
         ),
     ];
+    // UPDATES.md 10.1: "Atualizações", when the service has an updater: the switch, then the version with its last
+    // check and "Procurar agora".
+    let mut left = Vec::from(left);
+    if let (Some(info), Some(lines)) = (f.st.update_info().cloned(), f.st.update_lines()) {
+        use swapdesk_ui::update_card::UpdAction;
+        let mut lines = lines.into_iter();
+        let version = lines.next().unwrap_or_default();
+        let rest: Vec<String> = lines.collect();
+        left.push((
+            MsgKey::UpdSection,
+            vec![
+                SettingRow::Toggle {
+                    id: ControlId::Update(UpdAction::Switch),
+                    label: f.t(MsgKey::UpdSwitch),
+                    hint: Some(f.t(MsgKey::UpdSwitchHint)),
+                    on: info.check_on,
+                },
+                SettingRow::Button {
+                    id: ControlId::Update(UpdAction::CheckNow),
+                    label: version,
+                    hint: (!rest.is_empty()).then(|| rest.join("\n")),
+                    button: f.t(MsgKey::UpdCheckNow),
+                },
+            ],
+        ));
+    }
     // The page scrolls when a column is taller than the window: the bottom margin equals the top one.
     let column = |f: &Frame, groups: &[(MsgKey, Vec<SettingRow>)]| {
         groups.iter().map(|(title, rows)| settings_group_height(f, colw, &f.t(*title), rows) + 24.0).sum::<f32>()
@@ -1412,6 +1496,10 @@ fn settings_group(f: &mut Frame, x: f32, y: f32, w: f32, title: &str, rows: &[Se
                 p.draw(&sl, cx, ry + (row_h - sl.h) / 2.0, *c);
             }
             SettingRow::Status { .. } => {}
+            SettingRow::Button { id, button, .. } => {
+                let bw = f.button_width(button, Kind::Default);
+                f.button(*id, Rect::new(cx, ry + (row_h - 40.0) / 2.0, bw, 40.0), Kind::Default, button, false);
+            }
         }
         ry += row_h;
     }
@@ -1426,6 +1514,10 @@ fn row_parts<'r>(p: &dyn crate::painter::Painter, row: &'r SettingRow) -> (&'r s
         SettingRow::Toggle { label, hint, .. } => (label.as_str(), hint.as_deref(), layout::SWITCH_W),
         SettingRow::Status { label, hint, value, .. } => {
             (label.as_str(), hint.as_deref(), value.as_ref().map_or(0.0, |(s, _)| p.label(s, text::NAME).w))
+        }
+        SettingRow::Button { label, hint, button, .. } => {
+            let bw = p.label(button, crate::view::button_style(Kind::Default)).w + 32.0 + 2.0 * p.hairline();
+            (label.as_str(), hint.as_deref(), bw)
         }
     }
 }

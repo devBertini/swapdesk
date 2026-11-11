@@ -616,6 +616,12 @@ impl Shell {
                 }
             }
             Handling::OpenLogsFolder => self.open_logs(),
+            Handling::OpenWebPage => {
+                let page = self.state.borrow_mut().take_web_page();
+                if let Some(url) = page.filter(|u| u.starts_with("https://")) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+            }
             Handling::Menu(select) => self.pick(kind, select),
             Handling::SaveLogPanel => self.save_log(),
             Handling::ChooseFiles => {

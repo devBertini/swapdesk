@@ -296,6 +296,12 @@ impl Shared {
             Some(Effect::OpenLogs) => {
                 crate::system::open_logs_folder();
             }
+            Some(Effect::OpenWebPage) => {
+                let page = self.state.borrow_mut().take_web_page();
+                if let Some(url) = page {
+                    crate::system::open_web_page(&url);
+                }
+            }
             Some(effect @ (Effect::Menu(_) | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder)) => {
                 from.set_pending_effect(effect)
             }
@@ -474,11 +480,31 @@ impl Shared {
         }
         self.attention();
         self.minimize_main_for_session();
+        self.close_for_update();
         self.sync_timers();
     }
 
     /// A session of this computer just came up (either role): the main window goes to the taskbar, once per session,
     /// unless it is already minimized or hidden. Nothing brings it back when the session ends.
+    /// An update is being installed (UPDATES.md 6.2 step 4): the main window closes the way a person closes it, so
+    /// the window state is saved, and the process ends before the applier's sweep.
+    fn close_for_update(&self) {
+        if !self.state.borrow_mut().take_quit_request() {
+            return;
+        }
+        if let Some(h) = self.main_hwnd() {
+            // SAFETY: our window; WM_CLOSE goes through the window's own close path.
+            unsafe {
+                let _ = PostMessageW(
+                    Some(h),
+                    WM_CLOSE,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
+    }
+
     fn minimize_main_for_session(&self) {
         if !self.minimize_on_session || !self.state.borrow_mut().take_minimize_request() {
             return;

@@ -97,6 +97,12 @@ pub fn short_minutes(lang: Language, secs: u32) -> String {
     text(lang, &Msg::new(MsgKey::DurMinutes).with((secs / 60).max(1).to_string()))
 }
 
+/// A size in megabytes with one decimal, in the language's own decimal mark: "4,1 MB", "4.1 MB".
+pub fn size_mb(lang: Language, bytes: u64) -> String {
+    let s = format!("{:.1} MB", bytes as f64 / 1_000_000.0);
+    if lang == Language::PtBr { s.replace('.', ",") } else { s }
+}
+
 /// "1:42" for a countdown.
 pub fn countdown(secs: u16) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)

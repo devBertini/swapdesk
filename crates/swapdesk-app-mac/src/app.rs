@@ -249,13 +249,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     {
         let support = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
         let live: crate::update::LiveSessions = Arc::default();
-        let rolled_back = crate::update::at_start(&support, &*trace);
+        let ended = crate::update::at_start(&support, &*trace);
         if let Some(updater) = crate::update::app_updater(&support, Arc::clone(&live), Arc::clone(&trace)) {
             let hub = service.hub().clone();
             let _ = live.set(Box::new(move || hub.live_sessions()));
             service.hub().set_updater(Arc::clone(&updater));
-            if let Some(v) = rolled_back {
-                updater.rolled_back(&v);
+            match ended {
+                Some(Ok(())) => updater.updated(),
+                Some(Err(v)) => updater.rolled_back(&v),
+                None => {}
             }
         }
     }
