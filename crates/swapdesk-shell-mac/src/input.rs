@@ -66,6 +66,12 @@ pub enum MouseKind {
         precise: bool,
         starts: bool,
     },
+    /// A trackpad pinch (`magnifyWithEvent:`): `amount` is `NSEvent.magnification` (positive spreads the fingers,
+    /// zoom in); `ends` marks the gesture's last event (`NSEvent.phase` is `Ended` or `Cancelled`).
+    Magnify {
+        amount: f64,
+        ends: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

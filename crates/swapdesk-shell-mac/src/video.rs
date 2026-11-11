@@ -249,6 +249,14 @@ define_class!(
                 },
             );
         }
+
+        // A trackpad pinch. It is not a scroll: AppKit reports it apart, and the input lane turns it into what the
+        // host's own touchpad would send (Ctrl and the wheel on Windows).
+        #[unsafe(method(magnifyWithEvent:))]
+        fn magnify_with_event(&self, event: &NSEvent) {
+            let ends = event.phase().intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+            self.mouse(event, MouseKind::Magnify { amount: event.magnification(), ends });
+        }
     }
 );
 

@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use swapdesk_keys::mode::{KeyInput, KeyRouter, KeyboardMode, Routed};
 use swapdesk_keys::shortcuts::ViewerOs;
-use swapdesk_keys::swap::swap_event;
+use swapdesk_keys::swap::{swap_event, swap_modifiers};
 use swapdesk_keys::{KbKind, PAGE_KEYBOARD, modifier};
 use swapdesk_proto::{InputEvent, MouseButton};
 use swapdesk_shell_mac::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton};
@@ -35,6 +35,8 @@ use crate::keymap::{aggregate_of_bit, hid_of_kvk, is_local_escape, is_system_sho
 /// Whether a physical key is down right now, by `kVK_*` code (`CGEventSourceKeyState` on a Mac).
 pub type KeyProbe<'a> = &'a dyn Fn(u16) -> bool;
 
+/// The HID usage of the left Control key.
+const CTRL_USAGE: u16 = 0xE0;
 /// The Option keys of the HID modifier byte.
 const OPTION_BITS: u8 = modifier::LALT | modifier::RALT;
 
@@ -97,6 +99,11 @@ const RAIL_RATIO: f64 = 0.5;
 /// Points of motion, on either axis, after which a trackpad gesture's axis is decided.
 const RAIL_DECIDE: f64 = 3.0;
 
+/// Wheel units (1/120 notch) per unit of `NSEvent.magnification` when a pinch goes to a Windows host as Ctrl and the
+/// wheel: a pinch that doubles the picture (about 1.0 summed) is five notches, five zoom steps in a browser. GUESS,
+/// tuned on the owner's trackpad.
+const PINCH_UNITS: f64 = 600.0;
+
 /// The axis a trackpad gesture scrolls along (precise deltas only).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Rail {
@@ -149,6 +156,9 @@ pub struct InputConfig {
     pub num_lock: bool,
     /// Hide the local pointer over the video (the remote cursor is drawn instead).
     pub hide_local_pointer: bool,
+    /// A trackpad pinch goes to the host as Ctrl held and the wheel, as a Windows precision touchpad sends it (true
+    /// toward a Windows host). False: a pinch sends nothing.
+    pub pinch_zoom: bool,
 }
 
 impl Default for InputConfig {
@@ -162,6 +172,7 @@ impl Default for InputConfig {
             scroll: ScrollConfig::default(),
             num_lock: true,
             hide_local_pointer: true,
+            pinch_zoom: false,
         }
     }
 }
@@ -205,6 +216,10 @@ pub struct InputCore {
     wheel_rest: (f64, f64),
     /// The axis of the trackpad gesture in progress.
     rail: Rail,
+    /// A pinch in progress: `Some(true)` when this side pressed the host's Ctrl for it (let go at its end).
+    pinch: Option<bool>,
+    /// Pinch wheel units not sent yet.
+    pinch_rest: f64,
 }
 
 fn wire_button(button: PointerButton) -> Option<MouseButton> {
@@ -238,6 +253,8 @@ impl InputCore {
             pointer: None,
             wheel_rest: (0.0, 0.0),
             rail: Rail::PerEvent,
+            pinch: None,
+            pinch_rest: 0.0,
         }
     }
 
@@ -399,13 +416,15 @@ impl InputCore {
         self.buttons.clear();
         self.pointer = None;
         self.wheel_rest = (0.0, 0.0);
+        self.pinch = None;
+        self.pinch_rest = 0.0;
         self.router.reset();
         vec![InputEvent::ReleaseAll]
     }
 
     /// Nothing held, nothing to release (the host has nothing of ours down).
     pub fn is_idle(&self) -> bool {
-        self.mods == 0 && self.down.is_empty() && self.buttons.is_empty()
+        self.mods == 0 && self.down.is_empty() && self.buttons.is_empty() && self.pinch != Some(true)
     }
 
     /// A position record was not delivered (the consumer was behind): the next move or click must send it again.
@@ -417,6 +436,11 @@ impl InputCore {
     /// scroll event in the same direction carries them instead of losing them. Capped at one record's range per axis.
     pub fn refund_wheel(&mut self, dx: i16, dy: i16) {
         let cap = f64::from(i16::MAX);
+        if self.pinch.is_some() {
+            // A pinch's wheel: it rides on the pinch's next event, under the same Ctrl.
+            self.pinch_rest = (self.pinch_rest + f64::from(dy)).clamp(-cap, cap);
+            return;
+        }
         // The remainder is kept before the horizontal sign flip of `wheel_units`.
         self.wheel_rest.0 = (self.wheel_rest.0 - f64::from(dx)).clamp(-cap, cap);
         self.wheel_rest.1 = (self.wheel_rest.1 + f64::from(dy)).clamp(-cap, cap);
@@ -594,8 +618,67 @@ impl InputCore {
                     }
                 }
             }
+            MouseKind::Magnify { amount, ends } => {
+                if self.config.pinch_zoom {
+                    events.extend(self.pinch_event(amount, ends, at));
+                }
+            }
         }
         Outcome::taken(events)
+    }
+
+    /// The modifier byte the host holds, as the records carry it (after the Ctrl/Cmd swap).
+    fn host_mods(&self) -> u8 {
+        let m = self.wire_mods();
+        if self.config.swap_ctrl_cmd { swap_modifiers(m) } else { m }
+    }
+
+    /// One pinch event toward a Windows host: what its precision touchpad sends for a pinch, Ctrl held and the
+    /// wheel (positive, away from the user, zooms in). The Ctrl goes down before the first wheel record, unless the
+    /// host already holds one, and up at the gesture's end; it is built after the swap, so it stays Ctrl whatever
+    /// "Trocar Ctrl e Cmd" says.
+    fn pinch_event(&mut self, amount: f64, ends: bool, at: Option<(u16, u16)>) -> Vec<InputEvent> {
+        let mut events = Vec::new();
+        if let Some(at) = at.filter(|_| amount.is_finite() && amount != 0.0) {
+            if self.pinch_rest != 0.0 && self.pinch_rest.signum() != amount.signum() {
+                self.pinch_rest = 0.0;
+            }
+            self.pinch_rest += amount * PINCH_UNITS;
+            let whole = clamp_i16(self.pinch_rest.trunc());
+            self.pinch_rest -= f64::from(whole);
+            if whole != 0 {
+                if self.pinch.is_none() {
+                    let host = self.host_mods();
+                    let press = host & (modifier::LCTRL | modifier::RCTRL) == 0;
+                    if press {
+                        events.push(InputEvent::Key {
+                            usage_page: PAGE_KEYBOARD,
+                            usage: CTRL_USAGE,
+                            down: true,
+                            modifiers: host | modifier::LCTRL,
+                            locks: self.locks(),
+                        });
+                    }
+                    self.pinch = Some(press);
+                }
+                events.extend(self.pointer_event(at));
+                events.push(InputEvent::Wheel { dx: 0, dy: whole });
+            }
+        }
+        if ends {
+            if self.pinch == Some(true) {
+                events.push(InputEvent::Key {
+                    usage_page: PAGE_KEYBOARD,
+                    usage: CTRL_USAGE,
+                    down: false,
+                    modifiers: self.host_mods() & !modifier::LCTRL,
+                    locks: self.locks(),
+                });
+            }
+            self.pinch = None;
+            self.pinch_rest = 0.0;
+        }
+        events
     }
 
     /// The trackpad deltas of one scroll event kept on the gesture's axis.
@@ -1493,5 +1576,84 @@ mod tests {
             Some(&identity_map),
             1.0,
         );
+    }
+
+    fn pinch(c: &mut InputCore, amount: f64, ends: bool) -> Vec<InputEvent> {
+        c.mouse(mouse(MouseKind::Magnify { amount, ends }, 100.0, 100.0), Some(&identity_map), 2.0).events
+    }
+
+    fn toward_windows() -> InputCore {
+        InputCore::new(InputConfig { pinch_zoom: true, swap_ctrl_cmd: true, ..InputConfig::default() })
+    }
+
+    fn pinch_wheels(events: &[InputEvent]) -> Vec<i16> {
+        events.iter().filter_map(|e| if let InputEvent::Wheel { dx: 0, dy } = e { Some(*dy) } else { None }).collect()
+    }
+
+    /// A pinch toward a Windows host is what its precision touchpad sends: Ctrl held and the wheel (spreading the
+    /// fingers zooms in, away from the user), the Ctrl let go at the gesture's end. Ctrl stays Ctrl with the swap on.
+    #[test]
+    fn a_pinch_toward_windows_is_ctrl_and_the_wheel_and_the_ctrl_goes_up_at_its_end() {
+        let mut c = toward_windows();
+        let first = pinch(&mut c, 0.1, false);
+        assert_eq!(first[0], k(0xE0, true, modifier::LCTRL), "{first:?}");
+        assert!(matches!(first[1], InputEvent::Pointer { .. }), "{first:?}");
+        assert_eq!(pinch_wheels(&first), vec![60]);
+        assert_eq!(pinch(&mut c, 0.05, false), vec![InputEvent::Wheel { dx: 0, dy: 30 }], "no second Ctrl");
+        assert_eq!(pinch_wheels(&pinch(&mut c, -0.02, false)), vec![-12], "pinching back zooms out");
+        assert!(!c.is_idle(), "the host holds our Ctrl");
+        assert_eq!(pinch(&mut c, 0.0, true), vec![k(0xE0, false, 0)]);
+        assert!(c.is_idle());
+        // The next pinch presses its own Ctrl again.
+        assert_eq!(pinch(&mut c, 0.1, false)[0], k(0xE0, true, modifier::LCTRL));
+    }
+
+    #[test]
+    fn small_pinch_steps_add_up_and_a_pinch_with_no_whole_unit_presses_nothing() {
+        let mut c = toward_windows();
+        assert_eq!(pinch(&mut c, 0.001, false), vec![], "0.6 unit");
+        assert_eq!(pinch(&mut c, 0.0, true), vec![], "no Ctrl went down, none goes up");
+        let mut d = toward_windows();
+        assert!(pinch(&mut d, 0.001, false).is_empty());
+        assert_eq!(pinch_wheels(&pinch(&mut d, 0.001, false)), vec![1], "1.2 units: one whole");
+    }
+
+    /// Command held on the Mac is Ctrl on the host (the swap): the pinch then uses that Ctrl and leaves it held.
+    #[test]
+    fn a_pinch_under_a_ctrl_the_host_already_holds_presses_and_releases_no_ctrl_of_its_own() {
+        let mut c = toward_windows();
+        let held = c.modifiers_changed(CMD, &none).events;
+        assert_eq!(held, vec![k(0xE0, true, modifier::LCTRL)]);
+        assert_eq!(pinch_wheels(&pinch(&mut c, 0.1, false)), vec![60]);
+        let end = pinch(&mut c, 0.0, true);
+        assert!(end.is_empty(), "{end:?}");
+    }
+
+    #[test]
+    fn a_pinch_toward_a_mac_host_sends_nothing() {
+        let mut c = core();
+        assert_eq!(pinch(&mut c, 0.3, false), vec![]);
+        assert_eq!(pinch(&mut c, 0.0, true), vec![]);
+        assert!(c.is_idle());
+    }
+
+    /// The keyboard went away mid-pinch: the host let go of everything, so the gesture's end sends no Ctrl release,
+    /// and a pinch wheel the full queue refused rides on the pinch's next event, not on a later scroll.
+    #[test]
+    fn a_pinch_cut_by_a_release_all_ends_quietly_and_a_refused_pinch_wheel_stays_in_the_pinch() {
+        let mut c = toward_windows();
+        assert!(!pinch(&mut c, 0.1, false).is_empty());
+        assert_eq!(c.release_all(), vec![InputEvent::ReleaseAll]);
+        assert_eq!(pinch(&mut c, 0.0, true), vec![]);
+        let mut d = toward_windows();
+        assert_eq!(pinch_wheels(&pinch(&mut d, 0.1, false)), vec![60]);
+        d.refund_wheel(0, 60);
+        assert_eq!(pinch_wheels(&pinch(&mut d, 0.01, false)), vec![66]);
+        let scroll = d.mouse(
+            mouse(MouseKind::Scroll { dx: 0.0, dy: 0.0, precise: true, starts: true }, 100.0, 100.0),
+            Some(&identity_map),
+            2.0,
+        );
+        assert!(scroll.events.is_empty(), "{:?}", scroll.events);
     }
 }

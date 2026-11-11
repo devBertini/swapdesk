@@ -42,6 +42,8 @@ pub fn input_config(prefs: &KeyPrefs, display: u16, keyboard: KbKind) -> InputCo
         mode: wire_mode(prefs.mode),
         layouts_match: prefs.host_os == Os::MacOs,
         swap_ctrl_cmd: prefs.swap_ctrl_cmd && prefs.host_os == Os::Windows,
+        // A Windows touchpad zooms with Ctrl and the wheel; a Mac host has no such equivalent for a posted event.
+        pinch_zoom: prefs.host_os == Os::Windows,
         keyboard,
         display,
         ..InputConfig::default()
@@ -66,14 +68,14 @@ mod tests {
             3,
             KbKind::Iso,
         );
-        assert!(!win.layouts_match && win.swap_ctrl_cmd);
+        assert!(!win.layouts_match && win.swap_ctrl_cmd && win.pinch_zoom);
         assert_eq!((win.display, win.keyboard), (3, KbKind::Iso));
         let mac = input_config(
             &KeyPrefs { mode: KeyboardMode::Physical, host_os: Os::MacOs, swap_ctrl_cmd: true },
             0,
             KbKind::Ansi,
         );
-        assert!(mac.layouts_match && !mac.swap_ctrl_cmd);
+        assert!(mac.layouts_match && !mac.swap_ctrl_cmd && !mac.pinch_zoom);
         assert_eq!(mac.mode, WireMode::Physical);
     }
 }
