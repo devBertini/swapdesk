@@ -265,6 +265,20 @@ impl Wire for PeerPorts {
     }
 }
 
+/// Loads `peers.bin`; a missing or unreadable one is empty (it is only a hint for dialling).
+pub fn load_peer_ports(secrets: &dyn SecretStore) -> PeerPorts {
+    match secrets.load(PEER_PORTS_NAME) {
+        Ok(Some(bytes)) => PeerPorts::decode(&bytes).unwrap_or_default(),
+        _ => PeerPorts::default(),
+    }
+}
+
+/// Writes `peers.bin`.
+pub fn store_peer_ports(secrets: &dyn SecretStore, ports: &PeerPorts) -> Result<(), String> {
+    let bytes = ports.encode().map_err(|e| e.to_string())?;
+    secrets.store(PEER_PORTS_NAME, &bytes).map_err(|e| e.to_string())
+}
+
 /// Loads `account.bin`, or the defaults named `default_name` when it is missing or does not read (with one trace
 /// line: an account's own choices are not worth refusing to serve it, ACCOUNTS.md 14.2).
 pub fn load_account_settings(secrets: &dyn SecretStore, default_name: &str, trace: &dyn TraceSink) -> AccountSettings {

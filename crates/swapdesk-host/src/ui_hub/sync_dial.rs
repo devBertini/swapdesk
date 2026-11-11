@@ -151,6 +151,8 @@ impl Hub {
                 if self.p.trust.read(|s| s.find_by_id(&p.device_id).is_none()) {
                     continue;
                 }
+                // Its port, for the dials that come when it is out of discovery (ACCOUNTS.md 5.2).
+                self.note_peer_port(&p.device_id, p.session_port);
                 let now_seen = (p.addrs.first().map(|ip| SocketAddrV4::new(*ip, p.session_port)), p.proto_minor);
                 let slot = st.per.entry(p.device_id).or_default();
                 if slot.seen == Some(now_seen) {

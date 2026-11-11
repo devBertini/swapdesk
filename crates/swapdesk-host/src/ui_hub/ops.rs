@@ -276,7 +276,8 @@ impl Hub {
     fn add_by_address(&self, text: &str) -> Result<swapdesk_ipc::DeviceView, ApiCode> {
         let text = text.trim();
         let (ip_text, port) = match text.split_once(':') {
-            Some((ip, port)) => (ip, Some(port.parse::<u16>().map_err(|_| ApiCode::Invalid)?)),
+            // Any port of 1 to 65535: an account on a slot other than 0 (ACCOUNTS.md 5.2).
+            Some((ip, port)) => (ip, Some(port.parse::<u16>().ok().filter(|p| *p != 0).ok_or(ApiCode::Invalid)?)),
             None => (text, None),
         };
         let ip: Ipv4Addr = ip_text.parse().map_err(|_| ApiCode::Invalid)?;
@@ -401,6 +402,7 @@ impl Hub {
         lock(&self.learned).remove(&id);
         lock(&self.minors).forget(&id);
         lock(&self.peer_writes).forget(&id);
+        self.forget_peer_port(&id);
         // The last pairing gone: this account stops listening and announcing.
         self.update_receiving();
         self.devices_changed();

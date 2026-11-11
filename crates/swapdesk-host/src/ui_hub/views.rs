@@ -76,7 +76,8 @@ pub(crate) const MANUAL_PREFIX: &str = "addr:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Manual {
     pub addr: Ipv4Addr,
-    /// The peer's session port: [`crate::service::DEFAULT_SESSION_PORT`], or the one typed (development mode only).
+    /// The peer's session port: [`crate::service::DEFAULT_SESSION_PORT`], or the one typed (`ip:port`, an account on a
+    /// slot other than 0, ACCOUNTS.md 5.2).
     pub session_port: u16,
 }
 
@@ -469,10 +470,72 @@ impl Hub {
         if let Some(a) = lock(&self.learned).get(id) {
             return Some(*a);
         }
+        // Out of discovery: the last stored address, at the port the device was last seen on (an account on a slot
+        // other than 0), else the default port. A stale port fails at the key check, harmlessly.
+        let port = lock(&self.peer_ports)
+            .0
+            .entries
+            .iter()
+            .find(|e| &e.device_id == id)
+            .map_or(crate::service::DEFAULT_SESSION_PORT, |e| e.session_port);
         self.p
             .trust
             .read(|s| s.find_by_id(id).and_then(|d| d.last_addrs.first().copied()))
-            .map(|a| SocketAddrV4::new(Ipv4Addr::from(a), crate::service::DEFAULT_SESSION_PORT))
+            .map(|a| SocketAddrV4::new(Ipv4Addr::from(a), port))
+    }
+
+    /// `id` (paired) was seen on `port`: kept in `peers.bin` when it changed, at most once a minute per device.
+    pub fn note_peer_port(&self, id: &DeviceId, port: u16) {
+        const GAP: std::time::Duration = std::time::Duration::from_secs(60);
+        if self.p.trust.read(|s| s.find_by_id(id).is_none()) {
+            return;
+        }
+        let snapshot = {
+            let mut guard = lock(&self.peer_ports);
+            let (ports, written) = &mut *guard;
+            if ports.entries.iter().any(|e| &e.device_id == id && e.session_port == port) {
+                return;
+            }
+            if written.get(id).is_some_and(|t| t.elapsed() < GAP) {
+                return;
+            }
+            let seen_ms = self.p.wall.unix_ms();
+            match ports.entries.iter_mut().find(|e| &e.device_id == id) {
+                Some(e) => {
+                    e.session_port = port;
+                    e.seen_ms = seen_ms;
+                }
+                None => {
+                    if ports.entries.len() >= super::store::MAX_PEER_PORTS {
+                        // The oldest goes.
+                        if let Some(i) = ports.entries.iter().enumerate().min_by_key(|(_, e)| e.seen_ms).map(|(i, _)| i)
+                        {
+                            ports.entries.remove(i);
+                        }
+                    }
+                    ports.entries.push(super::store::PeerPort { device_id: *id, session_port: port, seen_ms });
+                }
+            }
+            written.insert(*id, std::time::Instant::now());
+            ports.clone()
+        };
+        if let Err(e) = super::store::store_peer_ports(&*self.p.secrets, &snapshot) {
+            self.log(swapdesk_platform::Level::Warn, format_args!("peers.bin was not written: {e}"));
+        }
+    }
+
+    /// The device was forgotten: its last port goes with it.
+    pub fn forget_peer_port(&self, id: &DeviceId) {
+        let snapshot = {
+            let mut guard = lock(&self.peer_ports);
+            let before = guard.0.entries.len();
+            guard.0.entries.retain(|e| &e.device_id != id);
+            if guard.0.entries.len() == before {
+                return;
+            }
+            guard.0.clone()
+        };
+        let _ = super::store::store_peer_ports(&*self.p.secrets, &snapshot);
     }
 }
 

@@ -1343,3 +1343,66 @@ fn an_account_without_pairings_neither_listens_nor_announces() {
     m.finish();
     other.finish();
 }
+
+/// ACCOUNTS.md 5.2 and 15 S3: in production a typed `address:port` reaches an account on another slot, and pairing by
+/// that address goes to the next port; port 0 is not a port.
+#[test]
+fn a_typed_address_with_a_port_is_accepted_in_production_and_pairs_on_the_next_port() {
+    let m = Machine::build("sala", FakeNetInterfaces::windows_typical(), false);
+    let mut ui = m.client(info(false));
+    let typed = device_of(ui.call(UiOp::AddByAddress { ipv4: "192.168.1.50:47822".into() }));
+    assert_eq!(typed.id, "addr:192.168.1.50:47822");
+    let manual = lock(&m.hub.hub.manual).last().cloned().expect("kept");
+    assert_eq!((manual.session_port, manual.pair_port()), (47822, 47823), "pairs on the next port");
+    assert_eq!(
+        ui.call(UiOp::AddByAddress { ipv4: "192.168.1.50:0".into() }).unwrap_err(),
+        ApiCode::Invalid,
+        "port 0 is not a port"
+    );
+    drop(ui);
+    m.finish();
+}
+
+/// ACCOUNTS.md 5.2: a paired device seen on a port other than the default is dialled there when discovery no longer
+/// shows it, also after a restart (the port is kept in `peers.bin`), and forgetting it forgets the port.
+#[test]
+fn a_paired_device_out_of_discovery_is_dialled_at_its_last_seen_port() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    m.trust.update(|s| s.devices[0].last_addrs = vec![[192, 168, 1, 50]]).unwrap();
+    let id = other.id();
+    assert_eq!(m.hub.hub.address_of(&id).map(|a| a.port()), Some(crate::service::DEFAULT_SESSION_PORT));
+    // Discovery shows it on slot 1 of its machine.
+    let mut seen = other_record(&other);
+    seen.session_port = 47822;
+    seen.addrs = vec![Ipv4Addr::new(192, 168, 1, 50)];
+    m.presence.set(vec![seen]);
+    assert_eq!(m.hub.hub.address_of(&id), Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 50), 47822)));
+    // Out of discovery: the last address at the last port.
+    m.presence.set(Vec::new());
+    assert_eq!(m.hub.hub.address_of(&id), Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 50), 47822)));
+    // Kept on disk: a fresh read of the store finds it.
+    let kept = super::store::load_peer_ports(&*m.secrets);
+    assert_eq!(kept.entries.iter().find(|e| e.device_id == id).map(|e| e.session_port), Some(47822));
+    // Forget: the port goes with the device.
+    let mut ui = m.client(info(false));
+    assert!(ui.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    assert!(super::store::load_peer_ports(&*m.secrets).entries.is_empty());
+    drop(ui);
+    m.finish();
+    other.finish();
+}
+
+fn other_record(other: &Machine) -> PresencePeer {
+    PresencePeer {
+        device_id: other.id(),
+        name: "other-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::LOCALHOST],
+        session_port: crate::service::DEFAULT_SESSION_PORT,
+        pair_port: crate::service::DEFAULT_PAIR_PORT,
+        proto_minor: 0,
+    }
+}

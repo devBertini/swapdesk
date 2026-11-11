@@ -168,6 +168,8 @@ pub(crate) struct Hub {
     peer_writes: Mutex<grants_sync::PeerWrites>,
     /// The grants sync outside a session, per paired device (GRANTS-SYNC.md 4.3).
     sync: Mutex<sync_dial::SyncState>,
+    /// The session port each paired device was last seen on (`peers.bin`, ACCOUNTS.md 5.2), and when it was written.
+    peer_ports: Mutex<(store::PeerPorts, HashMap<DeviceId, std::time::Instant>)>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
@@ -287,6 +289,7 @@ pub struct UiHub {
 
 impl UiHub {
     pub fn new(params: HubParams) -> Self {
+        let params_secrets = Arc::clone(&params.secrets);
         let settings = params.settings.clone();
         let mode = Arc::new(PairingMode::new(Arc::clone(&params.clock)));
         let hub = Arc::new(Hub {
@@ -307,6 +310,7 @@ impl UiHub {
             minors: Mutex::new(peer_minor::PeerMinors::default()),
             peer_writes: Mutex::new(grants_sync::PeerWrites::default()),
             sync: Mutex::new(sync_dial::SyncState::default()),
+            peer_ports: Mutex::new((store::load_peer_ports(&*params_secrets), HashMap::new())),
             live_sessions: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
