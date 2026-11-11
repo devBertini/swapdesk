@@ -288,6 +288,7 @@ pub(crate) fn open_account_data(
 fn machine_updater(
     store: &Arc<WinSecretStore>,
     dev: bool,
+    live_sessions: LiveSessions,
     trace: Arc<dyn TraceSink>,
 ) -> Option<Arc<swapdesk_host::ui_hub::update::Updater>> {
     use swapdesk_update::manager::{FIRST_DELAY_MS, PERIOD_JITTER_MS, Setup, UpdateManager};
@@ -318,20 +319,198 @@ fn machine_updater(
         setup,
         Arc::new(swapdesk_sys_win::http::WinHttp::new()),
         Arc::new(StateFile(dir.join("update-state.txt"))),
-        Arc::new(UpdateDir(dir)),
+        Arc::new(UpdateDir(dir.clone())),
         now(),
     );
-    let ready_trace = Arc::clone(&trace);
+    let (ready_trace, update_dir) = (Arc::clone(&trace), dir);
     let hooks = swapdesk_host::ui_hub::update::UpdaterHooks {
         now_ms: Box::new(now),
         jitter_ms: Box::new(move || (spread() % (2 * PERIOD_JITTER_MS)) as i64 - PERIOD_JITTER_MS as i64),
-        live_sessions: Box::new(|| 0),
-        ready: Box::new(move |path| {
-            // The applier is slice U5 of UPDATES.md: until it is built, a verified package waits in the folder.
-            ready_trace.log(Level::Info, "update", format_args!("a verified package is ready: {}", path.display()));
+        live_sessions: Box::new(move || live_sessions.get().map_or(0, |count| count())),
+        ready: Box::new(move |path, version| {
+            // The applier stops this service: while it runs, this call waits. Its return means the applier ended with
+            // the service still up (it refused, or could not write its journal), which is told as a failed install.
+            let ended = run_applier(&update_dir, &path, &running_version(), version);
+            if let Err(e) = &ended {
+                ready_trace.log(Level::Error, "update", format_args!("the update to {version} did not run: {e}"));
+            }
+            ended
         }),
     };
     Some(swapdesk_host::ui_hub::update::Updater::new(manager, hooks))
+}
+
+/// This build's version (a release always has one that reads).
+fn running_version() -> swapdesk_update::Version {
+    swapdesk_update::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(swapdesk_update::Version {
+        major: 0,
+        minor: 0,
+        patch: 0,
+        pre: None,
+    })
+}
+
+/// Live sessions of the whole machine, known once the accounts exist (after the updater is built).
+type LiveSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>>;
+
+/// UPDATES.md 6.2 step 4: stages the verified package (deleted once staged), then starts the applier and waits for it.
+/// An `Ok` never comes back in practice: the applier stops this service. An `Err` says why nothing was replaced.
+fn run_applier(
+    update: &std::path::Path,
+    package: &std::path::Path,
+    old: &swapdesk_update::Version,
+    new: &swapdesk_update::Version,
+) -> Result<(), String> {
+    use swapdesk_sys_win::update_apply::{Layout, stage};
+    let bytes = std::fs::read(package).map_err(|e| format!("reading the package: {e}"));
+    let _ = std::fs::remove_file(package);
+    let pkg = swapdesk_update::package::Package::read(&bytes?).map_err(|e| format!("the package: {e:?}"))?;
+    let layout = Layout { install: PathBuf::new(), update: update.to_path_buf() };
+    stage(&pkg, &layout.staging())?;
+    let ended = spawn_applier(update, &["--apply-update", &old.to_string(), &new.to_string()])
+        .and_then(|mut child| child.wait().map_err(|e| format!("waiting for the applier: {e}")))
+        .map(|status| format!("the applier ended ({status}) with this service still running"));
+    // Nothing was replaced: the staged files go, and "Tentar de novo" downloads the package again.
+    let _ = std::fs::remove_dir_all(layout.staging());
+    Err(match ended {
+        Ok(why) | Err(why) => why,
+    })
+}
+
+/// Copies this service's image to the applier folder and starts it there with `args`, as SYSTEM, without a window and
+/// outside any job of the service.
+fn spawn_applier(update: &std::path::Path, args: &[&str]) -> Result<std::process::Child, String> {
+    use std::os::windows::process::CommandExt;
+    let dir = update.join(swapdesk_sys_win::update_apply::APPLIER);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("the applier folder: {e}"))?;
+    let applier = dir.join("swapdesk-service.exe");
+    let me = std::env::current_exe().map_err(|e| format!("this service's image: {e}"))?;
+    std::fs::copy(&me, &applier).map_err(|e| format!("copying the applier: {e}"))?;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let start = |flags: u32| {
+        std::process::Command::new(&applier)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    // A job that refuses breakaway refuses the flag: then the service is in no job that ends its children with it
+    // (the helpers' job holds the helpers only), and a plain start does.
+    start(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+        .or_else(|_| start(CREATE_NO_WINDOW))
+        .map_err(|e| format!("starting the applier: {e}"))
+}
+
+/// What a starting service does with the update journal (UPDATES.md 6.2 step 6, 6.4; the decision is
+/// `swapdesk_update::apply::at_start`). Returns the version that was rolled back to this one, which the updater does not
+/// offer again by itself.
+fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> Option<swapdesk_update::Version> {
+    use swapdesk_sys_win::update_apply::{
+        APPLIER, Layout, ROLLBACK, append_journal, complete, programs_inside, read_journal,
+    };
+    use swapdesk_update::apply::{AtStart, Journal, at_start};
+    let me = running_version();
+    let layout = Layout { install: PathBuf::new(), update: update.to_path_buf() };
+    let last = read_journal(&layout.journal());
+    let applier_alive = !programs_inside(&layout.applier()).is_empty();
+    match at_start(last.as_ref(), &me, applier_alive, complete(&layout.staging())) {
+        AtStart::Nothing => None,
+        AtStart::Commit => {
+            match append_journal(&layout.journal(), &Journal::Committed { new: me.clone() }) {
+                Ok(()) => trace.log(Level::Info, "update", format_args!("updated to {me}: committed")),
+                Err(e) => trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}")),
+            }
+            None
+        }
+        AtStart::Finish { old, new } | AtStart::RollBack { old, new } => {
+            let finish = complete(&layout.staging());
+            let what =
+                if finish { "the applier runs again" } else { "its files are gone: the old version is restored" };
+            trace.log(Level::Warn, "update", format_args!("the update from {old} to {new} was cut short; {what}"));
+            let mode = if finish { "--apply-update" } else { "--roll-back" };
+            // Not waited for: the applier stops this service.
+            if let Err(e) = spawn_applier(update, &[mode, &old.to_string(), &new.to_string()]) {
+                trace.log(Level::Error, "update", format_args!("the applier did not start again: {e}"));
+            }
+            None
+        }
+        AtStart::Clean { rolled_back } => {
+            let _ = std::fs::remove_dir_all(update.join(ROLLBACK));
+            let _ = std::fs::remove_dir_all(update.join(APPLIER));
+            let _ = std::fs::remove_dir_all(layout.staging());
+            let _ = std::fs::remove_dir_all(layout.swap());
+            if let Some(new) = &rolled_back {
+                trace.log(Level::Warn, "update", format_args!("{new} did not start; {me} was restored"));
+            }
+            rolled_back
+        }
+        AtStart::Broken { old, new } => {
+            // The rollback folder stays: the way out is install.cmd from the release zip (UPDATES.md 6.4).
+            trace.log(
+                Level::Error,
+                "update",
+                format_args!(
+                    "{new} did not start and {old} could not be restored: its files wait in {}; run install.cmd from the release zip",
+                    update.join(ROLLBACK).join(old.to_string()).display()
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// The applier (`--apply-update <old> <new>` or `--roll-back <old> <new>`, UPDATES.md 6.2 step 5 to 7, 6.4): accepted
+/// only as SYSTEM and only from the applier folder inside the protected data folder. Replaces `old` with `new`, staged
+/// by the service (or puts `old` back); the outcome goes to `update\applier.log` and the journal. Exit codes: 0
+/// committed, 1 rolled back, 3 broken, 2 refused.
+pub fn apply_update(old: &str, new: &str, roll_back: bool) -> u8 {
+    use swapdesk_sys_win::update_apply::{Layout, SWEEP_GRACE, Scm, WinMachine};
+    use swapdesk_update::apply::{Outcome, apply, roll_back_only};
+    let Some(program_data) = std::env::var_os("ProgramData") else { return 2 };
+    let update = PathBuf::from(program_data).join("Swapdesk").join("update");
+    let log = |line: &str| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(update.join("applier.log")) {
+            let _ = writeln!(f, "{} {line}", SystemWallClock.unix_ms());
+        }
+    };
+    if current_user_sid().ok().as_deref() != Some("S-1-5-18") {
+        eprintln!("swapdesk-service: the applier runs only as SYSTEM, started by the service");
+        return 2;
+    }
+    let expected = update.join(swapdesk_sys_win::update_apply::APPLIER).join("swapdesk-service.exe");
+    let same = |a: &std::path::Path, b: &std::path::Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+    if !std::env::current_exe().is_ok_and(|me| same(&me, &expected)) {
+        log("refused: not started from the applier folder");
+        return 2;
+    }
+    let (Ok(old), Ok(new)) = (swapdesk_update::Version::parse(old), swapdesk_update::Version::parse(new)) else {
+        log("refused: a version does not read");
+        return 2;
+    };
+    let (Ok(policy), Ok(program_files)) = (InstallPolicy::production(), swapdesk_sys_win::launch::program_files())
+    else {
+        log("refused: the install policy could not be read");
+        return 2;
+    };
+    let mut machine = WinMachine {
+        layout: Layout { install: program_files.join("Swapdesk"), update: update.clone() },
+        control: Box::new(Scm { name: SERVICE_NAME.into() }),
+        policy,
+        grace: SWEEP_GRACE,
+        poll: Duration::from_millis(250),
+    };
+    log(&format!("{} {old} -> {new}", if roll_back { "rolling back" } else { "applying" }));
+    let outcome = if roll_back { roll_back_only(&mut machine, &old, &new) } else { apply(&mut machine, &old, &new) };
+    log(&format!("{outcome:?}"));
+    match outcome {
+        Outcome::Committed => 0,
+        Outcome::RolledBack(_) => 1,
+        Outcome::Broken(_) => 3,
+    }
 }
 
 /// The updater's state file.
@@ -420,7 +599,13 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     // one (its user opens Swapdesk), and at start for every account the machine knows.
     // UPDATES.md 2.2 and 13: one updater for the machine, in the service, shared by the account hubs. A development
     // instance never checks and never installs.
-    let updater = machine_updater(&store, opts.console || opts.instance.is_some(), Arc::clone(&trace));
+    let live_sessions: LiveSessions = Arc::default();
+    let updater = machine_updater(
+        &store,
+        opts.console || opts.instance.is_some(),
+        Arc::clone(&live_sessions),
+        Arc::clone(&trace),
+    );
     let factory: AccountFactory = {
         let (root, trace, interfaces, clock, term_env) =
             (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
@@ -581,6 +766,13 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         },
     );
     trace.log(Level::Info, "service", format_args!("running; console session {session:?}"));
+    // The pipes and endpoints are up: an update that started this version is committed (UPDATES.md 6.2 step 6).
+    if !(opts.console || opts.instance.is_some()) {
+        let rolled_back = update_journal_at_start(&store.dir().join("update"), &*trace);
+        if let (Some(u), Some(v)) = (&updater, rolled_back) {
+            u.rolled_back(&v);
+        }
+    }
 
     // The OS tells when an adapter or an address changes; the watcher turns a burst of notices into one event. Not in
     // `--dev-loopback`, which has no network.
@@ -605,6 +797,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut next_net = Instant::now() + reconcile;
     let mut next_watchdog = Instant::now() + WATCHDOG;
     let mut console_retry: Option<Instant> = None;
+    {
+        let accounts = Arc::clone(&accounts);
+        let _ = live_sessions.set(Box::new(move || accounts.all().iter().map(|a| a.hub.live_sessions()).sum()));
+    }
     let every_hub = |f: &dyn Fn(&UiHub)| {
         for a in accounts.all() {
             f(&a.hub);

@@ -11,6 +11,9 @@ use swapdesk_update::manager::{CheckFailure, InstallAsk, InstallFailure, Phase, 
 
 use super::{Conn, Hub};
 
+/// The hook that hands a verified package to the applier.
+pub type ReadyHook = Box<dyn Fn(std::path::PathBuf, &Version) -> Result<(), String> + Send + Sync>;
+
 /// What the updater needs of the machine, given by the service.
 pub struct UpdaterHooks {
     /// Milliseconds of the wall clock (the schedule and "last check").
@@ -19,8 +22,9 @@ pub struct UpdaterHooks {
     pub jitter_ms: Box<dyn Fn() -> i64 + Send + Sync>,
     /// Live sessions on the whole machine, hosted or viewed, any account (10.3).
     pub live_sessions: Box<dyn Fn() -> usize + Send + Sync>,
-    /// A verified package is ready at this path: the applier takes over (UPDATES.md 6, slice U5).
-    pub ready: Box<dyn Fn(std::path::PathBuf) + Send + Sync>,
+    /// A verified package of this version is ready at this path, and every interface was told `UpdateRestarting`:
+    /// the applier takes over (UPDATES.md 6.2 step 4). An `Err` is told as a failed install.
+    pub ready: ReadyHook,
 }
 
 /// The machine's updater.
@@ -85,6 +89,13 @@ impl Updater {
         view_to_wire(&self.manager.view())
     }
 
+    /// The applier restored the running version because `version` did not start (UPDATES.md 6.4): it is not offered
+    /// again by itself.
+    pub fn rolled_back(&self, version: &Version) {
+        self.manager.rolled_back(version);
+        self.changed();
+    }
+
     /// Every account hub's interfaces hear of the changes.
     pub(super) fn subscribe(&self, hub: &Arc<Hub>) {
         let mut hubs = lock(&self.hubs);
@@ -121,7 +132,15 @@ impl Updater {
             let result = me.manager.install(&version, ask, &me.cancel);
             me.changed();
             if let Ok(path) = result {
-                (me.hooks.ready)(path);
+                // Each interface saves its window state and exits (UPDATES.md 6.2 step 4); the applier then stops the
+                // service.
+                for hub in lock(&me.hubs).iter().filter_map(Weak::upgrade) {
+                    hub.notify(Notify::UpdateRestarting);
+                }
+                if (me.hooks.ready)(path, &version).is_err() {
+                    me.manager.ready_failed();
+                    me.changed();
+                }
             }
         });
     }

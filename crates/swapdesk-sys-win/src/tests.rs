@@ -26,7 +26,7 @@ use crate::sys::{open_process_token, token_is_elevated, wide};
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn me() -> String {
+pub(crate) fn me() -> String {
     current_user_sid().unwrap()
 }
 
@@ -40,10 +40,10 @@ fn unique(prefix: &str) -> String {
 }
 
 /// A fresh temp folder, removed at the end.
-struct Temp(PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 
 impl Temp {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let p = std::env::temp_dir().join(unique("swapdesk-sys-win"));
         fs::create_dir_all(&p).unwrap();
         Self(p)
@@ -438,7 +438,7 @@ fn dev_launch_of_a_missing_exe_fails() {
     assert!(launch_helper_dev(Path::new("C:\\no\\such\\swapdesk-helper.exe"), &[]).is_err());
 }
 
-fn create_dir_with_sddl(path: &Path, sddl: &str) {
+pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) {
     let w = wide(path.as_os_str()).unwrap();
     let s = wide(std::ffi::OsStr::new(sddl)).unwrap();
     let mut sd: PSECURITY_DESCRIPTOR = null_mut();

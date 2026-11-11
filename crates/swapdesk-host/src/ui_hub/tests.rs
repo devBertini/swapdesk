@@ -1510,7 +1510,7 @@ fn the_updater_answers_through_the_hub_with_its_refusals() {
             let live = Arc::clone(&live);
             Box::new(move || live.load(std::sync::atomic::Ordering::SeqCst))
         },
-        ready: Box::new(|_| {}),
+        ready: Box::new(|_, _| Ok(())),
     };
     m.hub.set_updater(super::update::Updater::new(manager, hooks));
     let ReplyBody::Update(view) = ui.call(UiOp::UpdateGet).unwrap() else { panic!() };

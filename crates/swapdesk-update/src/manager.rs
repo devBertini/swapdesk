@@ -423,6 +423,15 @@ impl UpdateManager {
         result
     }
 
+    /// The verified package could not be handed to the applier (staging or the applier's start failed): told as a
+    /// disk failure, and "Tentar de novo" downloads it again.
+    pub fn ready_failed(&self) {
+        let mut i = lock(&self.inner);
+        if matches!(i.phase, Phase::Ready { .. }) {
+            i.phase = Phase::Failed(InstallFailure::Disk);
+        }
+    }
+
     fn download(
         &self,
         version: &Version,

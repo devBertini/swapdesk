@@ -21,6 +21,7 @@ pub mod service;
 mod sys;
 pub mod trace;
 pub mod udp;
+pub mod update_apply;
 pub mod watcher;
 
 pub use acl::AceInfo;

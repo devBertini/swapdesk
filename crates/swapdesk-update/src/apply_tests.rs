@@ -33,6 +33,9 @@ impl Fake {
 
 impl Machine for Fake {
     fn journal(&mut self, entry: &Journal) -> Result<(), String> {
+        if matches!(entry, Journal::Failed { .. }) {
+            self.steps.push("failed");
+        }
         self.journal.push(entry.to_line());
         Ok(())
     }
@@ -106,6 +109,8 @@ fn a_service_that_does_not_commit_in_time_is_rolled_back() {
     assert!(matches!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::RolledBack(_)));
     assert_eq!((m.installed.as_str(), m.running), ("1.1.0", true), "the old version runs again");
     assert_eq!(m.journal.last().map(String::as_str), Some("failed 1.1.0 1.1.1"));
+    // `failed` is written before the old service starts, so that service does not resume the apply.
+    assert!(m.steps.ends_with(&["restore", "failed", "start"]), "{:?}", m.steps);
     // A step that fails after the stop rolls back the same way.
     for step in ["sweep", "put_new", "start"] {
         let mut m = Fake::new("1.1.0", "1.1.1");
@@ -123,19 +128,53 @@ fn a_service_that_does_not_commit_in_time_is_rolled_back() {
 
 #[test]
 fn an_interrupted_apply_is_finished_or_rolled_back_from_the_journal() {
+    let (old, new) = (v("1.1.0"), v("1.1.1"));
     let applying = Journal::last_of("applying 1.1.0 1.1.1\n");
-    assert_eq!(resume_from(applying.as_ref(), true), Some(true), "staging is there: finish");
-    assert_eq!(resume_from(applying.as_ref(), false), Some(false), "staging gone: roll back");
+    let a = applying.as_ref();
+    // The applier waits: the new service commits, the old one (restarted by the SCM) does nothing.
+    assert_eq!(at_start(a, &new, true, true), AtStart::Commit);
+    assert_eq!(at_start(a, &old, true, true), AtStart::Nothing);
+    // No applier (a power cut): whichever version starts, a mixed set included, the applier finishes from staging...
+    for me in [&old, &new] {
+        assert_eq!(at_start(a, me, false, true), AtStart::Finish { old: old.clone(), new: new.clone() }, "{me}");
+        // ... or restores the old version when staging is gone.
+        assert_eq!(at_start(a, me, false, false), AtStart::RollBack { old: old.clone(), new: new.clone() }, "{me}");
+    }
     let committed = Journal::last_of("applying 1.1.0 1.1.1\ncommitted 1.1.1\n");
-    assert_eq!(resume_from(committed.as_ref(), true), None, "committed: nothing to do");
+    assert_eq!(at_start(committed.as_ref(), &new, false, false), AtStart::Clean { rolled_back: None });
+    let failed = Journal::last_of("applying 1.1.0 1.1.1\nfailed 1.1.0 1.1.1\n");
+    assert_eq!(at_start(failed.as_ref(), &old, false, false), AtStart::Clean { rolled_back: Some(new.clone()) });
+    let broken = Journal::last_of("applying 1.1.0 1.1.1\nfailed 1.1.0 1.1.1\nbroken 1.1.0 1.1.1\n");
+    assert_eq!(
+        at_start(broken.as_ref(), &new, false, false),
+        AtStart::Broken { old: old.clone(), new: new.clone() },
+        "a broken restore keeps its rollback folder"
+    );
     assert_eq!(Journal::last_of("garbage\n"), None);
-    assert_eq!(resume_from(None, true), None);
+    assert_eq!(at_start(None, &old, false, true), AtStart::Nothing);
     // The lines round-trip.
     for j in [
-        Journal::Applying { old: v("1.1.0"), new: v("1.1.1") },
-        Journal::Committed { new: v("1.1.1") },
-        Journal::Failed { old: v("1.1.0"), new: v("1.1.1") },
+        Journal::Applying { old: old.clone(), new: new.clone() },
+        Journal::Committed { new: new.clone() },
+        Journal::Failed { old: old.clone(), new: new.clone() },
+        Journal::Broken { old: old.clone(), new: new.clone() },
     ] {
         assert_eq!(Journal::last_of(&j.to_line()), Some(j));
     }
+}
+
+#[test]
+fn a_failed_restore_journals_broken_and_a_cut_apply_can_be_rolled_back_alone() {
+    let mut m = Fake::new("1.1.0", "1.1.1");
+    m.new_commits = false;
+    m.fail_at = Some("restore");
+    assert!(matches!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::Broken(_)));
+    assert_eq!(m.journal.last().map(String::as_str), Some("broken 1.1.0 1.1.1"));
+
+    let mut m = Fake::new("1.1.0", "1.1.1");
+    m.backup = Some("1.1.0".into());
+    m.installed = "1.1.1".into();
+    assert!(matches!(roll_back_only(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::RolledBack(_)));
+    assert_eq!((m.installed.as_str(), m.running), ("1.1.0", true));
+    assert_eq!(m.journal.last().map(String::as_str), Some("failed 1.1.0 1.1.1"));
 }

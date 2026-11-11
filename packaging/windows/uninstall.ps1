@@ -13,7 +13,7 @@
        and reported); removes HKLM\SOFTWARE\Swapdesk;
     6. deletes the files install.ps1 put in %ProgramFiles%\Swapdesk, then the folder if it is empty;
     7. deletes the data folder %ProgramData%\Swapdesk (identity, trust store, settings, audit and trace logs) unless
-       -KeepData is given. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
+       -KeepData is given; the updater's folder update inside it is removed whole. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
        then the folder if it is empty. A folder that is a reparse point is never entered.
   Then it writes one Application event (id 1001), removes the Event Log source Swapdesk, and queries the service, the rules, the folders, the shortcut, the registry key and the processes, and exits
   with 1 when something is left.
@@ -130,7 +130,9 @@ function Get-RunningFromInstallDir {
     foreach ($p in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $ProcessNames -contains $_.ProcessName })) {
         $path = $null
         try { $path = $p.Path } catch { }
-        if ($path -and $path.StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $found += $p }
+        # UPDATES.md 6.2: an update applier runs a copy of the service from the data folder's update\applier.
+        $applierPrefix = (Join-Path $DataDir 'update\applier') + '\'
+        if ($path -and ($path.StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $path.StartsWith($applierPrefix, [System.StringComparison]::OrdinalIgnoreCase))) { $found += $p }
     }
     return $found
 }
@@ -288,6 +290,7 @@ try {
         $accountsDir = Join-Path $DataDir 'accounts'
         if ($DryRun) {
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from each folder {1}\<SID>, then each folder and {1} if empty' -f ($AccountFiles -join ', '), $accountsDir)
+            Say ('[dry-run] would: delete the update folder {0}\update (the updater''s state, journal, staging, rollback and applier)' -f $DataDir)
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from {1}{2}, then the folder if empty' -f ($DataFiles -join ', '), $DataDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
         } else {
             # ACCOUNTS.md 10.6: the accounts first, each by the names it holds; a link is never entered.
@@ -301,6 +304,13 @@ try {
                     }
                     foreach ($l in @(Remove-KnownFolder $accountsDir @() $false)) { $leftovers += ("{0}: {1}" -f $accountsDir, $l) }
                 }
+            }
+            # UPDATES.md 6.3: the folder update holds only the updater's own files (its state, the journal, a staged or
+            # rolled-back version, the applier and its log): removed whole, a link never entered.
+            $updateDir = Join-Path $DataDir 'update'
+            if (Test-Path -LiteralPath $updateDir) {
+                Say ("-> delete the update folder {0}" -f $updateDir)
+                foreach ($l in @(Remove-KnownFolder $updateDir @() $true)) { $leftovers += ("{0}: {1}" -f $updateDir, $l) }
             }
             Say ("-> delete the data files in {0}" -f $DataDir)
             $dataLeft = @(Remove-KnownFolder $DataDir $DataFiles ([bool]$Force))

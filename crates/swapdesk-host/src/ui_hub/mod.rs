@@ -464,6 +464,11 @@ impl UiHub {
         self.hub.account.get().is_none()
     }
 
+    /// Live sessions of this account, hosted or viewed (the updater's confirmation, UPDATES.md 10.3).
+    pub fn live_sessions(&self) -> usize {
+        self.hub.live_sessions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The user at the console changed (`None`: the sign-in screen). Sessions of this account pause while another
     /// account owns the console and end after a minute; they go on when it comes back.
     pub fn set_console_user(&self, sid: Option<String>) {
