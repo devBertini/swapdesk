@@ -642,3 +642,29 @@ fn a_session_the_host_let_in_elevated_still_asks_this_machine_for_the_administra
     assert_eq!(admin_open(&mut p.viewer_ui, session).unwrap_err(), ApiCode::NeedsAdmin);
     p.finish();
 }
+
+/// ACCOUNTS.md 12.2 (S9): while the Mac app's session is not the active one, a live session pauses as away and a
+/// new entry is refused; active again, it goes on.
+#[test]
+fn an_inactive_session_refuses_and_pauses() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+    let mut p = Pair::build_with(stored, Some(swapdesk_proto::PROTO_MINOR));
+    p.host.hub.set_session_active("501", true);
+    let entry = p.press();
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    p.host.hub.set_session_active("501", false);
+    let hosted = p.host.core.host().sessions()[0].session_id;
+    wait_for("the hosted session to pause as away", || {
+        let ctx = p.host.core.host().session(hosted)?;
+        (ctx.desktop_state().desktop == swapdesk_proto::Desktop::AccountAway && ctx.is_paused()).then_some(())
+    });
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: session }).is_ok());
+    wait_for("the session to end", || p.host.core.host().sessions().is_empty().then_some(()));
+    let again = p.press();
+    let _ = not_opened(&mut p.viewer_ui, again, Duration::from_secs(5));
+    assert!(p.host.core.host().sessions().is_empty(), "refused while away");
+    p.host.hub.set_session_active("501", true);
+    let entry = p.press();
+    let _ = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    p.finish();
+}

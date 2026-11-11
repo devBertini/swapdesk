@@ -63,14 +63,15 @@ swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
 swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }
 dispatch2.workspace = true
 objc2.workspace = true
+block2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError"]
+features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError", "NSNotification", "NSOperation", "block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"]
+features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSWorkspace"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 workspace = true

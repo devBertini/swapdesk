@@ -462,6 +462,8 @@ Unless `-KeepData`:
 5. **Last seen ports:** the app keeps `peers.bin` in its secrets folder, as on Windows.
 6. **Two mDNS responders from two users' apps on one Mac:** whether both can bind UDP 5353 next to the system's own responder is UNPROVEN. It is proven with two logged-in accounts on the Mac (owner batch); the fallback is that only the active session's app announces.
 
+**As built (S9, 11/11):** the pair is chosen at start by `swapdesk_host::accounts::first_free_pair` (a UDP probe of both ports on the wildcard address, up to 32 pairs up) and stored in the user's `settings.bin`; `UiHub::set_session_active` turns the two `NSWorkspace` notices into the console rule (inactive is another account at the screen: `ACCOUNT_AWAY` and the pause of 5.1); the user reference is the uid. `peers.bin` on the Mac (item 5) is already the hub's own (S2). UNPROVEN until the owner batch: the probe against another user's app, and two mDNS responders.
+
 **The later root daemon** (C2.2) must keep this rule: per-uid folders under its root folder, never one machine store.
 
 **Linux** (no port exists): any future port keeps the same rule, either per-user data with the app or per-uid folders under a root daemon.

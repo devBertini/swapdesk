@@ -347,3 +347,18 @@ fn receive_off_closes_the_accounts_endpoint_and_withdraws_its_record() {
     assert!(a.core.receiving() && ka.presence.announced() == Some(true));
     drop(ui);
 }
+
+/// ACCOUNTS.md 12.1 (S9, OS-free): a Mac app whose stored pair is held by another account's app takes the next free
+/// pair; stored there, it starts there next time.
+#[test]
+fn a_busy_port_pair_moves_to_the_next_slot_and_stays_there() {
+    use crate::accounts::{MAC_SLOTS, first_free_pair};
+    let held = [47_820u16, 47_821];
+    let free = |p: u16| !held.contains(&p);
+    assert_eq!(first_free_pair((47_820, 47_821), MAC_SLOTS, free), Some((47_822, 47_823)));
+    // Next start, from the pair it stored: it stays, even once the first pair is free again.
+    assert_eq!(first_free_pair((47_822, 47_823), MAC_SLOTS, |_| true), Some((47_822, 47_823)));
+    // Only the pairing port held: the pair moves too (both ports go together).
+    assert_eq!(first_free_pair((47_820, 47_821), MAC_SLOTS, |p| p != 47_821), Some((47_822, 47_823)));
+    assert_eq!(first_free_pair((47_820, 47_821), 3, |_| false), None, "nothing free within reach");
+}

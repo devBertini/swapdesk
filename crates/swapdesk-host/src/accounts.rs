@@ -36,6 +36,21 @@ pub fn slot_ports(base: u16, slot: u8) -> (u16, u16) {
     (session, session.saturating_add(1))
 }
 
+/// The port pair a Mac app listens on (ACCOUNTS.md 12.1): the pair its own `settings.bin` holds, or, when another
+/// account's app already holds it (fast user switching with both apps running), the next pair whose two ports are
+/// free, two by two, at most `slots` pairs up. The app stores the pair it got, so it stays there across restarts.
+/// `None`: no free pair in reach.
+pub fn first_free_pair(stored: (u16, u16), slots: u8, is_free: impl Fn(u16) -> bool) -> Option<(u16, u16)> {
+    (0..slots).find_map(|k| {
+        let session = stored.0.checked_add(2 * u16::from(k))?;
+        let pair = stored.1.checked_add(2 * u16::from(k))?;
+        (is_free(session) && is_free(pair)).then_some((session, pair))
+    })
+}
+
+/// How many pairs a Mac app tries above its own (the Windows slots, ACCOUNTS.md 5.5, GUESS).
+pub const MAC_SLOTS: u8 = 32;
+
 /// What an [`AccountFactory`] error starts with when the seat's port is held by another program: the machine then
 /// gives the account the next free slot (ACCOUNTS.md 5.5). The rest of the message names the holder.
 pub const PORT_HELD: &str = "port held: ";

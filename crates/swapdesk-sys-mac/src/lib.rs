@@ -11,3 +11,10 @@ pub mod actions;
 pub mod admin;
 #[cfg(target_os = "macos")]
 pub mod pty;
+
+/// The uid of this process's user, as the user reference of the Mac app (C5.1: "macOS uid + name").
+#[cfg(target_os = "macos")]
+pub fn own_uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}

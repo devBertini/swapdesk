@@ -127,8 +127,20 @@ impl ServiceParams {
 /// The app's one connection to its own hub. Not an administrator connection: nothing in the Mac app grants `UNATTENDED` or
 /// `ADMIN_TERMINAL` by itself. It `can_elevate`: it may ask for a ticket, and the administrator's name and password typed
 /// into macOS's dialog are what let [`MacElevator`] confirm it (`docs/ELEVATION-MAC.md` 3.4).
+/// This app's user, by uid (C5.1: "macOS uid + name"; ACCOUNTS.md 12.3).
+pub(crate) fn own_user_id() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        swapdesk_sys_mac::own_uid().to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "local-user".into()
+    }
+}
+
 pub(crate) fn app_connection() -> ConnInfo {
-    let user = UserRef { id: "local-user".into(), name: std::env::var("USER").unwrap_or_default() };
+    let user = UserRef { id: own_user_id(), name: std::env::var("USER").unwrap_or_default() };
     ConnInfo { session_id: UI_SESSION, user, admin: false, can_elevate: true }
 }
 
@@ -180,7 +192,8 @@ impl InProcessService {
             network_notices,
             admin_confirm,
         } = p;
-        let MacServiceSetup { mut config, identity, trust, settings } = mac_service_config(MacServiceParams {
+        let production_ports = ports.is_none();
+        let MacServiceSetup { mut config, identity, trust, mut settings } = mac_service_config(MacServiceParams {
             default_name,
             os_version: os_version.clone(),
             secrets: Arc::clone(&secrets),
@@ -191,6 +204,34 @@ impl InProcessService {
             dev_loopback,
             ports,
         })?;
+        // ACCOUNTS.md 12.1: another account's app may hold this user's pair (fast user switching with both apps
+        // running): take the next free pair and keep it in this user's settings.
+        if production_ports {
+            let free = |port: u16| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok();
+            match swapdesk_host::accounts::first_free_pair(
+                (settings.port, settings.pair_port),
+                swapdesk_host::accounts::MAC_SLOTS,
+                free,
+            ) {
+                Some(pair) if pair != (settings.port, settings.pair_port) => {
+                    trace.log(
+                        Level::Warn,
+                        "app",
+                        format_args!(
+                            "ports {}/{} are held by another program: this app takes {}/{}",
+                            settings.port, settings.pair_port, pair.0, pair.1
+                        ),
+                    );
+                    (settings.port, settings.pair_port) = pair;
+                    (config.session_port, config.pair_port) = pair;
+                    if let Err(e) = swapdesk_host::ui_hub::store_settings(&*secrets, &settings) {
+                        trace.log(Level::Warn, "app", format_args!("the new ports were not stored: {e}"));
+                    }
+                }
+                Some(_) => {}
+                None => trace.log(Level::Warn, "app", format_args!("no free port pair: the core will say why")),
+            }
+        }
         let wall = SystemWallClock;
         let audit = Arc::new(
             FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?,
@@ -671,7 +712,8 @@ mod tests {
         let c = app_connection();
         assert!(c.can_elevate, "it may ask for a ticket");
         assert!(!c.admin, "it is never an administrator itself");
-        assert_eq!((c.session_id, c.user.id.as_str()), (UI_SESSION, "local-user"));
+        // ACCOUNTS.md 12.3: the user reference is the uid.
+        assert_eq!((c.session_id, c.user.id.clone()), (UI_SESSION, own_user_id()));
 
         // Through the hub: the widening is refused as `NeedsAdmin` (not an administrator), and a ticket is given (it can
         // ask), so the scripted approval ends the way an administrator's would.
@@ -709,11 +751,7 @@ mod tests {
         settle(&rig, &mut state, "the grant in the list", |s| unattended_here(s, &rig.device));
         assert_eq!(confirm.calls(), 1);
         assert_eq!(rig.grants_here(), grants_with_unattended().0, "the trust store holds it");
-        assert_eq!(
-            rig.unattended_granted_by().as_deref(),
-            Some("local-user"),
-            "the account that asked, not the approver"
-        );
+        assert_eq!(rig.unattended_granted_by(), Some(own_user_id()), "the account that asked, not the approver");
 
         // The pass was used up: take the grant away, and asking for it again is `NeedsAdmin` and a step again.
         let a = state.activate(ControlId::Grant(Permission::Unattended));

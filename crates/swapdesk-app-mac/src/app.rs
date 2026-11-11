@@ -227,6 +227,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("the service did not start: {e}"))?;
     let backend = service.backend();
     viewer.set_out(backend.clone());
+    // ACCOUNTS.md 12.2: this app hosts only while its user session is the active one.
+    {
+        let (hub, uid) = (service.hub().clone(), crate::service::own_user_id());
+        hub.set_session_active(&uid, true);
+        let trace = Arc::clone(&trace);
+        let observer = crate::session_notices::observe(move |active| {
+            trace.log(
+                Level::Info,
+                "app",
+                format_args!("this user session is {}", if active { "active" } else { "inactive" }),
+            );
+            hub.set_session_active(&uid, active);
+        });
+        // Registered for the whole run of the app.
+        std::mem::forget(observer);
+    }
     let user = state.user_prefs();
     viewer.set_user_prefs(user.keyboard_mode, user.swap_ctrl_cmd);
     if options.selftest.is_none() {

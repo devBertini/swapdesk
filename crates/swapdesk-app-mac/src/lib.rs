@@ -44,6 +44,8 @@ pub mod pipeline;
 #[cfg(target_os = "macos")]
 pub mod selftest;
 #[cfg(target_os = "macos")]
+pub mod session_notices;
+#[cfg(target_os = "macos")]
 pub mod slot;
 
 #[cfg(all(test, target_os = "macos"))]

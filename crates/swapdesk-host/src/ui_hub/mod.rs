@@ -441,6 +441,14 @@ impl UiHub {
         self.hub.had_1_0.store(had, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The Mac app's session became active or inactive (ACCOUNTS.md 12.2, `NSWorkspace` session notices): while
+    /// inactive another user owns the screen, so entries are refused with `ACCOUNT_AWAY` and live sessions pause
+    /// (and end after the minute) as on Windows (5.1). `user` is this app's user (the uid).
+    pub fn set_session_active(&self, user: &str, active: bool) {
+        self.set_account(user);
+        self.set_console_user(Some(if active { user.to_string() } else { format!("{user}:inactive") }));
+    }
+
     /// Whether this hub serves the machine's only account (no account SID was set: a machine of one account, the Mac).
     pub fn single_account(&self) -> bool {
         self.hub.account.get().is_none()
