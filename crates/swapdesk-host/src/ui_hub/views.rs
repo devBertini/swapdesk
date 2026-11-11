@@ -443,6 +443,17 @@ impl Hub {
         out
     }
 
+    /// The protocol minor of `id`'s discovery record, when the device is on the network now.
+    pub fn minor_hint(&self, id: &DeviceId) -> Option<u16> {
+        self.p.presence.peers().iter().find(|p| &p.device_id == id).map(|p| p.proto_minor)
+    }
+
+    /// The protocol minor to count on for `id`, whose record now carries `hint` ([`Hub::minor_hint`]): what it said
+    /// in a session, else what its record says, else 0 (PROTOCOL.md 1). A viewer asks for anything of a later minor only toward a device this says knows it.
+    pub fn known_minor(&self, id: &DeviceId, hint: Option<u16>) -> u16 {
+        lock(&self.minors).known(id, hint)
+    }
+
     /// An address the viewer path can dial for `id`: the device seen on the network now, one learned from a typed
     /// address while we run, else the last address stored with the device and the default port.
     pub fn address_of(&self, id: &DeviceId) -> Option<SocketAddrV4> {

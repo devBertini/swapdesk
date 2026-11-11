@@ -288,6 +288,8 @@ impl CtxCell {
 
 pub(crate) struct Inner {
     session_id: u64,
+    /// How the host let this session in.
+    mode: swapdesk_proto::GrantMode,
     cell: Arc<CtxCell>,
     device: DeviceId,
     input: mpsc::Sender<Vec<InputEvent>>,
@@ -328,6 +330,11 @@ impl ViewerHandle {
 
     pub fn device(&self) -> DeviceId {
         self.inner.device
+    }
+
+    /// How the host let this session in: after a question to its user, without one, or as a swap.
+    pub fn mode(&self) -> swapdesk_proto::GrantMode {
+        self.inner.mode
     }
 
     /// What the host lets this session do now.
@@ -801,6 +808,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let ctx = session_handle.ctx().clone();
     *lock(&session) = Some(ctx.clone());
     let session_id = session_handle.grant().session_id;
+    let mode = session_handle.grant().mode;
     clip_session.store(session_id, std::sync::atomic::Ordering::Release);
     files.set_session(session_id);
     let since_ms = wall.unix_ms();
@@ -966,6 +974,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
 
     let inner = Inner {
         session_id,
+        mode,
         cell,
         device,
         input: input_tx,

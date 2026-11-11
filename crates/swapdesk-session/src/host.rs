@@ -553,7 +553,7 @@ impl HostInner {
             }
         }
 
-        if policy::unattended_grant(stored_grants, hello.requested).is_some() {
+        if policy::unattended_grant(stored_grants, hello.requested, hello.proto_minor).is_some() {
             return Decision::Grant { basis: Basis::Unattended, requested: hello.requested, slot: None };
         }
 
@@ -642,9 +642,10 @@ impl HostInner {
                 let (granted, mode) = match basis {
                     // Entry without a prompt needs the stored `UNATTENDED` still: a revocation that raced the
                     // decision refuses it, and the viewer's next request is asked about.
-                    Basis::Unattended => match policy::unattended_grant(stored_now, requested) {
-                        Some(g) => (g, GrantMode::Unattended),
-                        None => return Err(ErrorCode::NotPermitted),
+                    // What it holds depends on the viewer's minor: 1.1 enters without the machine-level bits.
+                    Basis::Unattended => match policy::unattended_grant(stored_now, requested, ctx.peer_minor()) {
+                        Some(g) if !g.is_empty() => (g, GrantMode::Unattended),
+                        _ => return Err(ErrorCode::NotPermitted),
                     },
                     Basis::Swap => (policy::swap_grant(stored_now, requested), GrantMode::Swap),
                     Basis::Prompted(picked) => {
@@ -656,14 +657,18 @@ impl HostInner {
                     }
                 };
                 ctx.set_requested(requested);
+                let unattended = mode == GrantMode::Unattended;
+                ctx.set_entered_unattended(unattended);
                 let session_id = random_session_id();
-                let token = t.resume.insert(session_id, *device, granted);
+                let token = t.resume.insert(session_id, *device, granted, unattended);
                 Committed { session_id, granted, mode, token }
             }
             Decision::Resume { session_id, token, requested } => {
+                let unattended = t.resume.entered_unattended(session_id);
                 match t.resume.resume(now(), device, session_id, &token, stored_now) {
                     Ok((granted, token)) => {
                         ctx.set_requested(requested);
+                        ctx.set_entered_unattended(unattended);
                         Committed { session_id, granted, mode: GrantMode::Resumed, token }
                     }
                     Err(_) => return Err(ErrorCode::Busy),

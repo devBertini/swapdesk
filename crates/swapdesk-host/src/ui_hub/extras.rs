@@ -399,7 +399,7 @@ impl Hub {
         let reason = match outcome {
             // The same entry goes on as a connect: it ends with the session's start or with why it did not open, and
             // a cancel in any phase drops this task, which tells the host.
-            Ok(WakeOutcome::Appeared) => return self.run_connect(conn, wake_id, id, intent, false).await,
+            Ok(WakeOutcome::Appeared) => return self.run_connect(conn, wake_id, id, intent).await,
             Ok(WakeOutcome::GaveUp) => Some(ApiCode::Timeout),
             Err(WakeError::NoMacs) => Some(ApiCode::Invalid),
             Err(WakeError::Send(_)) => Some(ApiCode::Internal),

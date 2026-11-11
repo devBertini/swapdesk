@@ -205,8 +205,13 @@ impl Machine {
             .expect("store");
     }
 
-    /// Shows `other` on the network at its session address.
+    /// Shows `other` on the network at its session address, with a record of 1.0 (no `minor` key).
     fn sees(&self, other: &Machine, pairing_open: bool) {
+        self.sees_minor(other, pairing_open, 0);
+    }
+
+    /// As `sees`, with the protocol minor `other`'s record carries.
+    fn sees_minor(&self, other: &Machine, pairing_open: bool, proto_minor: u16) {
         let SocketAddr::V4(addr) = other.session_addr() else { unreachable!() };
         self.presence.set(vec![PresencePeer {
             device_id: other.id(),
@@ -216,7 +221,7 @@ impl Machine {
             addrs: vec![*addr.ip()],
             session_port: addr.port(),
             pair_port: other.hub.pair_local_addrs().first().map_or(0, SocketAddr::port),
-            proto_minor: 0,
+            proto_minor,
         }]);
     }
 
@@ -640,11 +645,9 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
         ApiCode::NeedsAdmin
     );
     assert_eq!(m.trust.read(|s| s.devices[0].grants_here), PermissionSet::CONTROL, "nothing changed");
-    // D10: entry without a prompt is the same.
-    assert_eq!(
-        plain.call(UiOp::Connect { device_id: id.clone(), intent: Intent::Control, unattended: true }).unwrap_err(),
-        ApiCode::NeedsAdmin
-    );
+    // Entry without a prompt is no longer an administrator's alone (D10's check on `Connect` went with ACCOUNTS.md
+    // 8.1): any account's connect is taken, the flag is not read, and the host decides.
+    assert!(plain.call(UiOp::Connect { device_id: id.clone(), intent: Intent::Control, unattended: true }).is_ok());
 
     // What needs no administrator goes through.
     let view_files = (PermissionSet::VIEW.union(PermissionSet::FILES)).bits();

@@ -148,16 +148,14 @@ impl Hub {
     }
 
     fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
-        if let UiOp::Connect { device_id, intent, unattended } = op {
+        // `unattended` of the op is not read: whether the viewer asks for entry without a prompt follows what it
+        // knows of the host (`open_viewer`), from any account, and the host decides the rest.
+        if let UiOp::Connect { device_id, intent, .. } = op {
             if let Err(code) = self.require_console(conn, "a connect from a UI that is not the console's") {
                 return reply(conn, req, Err(code));
             }
-            // Entry without a prompt needs an administrator connection (D10); the host decides the rest.
-            if unattended && !conn.info.admin {
-                return reply(conn, req, Err(ApiCode::NeedsAdmin));
-            }
             // Answers with the entry at once; the attempt (up to the host's 20 s) goes on as a task.
-            self.connect(conn, req, &device_id, intent, unattended);
+            self.connect(conn, req, &device_id, intent);
             return;
         }
         reply(conn, req, self.op(conn, op));
@@ -389,6 +387,7 @@ impl Hub {
             }
         }
         lock(&self.learned).remove(&id);
+        lock(&self.minors).forget(&id);
         self.devices_changed();
         Ok(())
     }
@@ -496,14 +495,7 @@ impl Hub {
     /// `Connect`: answers with the id of an entry at once, then runs the attempt as a task. The entry reports
     /// `Connecting` and `Prompted` while the host decides; it ends with the session's first `Active` (then the entry's
     /// `Ended`) or with `NotOpened` and why. Only what is wrong with the request itself is a reply's error.
-    pub(super) fn connect(
-        self: &Arc<Self>,
-        conn: &Arc<Conn>,
-        req: u32,
-        device_id: &str,
-        intent: Intent,
-        unattended: bool,
-    ) {
+    pub(super) fn connect(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, device_id: &str, intent: Intent) {
         let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
         if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
             return reply(conn, req, Err(ApiCode::NotFound));
@@ -517,21 +509,14 @@ impl Hub {
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
         // The entry is registered under the lock the task ends with, so a fast end cannot leave a stale one.
         let mut entries = lock(&self.entries);
-        let task = rt.spawn(async move { me.run_connect(c, entry_id, id, intent, unattended).await });
+        let task = rt.spawn(async move { me.run_connect(c, entry_id, id, intent).await });
         entries.insert(entry_id, Entry { abort: task.abort_handle(), conn: conn.id, device_hex: device_id_hex(&id) });
     }
 
     /// One connect attempt under the entry `entry_id` (a connect's own, or the one of a wake): the session goes to its
     /// relay, which ends the entry after the session's first `Active`; or the entry ends here with why it did not open.
-    pub(super) async fn run_connect(
-        self: Arc<Self>,
-        conn: Arc<Conn>,
-        entry_id: u64,
-        id: DeviceId,
-        intent: Intent,
-        unattended: bool,
-    ) {
-        let Err(why) = self.open_viewer(&conn, entry_id, id, intent, unattended).await else { return };
+    pub(super) async fn run_connect(self: Arc<Self>, conn: Arc<Conn>, entry_id: u64, id: DeviceId, intent: Intent) {
+        let Err(why) = self.open_viewer(&conn, entry_id, id, intent).await else { return };
         // A cancel took the entry first: its end was told.
         if lock(&self.entries).remove(&entry_id).is_some() {
             conn.queue.control(Ipc::UiNotify(Notify::Session {
@@ -549,12 +534,17 @@ impl Hub {
         entry_id: u64,
         id: DeviceId,
         intent: Intent,
-        unattended: bool,
     ) -> Result<(), ConnectWhy> {
         let device_hex = device_id_hex(&id);
         let addr = self.address_of(&id).ok_or(ConnectWhy::Unreachable)?;
         let core = self.core().ok_or(ConnectWhy::Failed)?;
         let rt = self.rt().ok_or(ConnectWhy::Failed)?.clone();
+        // Entry without a prompt is asked for whenever the host is known to be of minor 1 or newer, from any
+        // account: such a host lets a device that holds `UNATTENDED` in without a question and without the
+        // machine-level bits, and prompts every other. A 1.0 host is never asked: it would let the device in at
+        // once with machine-level input, which its own interface never asked for.
+        let hint = self.minor_hint(&id);
+        let unattended = self.known_minor(&id, hint) >= 1;
         // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
         // at the host), and an administrator connection also asks for the administrator terminal (D10).
         let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };
@@ -589,7 +579,17 @@ impl Hub {
             return Err(ConnectWhy::Failed);
         }
         let session_id = handle.session_id();
-        let mode = if unattended { swapdesk_proto::GrantMode::Unattended } else { swapdesk_proto::GrantMode::Prompted };
+        // What the host said it speaks, over the connection its pinned key authenticated.
+        let said = handle.ctx().peer_minor();
+        if lock(&self.minors).said(id, said, hint) {
+            self.log(
+                Level::Info,
+                format_args!(
+                    "{device_hex} answered protocol minor {said} under a record of minor {hint:?}: it counts as {said}"
+                ),
+            );
+        }
+        let mode = handle.mode();
         handle.files().bind(conn.fs.clone());
         lock(&conn.viewers)
             .insert(session_id, Viewer { handle: handle.clone(), device: id, view_only: false, displays: Vec::new() });

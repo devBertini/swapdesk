@@ -532,6 +532,7 @@ impl Actor {
                     os_version: cfg.os_version.clone(),
                 };
                 let caps = cfg.capabilities.clone();
+                self.ctx.set_peer_minor(hello.proto_minor);
                 *slot = Some(hello);
                 if let Some(f) = self.emit(ack, false) {
                     return Some(f);
@@ -687,6 +688,7 @@ impl Actor {
     fn viewer_message(&mut self, msg: Message) -> Option<Finish> {
         match (self.phase, msg) {
             (Phase::AwaitAck, Message::HelloAck(ack)) => {
+                self.ctx.set_peer_minor(ack.proto_minor);
                 if let Side::Viewer { peer, .. } = &mut self.side {
                     *peer = Some(ack);
                 }

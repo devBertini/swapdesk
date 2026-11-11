@@ -67,14 +67,15 @@ fn f1_an_administrator_terminal_needs_the_grant_and_the_request() {
         let mem = Mem::new(ui, registry_one(rec.clone()));
         let who = Who::new();
         pin(&mem.trust, &who, all);
-        let (a, _t) = mem.open(&who, viewer_config(all)).await;
+        // A 1.0 viewer: its unattended entry holds ADMIN_TERMINAL at once (a viewer of minor 1 gets it with Elevate).
+        let (a, _t) = mem.open(&who, viewer_config_1_0(all)).await;
         let a = a.unwrap();
         assert_eq!(a.grant().granted, all);
         let info = a.grant().clone();
         a.abandon();
         eventually(Duration::from_secs(1), "the loss", || mem.host.sessions().is_empty()).await;
         // The same device resumes, but this time its Hello does not ask for ADMIN_TERMINAL.
-        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        let mut cfg = viewer_config_1_0(PermissionSet::CONTROL);
         cfg.resume = Some(info.resume.clone());
         let (r, _t) = mem.open(&who, cfg).await;
         let mut r = r.unwrap();

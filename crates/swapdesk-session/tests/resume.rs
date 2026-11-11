@@ -312,14 +312,64 @@ fn a_resumed_session_gets_the_original_grants_intersected_with_what_is_still_sto
 fn an_unattended_session_resumes_with_unattended_while_it_is_still_stored() {
     run_paused(async {
         let all = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
-        let f = fx(PermissionSet::EMPTY, all);
-        let s = f.session(all).await;
-        assert_eq!(s.grant().mode, GrantMode::Unattended);
+        // A 1.0 viewer holds the bit from its entry; a viewer of minor 1 entered without it. Each resumes with what
+        // it had.
+        for (minor, held) in [(0u16, all), (swapdesk_proto::PROTO_MINOR, PermissionSet::CONTROL)] {
+            let f = fx(PermissionSet::EMPTY, all);
+            let mut cfg = viewer_config(all);
+            cfg.proto_minor = minor;
+            let s = f.mem.open(&f.who, cfg.clone()).await.0.expect("the session should open");
+            assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, held), "minor {minor}");
+            let info = s.grant().clone();
+            f.lose(s).await;
+            cfg.resume = Some(info.resume.clone());
+            let r = f.mem.open(&f.who, cfg).await.0.unwrap();
+            assert_eq!((r.grant().mode, r.grant().granted), (GrantMode::Resumed, held), "minor {minor}");
+            assert_eq!(f.ui.prompt_count(), 0);
+        }
+    });
+}
+
+/// A resume of a session that entered without a prompt is still such a session for the host (what D13 asks about),
+/// although a viewer of minor 1 holds no `UNATTENDED` bit that would say so.
+#[test]
+fn a_resumed_unattended_entry_is_still_an_unattended_entry() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(CF);
+        let mem = Mem::new(ui.clone(), registry_one(rec.clone()));
+        let all = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+        let (unattended, prompted) = (Who::new(), Who::new());
+        pin(&mem.trust, &unattended, all);
+        pin(&mem.trust, &prompted, CF);
+        let lose = |s: ViewerSession| async {
+            s.abandon();
+            eventually(Duration::from_secs(1), "the loss", || mem.host.sessions().is_empty()).await;
+        };
+
+        let s = mem.open(&unattended, viewer_config(all)).await.0.unwrap();
+        assert!(lock(&rec.sessions).last().unwrap().entered_unattended());
         let info = s.grant().clone();
-        f.lose(s).await;
-        let r = f.resume(&f.who, &info, all).await.unwrap();
-        assert_eq!((r.grant().mode, r.grant().granted), (GrantMode::Resumed, all));
-        assert_eq!(f.ui.prompt_count(), 0);
+        lose(s).await;
+        let mut cfg = viewer_config(all);
+        cfg.resume = Some(info.resume.clone());
+        let r = mem.open(&unattended, cfg).await.0.unwrap();
+        assert_eq!(r.grant().mode, GrantMode::Resumed);
+        assert!(lock(&rec.sessions).last().unwrap().entered_unattended(), "the resumed session keeps how it entered");
+        r.disconnect().await;
+        eventually(Duration::from_secs(1), "the end", || mem.host.sessions().is_empty()).await;
+
+        // A session somebody accepted, and its resume, are not.
+        let s = mem.open(&prompted, viewer_config(CF)).await.0.unwrap();
+        assert_eq!(s.grant().mode, GrantMode::Prompted);
+        assert!(!lock(&rec.sessions).last().unwrap().entered_unattended());
+        let info = s.grant().clone();
+        lose(s).await;
+        let mut cfg = viewer_config(CF);
+        cfg.resume = Some(info.resume.clone());
+        let r = mem.open(&prompted, cfg).await.0.unwrap();
+        assert_eq!(r.grant().mode, GrantMode::Resumed);
+        assert!(!lock(&rec.sessions).last().unwrap().entered_unattended());
     });
 }
 
@@ -360,8 +410,8 @@ fn a_host_reboot_loses_every_token_unattended_devices_reconnect_through_unattend
         let r = r.unwrap();
         assert_eq!(
             (r.grant().mode, r.grant().granted),
-            (GrantMode::Unattended, all),
-            "through UNATTENDED, not through the stale token"
+            (GrantMode::Unattended, PermissionSet::CONTROL),
+            "through UNATTENDED, not through the stale token (a viewer of minor 1 enters without the bit)"
         );
         assert_eq!(ui.prompt_count(), prompts);
         r.abandon();

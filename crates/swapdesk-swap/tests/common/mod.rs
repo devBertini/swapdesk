@@ -374,6 +374,13 @@ pub fn viewer_config(requested: PermissionSet) -> ViewerConfig {
     cfg
 }
 
+/// As [`viewer_config`], for a viewer of 1.0: its `Hello` says protocol minor 0.
+pub fn viewer_config_1_0(requested: PermissionSet) -> ViewerConfig {
+    let mut cfg = viewer_config(requested);
+    cfg.proto_minor = 0;
+    cfg
+}
+
 // ---------- host and viewer over memory ----------
 
 pub struct Mem {

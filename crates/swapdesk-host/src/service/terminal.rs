@@ -307,7 +307,7 @@ impl HostInner {
             self.trust.read(|s| s.find_by_id(&d).and_then(|p| p.unattended_granted_by.as_ref().map(|u| u.id.clone())))
         });
         let facts = ConsentFacts {
-            session_unattended: ctx.granted().contains(PermissionSet::UNATTENDED),
+            session_unattended: ctx.entered_unattended(),
             granted_by: granted_by.as_deref(),
             console_user: console_user.as_deref(),
             admin_terminal: req.admin,

@@ -27,6 +27,9 @@ pub struct ViewerConfig {
     pub os: Os,
     pub os_version: String,
     pub app_version: String,
+    /// The protocol minor this viewer announces in its `Hello`: this build's own. A test that plays a viewer
+    /// of 1.0 sets 0.
+    pub proto_minor: u16,
     pub intent: Intent,
     /// What the viewer asks for. The viewer's service sets `UNATTENDED` or `ADMIN_TERMINAL` only for a local
     /// administrator (D10, F-PERM-03).
@@ -61,6 +64,7 @@ impl ViewerConfig {
             os,
             os_version: os_version.into(),
             app_version: app_version.into(),
+            proto_minor: PROTO_MINOR,
             intent: Intent::Control,
             requested: PermissionSet::CONTROL,
             resume: None,
@@ -77,7 +81,7 @@ impl ViewerConfig {
 
     fn hello(&self) -> Hello {
         Hello {
-            proto_minor: PROTO_MINOR,
+            proto_minor: self.proto_minor,
             app_version: self.app_version.clone(),
             name: self.name.clone(),
             os: self.os,

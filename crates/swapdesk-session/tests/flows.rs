@@ -50,6 +50,64 @@ use swapdesk_session::SessionEnd;
 
 // ---------- F-SESS-02: unattended entry ----------
 
+/// A viewer of 1.0 has no elevation step: it is let in with the whole grant, as 1.0 did.
+#[test]
+fn a_minor_0_viewer_gets_unattended_at_entry_as_in_1_0() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let all = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, all | PermissionSet::FILES);
+        let (s, _task) = mem.open(&who, viewer_config_1_0(all)).await;
+        let s = s.unwrap();
+        assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, all));
+        assert_eq!(ui.prompt_count(), 0, "no prompt");
+        assert_eq!(s.ctx().peer_minor(), swapdesk_proto::PROTO_MINOR, "the host answers with its own minor");
+    });
+}
+
+/// A viewer of minor 1 that entered without a prompt holds no `UNATTENDED`: the lock screen, the sign-in screen and
+/// UAC pause it, as they pause a prompted session, until it elevates.
+#[test]
+fn an_unelevated_unattended_session_pauses_at_a_secure_desktop() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), registry_one(rec.clone()));
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        // The plain terminal stays: only the administrator one is machine-level.
+        let plain = PermissionSet::CONTROL | PermissionSet::TERMINAL;
+        assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, plain));
+        assert_eq!(ui.prompt_count(), 0, "no prompt");
+        let host_ctx = lock(&rec.sessions)[0].clone();
+        assert!(host_ctx.entered_unattended(), "the host knows nobody accepted this session");
+        assert_eq!(host_ctx.peer_minor(), swapdesk_proto::PROTO_MINOR);
+        assert!(host_ctx.can_inject());
+        for desktop in [Desktop::Secure, Desktop::Locked, Desktop::LoginWindow] {
+            mem.host.set_desktop(desktop);
+            wait_event(
+                &mut s,
+                Duration::from_secs(1),
+                "paused",
+                |e| matches!(e, ViewerEvent::HostState { desktop: d, paused: true } if *d == desktop),
+            )
+            .await;
+            assert!(host_ctx.is_paused() && !host_ctx.can_inject(), "{desktop:?}: input is dropped");
+        }
+        mem.host.set_desktop(Desktop::Default);
+        wait_event(&mut s, Duration::from_secs(1), "resumed", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Default, paused: false })
+        })
+        .await;
+        assert!(host_ctx.can_inject());
+    });
+}
+
 #[test]
 fn unattended_entry_grants_the_stored_permissions_without_a_prompt() {
     run_paused(async {
@@ -64,8 +122,9 @@ fn unattended_entry_grants_the_stored_permissions_without_a_prompt() {
         assert_eq!(s.grant().mode, GrantMode::Unattended);
         assert_eq!(
             s.grant().granted,
-            PermissionSet::UNATTENDED | PermissionSet::CONTROL,
-            "stored grants intersected with what was requested"
+            PermissionSet::CONTROL,
+            "stored grants intersected with what was requested, without the machine-level bit: a viewer of minor 1 \
+             asks for it with Elevate"
         );
         assert_eq!(ui.prompt_count(), 0, "no prompt");
         assert_eq!(s.grant().host.name, "host-pc");
@@ -674,10 +733,11 @@ fn locking_the_host_pauses_video_and_drops_input_unless_the_session_is_unattende
         s.disconnect().await;
         task.await.unwrap();
 
-        // UNATTENDED sessions go on at the login, lock and UAC screens.
+        // A session that holds UNATTENDED goes on at the login, lock and UAC screens (here the entry of a 1.0
+        // viewer, which gets the bit at once).
         let who2 = Who::new();
         pin(&mem.trust, &who2, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
-        let (u, _task) = mem.open(&who2, viewer_config(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
+        let (u, _task) = mem.open(&who2, viewer_config_1_0(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
         let mut u = u.unwrap();
         for desktop in [Desktop::Secure, Desktop::Locked, Desktop::LoginWindow] {
             mem.host.set_desktop(desktop);

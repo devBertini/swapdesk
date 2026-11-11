@@ -23,6 +23,7 @@ mod files;
 mod host_ui;
 mod ops;
 mod pairing;
+mod peer_minor;
 pub mod presence;
 mod queue;
 pub mod store;
@@ -159,6 +160,8 @@ pub(crate) struct Hub {
     manual: Mutex<Vec<views::Manual>>,
     /// Where the devices paired through a typed address answer (session endpoint), remembered while we run.
     learned: Mutex<HashMap<DeviceId, SocketAddrV4>>,
+    /// The protocol minor each paired device said it speaks, beside the hint of its discovery record.
+    minors: Mutex<peer_minor::PeerMinors>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
@@ -279,6 +282,7 @@ impl UiHub {
             next_id: AtomicU32::new(1),
             manual: Mutex::new(Vec::new()),
             learned: Mutex::new(HashMap::new()),
+            minors: Mutex::new(peer_minor::PeerMinors::default()),
             live_sessions: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),

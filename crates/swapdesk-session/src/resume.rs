@@ -30,6 +30,8 @@ pub enum ResumeError {
 struct Entry {
     device: DeviceId,
     granted: PermissionSet,
+    /// The session entered without a prompt: a resume of it is still such a session.
+    unattended: bool,
     token: Option<[u8; 16]>,
     lost_at: Option<Instant>,
 }
@@ -44,11 +46,17 @@ impl ResumeTable {
         Self { window, entries: HashMap::new() }
     }
 
-    /// A session started or was resumed with a live connection. Returns its fresh token.
-    pub fn insert(&mut self, session_id: u64, device: DeviceId, granted: PermissionSet) -> [u8; 16] {
+    /// A session started or was resumed with a live connection. Returns its fresh token. `unattended` says it
+    /// entered without a prompt.
+    pub fn insert(&mut self, session_id: u64, device: DeviceId, granted: PermissionSet, unattended: bool) -> [u8; 16] {
         let token = random_token();
-        self.entries.insert(session_id, Entry { device, granted, token: Some(token), lost_at: None });
+        self.entries.insert(session_id, Entry { device, granted, unattended, token: Some(token), lost_at: None });
         token
+    }
+
+    /// Whether the session `session_id` entered without a prompt (false for one the table does not hold).
+    pub fn entered_unattended(&self, session_id: u64) -> bool {
+        self.entries.get(&session_id).is_some_and(|e| e.unattended)
     }
 
     /// The connection was lost (an idle timeout or a transport error): the token becomes usable.
@@ -185,7 +193,7 @@ mod tests {
 
     fn table() -> (ResumeTable, Instant, [u8; 16]) {
         let mut t = ResumeTable::new(WINDOW);
-        let tok = t.insert(7, A, PermissionSet::CONTROL | PermissionSet::FILES);
+        let tok = t.insert(7, A, PermissionSet::CONTROL | PermissionSet::FILES, false);
         (t, Instant::now(), tok)
     }
 
@@ -280,8 +288,8 @@ mod tests {
     #[test]
     fn purge_drops_expired_entries_only() {
         let mut t = ResumeTable::new(WINDOW);
-        t.insert(1, A, PermissionSet::VIEW);
-        t.insert(2, A, PermissionSet::VIEW);
+        t.insert(1, A, PermissionSet::VIEW, false);
+        t.insert(2, A, PermissionSet::VIEW, true);
         let now = Instant::now();
         t.mark_lost(1, now);
         t.purge(now + secs(30));

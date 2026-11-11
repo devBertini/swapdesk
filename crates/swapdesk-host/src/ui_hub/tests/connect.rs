@@ -22,14 +22,20 @@ impl Pair {
 
     /// `viewer_finds_host`: the viewer has an address for the host.
     fn build(viewer_finds_host: bool) -> Self {
+        Self::build_with(ALL, viewer_finds_host.then_some(0))
+    }
+
+    /// `stored`: what the host lets the viewer's device do. `host_record`: the protocol minor of the host's record
+    /// as the viewer sees it on the network (`None`: the viewer does not see the host).
+    fn build_with(stored: PermissionSet, host_record: Option<u16>) -> Self {
         let mut host = Machine::new("host-pc");
         let viewer = Machine::new("viewer-pc");
-        host.pin(&viewer, ALL);
+        host.pin(&viewer, stored);
         viewer.pin(&host, PermissionSet::EMPTY);
         host.attach_helper(IpcRole::HelperSystem);
         host.attach_helper(IpcRole::HelperUser);
-        if viewer_finds_host {
-            viewer.sees(&host, false);
+        if let Some(minor) = host_record {
+            viewer.sees_minor(&host, false, minor);
         }
         host.hub.set_console_session(Some(1));
         let host_ui = host.client(info(false));
@@ -368,4 +374,86 @@ fn next_state_after_waking(ui: &mut Client, entry: u64) -> SessionState {
         }
         _ => None,
     })
+}
+
+// ---------- entry without a prompt ----------
+
+fn is_incoming(m: &Ipc) -> bool {
+    matches!(m, Ipc::UiNotify(Notify::IncomingRequest(_)))
+}
+
+/// Waits until the host has no live session.
+fn host_free(p: &Pair) {
+    let t0 = Instant::now();
+    while !p.host.core.host().sessions().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the host's session did not end");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The owner's defect of 11/11: "Entrar sem perguntar" was granted and approved, and the next "Controlar" asked the
+/// host again. The viewer never asked for the entry; now it does toward a host of 1.1, and the host lets it in at
+/// once, without the machine-level bits.
+#[test]
+fn a_stored_unattended_grant_lets_controlar_in_without_a_question() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES | PermissionSet::AUDIO;
+    let mut p = Pair::build_with(stored, Some(swapdesk_proto::PROTO_MINOR));
+    let entry = p.press();
+
+    // The session opens, and nothing was asked at the host.
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(p.host_ui.nothing_within(Duration::from_millis(200), is_incoming), "the host's user is not asked");
+
+    // What it holds: what is stored and was asked for, without UNATTENDED (and never ADMIN_TERMINAL).
+    let hosted = p.host.core.host().sessions();
+    assert_eq!(hosted.len(), 1);
+    assert_eq!(hosted[0].granted, PermissionSet::CONTROL | PermissionSet::FILES | PermissionSet::AUDIO);
+
+    // The host's log says how it came in.
+    let started = p.host.audit.entries().into_iter().find_map(|e| match e.event {
+        AuditEvent::SessionStarted { mode, .. } => Some(mode),
+        _ => None,
+    });
+    assert_eq!(started, Some(swapdesk_proto::GrantMode::Unattended));
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: session }).is_ok());
+    p.finish();
+}
+
+/// Toward a host whose record is of 1.0 the viewer keeps the behaviour of 1.0: it does not ask, and the host's user
+/// is asked, although the device holds `UNATTENDED` there.
+#[test]
+fn toward_a_1_0_host_the_viewer_never_asks_unattended() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+    let mut p = Pair::build_with(stored, Some(0));
+    let entry = p.press();
+    let incoming = p.incoming();
+    assert_eq!(incoming.device.id, p.viewer.hex());
+    assert!(p.viewer_ui.nothing_within(Duration::from_millis(200), is_active), "no session before the answer");
+    assert!(p.answer(&incoming, Decision::Decline).is_ok());
+    assert_eq!(not_opened(&mut p.viewer_ui, entry, Duration::from_secs(5)), ConnectWhy::Declined);
+    p.finish();
+}
+
+/// Once the host has said, in a session over its pinned key, that it speaks minor 1, that wins over a record of
+/// 1.0: the next connect asks for the entry and is let in without a question.
+#[test]
+fn a_viewer_asks_unattended_only_toward_a_host_known_to_be_minor_1() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+    let mut p = Pair::build_with(stored, Some(0));
+
+    // A record without the key: no unattended entry is asked for, so the host asks its user.
+    let entry = p.press();
+    let incoming = p.incoming();
+    assert!(p.answer(&incoming, Decision::Accept).is_ok());
+    let first = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: first }).is_ok());
+    ended(&mut p.viewer_ui, first);
+    host_free(&p);
+
+    // What the host said in that session counts now.
+    let again = p.press();
+    let second = active_as(&mut p.viewer_ui, Role::Viewer, &[entry, again, first]);
+    assert!(p.host_ui.nothing_within(Duration::from_millis(200), is_incoming), "no second question");
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: second }).is_ok());
+    p.finish();
 }

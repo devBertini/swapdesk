@@ -175,9 +175,20 @@ fn without(set: PermissionSet, mask: u16) -> PermissionSet {
 
 /// `UNATTENDED` entry (F-SESS-02): only when the viewer asked for it and the device holds it; the grant is the
 /// stored grants intersected with what was requested.
-pub fn unattended_grant(stored: PermissionSet, requested: PermissionSet) -> Option<PermissionSet> {
-    (requested.contains(PermissionSet::UNATTENDED) && stored.contains(PermissionSet::UNATTENDED))
-        .then(|| stored & requested)
+///
+/// A viewer of protocol minor 1 or newer enters without the two machine-level bits, `UNATTENDED` and
+/// `ADMIN_TERMINAL`: it is in the session without a prompt, with what its user may do on the host's desktop, and
+/// asks for the rest with `Elevate` after the confirmation on its own machine. A viewer of minor 0 has no such
+/// step, so it gets the grant of 1.0, both bits included.
+pub fn unattended_grant(stored: PermissionSet, requested: PermissionSet, viewer_minor: u16) -> Option<PermissionSet> {
+    (requested.contains(PermissionSet::UNATTENDED) && stored.contains(PermissionSet::UNATTENDED)).then(|| {
+        let grant = stored & requested;
+        if viewer_minor >= 1 {
+            without(grant, PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL)
+        } else {
+            grant
+        }
+    })
 }
 
 /// A prompted session (D8, F-SESS-01): what the host's user picked, but never `UNATTENDED` (entry without a prompt
@@ -533,19 +544,58 @@ mod tests {
         assert!(permitted(PermissionSet::TERMINAL, PermissionSet::EMPTY, &plain));
     }
 
+    /// The entry rule by minor: a 1.1 viewer is let in without a prompt but without the machine-level bits, which
+    /// it asks for with `Elevate`; a 1.0 viewer has no such step and keeps the grant of 1.0.
+    #[test]
+    fn a_minor_1_viewer_enters_unattended_without_the_unattended_and_admin_terminal_bits() {
+        let everything = PermissionSet::UNATTENDED
+            | PermissionSet::ADMIN_TERMINAL
+            | PermissionSet::CONTROL
+            | PermissionSet::AUDIO
+            | PermissionSet::FILES
+            | PermissionSet::CLIPBOARD;
+        let plain = PermissionSet::CONTROL
+            | PermissionSet::AUDIO
+            | PermissionSet::FILES
+            | PermissionSet::CLIPBOARD
+            | PermissionSet::TERMINAL;
+        for minor in [1u16, 2, u16::MAX] {
+            let got = unattended_grant(everything, everything, minor).expect("the device holds UNATTENDED");
+            assert_eq!(got, plain, "minor {minor}: everything stored and asked for but the two bits");
+            assert!(!got.contains(PermissionSet::UNATTENDED) && !got.contains(PermissionSet::ADMIN_TERMINAL));
+            // Only what was asked for, as before.
+            let asked = PermissionSet::UNATTENDED | PermissionSet::VIEW;
+            assert_eq!(unattended_grant(everything, asked, minor), Some(PermissionSet::VIEW));
+        }
+    }
+
+    #[test]
+    fn a_minor_0_viewer_gets_unattended_at_entry_as_in_1_0() {
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        assert_eq!(unattended_grant(stored, stored, 0), Some(stored), "1.0 has no elevation step: the grant is whole");
+        let asked = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+        assert_eq!(unattended_grant(stored, asked, 0), Some(asked));
+    }
+
     #[test]
     fn unattended_swap_and_resumed_grants() {
         let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES;
         assert_eq!(
-            unattended_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL),
+            unattended_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL, 0),
             Some(PermissionSet::UNATTENDED | PermissionSet::CONTROL)
         );
-        assert_eq!(unattended_grant(stored, PermissionSet::CONTROL), None, "the viewer did not ask for UNATTENDED");
-        assert_eq!(
-            unattended_grant(PermissionSet::CONTROL, PermissionSet::UNATTENDED),
-            None,
-            "the device does not hold UNATTENDED"
-        );
+        for minor in [0, 1] {
+            assert_eq!(
+                unattended_grant(stored, PermissionSet::CONTROL, minor),
+                None,
+                "the viewer did not ask for UNATTENDED"
+            );
+            assert_eq!(
+                unattended_grant(PermissionSet::CONTROL, PermissionSet::UNATTENDED, minor),
+                None,
+                "the device does not hold UNATTENDED"
+            );
+        }
         let swap = swap_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES);
         assert!(!swap.contains(PermissionSet::UNATTENDED), "a swap never grants UNATTENDED entry");
         assert!(swap.contains(PermissionSet::CONTROL) && swap.contains(PermissionSet::FILES));

@@ -130,7 +130,10 @@ impl Rig {
             .core
             .connect_asking(self.host.addr(), self.host.device(), Intent::Control, true, PermissionSet::TERMINAL)
             .expect("the unattended session opens");
-        assert!(handle.granted().contains(PermissionSet::UNATTENDED), "no card: {:?}", handle.granted());
+        assert_eq!(handle.mode(), swapdesk_proto::GrantMode::Unattended, "no card: {:?}", handle.granted());
+        // This viewer speaks minor 1: it is in without a prompt and without the machine-level bit, and D13 still
+        // knows nobody accepted the session.
+        assert!(!handle.granted().contains(PermissionSet::UNATTENDED), "{:?}", handle.granted());
         assert_eq!(self.host.ui.prompts.load(Ordering::SeqCst), 0, "entered without a prompt");
         (handle, Seen::new(msgs))
     }
@@ -430,7 +433,8 @@ fn d13_a_prompted_session_and_the_administrator_terminal_never_ask() {
     assert_eq!(rig.open(&handle, 1, false).as_deref(), Ok(FAKE_USER));
     assert_eq!(rig.consents(), 0);
     rig.finish();
-    // The administrator terminal holds no user's data: unattended, with another user logged in, it opens unasked.
+    // The administrator terminal holds no user's data, so D13 never asks about it. A viewer of minor 1 that entered
+    // without a prompt does not hold it yet (it comes with Elevate): the open is refused, and nobody is asked.
     let rig =
         Rig::build(TERM.union(PermissionSet::UNATTENDED).union(PermissionSet::ADMIN_TERMINAL), Some(SID_B), true, true);
     rig.host
@@ -452,7 +456,8 @@ fn d13_a_prompted_session_and_the_administrator_terminal_never_ask() {
             PermissionSet::TERMINAL.union(PermissionSet::ADMIN_TERMINAL),
         )
         .expect("the unattended session opens");
-    assert_eq!(rig.open(&handle, 1, true).as_deref(), Ok("SYSTEM"));
+    assert_eq!(handle.mode(), swapdesk_proto::GrantMode::Unattended);
+    assert_eq!(rig.open(&handle, 1, true), Err(ErrorCode::NotPermitted));
     assert_eq!(rig.consents(), 0);
     rig.finish();
 }

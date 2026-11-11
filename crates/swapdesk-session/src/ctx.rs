@@ -114,6 +114,12 @@ pub(crate) struct CtxInner {
     pub desktop_req: watch::Sender<Option<Desktop>>,
     /// What the viewer's `Hello` asked for (host side; bits of a `PermissionSet`).
     requested: AtomicU16,
+    /// The protocol minor the peer announced in its `Hello` or `HelloAck` (0 until it did): nothing newer than it
+    /// is sent to that peer.
+    peer_minor: AtomicU16,
+    /// The session entered without a prompt (host side): the grant mode `Unattended`, or a resume of such a session.
+    /// It is not the `UNATTENDED` permission, which a viewer of minor 1 holds only after it elevated.
+    entered_unattended: AtomicBool,
     /// The stored grants of the device as the session last saw them (host side): a change of what is stored removes
     /// only what it revoked from them.
     pub stored_seen: Mutex<PermissionSet>,
@@ -168,6 +174,8 @@ impl SessionCtx {
                 wake: Notify::new(),
                 desktop_req,
                 requested: AtomicU16::new(0),
+                peer_minor: AtomicU16::new(0),
+                entered_unattended: AtomicBool::new(false),
                 stored_seen: Mutex::new(PermissionSet::EMPTY),
                 closing: AtomicBool::new(false),
             }),
@@ -217,6 +225,26 @@ impl SessionCtx {
 
     pub(crate) fn set_requested(&self, requested: PermissionSet) {
         self.inner.requested.store(requested.bits(), Ordering::SeqCst);
+    }
+
+    /// The protocol minor the peer announced (`Hello.proto_minor` on the host, `HelloAck.proto_minor` on the
+    /// viewer); 0 before that message, which is also what a 1.0 peer says.
+    pub fn peer_minor(&self) -> u16 {
+        self.inner.peer_minor.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_peer_minor(&self, minor: u16) {
+        self.inner.peer_minor.store(minor, Ordering::SeqCst);
+    }
+
+    /// True for a host session that entered without a prompt (`GrantMode::Unattended`) and for a resume of one.
+    /// What D13 asks about: whether somebody at the host accepted this session.
+    pub fn entered_unattended(&self) -> bool {
+        self.inner.entered_unattended.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_entered_unattended(&self, unattended: bool) {
+        self.inner.entered_unattended.store(unattended, Ordering::SeqCst);
     }
 
     /// What this session may do now.
