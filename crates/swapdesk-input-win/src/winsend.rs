@@ -1,7 +1,7 @@
 //! The `SendInput` injector: planned inputs to `INPUT` records, the virtual desktop from `GetSystemMetrics`, the lock
 //! toggle state and the input-desktop follow.
 
-use crate::plan::{KbKind, MouseInput, RawInput};
+use crate::plan::{CharKey, KbKind, MouseInput, RawInput};
 use crate::sink::Injector;
 use swapdesk_platform::{ErrorKind, PlatformError, Rect, Result};
 use swapdesk_proto::MouseButton;
@@ -13,14 +13,16 @@ use windows::Win32::System::StationsAndDesktops::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CAPITAL, VK_NUMLOCK, VK_SCROLL,
+    GetKeyState, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSE_EVENT_FLAGS,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyExW, SendInput, VIRTUAL_KEY,
+    VK_CAPITAL, VK_NUMLOCK, VK_SCROLL, VkKeyScanExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
 };
 
 fn os_error(op: &'static str, detail: String, code: i64) -> PlatformError {
@@ -180,6 +182,28 @@ impl Injector for SendInputInjector {
         std::thread::spawn(lock_toggles).join().ok()
     }
 
+    fn key_for_char(&self, c: char) -> Option<CharKey> {
+        let mut buf = [0u16; 2];
+        let [unit] = c.encode_utf16(&mut buf) else { return None };
+        // The layout of the thread that owns the foreground window: the one that will read the key.
+        // SAFETY: plain queries with no pointer argument but the optional process id, which is not asked for.
+        let layout = unsafe { GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), None)) };
+        // SAFETY: plain query on a character and a layout handle.
+        let found = unsafe { VkKeyScanExW(*unit, layout) };
+        if found == -1 {
+            return None;
+        }
+        let [vk, state] = found.to_le_bytes();
+        // Bit 0 is Shift; Ctrl, Alt (AltGr) and the layout's own bits leave the character to Unicode.
+        if state & !1 != 0 {
+            return None;
+        }
+        // SAFETY: plain query on a virtual key and a layout handle.
+        let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, Some(layout)) };
+        let code = u8::try_from(scan).ok().filter(|s| (1..0x80).contains(s))?;
+        Some(CharKey { code, shift: state & 1 != 0, letter: vk.is_ascii_uppercase() })
+    }
+
     fn follow_input_desktop(&mut self) -> Result<()> {
         // SAFETY: plain query; the returned handle belongs to the process and is not closed by us.
         let original = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.ok();
@@ -292,5 +316,17 @@ mod tests {
             assert_eq!(x.Anonymous.mi.mouseData, u32::from(XBUTTON2));
             assert_eq!(x.Anonymous.mi.dwFlags, MOUSEEVENTF_XDOWN);
         }
+    }
+
+    /// This computer's layout (any Latin one: US, ABNT2, ISO) has F on scan 0x21 and 1 on 0x02, Shift for capitals;
+    /// a character no key types is left to Unicode.
+    #[test]
+    fn the_layout_in_use_gives_the_key_of_a_letter_and_a_digit() {
+        let i = SendInputInjector::new();
+        assert_eq!(i.key_for_char('f'), Some(CharKey { code: 0x21, shift: false, letter: true }));
+        assert_eq!(i.key_for_char('F'), Some(CharKey { code: 0x21, shift: true, letter: true }));
+        assert_eq!(i.key_for_char('1'), Some(CharKey { code: 0x02, shift: false, letter: false }));
+        assert_eq!(i.key_for_char('\u{1F600}'), None, "outside the BMP");
+        assert_eq!(i.key_for_char('\u{263A}'), None, "no key types it");
     }
 }

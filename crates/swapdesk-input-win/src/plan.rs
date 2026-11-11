@@ -67,26 +67,80 @@ pub fn key_input(page: u16, usage: u16, down: bool) -> Option<KbInput> {
 const SCAN_RETURN: u8 = 0x1C;
 const SCAN_TAB: u8 = 0x0F;
 
+/// The key of the host's keyboard layout that types a character with no modifier but Shift, as the layout says
+/// (`VkKeyScanExW`): its set-1 scan code, whether Shift is needed with Caps Lock off, and whether Caps Lock changes it
+/// (a letter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharKey {
+    pub code: u8,
+    pub shift: bool,
+    pub letter: bool,
+}
+
+/// What the sink knows of the host while it types text: whether Caps Lock is on (`None`: not known), the scan codes of
+/// the Shift keys it holds, and whether it holds Ctrl, Alt or the Windows key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypingState {
+    pub caps: Option<bool>,
+    pub shifts_held: Vec<u8>,
+    pub other_modifier_held: bool,
+}
+
+const SCAN_LSHIFT: u8 = 0x2A;
+
+fn unicode_inputs(c: char, out: &mut Vec<KbInput>) {
+    let mut buf = [0u16; 2];
+    for unit in c.encode_utf16(&mut buf) {
+        for up in [false, true] {
+            out.push(KbInput { kind: KbKind::Unicode(*unit), up });
+        }
+    }
+}
+
 /// The injections that type `text`: per UTF-16 unit a key down and a key up (a character outside the BMP is its two
 /// surrogates in order, as `KEYEVENTF_UNICODE` expects). Line breaks and tabs go as Enter and Tab keys; other control
 /// characters are skipped.
 pub fn text_inputs(text: &str) -> Vec<KbInput> {
+    text_inputs_on(text, &|_| None, &TypingState::default())
+}
+
+/// [`text_inputs`] on a host whose layout `key_for` reads: an ASCII letter or digit that layout types with a plain or
+/// shifted key goes as that key, by scan code, with Shift pressed or let go around it as the character and Caps Lock
+/// need. A `KEYEVENTF_UNICODE` record carries the character in its scan code field, so a low-level keyboard hook reads
+/// `f` (0x66) as the scan code 0x66: a laptop's hotkey service (seen on an Acer, 11/11) swallows it and shows its
+/// microphone indicator, and the `f` never arrives. Everything else, and every character while Caps Lock is unknown or
+/// another modifier is held, goes as Unicode.
+pub fn text_inputs_on(text: &str, key_for: &dyn Fn(char) -> Option<CharKey>, host: &TypingState) -> Vec<KbInput> {
     let mut out = Vec::with_capacity(text.len() * 2);
+    let scan = |code: u8, up: bool| KbInput { kind: KbKind::Scan { code, extended: false }, up };
     for ch in text.chars() {
         match ch {
             '\r' | '\n' | '\t' => {
                 let code = if ch == '\t' { SCAN_TAB } else { SCAN_RETURN };
                 for up in [false, true] {
-                    out.push(KbInput { kind: KbKind::Scan { code, extended: false }, up });
+                    out.push(scan(code, up));
                 }
             }
             c if c.is_control() => {}
             c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    for up in [false, true] {
-                        out.push(KbInput { kind: KbKind::Unicode(*unit), up });
-                    }
+                let key = if c.is_ascii_alphanumeric() && !host.other_modifier_held { key_for(c) } else { None };
+                let Some((key, caps)) = key.zip(host.caps) else {
+                    unicode_inputs(c, &mut out);
+                    continue;
+                };
+                let shift = key.shift ^ (caps && key.letter);
+                let held = !host.shifts_held.is_empty();
+                if shift && !held {
+                    out.push(scan(SCAN_LSHIFT, false));
+                } else if !shift && held {
+                    out.extend(host.shifts_held.iter().map(|code| scan(*code, true)));
+                }
+                out.push(scan(key.code, false));
+                out.push(scan(key.code, true));
+                if shift && !held {
+                    out.push(scan(SCAN_LSHIFT, true));
+                } else if !shift && held {
+                    out.extend(host.shifts_held.iter().map(|code| scan(*code, false)));
                 }
             }
         }
@@ -210,5 +264,77 @@ mod tests {
         assert_eq!(wheel_inputs(0, 120), vec![MouseInput::Wheel(120)]);
         assert_eq!(wheel_inputs(-30, -60), vec![MouseInput::Wheel(-60), MouseInput::HWheel(-30)]);
         assert_eq!(wheel_inputs(i16::MIN, i16::MAX), vec![MouseInput::Wheel(32767), MouseInput::HWheel(-32768)]);
+    }
+
+    /// A US-like layout: letters on their set-1 keys, digits on the top row, shifted for capitals; nothing else.
+    fn us(c: char) -> Option<CharKey> {
+        let code = match c.to_ascii_lowercase() {
+            'f' => 0x21,
+            'g' => 0x22,
+            '1' => 0x02,
+            _ => return None,
+        };
+        Some(CharKey { code, shift: c.is_ascii_uppercase(), letter: c.is_ascii_alphabetic() })
+    }
+
+    fn sc(code: u8, up: bool) -> KbInput {
+        KbInput { kind: KbKind::Scan { code, extended: false }, up }
+    }
+
+    fn caps(on: bool) -> TypingState {
+        TypingState { caps: Some(on), ..TypingState::default() }
+    }
+
+    /// The defect of 11/11: a Unicode `f` carries 0x66 in its scan code field, which a laptop's hotkey hook swallowed
+    /// (and showed its microphone indicator). On a layout that has the key, `f` goes as that key and no record of the
+    /// text carries 0x66.
+    #[test]
+    fn a_letter_the_host_layout_has_goes_as_its_key_and_never_as_a_unicode_record() {
+        let out = text_inputs_on("fg1", &us, &caps(false));
+        assert_eq!(
+            out,
+            vec![sc(0x21, false), sc(0x21, true), sc(0x22, false), sc(0x22, true), sc(0x02, false), sc(0x02, true)]
+        );
+        assert!(out.iter().all(|k| !matches!(k.kind, KbKind::Unicode(_))), "{out:?}");
+    }
+
+    #[test]
+    fn shift_is_pressed_or_let_go_around_a_key_as_the_case_and_caps_lock_need() {
+        // A capital with no Shift held: Shift around it.
+        assert_eq!(
+            text_inputs_on("F", &us, &caps(false)),
+            vec![sc(0x2A, false), sc(0x21, false), sc(0x21, true), sc(0x2A, true)]
+        );
+        // The viewer holds Shift (it went as a key): the capital needs nothing more.
+        let shifted = TypingState { caps: Some(false), shifts_held: vec![0x2A], other_modifier_held: false };
+        assert_eq!(text_inputs_on("F", &us, &shifted), vec![sc(0x21, false), sc(0x21, true)]);
+        // A small letter under a held Shift: the Shift is let go around it and held again.
+        assert_eq!(
+            text_inputs_on("f", &us, &shifted),
+            vec![sc(0x2A, true), sc(0x21, false), sc(0x21, true), sc(0x2A, false)]
+        );
+        // Caps Lock on the host turns the letter's case, not the digit's.
+        assert_eq!(
+            text_inputs_on("f", &us, &caps(true)),
+            vec![sc(0x2A, false), sc(0x21, false), sc(0x21, true), sc(0x2A, true)]
+        );
+        assert_eq!(text_inputs_on("F", &us, &caps(true)), vec![sc(0x21, false), sc(0x21, true)]);
+        assert_eq!(text_inputs_on("1", &us, &caps(true)), vec![sc(0x02, false), sc(0x02, true)]);
+    }
+
+    #[test]
+    fn what_the_layout_lacks_or_an_unknown_caps_lock_or_a_held_ctrl_leaves_the_text_to_unicode() {
+        let uni = |c: char| {
+            vec![
+                KbInput { kind: KbKind::Unicode(c as u16), up: false },
+                KbInput { kind: KbKind::Unicode(c as u16), up: true },
+            ]
+        };
+        assert_eq!(text_inputs_on("h", &us, &caps(false)), uni('h'), "not on this layout");
+        assert_eq!(text_inputs_on("ç", &us, &caps(false)), uni('ç'), "not ASCII");
+        assert_eq!(text_inputs_on("f", &us, &TypingState::default()), uni('f'), "Caps Lock unknown");
+        let ctrl = TypingState { caps: Some(false), shifts_held: vec![], other_modifier_held: true };
+        assert_eq!(text_inputs_on("f", &us, &ctrl), uni('f'), "a key under Ctrl would be a shortcut");
+        assert_eq!(text_inputs("f"), uni('f'), "no layout: Unicode as before");
     }
 }
