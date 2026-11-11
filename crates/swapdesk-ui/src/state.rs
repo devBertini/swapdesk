@@ -646,7 +646,8 @@ pub struct UiState {
     pub(crate) displays_asked: Option<u64>,
     /// The sessions whose first `Active` state already asked the shell to minimize the main window.
     minimize_asked: Vec<u64>,
-    /// Of those, the ones that have not ended yet: when the last of them ends, the main window comes back.
+    /// Of those, the ones in which this computer controls and that have not ended yet: when the last of them ends,
+    /// the main window comes back (never on the computer that was controlled, D60).
     restore_after: Vec<u64>,
     /// The shell composes a real remote picture in the viewer window (a real run, not a mock scenario or a capture).
     live_picture: bool,
@@ -1312,15 +1313,18 @@ impl UiState {
         for s in &self.sessions {
             if matches!(s.state, SessionState::Active { .. }) && !self.minimize_asked.contains(&s.id) {
                 self.minimize_asked.push(s.id);
-                self.restore_after.push(s.id);
+                if matches!(s.state, SessionState::Active { role: Role::Viewer, .. }) {
+                    self.restore_after.push(s.id);
+                }
                 asked = true;
             }
         }
         asked
     }
 
-    /// True once when the last session that minimized the main window has ended and no other session of this
-    /// computer is still going (owner, 11/11: the window comes back at the end of the session that hid it). The shell
+    /// True once when the last session in which this computer controlled (and that minimized the main window) has
+    /// ended and no other session of this computer is still going (owner, 11/11: the window comes back on the
+    /// computer that controlled; on the one that was controlled it stays minimized). The shell
     /// then restores the main window if it is still minimized; a window the user already brought back is left as it
     /// is. A shell that never shows a real session (a mock run) does not call it.
     pub fn take_restore_request(&mut self) -> bool {

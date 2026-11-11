@@ -129,6 +129,9 @@ pub(crate) struct Conn {
     pub fs: Arc<PipeCaller>,
     /// What an administrator confirmed for this connection and it has not used yet (see `elevation.rs`).
     pub passes: Mutex<Vec<elevation::Pass>>,
+    /// The device whose permissions an administrator approved on this connection lately, by whom and until when:
+    /// further changes of that device's permissions need no new approval meanwhile (D62, see `elevation.rs`).
+    pub grace: Mutex<Option<elevation::Grace>>,
 }
 
 /// A viewer session on a connection.
@@ -570,6 +573,7 @@ impl UiHub {
             terms: Mutex::new(HashMap::new()),
             fs,
             passes: Mutex::new(Vec::new()),
+            grace: Mutex::new(None),
         });
         lock(&hub.conns).push(Arc::clone(&conn));
         hub.log(

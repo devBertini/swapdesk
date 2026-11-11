@@ -1338,20 +1338,28 @@ fn a_new_session_asks_again() {
     assert!(!s.take_minimize_request());
 }
 
-/// Owner, 11/11: the main window minimized at a session's start comes back when that session ends.
+/// Owner, 11/11: the main window minimized at a session's start comes back when that session ends, on the computer
+/// that controlled; on the computer that was controlled it stays minimized.
 #[test]
-fn the_end_of_the_session_that_minimized_the_window_asks_once_to_restore_it() {
-    for role in [Role::Viewer, Role::Host] {
-        let mut s = base();
-        s.apply(session_event(3, MAC, active(role, Permissions::NONE)));
-        assert!(s.take_minimize_request());
-        assert!(!s.take_restore_request(), "not while the session goes on ({role:?})");
-        s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
-        assert!(!s.take_restore_request(), "a pause is no end ({role:?})");
-        s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
-        assert!(s.take_restore_request(), "the session ended ({role:?})");
-        assert!(!s.take_restore_request(), "asked once ({role:?})");
-    }
+fn the_end_of_a_session_this_computer_controlled_asks_once_to_restore_the_window() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    assert!(!s.take_restore_request(), "not while the session goes on");
+    s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
+    assert!(!s.take_restore_request(), "a pause is no end");
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(s.take_restore_request(), "the session ended");
+    assert!(!s.take_restore_request(), "asked once");
+}
+
+#[test]
+fn the_controlled_computer_keeps_its_window_minimized_after_the_session() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Host, Permissions::NONE)));
+    assert!(s.take_minimize_request(), "it minimizes on both computers (D47)");
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(!s.take_restore_request(), "the controlled computer stays minimized (D60)");
 }
 
 #[test]
@@ -1359,7 +1367,7 @@ fn the_window_comes_back_only_when_no_session_is_left_and_never_for_one_that_did
     let mut s = base();
     s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
     assert!(s.take_minimize_request());
-    s.apply(session_event(4, AIR, active(Role::Host, Permissions::NONE)));
+    s.apply(session_event(4, AIR, active(Role::Viewer, Permissions::NONE)));
     assert!(s.take_minimize_request());
     s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
     assert!(!s.take_restore_request(), "the other session still goes on");

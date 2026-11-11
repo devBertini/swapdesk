@@ -218,13 +218,20 @@ fn a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm: MainThrea
     shell.minimize_main_for_session();
     ensure!(settles_miniaturized(&shell, true), "a new session did not minimize the main window");
 
-    // Owner, 11/11: it comes back when the sessions that hid it end, not while one still goes on.
+    // Owner, 11/11: the computer that was controlled keeps its window minimized when the sessions end (D60).
     shell.state.borrow_mut().apply(session(host_id + 100, SessionState::Ended { reason: None }));
-    shell.restore_main_after_session();
-    ensure!(settles_miniaturized(&shell, true), "the main window came back while a session still went on");
     shell.state.borrow_mut().apply(session(host_id, SessionState::Ended { reason: None }));
     shell.restore_main_after_session();
-    ensure!(settles_miniaturized(&shell, false), "the main window did not come back when the last session ended");
+    ensure!(settles_miniaturized(&shell, true), "the controlled computer brought its main window back");
+    // A session this Mac controls brings it back when it ends.
+    shell.state.borrow_mut().apply(session(host_id + 200, active(Role::Viewer)));
+    shell.minimize_main_for_session();
+    shell.state.borrow_mut().apply(session(host_id + 200, SessionState::Ended { reason: None }));
+    shell.restore_main_after_session();
+    ensure!(
+        settles_miniaturized(&shell, false),
+        "the main window did not come back when the controlling session ended"
+    );
     close(&shell);
     Ok(())
 }

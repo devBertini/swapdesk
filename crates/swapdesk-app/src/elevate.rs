@@ -111,7 +111,18 @@ impl WinElevator {
 /// (`swapdesk_ui::service_backend::elevation::RUN_FOR`, 110 s).
 pub const WINDOW_MARGIN_S: u16 = 10;
 
-/// The person's answer, from the instance's own window (ELEVATION.md 3.5): it shows the action as the service holds
+/// The instance's answer since D61 (owner, 11/11: the window after UAC asked again what the step before it had
+/// already confirmed): the action the service holds for the ticket is approved without a window, while the asking
+/// interface still waits for it (more than [`WINDOW_MARGIN_S`] of the ticket left). The person confirmed the action in
+/// the step ("Continuar", with the same action line) and then at the UAC prompt.
+pub fn approve_as_asked(action: &ElevAction, peer_name: &str, remaining_s: u16) -> bool {
+    let line = elevated_client::action_line(swapdesk_ui::Language::En, action, peer_name);
+    let approve = remaining_s > WINDOW_MARGIN_S;
+    trace(&format!("instance: {} without a window: {line}", if approve { "approved" } else { "too late, declined" }));
+    approve
+}
+
+/// The person's answer, from the instance's own window (ELEVATION.md 3.5; not used since D61, kept to revert): it shows the action as the service holds
 /// it, in this process's display language, with "Cancelar" and "Confirmar", and closes as declined when the
 /// ticket's time runs out. Only a real click or key on "Confirmar" approves; a window that cannot be shown
 /// declines.
@@ -288,6 +299,17 @@ mod tests {
         // What goes on the command line is what the instance's own parser takes back.
         let parsed = cli::parse(&["--elevated".to_owned(), HEX.to_owned()]).unwrap();
         assert_eq!(parsed.elevated, Some(TICKET));
+    }
+
+    /// D61: the instance approves what the service holds for the ticket with no second window, but never a ticket
+    /// the asking interface has already given up on.
+    #[test]
+    fn the_instance_approves_the_held_action_without_a_window_while_the_interface_still_waits() {
+        let action = ElevAction::OpenAdminTerminal { session_id: 7 };
+        assert!(approve_as_asked(&action, "MacBook", 120));
+        assert!(approve_as_asked(&action, "MacBook", WINDOW_MARGIN_S + 1));
+        assert!(!approve_as_asked(&action, "MacBook", WINDOW_MARGIN_S));
+        assert!(!approve_as_asked(&action, "MacBook", 0));
     }
 
     #[test]

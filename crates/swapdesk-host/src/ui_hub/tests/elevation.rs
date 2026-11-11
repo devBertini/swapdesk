@@ -48,6 +48,8 @@ fn pair() -> (Machine, Machine, String) {
     let m = Machine::new("sala");
     let other = Machine::new("other");
     m.pin(&other, PermissionSet::CONTROL);
+    // The single-use ticket and pass on their own; the grace of D62 has its own test.
+    m.hub.set_elevation_grace(Duration::ZERO);
     let id = other.hex();
     (m, other, id)
 }
@@ -643,4 +645,56 @@ fn a_silent_elevator_connection_ends_after_its_lifetime_and_a_bye_ends_it_at_onc
 
     m.finish();
     other.finish();
+}
+
+fn begin_ttl(ui: &mut Client, id: &str, bits: u16) -> (ElevationTicket, u16) {
+    match ui.call(UiOp::ElevationBegin { action: ElevAction::SetGrants { device_id: id.into(), grants: bits } }) {
+        Ok(ReplyBody::ElevationTicket { ticket, ttl_s }) => (ticket, ttl_s),
+        other => panic!("not a ticket: {other:?}"),
+    }
+}
+
+/// D62 (owner, 11/11: one UAC prompt, then only the app's own confirmation for each permission): after an
+/// administrator approved a device's permissions on a connection, the next change of the same device on the same
+/// connection gets a ticket already confirmed (`ttl_s` 0) by the same approver; another device or another connection
+/// needs the administrator again.
+#[test]
+fn an_approval_covers_further_changes_of_the_same_device_on_the_same_connection_only() {
+    let (m, other, id) = pair();
+    m.hub.set_elevation_grace(Duration::from_secs(600));
+    let third = Machine::new("third");
+    m.pin(&third, PermissionSet::CONTROL);
+    let mut ui = m.client(asker());
+    let mut same_user = m.client(asker());
+
+    let (t, ttl) = begin_ttl(&mut ui, &id, unattended());
+    assert!(ttl > 0, "the first change needs the administrator");
+    m.hub.confirm_elevation(&t, &approver(), true).expect("confirmed");
+    assert_eq!(end(&mut ui, t), ElevationOutcome::Confirmed);
+    assert!(ui.call(grants_op(&id, unattended())).is_ok());
+
+    // The next change of the same device: NeedsAdmin first (the interface then shows its step), then a ticket
+    // confirmed at once, and the change goes through with the same approver.
+    let wider = PermissionSet::UNATTENDED.union(PermissionSet::CONTROL).union(PermissionSet::FILES).bits();
+    assert_eq!(ui.call(grants_op(&id, wider)).unwrap_err(), ApiCode::NeedsAdmin);
+    let (t, ttl) = begin_ttl(&mut ui, &id, wider);
+    assert_eq!(ttl, 0, "confirmed by the approval of a moment ago");
+    assert_eq!(end(&mut ui, t), ElevationOutcome::Confirmed);
+    assert!(ui.call(grants_op(&id, wider)).is_ok());
+    assert_eq!(granted_here(&m).bits(), wider);
+    let by_approver = m
+        .audit
+        .entries()
+        .into_iter()
+        .filter(|e| matches!(&e.event, AuditEvent::GrantsChanged { by, .. } if by.id == SID));
+    assert_eq!(by_approver.count(), 2, "both changes name the approver");
+
+    // Another device, another connection: the administrator again.
+    assert!(begin_ttl(&mut ui, &third.hex(), unattended()).1 > 0, "another device");
+    assert!(begin_ttl(&mut same_user, &id, wider).1 > 0, "another connection");
+
+    drop((ui, same_user));
+    m.finish();
+    other.finish();
+    third.finish();
 }

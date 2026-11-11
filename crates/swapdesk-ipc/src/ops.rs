@@ -444,7 +444,9 @@ pub enum ReplyBody {
         outcome: TermOutcome,
         account: Text,
     },
-    /// The ticket of an administrator confirmation and how long it lives (op 35).
+    /// The ticket of an administrator confirmation and how long it lives (op 35). `ttl_s` 0: the ticket is already
+    /// confirmed (an administrator approved this device's permissions on this connection a moment ago, D62), so no
+    /// elevated instance is started; `ElevationEnd` reports it `Confirmed`.
     ElevationTicket {
         ticket: ElevationTicket,
         ttl_s: u16,

@@ -99,11 +99,17 @@ fn elevate(inner: &Inner, out: &mpsc::Sender<Item>, action: &ElevatedAction, lin
     let elevator = lock(&inner.elevator).clone().ok_or(ApiCode::Internal)?;
     let wire = wire_action(action).ok_or(ApiCode::Internal)?;
 
-    let ticket = match request(inner, out, UiOp::ElevationBegin { action: wire })? {
-        ReplyBody::ElevationTicket { ticket, .. } => ticket,
+    let (ticket, ttl_s) = match request(inner, out, UiOp::ElevationBegin { action: wire })? {
+        ReplyBody::ElevationTicket { ticket, ttl_s } => (ticket, ttl_s),
         _ => return Err(ApiCode::Internal),
     };
-    let run = elevator.run(&ticket, line, Instant::now() + RUN_FOR);
+    // `ttl_s` 0: an administrator approved this device's permissions on this connection a moment ago (D62): the
+    // ticket is already confirmed and no elevated instance is started.
+    let run = if ttl_s == 0 {
+        ElevatorRun::Ended { exit_code: Some(0) }
+    } else {
+        elevator.run(&ticket, line, Instant::now() + RUN_FOR)
+    };
 
     // The ticket is always ended, whatever the run said: it closes an open one and tells the outcome.
     let outcome = match request(inner, out, UiOp::ElevationEnd { ticket }) {

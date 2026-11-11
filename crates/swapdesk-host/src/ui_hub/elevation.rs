@@ -10,6 +10,11 @@
 //!   hub through [`UiHub::describe_elevation`] and [`UiHub::confirm_elevation`], either from [`UiHub::serve_elevator`]
 //!   (a pipe) or in process.
 //! * Both lifetimes are read on the hub's clock; entries are swept on every elevation op and pass lookup.
+//! * D62 (owner, 11/11: one UAC prompt, then only the app's own confirmation for each permission): a confirmed
+//!   `SetGrants` also leaves a grace on the asking connection for that device, 10 minutes from the confirmation.
+//!   Meanwhile a ticket for another `SetGrants` of the same device from the same connection is confirmed at once by
+//!   the same approver (`ttl_s` 0): the interface still shows its step for each change, and no elevated instance is
+//!   started. Another device, another connection or the other actions need the administrator again.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -33,6 +38,8 @@ use super::{Conn, ConnInfo, Hub, UiHub, lock};
 const TICKET_TTL: Duration = Duration::from_secs(120);
 /// How long a pass stays usable after the confirmation.
 const PASS_TTL: Duration = Duration::from_secs(30);
+/// How long an administrator's approval of a device's permissions covers further changes of them (D62, GUESS).
+const GRACE_TTL: Duration = Duration::from_secs(600);
 /// How long an elevator connection may stay: the ticket's life plus a margin.
 const ELEVATOR_LIFETIME: Duration = Duration::from_secs(125);
 /// Open tickets on the machine, all connections together.
@@ -67,18 +74,32 @@ pub(crate) struct Pass {
     expires: MonoMicros,
 }
 
+/// An administrator's approval of one device's permissions on a connection, reused until `expires` (D62).
+pub(crate) struct Grace {
+    device_id: String,
+    approver: swapdesk_trust::UserRef,
+    expires: MonoMicros,
+}
+
 /// The hub's table of tickets and the lifetimes it works with.
 pub(super) struct Elevation {
     tickets: Vec<TicketEntry>,
     ticket_ttl: Duration,
     pass_ttl: Duration,
+    grace_ttl: Duration,
     /// How long an elevator connection may stay (a test shortens it).
     pub(super) elevator_lifetime: Duration,
 }
 
 impl Default for Elevation {
     fn default() -> Self {
-        Self { tickets: Vec::new(), ticket_ttl: TICKET_TTL, pass_ttl: PASS_TTL, elevator_lifetime: ELEVATOR_LIFETIME }
+        Self {
+            tickets: Vec::new(),
+            ticket_ttl: TICKET_TTL,
+            pass_ttl: PASS_TTL,
+            grace_ttl: GRACE_TTL,
+            elevator_lifetime: ELEVATOR_LIFETIME,
+        }
     }
 }
 
@@ -151,6 +172,42 @@ impl Hub {
         table.tickets.retain(|t| t.conn != conn.id);
         let ticket = random_token();
         let ttl = table.ticket_ttl;
+        let expires = MonoMicros(now.0.saturating_add(micros(ttl)));
+        // D62: the same device's permissions, approved on this connection a moment ago: confirmed at once.
+        let graced = match &action {
+            ElevAction::SetGrants { device_id, .. } => {
+                let mut grace = lock(&conn.grace);
+                if grace.as_ref().is_some_and(|g| g.expires <= now) {
+                    *grace = None;
+                }
+                grace.as_ref().filter(|g| &g.device_id == device_id).map(|g| g.approver.clone())
+            }
+            _ => None,
+        };
+        if let Some(approver) = graced {
+            self.log_elevation("confirmed by the approval of a moment ago", &action);
+            let mut passes = lock(&conn.passes);
+            passes.retain(|p| p.expires > now);
+            if passes.len() >= MAX_PASSES {
+                passes.remove(0);
+            }
+            passes.push(Pass {
+                action: action.clone(),
+                approver,
+                expires: MonoMicros(now.0.saturating_add(micros(table.pass_ttl))),
+            });
+            drop(passes);
+            table.tickets.push(TicketEntry {
+                ticket,
+                conn: conn.id,
+                session: conn.info.session_id,
+                action,
+                peer_name,
+                expires,
+                state: TicketState::Confirmed,
+            });
+            return Ok(ReplyBody::ElevationTicket { ticket: ElevationTicket(ticket), ttl_s: 0 });
+        }
         self.log_elevation("opened", &action);
         table.tickets.push(TicketEntry {
             ticket,
@@ -158,7 +215,7 @@ impl Hub {
             session: conn.info.session_id,
             action,
             peer_name,
-            expires: MonoMicros(now.0.saturating_add(micros(ttl))),
+            expires,
             state: TicketState::Open,
         });
         Ok(ReplyBody::ElevationTicket { ticket: ElevationTicket(ticket), ttl_s: seconds_up(micros(ttl)) })
@@ -221,7 +278,7 @@ impl Hub {
         &self,
         ticket: &ElevationTicket,
         approver: &ConnInfo,
-        then: impl FnOnce(&mut TicketEntry, &Conn, Duration) -> T,
+        then: impl FnOnce(&mut TicketEntry, &Conn, (Duration, Duration)) -> T,
     ) -> Result<T, ApiCode> {
         if !approver.admin {
             return Err(
@@ -234,6 +291,7 @@ impl Hub {
         let mut table = lock(&self.elevation);
         table.sweep(now);
         let pass_ttl = table.pass_ttl;
+        let grace_ttl = table.grace_ttl;
         let entry = table
             .tickets
             .iter_mut()
@@ -246,7 +304,7 @@ impl Hub {
             .iter()
             .find(|c| c.id == entry.conn)
             .ok_or_else(|| self.api_error(ApiCode::NotFound, "an elevation ticket whose connection is gone"))?;
-        Ok(then(entry, asking, pass_ttl))
+        Ok(then(entry, asking, (pass_ttl, grace_ttl)))
     }
 
     pub(super) fn elevation_describe(
@@ -267,7 +325,7 @@ impl Hub {
         approve: bool,
     ) -> Result<(), ApiCode> {
         let now = self.p.clock.now();
-        let (what, action) = self.with_ticket(ticket, approver, |entry, asking, pass_ttl| {
+        let (what, action) = self.with_ticket(ticket, approver, |entry, asking, (pass_ttl, grace_ttl)| {
             if !approve {
                 entry.state = TicketState::Declined;
                 return ("declined", entry.action.clone());
@@ -283,6 +341,13 @@ impl Hub {
                 approver: approver.user.clone(),
                 expires: MonoMicros(now.0.saturating_add(micros(pass_ttl))),
             });
+            if let ElevAction::SetGrants { device_id, .. } = &entry.action {
+                *lock(&asking.grace) = Some(Grace {
+                    device_id: device_id.clone(),
+                    approver: approver.user.clone(),
+                    expires: MonoMicros(now.0.saturating_add(micros(grace_ttl))),
+                });
+            }
             ("confirmed", entry.action.clone())
         })?;
         self.log_elevation(what, &action);
@@ -308,6 +373,7 @@ impl Hub {
     pub(super) fn drop_elevation_of(&self, conn: &Conn) {
         lock(&self.elevation).tickets.retain(|t| t.conn != conn.id);
         lock(&conn.passes).clear();
+        *lock(&conn.grace) = None;
     }
 
     /// The restricted loop of an elevated instance: `Describe` once, `Confirm` once, nothing else.
@@ -393,6 +459,12 @@ impl UiHub {
         let mut table = lock(&self.hub.elevation);
         table.ticket_ttl = ticket;
         table.pass_ttl = pass;
+    }
+
+    /// How long an approval of a device's permissions covers further changes of it (D62; 10 minutes by default). Zero:
+    /// every change needs the administrator, as before D62 (tests of the single-use ticket and pass).
+    pub fn set_elevation_grace(&self, grace: Duration) {
+        lock(&self.hub.elevation).grace_ttl = grace;
     }
 
     /// Serves the connection of an elevated instance until it ends: after the server handshake with `Hello.role`
