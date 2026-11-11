@@ -1340,6 +1340,7 @@ version = "1.0.0"
 dependencies = [
  "swapdesk-platform",
  "swapdesk-proto",
+ "swapdesk-update",
  "windows-sys 0.61.2",
 ]
 

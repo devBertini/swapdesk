@@ -9,6 +9,7 @@ pub mod actions;
 pub mod dirwatch;
 pub mod elevate;
 mod env;
+pub mod http;
 pub mod launch;
 pub mod panic_hook;
 pub mod pipe;
