@@ -85,7 +85,7 @@ pub(crate) fn drawer_files(f: &mut Frame, b: Rect, peer: &str) {
     } else if let Some(l) = &listing {
         if l.entries.is_empty() {
             let e = p.label(&f.t(MsgKey::FilesEmpty), text::BODY);
-            p.draw(&e, x + 12.0, y + (44.0 - e.h) / 2.0, pal.soft);
+            p.draw(&e, x + (w - e.w) / 2.0, y + (44.0 - e.h) / 2.0, pal.soft);
             y += ROW_H;
         }
         for (n, i) in range.clone().enumerate() {

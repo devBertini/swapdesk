@@ -21,6 +21,10 @@ struct Fixed {
     drawn: RefCell<Vec<String>>,
     /// Where each text was drawn: x, y and its height.
     placed: RefCell<Vec<(f32, f32, f32)>>,
+    /// Every text laid out centred: the text, the width of its box and its size.
+    centred_made: RefCell<Vec<(String, f32, f32)>>,
+    /// Every centred text drawn: the text, the middle of its box and its size.
+    centred: RefCell<Vec<(String, f32, f32)>>,
 }
 
 impl Fixed {
@@ -81,7 +85,10 @@ impl Painter for Fixed {
     fn content_height(&self, st: TextStyle) -> f32 {
         st.size * 1.2
     }
-    fn layout(&self, text: &str, st: TextStyle, max_w: f32, _: Align, ellipsis: bool, _: usize) -> Label {
+    fn layout(&self, text: &str, st: TextStyle, max_w: f32, align: Align, ellipsis: bool, _: usize) -> Label {
+        if align == Align::Center {
+            self.centred_made.borrow_mut().push((text.to_owned(), max_w, st.size));
+        }
         let one_line = text.chars().count() as f32 * st.size * 0.55;
         let lines = if ellipsis || one_line <= max_w { 1.0 } else { (one_line / max_w).ceil() };
         Label::new(one_line.min(max_w), lines * st.size * st.line, st.size, text.to_owned())
@@ -90,6 +97,9 @@ impl Painter for Fixed {
         let text = l.handle::<String>().expect("a label is drawn by the painter that made it");
         self.drawn.borrow_mut().push(text.clone());
         self.placed.borrow_mut().push((x, y, l.h));
+        if let Some((_, box_w, size)) = self.centred_made.borrow().iter().find(|(t, ..)| t == text) {
+            self.centred.borrow_mut().push((text.clone(), x + box_w / 2.0, *size));
+        }
         self.op();
     }
 }
@@ -435,4 +445,110 @@ fn the_settings_page_scrolls_when_it_is_taller_than_the_window_and_starts_at_its
     // A window tall enough for the whole page does not scroll.
     let (_, lowest_tall, out_tall) = settings_frame((1200.0, lowest + 200.0), &Interaction::default());
     assert_eq!(out_tall.scroll_max, 0.0, "the page ends at {lowest_tall}");
+}
+
+// ----- what stands alone is centred (D51) -----
+
+/// A card, a state, an empty page or a dialog that stands alone in its area has its text and its buttons on the
+/// middle of that area: the page under the header, the window, the video. The buttons are one group, 12 apart, in
+/// the order of the rule (negative on the left, positive on the right).
+#[test]
+fn what_stands_alone_is_centred_with_its_text_and_its_buttons_on_one_axis() {
+    use WindowKind::{Main, Viewer};
+    use swapdesk_ui::NoticeKind;
+    let (w, _) = design_size(Main);
+    let page = (swapdesk_ui::tokens::layout::SIDEBAR_W + w) / 2.0;
+    let window = w / 2.0;
+    let wait = |sc: Scenario| -> Vec<ControlId> {
+        let s = sc.prepared_state();
+        let id = s.selected_device().expect("a device is selected").id.clone();
+        let mut buttons = s.wait_card(&id).expect("a wait card").buttons;
+        buttons.sort_by_key(|b| b.primary);
+        buttons.iter().map(|b| b.id).collect()
+    };
+    let dialog = vec![ControlId::DialogSecondary, ControlId::DialogPrimary];
+    let cases: Vec<(Scenario, WindowKind, f32, Vec<ControlId>)> = vec![
+        (Scenario::EstadoAguardandoAceite, Main, page, wait(Scenario::EstadoAguardandoAceite)),
+        (Scenario::EstadoConexaoRecusada, Main, page, wait(Scenario::EstadoConexaoRecusada)),
+        (Scenario::EstadoAcordando, Main, page, wait(Scenario::EstadoAcordando)),
+        (Scenario::EstadoRedePublica, Main, page, vec![ControlId::Notice(NoticeKind::Public)]),
+        (Scenario::EstadoServicoMac, Main, page, vec![ControlId::Notice(NoticeKind::Service)]),
+        (Scenario::EstadoPermissoesMac, Main, page, vec![ControlId::Notice(NoticeKind::MacPerms)]),
+        (Scenario::EstadoFechouInesperado, Main, page, vec![ControlId::Notice(NoticeKind::Crash)]),
+        (Scenario::EstadoNenhumComputador, Main, page, vec![ControlId::NoComputerAddress]),
+        (Scenario::EstadoNaoPareado, Main, page, vec![]),
+        (Scenario::Historico, Main, page, vec![]),
+        (Scenario::AtividadeVazia, Main, page, vec![]),
+        (Scenario::Pareamento, Main, window, vec![ControlId::PairDifferent, ControlId::PairSame]),
+        (Scenario::ParearEsteComputador, Main, window, vec![ControlId::PairCancel]),
+        (Scenario::PedidoConexao, Main, window, vec![ControlId::Decline, ControlId::ViewOnlyAccept, ControlId::Accept]),
+        (Scenario::Consentimento, Main, window, dialog.clone()),
+        (Scenario::Elevacao, Main, window, dialog.clone()),
+        (Scenario::EstadoReconectando, Viewer, window, vec![ControlId::ReconnectDisconnect]),
+        (Scenario::EstadoInversaoRecusada, Viewer, window, vec![ControlId::SwapDeclinedClose]),
+        (Scenario::InverterAguardando, Viewer, window, vec![]),
+        (Scenario::Inverter, Viewer, window, dialog),
+    ];
+    for (sc, kind, middle, ids) in cases {
+        let name = sc.name();
+        let state = sc.prepared_state();
+        let p = Fixed::default();
+        let ix = Interaction::default();
+        let out = paint(Frame::new(&p, &state, &ix, design_size(kind), true), kind);
+
+        // The text: something is laid out centred around the middle of the area.
+        let centred = p.centred.borrow();
+        assert!(
+            centred.iter().any(|(_, at, _)| (at - middle).abs() < 0.51),
+            "{name}: no text is centred on {middle}: {centred:?}"
+        );
+
+        // The buttons: one group in the order given, 12 apart, on one line, around the same middle.
+        if ids.is_empty() {
+            continue;
+        }
+        let rects: Vec<Rect> = ids
+            .iter()
+            .map(|id| {
+                out.widgets.iter().find(|w| w.id == *id).unwrap_or_else(|| panic!("{name}: {id:?} is not drawn")).rect
+            })
+            .collect();
+        for pair in rects.windows(2) {
+            assert_eq!(pair[0].y, pair[1].y, "{name}: the buttons share a line");
+            let gap = pair[1].x - pair[0].right();
+            assert!((gap - 12.0).abs() < 0.01, "{name}: {gap} between two buttons of the group, in the order given");
+        }
+        let group = (rects[0].x + rects[rects.len() - 1].right()) / 2.0;
+        assert!((group - middle).abs() < 0.51, "{name}: the buttons are centred on {group}, the area on {middle}");
+    }
+}
+
+/// The card itself sits in the middle of its area, and at the top of an area too short for it.
+#[test]
+fn a_card_that_stands_alone_sits_in_the_middle_of_its_area() {
+    let state = Scenario::EstadoAguardandoAceite.prepared_state();
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let mut f = Frame::new(&p, &state, &ix, (1200.0, 760.0), true);
+    let buttons = [(ControlId::PairCancel, "Cancelar".to_owned(), Kind::Default)];
+    let card = card::Card {
+        look: card::Look::Alone,
+        icon: Some(card::Icon::Spinner),
+        title: Some("Esperando"),
+        body: Some("Quem estiver nele precisa aceitar."),
+        bar: None,
+        buttons: &buttons,
+    };
+    let area = Rect::new(300.0, 100.0, 800.0, 600.0);
+    let r = card.paint_in(&mut f, area, card::W);
+    assert_eq!(r.w, card::W);
+    assert!((r.center().0 - area.center().0).abs() < 0.51, "{r:?} in {area:?}");
+    assert!((r.center().1 - area.center().1).abs() < 0.51, "{r:?} in {area:?}");
+    assert_eq!(r.h, card.height(&f, card::W));
+
+    // Narrower than the card: the card takes the width. Shorter: it starts at the top and is not cut.
+    let small = Rect::new(300.0, 100.0, 360.0, 80.0);
+    let r = card.paint_in(&mut f, small, card::W);
+    assert_eq!((r.x, r.y, r.w), (small.x, small.y, small.w));
+    assert!(r.h > small.h);
 }

@@ -223,6 +223,10 @@ pub enum Scenario {
     EstadoFechouInesperado,
     /// The device list is empty after 10 s of discovery (F20).
     EstadoNenhumComputador,
+    /// A computer of the network that is not paired yet: its page holds one card (D51).
+    EstadoNaoPareado,
+    /// Atividade before anything was logged: the empty page (D51).
+    AtividadeVazia,
     /// Launch before any answer: placeholder blocks (R-UI-1).
     Carregando,
     AtividadeCarregando,
@@ -230,7 +234,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 39] = [
+    pub const ALL: [Scenario; 41] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -267,6 +271,8 @@ impl Scenario {
         Scenario::PareamentoConfirmando,
         Scenario::EstadoFechouInesperado,
         Scenario::EstadoNenhumComputador,
+        Scenario::EstadoNaoPareado,
+        Scenario::AtividadeVazia,
         Scenario::Carregando,
         Scenario::AtividadeCarregando,
         Scenario::ArquivosCarregando,
@@ -311,6 +317,8 @@ impl Scenario {
             Scenario::PareamentoConfirmando => "pareamento-confirmando",
             Scenario::EstadoFechouInesperado => "estado-fechou-inesperado",
             Scenario::EstadoNenhumComputador => "estado-nenhum-computador",
+            Scenario::EstadoNaoPareado => "estado-nao-pareado",
+            Scenario::AtividadeVazia => "atividade-vazia",
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
             Scenario::ArquivosCarregando => "arquivos-carregando",
@@ -364,6 +372,8 @@ impl Scenario {
             }
             Scenario::EstadoFechouInesperado => "new: crash notice (D12)",
             Scenario::EstadoNenhumComputador => "new: no computer found card (F20)",
+            Scenario::EstadoNaoPareado => "new: a computer not paired yet (D51)",
+            Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
             Scenario::ArquivosCarregando => "R-UI-1: Arquivos while the folder lists",
@@ -385,12 +395,13 @@ impl Scenario {
             }
             _ => {}
         }
+        let logged = if self == Scenario::AtividadeVazia { Vec::new() } else { activity() };
         vec![
             reply(Ok(Reply::ThisDevice(this_device()))),
             reply(Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private)))),
             reply(Ok(Reply::Devices(devices()))),
             reply(Ok(Reply::Settings(settings()))),
-            reply(Ok(Reply::Activity(activity()))),
+            reply(Ok(Reply::Activity(logged))),
         ]
     }
 
@@ -668,6 +679,8 @@ impl Scenario {
             ],
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
             Scenario::EstadoNenhumComputador => vec![Event(UiEvent::DevicesChanged(Vec::new())), Ticks(10)],
+            Scenario::EstadoNaoPareado => vec![Select(AIR)],
+            Scenario::AtividadeVazia => vec![Goto(Nav::Activity)],
             Scenario::Carregando => vec![Startup, ArmPlaceholders],
             Scenario::AtividadeCarregando => vec![Goto(Nav::Activity), BeginFetch(DataKind::Activity), ArmPlaceholders],
             Scenario::ArquivosCarregando => {
@@ -1150,6 +1163,8 @@ mod tests {
             (Scenario::PareamentoConfirmando, Screen::Pairing, &[Main]),
             (Scenario::EstadoFechouInesperado, Screen::Devices, &[Main]),
             (Scenario::EstadoNenhumComputador, Screen::Home, &[Main]),
+            (Scenario::EstadoNaoPareado, Screen::Devices, &[Main]),
+            (Scenario::AtividadeVazia, Screen::Activity, &[Main]),
             (Scenario::Carregando, Screen::Home, &[Main]),
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),

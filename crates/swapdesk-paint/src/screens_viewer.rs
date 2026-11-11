@@ -8,6 +8,7 @@ use swapdesk_ui::{
     WindowKind,
 };
 
+use crate::card::{self, Card, Icon, Look};
 use crate::painter::{Align, Rect};
 use crate::view::{Frame, Kind, icons};
 
@@ -84,7 +85,7 @@ pub fn paint_viewer(f: &mut Frame) {
         if let Some(wait) = f.st.swap_wait() {
             swap_wait_card(f, video, &wait);
         } else if matches!(f.st.swap().map(|s| &s.phase), Some(SwapPhase::Declined(_))) {
-            swap_declined_card(f, video, &peer);
+            swap_declined_card(f, video);
         }
         if f.st.session_bar_visible() {
             toolbar(f, video_col, &session.device_id);
@@ -316,104 +317,62 @@ fn unread_badge(f: &Frame, at: (f32, f32)) {
 
 // ----- cards in the video area -----
 
+/// The cards over the video stand alone in it: centred, with their content centred, in the look of the main
+/// window's wait card (D51).
 fn reconnecting_card(f: &mut Frame, col: Rect, peer: &str, attempt: u32) {
-    let (p, _pal) = (f.p, f.pal);
-    let w = 360.0f32.min(col.w - 40.0);
-    let title =
-        p.label_in(&f.st.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer)), text::H2_STATE, w - 44.0, Align::Start);
-    let body = p.label_in(
-        &f.st.tm(&Msg::new(MsgKey::ReconnectingBody).with(attempt.to_string())),
-        text::BODY,
-        w - 44.0,
-        Align::Start,
-    );
+    let title = f.st.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer));
+    let body = f.st.tm(&Msg::new(MsgKey::ReconnectingBody).with(attempt.to_string()));
     // The time left of the minute the service keeps trying (R-UI-13): a row of its own, there from the start.
     let bar = f.st.reconnect_wait();
-    let row_h = bar.as_ref().map(|_| f.countdown_row_h());
-    let h = 20.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + row_h.map_or(0.0, |r| r + 10.0) + 40.0 + 20.0;
-    let r = Rect::new(p.snap(col.x + (col.w - w) / 2.0), p.snap(col.y + (col.h - h) / 2.0), w, h);
-    p.fill_rrect(r, 12.0, f.pal.remote);
-    p.bordered(r, 12.0, fixed::CARD_DARK_BORDER, f.pal.remote);
-    let (x, mut y) = (r.x + 22.0, r.y + 20.0);
-    p.arc_stroke((x + 20.0, y + 20.0), 18.5, -90.0 + 45.0, 270.0, 3.0, fixed::SPINNER);
-    y += 50.0;
-    p.draw(&title, x, y, fixed::CARD_DARK_INK);
-    y += title.h + 10.0;
-    p.draw(&body, x, y, fixed::CARD_DARK_SOFT);
-    if let Some(bar) = &bar {
-        let colors = [fixed::CARD_DARK_BORDER, fixed::SPINNER, fixed::CARD_DARK_SOFT];
-        f.countdown_row((x, y + body.h + 10.0), w - 44.0, bar, colors);
+    let buttons = [(ControlId::ReconnectDisconnect, f.t(MsgKey::Disconnect), Kind::Default)];
+    Card {
+        look: Look::Dark,
+        icon: Some(Icon::Spinner),
+        title: Some(&title),
+        body: Some(&body),
+        bar: bar.as_ref(),
+        buttons: &buttons,
     }
-    let label = f.t(MsgKey::Disconnect);
-    let bw = f.button_width(&label, Kind::Default);
-    let br = Rect::new(x, r.bottom() - 20.0 - 40.0, bw, 40.0);
-    p.stroke_rrect(br.inset(0.5), 8.0, 1.0, fixed::CARD_DARK_BORDER);
-    f.tint(ControlId::ReconnectDisconnect, br, 8.0, Color::rgb(0xFFFFFF), 0.08, 0.14);
-    let l = p.label(&label, text::BTN);
-    p.draw(&l, br.x + (br.w - l.w) / 2.0, br.y + (40.0 - l.h) / 2.0, fixed::CARD_DARK_INK);
-    f.register(ControlId::ReconnectDisconnect, br, 8.0);
+    .paint_in(f, col, card::W.min(col.w - 40.0));
 }
 
-fn swap_declined_card(f: &mut Frame, video: Rect, peer: &str) {
-    let (p, pal) = (f.p, f.pal);
-    let w = 360.0f32.min(video.w - 40.0);
-    let bwid = p.hairline();
-    let _ = peer;
-    // Which words: the card says why the other side did not swap (F-SWAP-02).
-    let (title_text, body_text) = f.st.swap_declined_texts();
-    let title = p.label_in(&title_text, text::H2_STATE, w - 44.0 - 2.0 * bwid, Align::Start);
-    let body = p.label_in(&body_text, text::BODY, w - 44.0 - 2.0 * bwid, Align::Start);
-    let h = 2.0 * bwid + 40.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + 40.0;
-    let r = Rect::new(p.snap(video.x + (video.w - w) / 2.0), p.snap(video.y + (video.h - h) / 2.0), w, h);
-    f.panel(r, pal.surface);
-    let (x, mut y) = (r.x + bwid + 22.0, r.y + bwid + 20.0);
-    p.fill_circle((x + 20.0, y + 20.0), 20.0, pal.sunken);
-    p.stroke_circle((x + 20.0, y + 20.0), 19.5, 1.0, pal.line);
-    p.svg(icons::SWAP, x + 10.0, y + 10.0, 20.0, 2.0, pal.soft);
-    y += 50.0;
-    p.draw(&title, x, y, pal.ink);
-    y += title.h + 10.0;
-    p.draw(&body, x, y, pal.soft);
-    let close = f.t(MsgKey::Close);
-    let cw = f.button_width(&close, Kind::Default);
-    f.button(
-        ControlId::SwapDeclinedClose,
-        Rect::new(x, r.bottom() - bwid - 20.0 - 40.0, cw, 40.0),
-        Kind::Default,
-        &close,
-        false,
-    );
+/// The other side did not swap: the card says why (F-SWAP-02).
+fn swap_declined_card(f: &mut Frame, video: Rect) {
+    let (title, body) = f.st.swap_declined_texts();
+    let buttons = [(ControlId::SwapDeclinedClose, f.t(MsgKey::Close), Kind::Default)];
+    Card {
+        look: Look::Alone,
+        icon: Some(Icon::Ring(icons::SWAP)),
+        title: Some(&title),
+        body: Some(&body),
+        bar: None,
+        buttons: &buttons,
+    }
+    .paint_in(f, video, card::W.min(video.w - 40.0));
 }
 
 /// The viewer asked to swap: who is asked, what happens if nobody answers and the time left, in the place and
 /// style of the declined card. No button: an outgoing request cannot be withdrawn.
 fn swap_wait_card(f: &mut Frame, video: Rect, wait: &SwapWait) {
-    let (p, pal) = (f.p, f.pal);
-    let w = 360.0f32.min(video.w - 40.0);
-    let bwid = p.hairline();
-    let inner = w - 44.0 - 2.0 * bwid;
-    let title = p.label_in(&wait.title, text::H2_STATE, inner, Align::Start);
-    let body = p.label_in(&wait.body, text::BODY, inner, Align::Start);
-    let h = 2.0 * bwid + 40.0 + 40.0 + 10.0 + title.h + 10.0 + body.h + 10.0 + f.countdown_row_h();
-    let r = Rect::new(p.snap(video.x + (video.w - w) / 2.0), p.snap(video.y + (video.h - h) / 2.0), w, h);
-    f.panel(r, pal.surface);
-    let (x, mut y) = (r.x + bwid + 22.0, r.y + bwid + 20.0);
-    p.fill_circle((x + 20.0, y + 20.0), 20.0, pal.link_tint);
-    p.svg(icons::SWAP, x + 10.0, y + 10.0, 20.0, 2.0, pal.link);
-    y += 50.0;
-    p.draw(&title, x, y, pal.ink);
-    y += title.h + 10.0;
-    p.draw(&body, x, y, pal.soft);
-    y += body.h + 10.0;
-    f.countdown_row((x, y), inner, &wait.bar, [pal.line, pal.link, pal.soft]);
+    let pal = f.pal;
+    Card {
+        look: Look::Alone,
+        icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::SWAP)),
+        title: Some(&wait.title),
+        body: Some(&wait.body),
+        bar: Some(&wait.bar),
+        buttons: &[],
+    }
+    .paint_in(f, video, card::W.min(video.w - 40.0));
 }
 
+/// The swap confirmation over the viewer: a centred card with its text and buttons centred (D51).
 fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
     let (p, pal) = (f.p, f.pal);
     let t = f.st.dialog_texts(kind);
     let w = layout::DIALOG_W.min(f.w - 48.0) - 64.0;
-    let title = p.label_in(&t.title, text::H1_DIALOG, w, Align::Start);
-    let bodies: Vec<_> = t.body.iter().map(|b| p.label_in(b, text::BODY, w, Align::Start)).collect();
+    let title = p.label_in(&t.title, text::H1_DIALOG, w, Align::Center);
+    let bodies: Vec<_> = t.body.iter().map(|b| p.label_in(b, text::BODY, w, Align::Center)).collect();
     let mut h = 32.0 + title.h + 28.0 + 40.0 + 32.0;
     for b in &bodies {
         h += 12.0 + b.h;
@@ -436,14 +395,14 @@ fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
         y += b.h;
     }
     y += 28.0;
-    // The secondary (negative) action at the start, the primary at the end (owner, 09/11).
+    // One centred group: the negative action on the left, the primary on the right.
     if let Some(pm) = &t.primary {
         let mut list = Vec::new();
         if let Some(s) = &t.secondary {
             list.push((ControlId::DialogSecondary, s.clone(), Kind::Default));
         }
         list.push((ControlId::DialogPrimary, pm.clone(), Kind::Primary));
-        crate::screens_main::actions_row(f, x, y, r.w - 64.0, &list);
+        card::actions(f, x, y, r.w - 64.0, &list, false);
     }
 }
 

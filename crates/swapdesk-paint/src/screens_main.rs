@@ -11,6 +11,7 @@ use swapdesk_ui::{
     PairingState, Screen, SelectId, WaitCard, WaitIcon, WindowKind,
 };
 
+use crate::card::{self, Card, Icon, Look};
 use crate::painter::{Align, Rect};
 use crate::view::{Frame, Kind, icons};
 
@@ -336,8 +337,8 @@ fn home_main(f: &mut Frame) {
     }
 }
 
-/// The crash notice, the "no computer found" card or the empty line, as the device page had them. Returns the height
-/// used, with the gap after it.
+/// The crash notice, the "no computer found" card or the empty line. Each is one card across the page among the
+/// page's other cards, with its content centred (D51). Returns the height used, with the gap after it.
 fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
     let (p, pal) = (f.p, f.pal);
     let mut used = 0.0;
@@ -345,24 +346,26 @@ fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
         return used;
     }
     if f.st.crash_notice() {
-        used += notice_cards(f, a, y, &[NoticeKind::Crash]) + 20.0;
+        used += notice_card(f, Look::Inline, NoticeKind::Crash, Rect::new(a.x, y, a.cw, 0.0)).h + 20.0;
     }
     if f.st.no_computer_card() {
         // F20: discovery found nothing for 10 s; the action focuses the address field.
         let (title, body, button) =
             (f.t(MsgKey::NoComputerTitle), f.t(MsgKey::NoComputerBody), f.t(MsgKey::NoComputerButton));
-        let w = ((a.cw - 40.0) / 3.0).max(320.0).min(a.cw);
-        let h = state_card(
-            f,
-            (a.x, y + used, w),
-            icons::WIFI,
-            (pal.link_tint, pal.link),
-            (&title, &body, &button),
-            ControlId::NoComputerAddress,
-        );
+        let buttons = [(ControlId::NoComputerAddress, button, Kind::Primary)];
+        let c = Card {
+            look: Look::Inline,
+            icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::WIFI)),
+            title: Some(&title),
+            body: Some(&body),
+            bar: None,
+            buttons: &buttons,
+        };
+        let h = c.height(f, a.cw);
+        c.paint(f, Rect::new(a.x, y + used, a.cw, h));
         used += h + 20.0;
     } else if f.st.devices().is_empty() {
-        let l = p.label_in(&f.t(MsgKey::EmptyDevices), text::BODY, a.cw, Align::Start);
+        let l = p.label_in(&f.t(MsgKey::EmptyDevices), text::BODY, a.cw, Align::Center);
         p.draw(&l, a.x, y + used, pal.soft);
         used += l.h + 20.0;
     }
@@ -500,7 +503,7 @@ fn paint_card(f: &mut Frame, card: &HomeCard, r: Rect, avail: f32) {
                 }
             } else if lines.is_empty() {
                 let l = p.label_ellipsis(empty, text::BODY, inner);
-                p.draw(&l, x, y + 10.0, pal.soft);
+                p.draw(&l, x + (inner - l.w) / 2.0, y + 10.0, pal.soft);
             } else {
                 let shown = recent_fit(f, (avail - recent_fixed(f)).max(0.0), lines, tw);
                 for (n, line) in lines.iter().take(shown).enumerate() {
@@ -537,6 +540,12 @@ struct Area {
 
 fn area(f: &Frame) -> Area {
     Area { x: SIDEBAR_W + 40.0, cw: (f.w - SIDEBAR_W - 80.0).max(200.0) }
+}
+
+/// What a page leaves under `y` (its header, its tabs) down to the bottom margin: where a card that stands alone in
+/// the page is centred (D51).
+fn room(f: &Frame, a: &Area, y: f32) -> Rect {
+    Rect::new(a.x, y, a.cw, (f.h - 40.0 - y).max(0.0))
 }
 
 fn devices_main(f: &mut Frame) {
@@ -625,7 +634,7 @@ fn devices_main(f: &mut Frame) {
     y += (title_h + 6.0 + status.h).max(40.0) + 28.0;
 
     if let Some(card) = card {
-        wait_card(f, &a, y, &card);
+        wait_card(f, room(f, &a, y), &card);
         return;
     }
     if d.paired {
@@ -633,16 +642,21 @@ fn devices_main(f: &mut Frame) {
     }
     let notices = f.st.notices();
     if !notices.is_empty() {
-        notice_cards(f, &a, y, &notices);
+        notice_cards(f, room(f, &a, y), &notices);
         return;
     }
     if !d.paired {
+        // Not paired yet: what pairing takes, alone in the page (D51).
         let body = f.t(MsgKey::PairNotPairedBody);
-        let bw = p.hairline();
-        let th = f.para_height(&body, text::BODY, a.cw - 44.0 - 2.0 * bw);
-        let r = Rect::new(a.x, y, a.cw, 2.0 * bw + 40.0 + th);
-        f.panel(r, pal.surface);
-        f.para(&body, text::BODY, a.x + bw + 22.0, y + bw + 20.0, a.cw - 44.0 - 2.0 * bw, pal.soft, Align::Start);
+        Card {
+            look: Look::Alone,
+            icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::SHIELD)),
+            title: None,
+            body: Some(&body),
+            bar: None,
+            buttons: &[],
+        }
+        .paint_in(f, room(f, &a, y), card::W);
         return;
     }
     match f.st.tab() {
@@ -866,21 +880,21 @@ fn permissions(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) {
     f.button(ControlId::Forget, Rect::new(rx, note_y + nh + 10.0 + 8.0, fw, 40.0), Kind::Danger, &forget, false);
 }
 
+/// The history tab holds one message for now: a card alone in the tab (D51).
 fn history(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) {
-    let (p, pal) = (f.p, f.pal);
-    let bw = p.hairline();
-    let tw = a.cw - 44.0 - 2.0 * bw;
+    let pal = f.pal;
     let title = f.st.tm(&Msg::new(MsgKey::HistoryTitle).with(d.name.clone()));
     let body = f.t(MsgKey::HistoryPlaceholder);
-    let h2 = p.label(&title, text::H2);
-    let th = f.para_height(&body, text::BODY, tw);
-    f.panel(Rect::new(a.x, y, a.cw, 2.0 * bw + 40.0 + h2.h + 10.0 + th), pal.surface);
-    p.draw(&h2, a.x + bw + 22.0, y + bw + 20.0, pal.ink);
-    f.para(&body, text::BODY, a.x + bw + 22.0, y + bw + 20.0 + h2.h + 10.0, tw, pal.soft, Align::Start);
+    Card {
+        look: Look::Alone,
+        icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::CLOCK)),
+        title: Some(&title),
+        body: Some(&body),
+        bar: None,
+        buttons: &[],
+    }
+    .paint_in(f, room(f, a, y), card::W);
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// Notices and states
 
 fn notice_icon(kind: NoticeKind) -> String {
     match kind {
@@ -891,122 +905,92 @@ fn notice_icon(kind: NoticeKind) -> String {
     }
 }
 
-/// `.msg` cards (padding 20 22, gap 10, icon 40, h2 17/1.3, a primary button at the bottom), up to three per row.
-/// Returns the height the cards take.
-fn notice_cards(f: &mut Frame, a: &Area, y: f32, kinds: &[NoticeKind]) -> f32 {
+/// One notice as a card: its icon, title, text and primary button, centred (D51). `r` gives the place and the
+/// width; a height of 0 means as tall as the content. Returns the card's rectangle.
+fn notice_card(f: &mut Frame, look: Look, kind: NoticeKind, r: Rect) -> Rect {
     let pal = f.pal;
-    let per_row = kinds.len().clamp(1, 3);
-    let gap = 20.0;
-    let w = (a.cw - gap * (per_row as f32 - 1.0)) / per_row as f32;
-    let mut total = 0.0f32;
-    for (n, kind) in kinds.iter().enumerate() {
-        let (col, row) = (n % 3, n / 3);
-        let (title, body, button) = f.st.notice_texts(*kind);
-        let x = a.x + col as f32 * (w + gap);
-        let tinted = if matches!(kind, NoticeKind::MacPerms) {
-            (pal.link_tint, pal.link)
-        } else {
-            (pal.danger_tint, pal.danger)
-        };
-        // Every card of a row is laid out by its own text, as before; rows stack by the last height.
-        let h = state_card_height(f, w, &title, &body);
-        let top = y + row as f32 * (h + gap);
-        state_card(f, (x, top, w), &notice_icon(*kind), tinted, (&title, &body, &button), ControlId::Notice(*kind));
-        total = total.max(row as f32 * (h + gap) + h);
-    }
-    total
+    let (title, body, button) = f.st.notice_texts(kind);
+    let (tint, ink) =
+        if matches!(kind, NoticeKind::MacPerms) { (pal.link_tint, pal.link) } else { (pal.danger_tint, pal.danger) };
+    let icon = notice_icon(kind);
+    let buttons = [(ControlId::Notice(kind), button, Kind::Primary)];
+    let c = Card {
+        look,
+        icon: Some(Icon::Circle(tint, ink, &icon)),
+        title: Some(&title),
+        body: Some(&body),
+        bar: None,
+        buttons: &buttons,
+    };
+    let h = r.h.max(c.height(f, r.w));
+    c.paint(f, Rect::new(r.x, r.y, r.w, h))
 }
 
-fn state_card_height(f: &Frame, w: f32, title: &str, body: &str) -> f32 {
+/// The height [`notice_card`] takes at width `w`.
+fn notice_card_height(f: &Frame, look: Look, kind: NoticeKind, w: f32) -> f32 {
+    let (title, body, button) = f.st.notice_texts(kind);
+    let buttons = [(ControlId::Notice(kind), button, Kind::Primary)];
+    Card { look, icon: Some(Icon::Spinner), title: Some(&title), body: Some(&body), bar: None, buttons: &buttons }
+        .height(f, w)
+}
+
+/// The notices that take a device page's content, centred in `room` (D51): one is a card alone; several stand side
+/// by side, up to three per row, each row as tall as its tallest card.
+fn notice_cards(f: &mut Frame, room: Rect, kinds: &[NoticeKind]) {
     let p = f.p;
-    let bw = p.hairline();
-    let inner = w - 44.0 - 2.0 * bw;
-    let t = p.label_in(title, text::H2_STATE, inner, Align::Start);
-    let b = p.label_in(body, text::BODY, inner, Align::Start);
-    2.0 * bw + 40.0 + 40.0 + 10.0 + t.h + 10.0 + b.h + 10.0 + 40.0
-}
-
-/// One card of a state: icon circle, title, body and a primary button; returns its height.
-fn state_card(
-    f: &mut Frame,
-    at: (f32, f32, f32),
-    icon: &str,
-    tint: (Color, Color),
-    texts: (&str, &str, &str),
-    id: ControlId,
-) -> f32 {
-    let (p, pal) = (f.p, f.pal);
-    let (title, body, button) = texts;
-    let (x, top, w) = at;
-    let bw = p.hairline();
-    let inner = w - 44.0 - 2.0 * bw;
-    let t = p.label_in(title, text::H2_STATE, inner, Align::Start);
-    let b = p.label_in(body, text::BODY, inner, Align::Start);
-    let h = state_card_height(f, w, title, body);
-    f.panel(Rect::new(x, top, w, h), pal.surface);
-    let (ix, mut iy) = (x + bw + 22.0, top + bw + 20.0);
-    f.icon_circle(ix, iy, tint.0, tint.1, icon);
-    iy += 40.0 + 10.0;
-    p.draw(&t, ix, iy, pal.ink);
-    iy += t.h + 10.0;
-    p.draw(&b, ix, iy, pal.soft);
-    let bwid = f.button_width(button, Kind::Primary);
-    f.button(id, Rect::new(ix, top + h - bw - 20.0 - 40.0, bwid, 40.0), Kind::Primary, button, false);
-    h
+    if let [kind] = kinds {
+        let w = card::W.min(room.w);
+        let h = notice_card_height(f, Look::Alone, *kind, w);
+        let at = Rect::new(p.snap(room.x + (room.w - w) / 2.0), p.snap(room.y + ((room.h - h) / 2.0).max(0.0)), w, h);
+        notice_card(f, Look::Alone, *kind, at);
+        return;
+    }
+    let gap = 20.0;
+    let per_row = kinds.len().clamp(1, 3);
+    let w = ((room.w - gap * (per_row as f32 - 1.0)) / per_row as f32).min(card::W);
+    let rows: Vec<&[NoticeKind]> = kinds.chunks(per_row).collect();
+    let heights: Vec<f32> = rows
+        .iter()
+        .map(|row| row.iter().map(|k| notice_card_height(f, Look::Inline, *k, w)).fold(0.0, f32::max))
+        .collect();
+    let total = heights.iter().sum::<f32>() + gap * rows.len().saturating_sub(1) as f32;
+    let mut y = p.snap(room.y + ((room.h - total) / 2.0).max(0.0));
+    for (row, h) in rows.iter().zip(&heights) {
+        let row_w = w * row.len() as f32 + gap * (row.len() as f32 - 1.0);
+        let mut x = p.snap(room.x + (room.w - row_w) / 2.0);
+        for kind in row.iter() {
+            notice_card(f, Look::Inline, *kind, Rect::new(x, y, w, *h));
+            x += w + gap;
+        }
+        y += h + gap;
+    }
 }
 
 /// The card a device's page shows in place of its content while a wake or a connect waits, or after a connect that
 /// did not open: an icon, what is waited for and on whom, the time left when there is a limit, and the way out. It
 /// stands alone in the page, so it is centred in the room under the header, with its own content centred, and wide
-/// enough to be read at a glance.
-fn wait_card(f: &mut Frame, a: &Area, y: f32, card: &WaitCard) {
-    const PAD: f32 = 32.0;
-    const ICON: f32 = 40.0;
-    let (p, pal) = (f.p, f.pal);
-    let bw = p.hairline();
-    let w = 480.0f32.min(a.cw);
-    let inner = w - 2.0 * PAD - 2.0 * bw;
-    let t = p.label_in(&card.title, text::H1_DIALOG, inner, Align::Center);
-    let b = p.label_in(&card.body, text::BODY, inner, Align::Center);
-    // The countdown row is there for the whole wait, also before the seconds are known, so the card never grows.
-    let row_h = card.bar.as_ref().map(|_| f.countdown_row_h());
-    let h = 2.0 * bw + PAD + ICON + 20.0 + t.h + 12.0 + b.h + row_h.map_or(0.0, |r| 20.0 + r) + 28.0 + 40.0 + PAD;
-    // Centred in what the header leaves of the page; a short window keeps it under the header.
-    let room = f.h - 40.0 - y;
-    let r = Rect::new(p.snap(a.x + (a.cw - w) / 2.0), p.snap(y + ((room - h) / 2.0).max(0.0)), w, h);
-    f.panel(r, pal.surface);
-    let (ix, mut iy) = (r.x + bw + PAD, r.y + bw + PAD);
+/// enough to be read at a glance (D51).
+fn wait_card(f: &mut Frame, room: Rect, card: &WaitCard) {
+    let pal = f.pal;
     let (tint, ink, icon) = match card.icon {
         WaitIcon::Power => (pal.link_tint, pal.link, icons::POWER),
         WaitIcon::Clock => (pal.link_tint, pal.link, icons::CLOCK),
         WaitIcon::ShieldAlert => (pal.danger_tint, pal.danger, icons::SHIELD_ALERT),
     };
-    f.icon_circle(ix + (inner - ICON) / 2.0, iy, tint, ink, icon);
-    iy += ICON + 20.0;
-    p.draw(&t, ix, iy, pal.ink);
-    iy += t.h + 12.0;
-    p.draw(&b, ix, iy, pal.soft);
-    iy += b.h;
-    if let Some(bar) = &card.bar {
-        f.countdown_row((ix, iy + 20.0), inner, bar, [pal.line, pal.link, pal.soft]);
-    }
-    // The buttons as one centred group on the card's bottom line: negative on the left, positive on the right (the
-    // order rule).
-    let mut list: Vec<(ControlId, String, Kind)> = card
+    let buttons: Vec<(ControlId, String, Kind)> = card
         .buttons
         .iter()
         .map(|b| (b.id, b.label.clone(), if b.primary { Kind::Primary } else { Kind::Default }))
         .collect();
-    list.sort_by_key(|b| b.2 == Kind::Primary);
-    let widths: Vec<f32> = list.iter().map(|(_, label, kind)| f.button_width(label, *kind)).collect();
-    let gap = 12.0;
-    let total = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
-    let mut bx = p.snap(ix + (inner - total) / 2.0);
-    let by = r.bottom() - bw - PAD - 40.0;
-    for ((id, label, kind), bwid) in list.iter().zip(&widths) {
-        f.button(*id, Rect::new(bx, by, *bwid, layout::BUTTON_H), *kind, label, false);
-        bx += bwid + gap;
+    Card {
+        look: Look::Alone,
+        icon: Some(Icon::Circle(tint, ink, icon)),
+        title: Some(&card.title),
+        body: Some(&card.body),
+        bar: card.bar.as_ref(),
+        buttons: &buttons,
     }
+    .paint_in(f, room, card::W);
 }
 
 /// The error strip: floats over the bottom of the content so nothing moves when it appears.
@@ -1085,6 +1069,20 @@ fn activity_main(f: &mut Frame) {
     let panel_h = content_h.min(avail);
     let panel = Rect::new(a.x, y, a.cw, panel_h);
     if f.st.fetch(DataKind::Activity) == swapdesk_ui::Fetch::Pending {
+        return;
+    }
+    if !loading && total == 0 {
+        // Nothing logged yet: the page says so, alone and centred (D51), instead of a table with no rows.
+        let empty = f.t(MsgKey::HomeRecentEmpty);
+        Card {
+            look: Look::Alone,
+            icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::CLOCK)),
+            title: None,
+            body: Some(&empty),
+            bar: None,
+            buttons: &[],
+        }
+        .paint_in(f, room(f, &a, y), card::W);
         return;
     }
     f.panel(panel, pal.surface);
@@ -1417,8 +1415,8 @@ enum PairItem {
     Buttons(Vec<(ControlId, String, Kind)>),
 }
 
-/// The pairing screen: one centred card, the same on Windows and macOS (owner, 09/11: one interface on both
-/// systems). Card 520 wide, margins 32 and 28, 14 between blocks, as the Mac app's card.
+/// The pairing screen: one centred card with its content centred (D51), the same on Windows and macOS (owner,
+/// 09/11: one interface on both systems). Card 520 wide, margins 32 and 28, 14 between blocks.
 fn pairing(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
     let Some(view) = f.st.pairing().cloned() else { return };
@@ -1508,13 +1506,14 @@ fn pairing(f: &mut Frame) {
         let h = height(f, it);
         match it {
             PairItem::Title(t) => {
-                f.para(t, text::H1, x, y, inner, pal.ink, Align::Start);
+                f.para(t, text::H1, x, y, inner, pal.ink, Align::Center);
             }
             PairItem::Body(t) => {
-                f.para(t, text::BODY, x, y, inner, pal.soft, Align::Start);
+                f.para(t, text::BODY, x, y, inner, pal.soft, Align::Center);
             }
             PairItem::Code(c) => {
-                f.text(c, text::PAIR_CODE, x, y, pal.link);
+                let code = p.label(c, text::PAIR_CODE);
+                p.draw(&code, x + (inner - code.w) / 2.0, y, pal.link);
             }
             PairItem::Countdown(r) => {
                 let num = p.label(&format::countdown(*r), text::COUNTDOWN);
@@ -1525,27 +1524,9 @@ fn pairing(f: &mut Frame) {
                 p.fill_rrect(Rect::new(bx, by, bw, 6.0), 3.0, pal.line);
                 p.fill_rrect(Rect::new(bx, by, bw * frac, 6.0), 3.0, pal.link);
             }
-            PairItem::Buttons(list) => actions_row(f, x, y, inner, list),
+            PairItem::Buttons(list) => card::actions(f, x, y, inner, list, false),
         }
         y += h + GAP;
-    }
-}
-
-/// A row of actions across `w`: negative ones from the start, positive ones (`Kind::Primary`) packed at the end
-/// (owner, 09/11: the same order on both systems).
-pub(crate) fn actions_row(f: &mut Frame, x: f32, y: f32, w: f32, list: &[(ControlId, String, Kind)]) {
-    let mut left = x;
-    for (id, label, kind) in list.iter().filter(|b| b.2 != Kind::Primary) {
-        let bw = f.button_width(label, *kind);
-        f.button(*id, Rect::new(left, y, bw, layout::BUTTON_H), *kind, label, false);
-        left += bw + 8.0;
-    }
-    let mut right = x + w;
-    for (id, label, kind) in list.iter().rev().filter(|b| b.2 == Kind::Primary) {
-        let bw = f.button_width(label, *kind);
-        right -= bw;
-        f.button(*id, Rect::new(right, y, bw, layout::BUTTON_H), *kind, label, false);
-        right -= 8.0;
     }
 }
 
@@ -1578,8 +1559,9 @@ fn incoming(f: &mut Frame) {
     let w = layout::DIALOG_W.min(f.w - 48.0) - 64.0;
     let title_s = f.st.incoming_title(&i);
     let sub_s = f.st.tm(&Msg::new(MsgKey::IncomingSub).with(i.remaining_s.to_string()));
-    let title = p.label_in(&title_s, text::H1_DIALOG, w, Align::Start);
-    let sub = p.label_in(&sub_s, text::BODY, w, Align::Start);
+    // The request itself is centred (D51); the choices under it are a form and keep their columns.
+    let title = p.label_in(&title_s, text::H1_DIALOG, w, Align::Center);
+    let sub = p.label_in(&sub_s, text::BODY, w, Align::Center);
     let legend = p.label(&f.t(MsgKey::AllowThisSession), text::NAME);
     let boxes = f.st.incoming_boxes();
     let rows = boxes.len().div_ceil(2);
@@ -1618,28 +1600,32 @@ fn incoming(f: &mut Frame) {
     f.checkbox(ControlId::RememberUnattended, x, y, w, i.remember_unattended, &f.t(MsgKey::RememberUnattended));
     y += 32.0 + 24.0;
 
-    // Buttons: "Recusar" quiet at the start (no left padding), the other two at the end.
-    let decline = f.t(MsgKey::Decline);
-    let view = f.t(MsgKey::ViewOnlyAccept);
-    let accept = f.t(MsgKey::Accept);
-    let aw = f.button_width(&accept, Kind::Primary);
-    let vw = f.button_width(&view, Kind::Default);
-    let dw = f.button_width(&decline, Kind::Quiet) - 16.0;
-    f.button(ControlId::Accept, Rect::new(x + w - aw, y, aw, 40.0), Kind::Primary, &accept, false);
-    f.button(ControlId::ViewOnlyAccept, Rect::new(x + w - aw - 10.0 - vw, y, vw, 40.0), Kind::Default, &view, false);
-    // Quiet with padding-left 0: draw the label at the card's edge.
-    let drect = Rect::new(x - 16.0 - p.hairline(), y, dw + 16.0 + 16.0 + 2.0 * p.hairline(), 40.0);
-    f.button(ControlId::Decline, drect, Kind::Quiet, &decline, true);
+    // The buttons as one centred group: "Recusar" first, the two that let the other side in after it.
+    let list = [
+        (ControlId::Decline, f.t(MsgKey::Decline), Kind::Default),
+        (ControlId::ViewOnlyAccept, f.t(MsgKey::ViewOnlyAccept), Kind::Default),
+        (ControlId::Accept, f.t(MsgKey::Accept), Kind::Primary),
+    ];
+    card::actions(f, x, y, w, &list, false);
 }
 
-/// Consent card, elevation step and swap dialogs: an icon, a title, text, an optional line and two buttons.
+/// Consent card, elevation step and swap dialogs: an icon, a title, text, an optional line and the buttons, all
+/// centred in the card (D51).
 fn dialog(f: &mut Frame, kind: &DialogKind) {
     let (p, pal) = (f.p, f.pal);
     let t = f.st.dialog_texts(kind);
     let w = layout::DIALOG_W.min(f.w - 48.0) - 64.0;
-    let title = p.label_in(&t.title, text::H1_DIALOG, w, Align::Start);
-    let bodies: Vec<_> = t.body.iter().map(|b| p.label_in(b, text::BODY, w, Align::Start)).collect();
-    let extra = t.extra.as_ref().map(|e| p.label_in(e, text::CAPTION, w, Align::Start));
+    let title = p.label_in(&t.title, text::H1_DIALOG, w, Align::Center);
+    let bodies: Vec<_> = t.body.iter().map(|b| p.label_in(b, text::BODY, w, Align::Center)).collect();
+    // The elevation step's line has a turning arc before it: the two are centred as one.
+    let arc = matches!(kind, DialogKind::Elevation);
+    let extra = t.extra.as_ref().map(|e| {
+        if arc {
+            p.label_in(e, text::CAPTION, w - 28.0, Align::Start)
+        } else {
+            p.label_in(e, text::CAPTION, w, Align::Center)
+        }
+    });
     let mut content_h = 44.0 + 20.0 + title.h;
     for b in &bodies {
         content_h += 12.0 + b.h;
@@ -1655,8 +1641,9 @@ fn dialog(f: &mut Frame, kind: &DialogKind) {
         DialogKind::Consent => icons::terminal(),
         DialogKind::SwapConfirm | DialogKind::SwapAsk => icons::SWAP.to_owned(),
     };
-    p.fill_circle((x + 22.0, y + 22.0), 22.0, pal.link_tint);
-    p.svg(&icon, x + 11.0, y + 11.0, 22.0, 2.0, pal.link);
+    let cx = x + w / 2.0;
+    p.fill_circle((cx, y + 22.0), 22.0, pal.link_tint);
+    p.svg(&icon, cx - 11.0, y + 11.0, 22.0, 2.0, pal.link);
     y += 44.0 + 20.0;
     p.draw(&title, x, y, pal.ink);
     y += title.h;
@@ -1667,22 +1654,22 @@ fn dialog(f: &mut Frame, kind: &DialogKind) {
     }
     if let Some(e) = &extra {
         y += 16.0;
-        if matches!(kind, DialogKind::Elevation) {
-            p.arc_stroke((x + 10.0, y + e.h / 2.0), 8.0, -90.0, 270.0, 2.5, pal.link);
-            p.draw(e, x + 28.0, y, pal.ink);
+        if arc {
+            let gx = x + (w - 28.0 - e.w) / 2.0;
+            p.arc_stroke((gx + 10.0, y + e.h / 2.0), 8.0, -90.0, 270.0, 2.5, pal.link);
+            p.draw(e, gx + 28.0, y, pal.ink);
         } else {
             p.draw(e, x, y, pal.ink);
         }
         y += e.h;
     }
     y += 28.0;
-    // Secondary quiet at the start, primary at the end.
+    let mut list = Vec::new();
     if let Some(s) = &t.secondary {
-        let sw = f.button_width(s, Kind::Quiet);
-        f.button(ControlId::DialogSecondary, Rect::new(x - 16.0 - p.hairline(), y, sw, 40.0), Kind::Quiet, s, true);
+        list.push((ControlId::DialogSecondary, s.clone(), Kind::Default));
     }
     if let Some(pm) = &t.primary {
-        let pw = f.button_width(pm, Kind::Primary);
-        f.button(ControlId::DialogPrimary, Rect::new(x + w - pw, y, pw, 40.0), Kind::Primary, pm, false);
+        list.push((ControlId::DialogPrimary, pm.clone(), Kind::Primary));
     }
+    card::actions(f, x, y, w, &list, false);
 }
