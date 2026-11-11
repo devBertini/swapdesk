@@ -18,6 +18,7 @@ const TRANSFER_H: f32 = 58.0;
 fn content_height(f: &Frame, w: f32, peer: &str) -> f32 {
     let p = f.p;
     let mut h = 18.0 + 40.0 + 14.0;
+    h += consent_block(f, (0.0, 0.0), w, peer, false);
     if f.st.placeholder(DataKind::Listing) {
         h += 2.0 * ROW_H;
     } else if let Some(l) = f.st.listing() {
@@ -35,6 +36,21 @@ fn content_height(f: &Frame, w: f32, peer: &str) -> f32 {
     h += 22.0 + p.label_in(&drop_text, text::BODY, w - 44.0, Align::Center).h + 10.0 + 40.0 + 22.0 + 14.0 + 6.0;
     h += p.label(&f.t(MsgKey::Transfers), text::H2).h + 14.0;
     h + f.st.viewer_transfers().len() as f32 * TRANSFER_H + 18.0
+}
+
+/// While the host asks its user about the files (D13): who is asked and the time the question has left, above the
+/// entries. Returns its height (0 when nobody is asked); `draw` false only measures.
+fn consent_block(f: &Frame, at: (f32, f32), w: f32, peer: &str, draw: bool) -> f32 {
+    let Some(bar) = f.st.consent_wait(swapdesk_ui::Feature::Files) else { return 0.0 };
+    let (p, pal) = (f.p, f.pal);
+    let msg = f.st.tm(&Msg::new(MsgKey::FilesConsentWaiting).with(peer));
+    let l = p.label_in(&msg, text::BODY, w, Align::Start);
+    let row_h = f.countdown_row_h();
+    if draw {
+        p.draw(&l, at.0, at.1, pal.soft);
+        f.countdown_row((at.0, at.1 + l.h + 8.0), w.min(320.0), &bar, [pal.line, pal.link, pal.soft]);
+    }
+    l.h + 8.0 + row_h + 14.0
 }
 
 pub(crate) fn drawer_files(f: &mut Frame, b: Rect, peer: &str) {
@@ -71,6 +87,7 @@ pub(crate) fn drawer_files(f: &mut Frame, b: Rect, peer: &str) {
         f.button(ControlId::FilesUp, Rect::new(x + w - cw - uw, y, uw - 8.0, 40.0), Kind::Default, u, false);
     }
     y += 40.0 + 14.0;
+    y += consent_block(f, (x, y), w, peer, true);
 
     // Entries: rows of 44, one page at a time.
     let listing = f.st.listing().cloned();

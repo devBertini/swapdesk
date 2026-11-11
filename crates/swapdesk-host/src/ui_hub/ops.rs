@@ -684,6 +684,15 @@ impl Hub {
                     }
                 },
                 ViewerOut::PeerGrants(grants) => self.apply_peer_grants(device, grants),
+                // The host asks its user: the panel of the feature says so, with the time left (WAITING.md 4, rows
+                // 11 and 12).
+                ViewerOut::Consent { feature, timeout_s } => {
+                    conn.queue.control(Ipc::UiNotify(Notify::ConsentPending {
+                        session_id,
+                        feature,
+                        remaining_s: timeout_s,
+                    }));
+                }
                 ViewerOut::Displays { session_id: sid, list } => {
                     let views = display_views(&list);
                     // Kept for `ListDisplays`, which a UI sends once per session and may send after this arrived.

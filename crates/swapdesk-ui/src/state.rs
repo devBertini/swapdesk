@@ -391,6 +391,15 @@ pub struct WaitButton {
     pub primary: bool,
 }
 
+/// The host is asking its user about a feature of the viewer session (D13): the panel of that feature says so, with
+/// the time the question has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConsentWait {
+    feature: Feature,
+    remaining_s: u16,
+    total_s: u16,
+}
+
 /// The countdown row of a waiting card: a track filled from the left, with the time beside it when there is one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaitBar {
@@ -598,6 +607,8 @@ pub struct UiState {
     pub(crate) term: TermPhase,
     /// The connection-wide id of the current terminal, once the service gave it.
     pub(crate) term_id: Option<u32>,
+    /// The host is asking its user about the terminal or the files of the viewer session.
+    pub(crate) consent_wait: Option<ConsentWait>,
     pub(crate) clipboard_on: bool,
     pub(crate) audio_on: bool,
     pub(crate) grab_on: bool,
@@ -679,6 +690,7 @@ impl UiState {
             term_account: None,
             term: TermPhase::Idle,
             term_id: None,
+            consent_wait: None,
             clipboard_on: true,
             audio_on: true,
             grab_on: true,
@@ -935,6 +947,25 @@ impl UiState {
     /// The session that makes this computer a host (the banner).
     pub fn host_session(&self) -> Option<&SessionView> {
         self.sessions.iter().find(|s| s.is_host())
+    }
+
+    /// The host is asking its user whether the viewer session may use `feature` (D13): the countdown row of the
+    /// question, from the seconds it was told to the end. `None` when nobody is being asked about it.
+    pub fn consent_wait(&self, feature: Feature) -> Option<WaitBar> {
+        let w = self.consent_wait.filter(|w| w.feature == feature)?;
+        let total = w.total_s.max(1);
+        let left = w.remaining_s.min(total);
+        Some(WaitBar {
+            fraction: f32::from(total - left) / f32::from(total),
+            text: Some(crate::format::countdown(left)),
+        })
+    }
+
+    /// The answer to the question about `feature` came (the feature opened, or the request failed).
+    fn consent_answered(&mut self, feature: Feature) {
+        if self.consent_wait.is_some_and(|w| w.feature == feature) {
+            self.consent_wait = None;
+        }
     }
 
     /// A session waking its device (shown in the main area, in place of the device's content).
@@ -1632,6 +1663,12 @@ impl UiState {
             self.swap_left_s -= 1;
             changed = changed.union(Changed::ALL);
         }
+        if let Some(w) = &mut self.consent_wait
+            && w.remaining_s > 0
+        {
+            w.remaining_s -= 1;
+            changed = changed.union(Changed::VIEWER);
+        }
         let mut gave_up: Vec<(u64, String)> = Vec::new();
         for s in &mut self.sessions {
             if let Some(left) = &mut s.reconnect_left_s
@@ -1771,6 +1808,7 @@ impl UiState {
             UiEvent::Term { term_id, event } => {
                 match event {
                     TermEvent::Opened { account } => {
+                        self.consent_answered(Feature::Terminal);
                         let admin = matches!(self.term, TermPhase::Opening { admin: true });
                         self.term_account = Some(account);
                         self.term_id = Some(term_id);
@@ -1789,6 +1827,10 @@ impl UiState {
                 Changed::VIEWER
             }
             UiEvent::Transfer { transfer_id, session_id, name, outgoing, state } => {
+                // A transfer that moves or ends was answered (a refusal fails it).
+                if !matches!(state, TransferState::Queued) {
+                    self.consent_answered(Feature::Files);
+                }
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
                     t.state = state;
                 } else {
@@ -1807,6 +1849,13 @@ impl UiState {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
                     t.saved_as = Some(name);
                 }
+                Changed::VIEWER
+            }
+            UiEvent::ConsentPending { session_id, feature, remaining_s } => {
+                if self.viewer_session().is_none_or(|s| s.id != session_id) {
+                    return Changed::NONE;
+                }
+                self.consent_wait = Some(ConsentWait { feature, remaining_s, total_s: remaining_s });
                 Changed::VIEWER
             }
             UiEvent::ClipboardSkipped { reason, .. } => {
@@ -1907,6 +1956,7 @@ impl UiState {
                 self.term_account = None;
                 self.term_id = None;
                 self.term = TermPhase::Idle;
+                self.consent_wait = None;
                 if matches!(
                     self.swap.as_ref().map(|s| &s.phase),
                     Some(SwapPhase::Confirm | SwapPhase::Requested { .. })
@@ -2094,6 +2144,7 @@ impl UiState {
                 Changed::ALL
             }
             Reply::Listing(l) => {
+                self.consent_answered(Feature::Files);
                 self.listing = Some(l);
                 self.files.page = 0;
                 self.finish_fetch(DataKind::Listing);
@@ -2194,6 +2245,12 @@ impl UiState {
         }
         if let Some(kind) = fetch_kind(&pending.command) {
             self.fail_fetch(kind);
+        }
+        // A refused or lost request ends the question about it.
+        match pending.command {
+            Command::TermOpen { .. } => self.consent_answered(Feature::Terminal),
+            Command::FilesList { .. } | Command::FilesSend { .. } => self.consent_answered(Feature::Files),
+            _ => {}
         }
         if matches!(pending.command, Command::PairConfirm { .. }) {
             self.pair_confirming = false;

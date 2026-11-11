@@ -524,3 +524,27 @@ fn after_a_reconnect_the_files_of_another_user_are_still_asked_for() {
     drop(relay);
     p.finish();
 }
+
+/// WAITING.md 4, row 12: while the host asks its user about the files (D13), the viewer's interface is told so, with
+/// the seconds the question has.
+#[test]
+fn the_viewer_is_told_that_the_host_asks_its_user_and_for_how_long() {
+    let mut p = Pair::build("d13-wait", false, Some("S-1-5-21-777"));
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+    let pick = p.pick("a.bin", b"hello");
+    assert!(p.send(vec![pick], Some("incoming")).is_ok());
+    let (feature, remaining) = p.viewer_ui.notify("ConsentPending", |n| match n {
+        Notify::ConsentPending { session_id, feature, remaining_s } if *session_id == p.session => {
+            Some((*feature, *remaining_s))
+        }
+        _ => None,
+    });
+    assert_eq!(feature, swapdesk_proto::Feature::Files);
+    assert!(remaining > 0 && remaining <= 20, "the host's seconds: {remaining}");
+    let asked = p.host_ui.notify("the consent question", |n| match n {
+        Notify::IncomingRequest(r) if matches!(r.kind, RequestKind::Consent { .. }) => Some(r.request_id),
+        _ => None,
+    });
+    assert!(p.host_ui.call(UiOp::AnswerIncoming { request_id: asked, decision: Decision::Decline, grants: 0 }).is_ok());
+    p.finish();
+}

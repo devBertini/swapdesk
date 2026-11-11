@@ -83,6 +83,11 @@ pub enum ViewerOut {
     Term(TermOut),
     /// What the host stored for this machine (`StoredGrants`, minor 1): kept for Permissões, display only.
     PeerGrants(swapdesk_proto::PermissionSet),
+    /// The host is asking its user about `feature` (D13, `ConsentPending`) for `timeout_s` seconds.
+    Consent {
+        feature: swapdesk_proto::Feature,
+        timeout_s: u16,
+    },
 }
 
 /// What a terminal of this session sends the UI.
@@ -703,6 +708,10 @@ impl Drive {
                     if e.about_type == 0x0501 {
                         self.terms.refused(e.about_id, e.code);
                     }
+                    None
+                }
+                ViewerEvent::Message(Ctl::ConsentPending(p)) => {
+                    let _ = self.out.send(ViewerOut::Consent { feature: p.feature, timeout_s: p.timeout_s }).await;
                     None
                 }
                 ViewerEvent::Message(_) => None,

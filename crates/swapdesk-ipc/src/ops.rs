@@ -1,6 +1,6 @@
 //! Bodies of `UiRequest` (by op), `UiReply` (by the op it answers) and `UiNotify` (by kind), C2.4.
 
-use swapdesk_proto::{Action, CodecError, Intent, Preset, Reader, Wire, Writer};
+use swapdesk_proto::{Action, CodecError, Feature, Intent, Preset, Reader, Wire, Writer};
 
 use crate::error::{IpcError, Result};
 use crate::files::{FileListing, FilesNote, FilesOp};
@@ -559,6 +559,13 @@ pub enum Notify {
         term_id: u32,
         exit_code: Option<i32>,
     },
+    /// The host is asking its user whether this viewer session may use `feature` (D13): the question runs for
+    /// `remaining_s` more seconds. The answer arrives as the outcome of the request that caused it.
+    ConsentPending {
+        session_id: u64,
+        feature: Feature,
+        remaining_s: u16,
+    },
     /// Kinds 20 to 24: the files feature (stage 44), see [`FilesNote`].
     Files(FilesNote),
 }
@@ -582,6 +589,7 @@ impl Notify {
             Self::ChatRead { .. } => 13,
             Self::ClipboardSkipped { .. } => 14,
             Self::TermExited { .. } => 16,
+            Self::ConsentPending { .. } => 17,
             Self::Files(f) => f.kind(),
         }
     }
@@ -636,6 +644,11 @@ impl Notify {
                 w.put_u32(*term_id);
                 exit_code.put(w, 0)?;
             }
+            Self::ConsentPending { session_id, feature, remaining_s } => {
+                w.put_u64(*session_id);
+                feature.put(w, 0)?;
+                w.put_u16(*remaining_s);
+            }
             Self::Files(f) => f.put_body(w)?,
         }
         Ok(())
@@ -658,6 +671,7 @@ impl Notify {
             13 => Self::ChatRead { session_id: r.u64()?, up_to: r.u32()? },
             14 => Self::ClipboardSkipped { session_id: r.u64()?, reason: ApiCode::get(r, 0)? },
             16 => Self::TermExited { term_id: r.u32()?, exit_code: <Option<i32>>::get(r, 0)? },
+            17 => Self::ConsentPending { session_id: r.u64()?, feature: Feature::get(r, 0)?, remaining_s: r.u16()? },
             20..=24 => Self::Files(FilesNote::get_body(kind, r)?),
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));

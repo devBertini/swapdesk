@@ -610,6 +610,8 @@ pub fn extra_notify() -> BoxedStrategy<Notify> {
         (any::<u64>(), api_code()).prop_map(|(session_id, reason)| Notify::ClipboardSkipped { session_id, reason }),
         (any::<u32>(), proptest::option::of(any::<i32>()))
             .prop_map(|(term_id, exit_code)| Notify::TermExited { term_id, exit_code }),
+        (any::<u64>(), prop_oneof![Just(Feature::Terminal), Just(Feature::Files)], any::<u16>())
+            .prop_map(|(session_id, feature, remaining_s)| Notify::ConsentPending { session_id, feature, remaining_s }),
         files_note().prop_map(Notify::Files),
     ]
     .boxed()

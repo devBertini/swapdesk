@@ -231,10 +231,14 @@ pub enum Scenario {
     Carregando,
     AtividadeCarregando,
     ArquivosCarregando,
+    /// The terminal panel while the host asks its user (D13), with the seconds left (R-UI-13).
+    TerminalAguardandoConsentimento,
+    /// The files panel while the host asks its user (D13), with the seconds left (R-UI-13).
+    ArquivosAguardandoConsentimento,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 41] = [
+    pub const ALL: [Scenario; 43] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -276,6 +280,8 @@ impl Scenario {
         Scenario::Carregando,
         Scenario::AtividadeCarregando,
         Scenario::ArquivosCarregando,
+        Scenario::TerminalAguardandoConsentimento,
+        Scenario::ArquivosAguardandoConsentimento,
     ];
 
     /// The name `--mock` takes.
@@ -322,6 +328,8 @@ impl Scenario {
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
             Scenario::ArquivosCarregando => "arquivos-carregando",
+            Scenario::TerminalAguardandoConsentimento => "terminal-aguardando-consentimento",
+            Scenario::ArquivosAguardandoConsentimento => "arquivos-aguardando-consentimento",
         }
     }
 
@@ -377,6 +385,8 @@ impl Scenario {
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
             Scenario::ArquivosCarregando => "R-UI-1: Arquivos while the folder lists",
+            Scenario::TerminalAguardandoConsentimento => "new: Terminal while the other side's user is asked (R-UI-13)",
+            Scenario::ArquivosAguardandoConsentimento => "new: Arquivos while the other side's user is asked (R-UI-13)",
         }
     }
 
@@ -686,6 +696,21 @@ impl Scenario {
             Scenario::ArquivosCarregando => {
                 vec![mac(), Event(Self::viewer_session(18)), Activate(ControlId::TbFiles), ArmPlaceholders]
             }
+            Scenario::TerminalAguardandoConsentimento => vec![
+                mac(),
+                Event(Self::viewer_session(15)),
+                Activate(ControlId::TbTerminal),
+                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Terminal, remaining_s: 20 }),
+                Ticks(6),
+            ],
+            Scenario::ArquivosAguardandoConsentimento => vec![
+                mac(),
+                Event(Self::viewer_session(18)),
+                Activate(ControlId::TbFiles),
+                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Files, remaining_s: 20 }),
+                Ticks(6),
+                ArmPlaceholders,
+            ],
         }
     }
 
@@ -1168,6 +1193,8 @@ mod tests {
             (Scenario::Carregando, Screen::Home, &[Main]),
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::TerminalAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ArquivosAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {

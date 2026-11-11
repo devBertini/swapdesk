@@ -2488,3 +2488,71 @@ fn the_elevated_window_answers_only_by_its_buttons_and_declines_when_the_time_ru
     assert!(UiState::new(Language::PtBr, false).elevated_confirm().is_none());
     assert_eq!(base().escape_target(WindowKind::Main), None);
 }
+
+// ---------- WAITING.md 4, rows 11 and 12: the host asks its user about the terminal or the files ----------
+
+fn consent_pending(feature: Feature, remaining_s: u16) -> UiEvent {
+    UiEvent::ConsentPending { session_id: 1, feature, remaining_s }
+}
+
+#[test]
+fn the_terminal_says_that_the_host_asks_its_user_and_counts_down_until_the_answer() {
+    let mut s = viewer();
+    let cmds = open_terminal(&mut s);
+    assert_eq!(s.consent_wait(Feature::Terminal), None, "nobody is asked yet");
+    s.apply(consent_pending(Feature::Terminal, 20));
+    let bar = s.consent_wait(Feature::Terminal).expect("the question shows");
+    assert_eq!((bar.fraction, bar.text.as_deref()), (0.0, Some("0:20")));
+    assert_eq!(s.consent_wait(Feature::Files), None, "only for the feature asked about");
+    for _ in 0..5 {
+        s.tick();
+    }
+    let bar = s.consent_wait(Feature::Terminal).unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:15"));
+    assert!((bar.fraction - 0.25).abs() < 1e-6);
+    // The person said yes: the shell opens and the line goes.
+    answer_open(&mut s, &cmds, 7);
+    assert_eq!(s.consent_wait(Feature::Terminal), None);
+}
+
+#[test]
+fn a_refused_terminal_ends_the_question_and_a_question_of_another_session_is_ignored() {
+    let mut s = viewer();
+    let cmds = open_terminal(&mut s);
+    s.apply(UiEvent::ConsentPending { session_id: 99, feature: Feature::Terminal, remaining_s: 20 });
+    assert_eq!(s.consent_wait(Feature::Terminal), None, "not this window's session");
+    s.apply(consent_pending(Feature::Terminal, 20));
+    tracked_error(&mut s, &cmds[0], ApiCode::Refused);
+    assert_eq!(s.consent_wait(Feature::Terminal), None);
+    assert!(matches!(s.term_phase(), TermPhase::Failed { .. }));
+}
+
+#[test]
+fn the_files_say_that_the_host_asks_its_user_until_the_listing_comes() {
+    let mut s = viewer();
+    s.activate(ControlId::TbFiles);
+    s.apply(consent_pending(Feature::Files, 20));
+    assert_eq!(s.consent_wait(Feature::Files).unwrap().text.as_deref(), Some("0:20"));
+    s.apply(reply_ok(Reply::Listing(Listing { path: String::new(), entries: Vec::new(), truncated: false })));
+    assert_eq!(s.consent_wait(Feature::Files), None);
+    // The first listing waits for the 20 s question and then lists: its limit covers both.
+    assert_eq!(Command::FilesList { session_id: 1, path: None }.timeout_s(), 25);
+    // A send whose transfer starts was answered too.
+    s.apply(consent_pending(Feature::Files, 20));
+    s.apply(UiEvent::Transfer {
+        transfer_id: 1,
+        session_id: 1,
+        name: "a.bin".into(),
+        outgoing: true,
+        state: TransferState::Queued,
+    });
+    assert!(s.consent_wait(Feature::Files).is_some(), "queued: still asked");
+    s.apply(UiEvent::Transfer {
+        transfer_id: 1,
+        session_id: 1,
+        name: "a.bin".into(),
+        outgoing: true,
+        state: TransferState::Failed { reason: ApiCode::Refused },
+    });
+    assert_eq!(s.consent_wait(Feature::Files), None);
+}

@@ -484,7 +484,17 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
     };
     match &phase {
         TermPhase::Open { .. } => f.register(ControlId::TermGrid, grid, 10.0),
-        TermPhase::Opening { .. } | TermPhase::Idle => say(f, f.t(MsgKey::TermOpening)),
+        // The host asks its user first (D13): who is asked, and the time the question has left.
+        TermPhase::Opening { .. } | TermPhase::Idle => match f.st.consent_wait(swapdesk_ui::Feature::Terminal) {
+            Some(bar) => {
+                let msg = f.st.tm(&Msg::new(MsgKey::TermConsentWaiting).with(peer));
+                let l = f.p.label_in(&msg, text::CAPTION, w - 32.0, Align::Start);
+                f.p.draw(&l, x + 16.0, y + 14.0, fixed::TERMINAL_INK);
+                let colors = [fixed::CARD_DARK_BORDER, fixed::SPINNER, fixed::CARD_DARK_SOFT];
+                f.countdown_row((x + 16.0, y + 14.0 + l.h + 10.0), (w - 32.0).min(320.0), &bar, colors);
+            }
+            None => say(f, f.t(MsgKey::TermOpening)),
+        },
         TermPhase::Failed { why, .. } => say(f, f.st.tm(why)),
         // The last screen stays visible; the line below says the shell ended.
         TermPhase::Exited { .. } => {}

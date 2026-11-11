@@ -465,6 +465,9 @@ pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
         w::Notify::TermExited { term_id, exit_code } => {
             E::Term { term_id, event: a::TermEvent::Exited { code: exit_code } }
         }
+        w::Notify::ConsentPending { session_id, feature, remaining_s } => {
+            E::ConsentPending { session_id, feature: feature_from_wire(feature), remaining_s }
+        }
         w::Notify::Files(n) => super::files::note_to_event(n),
     })
 }
@@ -507,6 +510,11 @@ pub fn event_to_notify(e: &a::UiEvent) -> Option<w::Notify> {
         E::Term { term_id, event: a::TermEvent::Exited { code } } => {
             w::Notify::TermExited { term_id: *term_id, exit_code: *code }
         }
+        E::ConsentPending { session_id, feature, remaining_s } => w::Notify::ConsentPending {
+            session_id: *session_id,
+            feature: feature_to_wire(*feature),
+            remaining_s: *remaining_s,
+        },
         E::Transfer { .. } | E::TransferSavedAs { .. } => w::Notify::Files(super::files::event_to_note(e)?),
         _ => return None,
     })

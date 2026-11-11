@@ -911,6 +911,13 @@ pub enum UiEvent {
         session_id: u64,
         reason: ApiCode,
     },
+    /// The host is asking its user whether this viewer session may use `feature` (D13), for `remaining_s` more
+    /// seconds; the answer arrives as the outcome of the request that caused the question.
+    ConsentPending {
+        session_id: u64,
+        feature: Feature,
+        remaining_s: u16,
+    },
     ActivityAlert(AuditView),
     SettingsChanged(Settings),
     ElevationResult {
@@ -961,8 +968,9 @@ impl Command {
             // The host's runner may wait on the machine (a suspend); the service gives up at 25 s.
             Command::RunAction { .. } => 30,
             // The host's user may be asked first (D13: 20 s), and the shell then starts.
-            Command::TermOpen { .. } => 25,
-            Command::ActivityList { .. } | Command::FilesList { .. } | Command::ActivityExport { .. } => 10,
+            // The same for the first listing of the files (D13), which then lists the folder.
+            Command::TermOpen { .. } | Command::FilesList { .. } => 25,
+            Command::ActivityList { .. } | Command::ActivityExport { .. } => 10,
             _ => 5,
         }
     }
