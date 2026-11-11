@@ -13,14 +13,16 @@ default-filter = "not (package(swapdesk-codec-win) | package(swapdesk-render-win
 path = "junit.xml"
 
 # Tests that drive the GPU's video engines (decode, encode, present) contend for the integrated GPU when several
-# test binaries run at once and then time out: they run one at a time, alongside everything else.
+# test binaries run at once and then time out: they run one at a time, alongside everything else. On the Mac the same
+# holds for VideoToolbox and ScreenCaptureKit (codec-mac, capture-mac and the viewer's media tests): three media tests at once, on a test binary macOS is
+# still assessing, took over 10 s for their first four frames (11/11/2026), against 2.5 s alone.
 [test-groups]
 gpu = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui)"
+filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui) | package(swapdesk-codec-mac) | package(swapdesk-capture-mac) | (package(swapdesk-app-mac) & test(/^media_tests::/))"
 test-group = "gpu"
 
 [[profile.ci.overrides]]
-filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui)"
+filter = "package(swapdesk-codec-win) | package(swapdesk-render-win) | binary(viewer_pipeline) | binary(e2e_ui) | package(swapdesk-codec-mac) | package(swapdesk-capture-mac) | (package(swapdesk-app-mac) & test(/^media_tests::/))"
 test-group = "gpu"
