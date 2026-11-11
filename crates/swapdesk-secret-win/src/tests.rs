@@ -511,3 +511,94 @@ fn a_user_scope_blob_opens_only_with_its_entropy() {
     altered[last] ^= 1;
     assert!(unprotect_user(&altered, b"purpose-a").is_err());
 }
+
+// ---------- ACCOUNTS.md 15 S2: a folder per account ----------
+
+const SOME_SID: &str = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+
+#[test]
+fn an_account_folder_is_created_owned_by_system_with_the_protected_dacl() {
+    // Development shape: the current user stands where SYSTEM is (only SYSTEM can make SYSTEM the owner).
+    let t = Temp::new();
+    let spec = test_spec();
+    let root = WinSecretStore::open_in(&spec, &t.0, None).unwrap();
+    let account = root.open_account(SOME_SID, None).unwrap();
+    assert_eq!(account.dir(), root.dir().join(ACCOUNTS_FOLDER).join(SOME_SID));
+    for folder in [root.dir().join(ACCOUNTS_FOLDER), account.dir().to_path_buf()] {
+        let read = read_security(&folder).unwrap();
+        assert_eq!(read.owner, normalize_sid(&spec.owner).unwrap(), "{}", folder.display());
+        assert!(dacl_matches(&spec, &read).unwrap(), "{}: {}", folder.display(), read.dacl_sddl);
+        assert!(read.dacl_sddl.starts_with("D:P"), "protected: {}", read.dacl_sddl);
+    }
+    // Its files are blobs of the account, apart from the root's.
+    account.store("identity.bin", b"account key").unwrap();
+    assert_eq!(account.load("identity.bin").unwrap().as_deref(), Some(&b"account key"[..]));
+    assert_eq!(root.load("identity.bin").unwrap(), None, "the root is untouched");
+    // Opening it again keeps it.
+    let again = root.open_account(SOME_SID, None).unwrap();
+    assert_eq!(again.load("identity.bin").unwrap().as_deref(), Some(&b"account key"[..]));
+}
+
+#[test]
+fn a_pre_created_account_folder_with_another_owner_is_moved_aside() {
+    let t = Temp::new();
+    let spec = test_spec();
+    let root = WinSecretStore::open_in(&spec, &t.0, None).unwrap();
+    fs::create_dir_all(root.dir().join(ACCOUNTS_FOLDER)).unwrap();
+    let planted = root.dir().join(ACCOUNTS_FOLDER).join(SOME_SID);
+    fs::create_dir(&planted).unwrap();
+    fs::write(planted.join("trust.bin"), b"forged").unwrap();
+    // A root that trusts only SYSTEM as an owner: the folder made by plain std is not trusted.
+    let strict = WinSecretStore {
+        dir: root.dir().to_path_buf(),
+        trusted_owners: vec![normalize_sid("SY").unwrap()],
+        spec: FolderSpec { trusted_owners: vec!["SY".into()], ..spec.clone() },
+    };
+    let log = Lines::default();
+    let account = strict.open_account(SOME_SID, Some(&log)).unwrap();
+    assert!(!account.dir().join("trust.bin").exists(), "the new folder starts empty");
+    // The forged file was moved aside, not deleted: under the strict rule the test-made `accounts` folder is no more
+    // trusted than the planted one, so it goes aside with it, and the forged file is found below the root.
+    fn find(dir: &Path, depth: u8) -> Option<PathBuf> {
+        for e in fs::read_dir(dir).ok()?.flatten() {
+            let p = e.path();
+            if p.ends_with("trust.bin") && fs::read(&p).ok()? == b"forged" {
+                return Some(p);
+            }
+            if depth > 0
+                && p.is_dir()
+                && let Some(f) = find(&p, depth - 1)
+            {
+                return Some(f);
+            }
+        }
+        None
+    }
+    let forged = find(root.dir(), 3).expect("moved aside, not deleted");
+    assert!(forged.to_string_lossy().contains(".untrusted-"), "{}", forged.display());
+    assert!(log.0.lock().unwrap().iter().any(|l| l.contains("moved aside")));
+}
+
+#[test]
+fn a_sid_with_anything_but_digits_and_dashes_names_no_folder() {
+    let t = Temp::new();
+    let root = WinSecretStore::open_in(&test_spec(), &t.0, None).unwrap();
+    for bad in [
+        "",
+        "S-1-",
+        "S-1-5-21-..\\x",
+        "S-1-5/../x",
+        "..",
+        "S-1-5-21-1 ",
+        "s-1-5-21-1",
+        "S-1-5--21",
+        "S-1-5-21-",
+        "S-1-5-21-1:stream",
+        &format!("S-1-{}", "1".repeat(200)),
+    ] {
+        assert!(!account_folder_ok(bad), "{bad:?}");
+        assert!(root.open_account(bad, None).is_err(), "{bad:?} was opened");
+    }
+    assert!(account_folder_ok(SOME_SID));
+    assert!(!root.dir().join(ACCOUNTS_FOLDER).join("..").join("x").exists());
+}

@@ -99,6 +99,188 @@ pub fn store_settings(secrets: &dyn SecretStore, settings: &MachineSettings) -> 
     secrets.store(SETTINGS_NAME, &bytes).map_err(|e| e.to_string())
 }
 
+// ---------- ACCOUNTS.md 14.2: what each account keeps (Windows) ----------
+
+/// `accounts.bin`: the accounts of this machine and their port slots.
+pub const ACCOUNTS_NAME: &str = "accounts.bin";
+/// `account.bin` in an account's folder.
+pub const ACCOUNT_SETTINGS_NAME: &str = "account.bin";
+/// `peers.bin` in an account's folder.
+pub const PEER_PORTS_NAME: &str = "peers.bin";
+/// At most this many accounts (slots 0 to 31).
+pub const MAX_ACCOUNTS: usize = 32;
+/// At most this many last-seen ports per account.
+pub const MAX_PEER_PORTS: usize = 64;
+/// The longest SID (the `str(184)` of C2.4).
+pub const MAX_SID: usize = 184;
+
+/// One account of the machine: its SID, its slot (session port `47820 + 2k`, pairing port `47821 + 2k`), when it
+/// was first seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    pub sid: String,
+    pub slot: u8,
+    pub created_ms: u64,
+}
+
+impl Wire for AccountEntry {
+    const MIN_SIZE: usize = 1 + 1 + 8;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        w.put_str(&self.sid, MAX_SID)?;
+        w.put_u8(self.slot);
+        w.put_u64(self.created_ms);
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        let e = Self { sid: r.str(MAX_SID)?, slot: r.u8()?, created_ms: r.u64()? };
+        if usize::from(e.slot) >= MAX_ACCOUNTS {
+            return Err(CodecError::InvalidValue("account slot"));
+        }
+        Ok(e)
+    }
+}
+
+/// `AccountsIndex`: every account with a folder, each in a slot of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountsIndex {
+    pub accounts: Vec<AccountEntry>,
+}
+
+impl Wire for AccountsIndex {
+    const MIN_SIZE: usize = 2 + 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        w.put_u16(FORMAT);
+        self.accounts.put(w, MAX_ACCOUNTS)
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        if r.u16()? != FORMAT {
+            return Err(CodecError::InvalidValue("accounts format"));
+        }
+        let accounts = <Vec<AccountEntry>>::get(r, MAX_ACCOUNTS)?;
+        let mut slots: Vec<u8> = accounts.iter().map(|a| a.slot).collect();
+        let mut sids: Vec<&str> = accounts.iter().map(|a| a.sid.as_str()).collect();
+        slots.sort_unstable();
+        sids.sort_unstable();
+        if slots.windows(2).any(|w| w[0] == w[1]) || sids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(CodecError::InvalidValue("a slot or an account twice"));
+        }
+        Ok(Self { accounts })
+    }
+}
+
+/// `AccountSettings`: what each account sets for itself (the machine keeps the rest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountSettings {
+    /// The name peers see (`<computer> · <account>` by default, ACCOUNTS.md 7.2).
+    pub name: String,
+    /// "Receber conexões": the account's endpoint listens and its record is announced.
+    pub receive: bool,
+    pub lock_on_end: bool,
+    pub keep_awake: bool,
+}
+
+impl AccountSettings {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.into(), receive: true, lock_on_end: false, keep_awake: true }
+    }
+}
+
+impl Wire for AccountSettings {
+    const MIN_SIZE: usize = 2 + 1 + 3;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        w.put_u16(FORMAT);
+        w.put_str(&self.name, MAX_MACHINE_NAME)?;
+        w.put_bool(self.receive);
+        w.put_bool(self.lock_on_end);
+        w.put_bool(self.keep_awake);
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        if r.u16()? != FORMAT {
+            return Err(CodecError::InvalidValue("account settings format"));
+        }
+        let s =
+            Self { name: r.str(MAX_MACHINE_NAME)?, receive: r.bool()?, lock_on_end: r.bool()?, keep_awake: r.bool()? };
+        if !valid_name(&s.name) {
+            return Err(CodecError::InvalidValue("account name"));
+        }
+        Ok(s)
+    }
+}
+
+/// The session port a paired device was last seen on (ACCOUNTS.md 5.2), so a dial without discovery tries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerPort {
+    pub device_id: [u8; 16],
+    pub session_port: u16,
+    pub seen_ms: u64,
+}
+
+impl Wire for PeerPort {
+    const MIN_SIZE: usize = 16 + 2 + 8;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        self.device_id.put(w, 0)?;
+        w.put_u16(self.session_port);
+        w.put_u64(self.seen_ms);
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        Ok(Self { device_id: r.array()?, session_port: r.u16()?, seen_ms: r.u64()? })
+    }
+}
+
+/// `PeerPorts`: one entry per paired device at most; an entry goes with its device on Forget.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerPorts {
+    pub entries: Vec<PeerPort>,
+}
+
+impl Wire for PeerPorts {
+    const MIN_SIZE: usize = 2 + 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        w.put_u16(FORMAT);
+        self.entries.put(w, MAX_PEER_PORTS)
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        if r.u16()? != FORMAT {
+            return Err(CodecError::InvalidValue("peer ports format"));
+        }
+        let entries = <Vec<PeerPort>>::get(r, MAX_PEER_PORTS)?;
+        let mut ids: Vec<[u8; 16]> = entries.iter().map(|e| e.device_id).collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(CodecError::InvalidValue("a device twice"));
+        }
+        Ok(Self { entries })
+    }
+}
+
+/// Loads `account.bin`, or the defaults named `default_name` when it is missing or does not read (with one trace
+/// line: an account's own choices are not worth refusing to serve it, ACCOUNTS.md 14.2).
+pub fn load_account_settings(secrets: &dyn SecretStore, default_name: &str, trace: &dyn TraceSink) -> AccountSettings {
+    match secrets.load(ACCOUNT_SETTINGS_NAME) {
+        Ok(Some(bytes)) => AccountSettings::decode(&bytes).unwrap_or_else(|e| {
+            trace.log(Level::Warn, "store", format_args!("account.bin does not read ({e}): the defaults apply"));
+            AccountSettings::new(default_name)
+        }),
+        Ok(None) => AccountSettings::new(default_name),
+        Err(e) => {
+            trace.log(Level::Warn, "store", format_args!("account.bin cannot be read ({e}): the defaults apply"));
+            AccountSettings::new(default_name)
+        }
+    }
+}
+
 /// The audit log as the hub reads it: an appending sink plus the recent entries, newest first.
 pub trait AuditLog: AuditSink {
     /// At most `max` entries, newest first.

@@ -1267,3 +1267,54 @@ fn a_just_paired_device_gets_a_valid_preset_that_the_accept_takes() {
     host.finish();
     viewer.finish();
 }
+
+/// ACCOUNTS.md 15 S2: the three new records of 14.2 read back what they wrote and refuse what breaks their rules.
+#[test]
+fn accounts_index_account_settings_and_peer_ports_round_trip() {
+    use super::store::{AccountEntry, AccountSettings, AccountsIndex, PeerPort, PeerPorts};
+    use swapdesk_proto::Wire;
+    let index = AccountsIndex {
+        accounts: vec![
+            AccountEntry { sid: "S-1-5-21-1-2-3-1001".into(), slot: 0, created_ms: 1_700_000_000_000 },
+            AccountEntry { sid: "S-1-5-21-1-2-3-1002".into(), slot: 1, created_ms: 1_700_000_100_000 },
+        ],
+    };
+    assert_eq!(AccountsIndex::decode(&index.encode().unwrap()).unwrap(), index);
+    let mut twice = index.clone();
+    twice.accounts[1].slot = 0;
+    assert!(AccountsIndex::decode(&twice.encode().unwrap()).is_err(), "a slot twice");
+    let mut big_slot = index.clone();
+    big_slot.accounts[1].slot = 32;
+    assert!(AccountsIndex::decode(&big_slot.encode().unwrap()).is_err(), "slot 32 does not exist");
+
+    let settings =
+        AccountSettings { name: "Sala · Alex".into(), receive: false, lock_on_end: true, keep_awake: false };
+    assert_eq!(AccountSettings::decode(&settings.encode().unwrap()).unwrap(), settings);
+    assert_eq!(
+        AccountSettings::new("Sala"),
+        AccountSettings { name: "Sala".into(), receive: true, lock_on_end: false, keep_awake: true }
+    );
+
+    let ports = PeerPorts {
+        entries: vec![
+            PeerPort { device_id: [1; 16], session_port: 47822, seen_ms: 5 },
+            PeerPort { device_id: [2; 16], session_port: 47820, seen_ms: 6 },
+        ],
+    };
+    assert_eq!(PeerPorts::decode(&ports.encode().unwrap()).unwrap(), ports);
+    let mut dup = ports.clone();
+    dup.entries[1].device_id = [1; 16];
+    assert!(PeerPorts::decode(&dup.encode().unwrap()).is_err(), "a device twice");
+    // A record of another format is refused, never misread.
+    let mut bytes = ports.encode().unwrap();
+    bytes[0] = 9;
+    assert!(PeerPorts::decode(&bytes).is_err());
+
+    // A damaged account.bin reads as the defaults, with a trace line.
+    let secrets = MemorySecretStore::new();
+    let log = LogCapture::new();
+    swapdesk_platform::SecretStore::store(&secrets, super::store::ACCOUNT_SETTINGS_NAME, b"junk").unwrap();
+    let read = super::store::load_account_settings(&secrets, "Sala", &log);
+    assert_eq!(read, AccountSettings::new("Sala"));
+    assert!(log.lines().iter().any(|l| l.text.contains("account.bin")));
+}

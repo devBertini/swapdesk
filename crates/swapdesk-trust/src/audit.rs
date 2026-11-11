@@ -120,6 +120,9 @@ pub enum AuditEvent {
     /// a stall). It is the kind an unauthenticated peer can produce at will, and the one the audit rate limit covers;
     /// `PairFailed` is reserved for attempts that reached step 2.
     PairRefused(ErrorCode),
+    /// ACCOUNTS.md 14.2, tag 18: the session of the entry before it was elevated (`UNATTENDED` and a stored
+    /// `ADMIN_TERMINAL` added to it). Written only to the per-account logs, which 1.0 never reads.
+    Elevated,
 }
 
 impl Wire for AuditEvent {
@@ -193,6 +196,7 @@ impl Wire for AuditEvent {
                 w.put_u8(17);
                 c.put(w, 0)?;
             }
+            Self::Elevated => w.put_u8(18),
         }
         Ok(())
     }
@@ -226,6 +230,7 @@ impl Wire for AuditEvent {
             15 => Self::AddressBlocked(r.array()?),
             16 => Self::KeyReplaced { old: r.array()? },
             17 => Self::PairRefused(ErrorCode::get(r, 0)?),
+            18 => Self::Elevated,
             tag => return Err(CodecError::UnknownTag { what: "AuditEvent", tag: u64::from(tag) }),
         })
     }
@@ -395,6 +400,29 @@ mod tests {
         assert_eq!(read.entries, want);
         assert_eq!(read.valid_len, file.len());
         assert!(!read.truncated_tail);
+    }
+
+    /// ACCOUNTS.md 15 S2: tag 18 `Elevated` reads back, and a log of 1.0 events (none carries it) still reads as it
+    /// did.
+    #[test]
+    fn audit_tag_18_round_trips_and_a_1_0_log_still_reads() {
+        let elevated =
+            AuditEntry { time_ms: 7, device: DeviceRef::Known([3; 16]), event: AuditEvent::Elevated, duration_s: None };
+        let rec = elevated.encode_record().unwrap();
+        assert!(rec.contains(&18), "the tag is 18");
+        let mut file = Vec::new();
+        let old: Vec<AuditEntry> = every_event()
+            .into_iter()
+            .map(|event| AuditEntry { time_ms: 1, device: DeviceRef::Known([1; 16]), event, duration_s: None })
+            .collect();
+        for e in &old {
+            file.extend_from_slice(&e.encode_record().unwrap());
+        }
+        assert_eq!(decode_log(&file).unwrap().entries, old, "a 1.0 log");
+        file.extend_from_slice(&rec);
+        let read = decode_log(&file).unwrap();
+        assert_eq!(read.entries.last(), Some(&elevated));
+        assert_eq!(read.entries.len(), old.len() + 1);
     }
 
     #[test]

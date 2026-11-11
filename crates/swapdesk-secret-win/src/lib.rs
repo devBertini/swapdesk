@@ -50,11 +50,28 @@ fn check_name(name: &str) -> Result<()> {
     }
 }
 
+/// The folder under the protected root that holds one folder per account (ACCOUNTS.md 4.1).
+pub const ACCOUNTS_FOLDER: &str = "accounts";
+/// The longest SID an account folder may be named after (the `str(184)` of C2.4).
+pub const MAX_SID: usize = 184;
+
+/// A SID that may name an account folder: `S-1-` followed by digits and dashes only, at most [`MAX_SID`] bytes, so
+/// it can never name another path.
+pub fn account_folder_ok(sid: &str) -> bool {
+    sid.len() <= MAX_SID
+        && sid.strip_prefix("S-1-").is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-') && !rest.contains("--")
+        })
+        && !sid.ends_with('-')
+}
+
 /// The DPAPI-backed store in the protected folder.
 pub struct WinSecretStore {
     dir: PathBuf,
     /// Owners (as `S-1-5-...`) a file may have and still be read: the spec's trusted owners.
     trusted_owners: Vec<String>,
+    /// The folder rules this store was opened with; an account's folder gets the same.
+    spec: FolderSpec,
 }
 
 impl WinSecretStore {
@@ -76,7 +93,25 @@ impl WinSecretStore {
             );
         }
         let trusted_owners = spec.trusted_owners.iter().map(|o| sys::normalize_sid(o)).collect::<Result<Vec<_>>>()?;
-        Ok(Self { dir: report.path, trusted_owners })
+        Ok(Self { dir: report.path, trusted_owners, spec: spec.clone() })
+    }
+
+    /// The store of one account (ACCOUNTS.md 4.1): `<root>\accounts\<sid>\`, each folder made, kept or moved aside
+    /// by the rules of the root ([`ensure_folder`]). Its files have the root's names and DPAPI entropies.
+    pub fn open_account(&self, sid: &str, trace: Option<&dyn TraceSink>) -> Result<Self> {
+        if !account_folder_ok(sid) {
+            return Err(sys::invalid("open_account", "not a SID that may name a folder"));
+        }
+        let accounts = ensure_folder(&self.spec, &self.dir, ACCOUNTS_FOLDER, trace)?;
+        let report = ensure_folder(&self.spec, &accounts.path, sid, trace)?;
+        if let (Some(t), Some(aside)) = (trace, &report.moved_aside) {
+            t.log(
+                Level::Warn,
+                "secret",
+                format_args!("alert: an untrusted account folder was set aside as {}", aside.display()),
+            );
+        }
+        Ok(Self { dir: report.path, trusted_owners: self.trusted_owners.clone(), spec: self.spec.clone() })
     }
 
     pub fn dir(&self) -> &Path {
