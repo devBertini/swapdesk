@@ -841,8 +841,10 @@ fn permissions(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) {
         if let Some(h) = &hint_l {
             p.draw(h, lx + bw + 20.0, ty + l.h, pal.soft);
         }
-        let on = d.grants_here.has(*perm);
-        let waiting = f.st.grant_waiting(*perm);
+        // A permission this computer cannot serve is drawn off and dimmed, like one that waits (its line says why).
+        let available = f.st.grant_available(*perm);
+        let on = available && d.grants_here.has(*perm);
+        let waiting = f.st.grant_waiting(*perm) || !available;
         f.switch(
             ControlId::Grant(*perm),
             lx + colw - bw - 20.0 - layout::SWITCH_W,

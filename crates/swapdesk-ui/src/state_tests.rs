@@ -2601,3 +2601,24 @@ fn the_confirmation_names_every_machine_level_permission_and_a_clean_device_name
     let named = elevation_action_text(Language::PtBr, &action, "Ma\u{202e}c");
     assert!(!named.contains('\u{202e}'), "{named:?}");
 }
+
+/// ELEVATION-MAC.md M5: a Mac serves no administrator terminal in this version (D32), so on a Mac its switch is off,
+/// disabled and does nothing, with the line that says why; on Windows it is a switch like the others.
+#[test]
+fn on_a_mac_the_administrator_terminal_switch_is_off_and_inert_with_its_line() {
+    let mut s = Scenario::PermissoesNoMac.prepared_state();
+    assert!(!s.grant_available(Permission::AdminTerminal));
+    assert!(s.grant_available(Permission::Unattended), "only the administrator terminal");
+    let row = s
+        .controls(WindowKind::Main)
+        .into_iter()
+        .find(|c| c.id == ControlId::Grant(Permission::AdminTerminal))
+        .expect("the row is there");
+    assert!(row.disabled && row.toggled == Some(false), "{row:?}");
+    assert_eq!(row.description.as_deref(), Some("Indisponível no macOS nesta versão"));
+    let a = s.activate(ControlId::Grant(Permission::AdminTerminal));
+    assert!(a.commands.is_empty(), "nothing is sent");
+
+    let s = Scenario::Permissoes.prepared_state();
+    assert!(s.grant_available(Permission::AdminTerminal), "Windows serves it");
+}

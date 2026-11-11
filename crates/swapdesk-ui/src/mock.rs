@@ -233,12 +233,14 @@ pub enum Scenario {
     ArquivosCarregando,
     /// The terminal panel while the host asks its user (D13), with the seconds left (R-UI-13).
     TerminalAguardandoConsentimento,
+    /// Permissões on a Mac: the administrator terminal is off and inert, with its line (ELEVATION-MAC.md M5).
+    PermissoesNoMac,
     /// The files panel while the host asks its user (D13), with the seconds left (R-UI-13).
     ArquivosAguardandoConsentimento,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 43] = [
+    pub const ALL: [Scenario; 44] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -282,6 +284,7 @@ impl Scenario {
         Scenario::ArquivosCarregando,
         Scenario::TerminalAguardandoConsentimento,
         Scenario::ArquivosAguardandoConsentimento,
+        Scenario::PermissoesNoMac,
     ];
 
     /// The name `--mock` takes.
@@ -330,6 +333,7 @@ impl Scenario {
             Scenario::ArquivosCarregando => "arquivos-carregando",
             Scenario::TerminalAguardandoConsentimento => "terminal-aguardando-consentimento",
             Scenario::ArquivosAguardandoConsentimento => "arquivos-aguardando-consentimento",
+            Scenario::PermissoesNoMac => "permissoes-no-mac",
         }
     }
 
@@ -387,6 +391,7 @@ impl Scenario {
             Scenario::ArquivosCarregando => "R-UI-1: Arquivos while the folder lists",
             Scenario::TerminalAguardandoConsentimento => "new: Terminal while the other side's user is asked (R-UI-13)",
             Scenario::ArquivosAguardandoConsentimento => "new: Arquivos while the other side's user is asked (R-UI-13)",
+            Scenario::PermissoesNoMac => "new: Permissões on a Mac, the administrator terminal unavailable (D32)",
         }
     }
 
@@ -702,6 +707,14 @@ impl Scenario {
                 Activate(ControlId::TbTerminal),
                 Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Terminal, remaining_s: 20 }),
                 Ticks(6),
+            ],
+            Scenario::PermissoesNoMac => vec![
+                Event(UiEvent::Reply {
+                    ticket: Ticket(0),
+                    result: Ok(Reply::ThisDevice(ThisDevice { os: Os::MacOs, ..this_device() })),
+                }),
+                mac(),
+                Tab(DeviceTab::Permissions),
             ],
             Scenario::ArquivosAguardandoConsentimento => vec![
                 mac(),
@@ -1195,6 +1208,7 @@ mod tests {
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
             (Scenario::TerminalAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::ArquivosAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
+            (Scenario::PermissoesNoMac, Screen::Devices, &[Main]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {

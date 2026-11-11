@@ -458,8 +458,9 @@ impl UiState {
             DeviceTab::Permissions => {
                 s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PermsHereTitle).with(d.name.clone())));
                 for (p, label, hint) in self.permission_rows() {
-                    s.switch(ControlId::Grant(p), label, d.grants_here.has(p), hint);
-                    if self.grant_waiting(p)
+                    let available = self.grant_available(p);
+                    s.switch(ControlId::Grant(p), label, available && d.grants_here.has(p), hint);
+                    if (self.grant_waiting(p) || !available)
                         && let Some(c) = s.v.last_mut()
                     {
                         c.disabled = true;
@@ -583,7 +584,11 @@ impl UiState {
             (
                 Permission::AdminTerminal,
                 self.name_of(MsgKey::PermAdminTerminal),
-                Some(self.name_of(MsgKey::PermAdminTerminalHint)),
+                Some(self.name_of(if self.grant_available(Permission::AdminTerminal) {
+                    MsgKey::PermAdminTerminalHint
+                } else {
+                    MsgKey::PermAdminTerminalMacOff
+                })),
             ),
             (Permission::Files, self.name_of(MsgKey::PermFiles), None),
             (Permission::Clipboard, self.name_of(MsgKey::PermClipboard), None),
@@ -593,6 +598,13 @@ impl UiState {
                 Some(self.name_of(MsgKey::PermUnattendedHint)),
             ),
         ]
+    }
+
+    /// Whether this computer can serve `p` at all. A Mac host serves no administrator terminal in this version
+    /// (D32), so on a Mac its switch stays off and inert, with the line that says why (ELEVATION-MAC.md, owner
+    /// decision 3).
+    pub fn grant_available(&self, p: Permission) -> bool {
+        !(p == Permission::AdminTerminal && self.this.as_ref().is_some_and(|t| t.os == Os::MacOs))
     }
 
     /// The read-only column "Este computador pode, no X": (label, "Sim" / "Não" / "–"), plus whether it is a yes.
@@ -1311,7 +1323,7 @@ impl UiState {
             ControlId::Tab(t) => a.changed = self.select_tab(t),
             ControlId::EditGrants => a.changed = self.select_tab(DeviceTab::Permissions),
             ControlId::Grant(p) => {
-                if let Some(d) = self.selected_device().cloned() {
+                if let Some(d) = self.selected_device().cloned().filter(|_| self.grant_available(p)) {
                     let grants = d.grants_here.toggled(p);
                     // R-UI-2: the switch moves at once and goes back if the service refuses; an admin grant waits
                     // for the service (the elevation step may come first).

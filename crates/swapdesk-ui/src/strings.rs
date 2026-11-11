@@ -507,6 +507,7 @@ strings! {
     TermConsentWaiting => "Esperando quem usa o {0} permitir o terminal.", "Waiting for the person using {0} to allow the terminal.";
     FilesConsentWaiting => "Esperando quem usa o {0} permitir os arquivos.", "Waiting for the person using {0} to allow the files.";
     ActionWaiting => "Esperando o {0} executar a ação…", "Waiting for {0} to run the action…";
+    PermAdminTerminalMacOff => "Indisponível no macOS nesta versão", "Not available on macOS in this version";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).
