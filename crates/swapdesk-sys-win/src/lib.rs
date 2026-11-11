@@ -19,6 +19,7 @@ pub mod sas;
 pub mod service;
 mod sys;
 pub mod trace;
+pub mod udp;
 pub mod watcher;
 
 pub use acl::AceInfo;
