@@ -442,7 +442,7 @@ impl UiHub {
     {
         // The read waits on its own thread so that the lifetime holds on a pipe that says nothing.
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new().name("ui-hub-elevator-read".into()).spawn(move || {
+        let reading = std::thread::Builder::new().name("ui-hub-elevator-read".into()).spawn(move || {
             loop {
                 let msg = reader.read_message();
                 let last = !matches!(msg, Ok(Some(_)));
@@ -455,7 +455,18 @@ impl UiHub {
         let end = self.hub.elevator_loop(&rx, &mut writer, &info, lifetime);
         drop(rx);
         if let Some(cancel) = cancel {
-            cancel();
+            // A cancel finds no read to end when the thread is between two reads (it just handed a message over): it
+            // would then start a read that nothing ends, holding the pipe open, and the client would never see the
+            // end. So the cancel is repeated until the thread is gone, at most CANCEL_FOR.
+            const CANCEL_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+            let until = std::time::Instant::now() + CANCEL_FOR;
+            loop {
+                cancel();
+                if reading.is_finished() || std::time::Instant::now() >= until {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         end
     }
