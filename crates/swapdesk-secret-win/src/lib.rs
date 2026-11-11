@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use swapdesk_platform::{Level, Result, SecretStore, TraceSink};
 
-pub use dpapi::{protect, unprotect};
+pub use dpapi::{protect, protect_user, unprotect, unprotect_user};
 pub use folder::{FolderReport, FolderSpec, dacl_matches, ensure_folder};
 pub use sys::{FolderSecurity, current_user_sid, normalize_sid, read_security};
 

@@ -25,3 +25,15 @@ ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
 (cd "$target/package" && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
 echo "ZIP=$zip"
 cat "$zip.sha256"
+
+# The update package (UPDATES.md 3): the signed bundle tree, read back before it is kept.
+pkg="$target/package/Swapdesk-macos-arm64-$version.sdpkg"
+rm -f "$pkg"
+stage="$target/package/update-stage"
+rm -rf "$stage" && mkdir -p "$stage"
+ditto "$app" "$stage/Swapdesk.app"
+cargo build --release -q -p swapdesk-release-tools --bin swapdesk-pack
+"$target/release/swapdesk-pack" "$stage" "$pkg"
+"$target/release/swapdesk-pack" --list "$pkg" > /dev/null
+rm -rf "$stage"
+echo "UPDATE=$pkg"

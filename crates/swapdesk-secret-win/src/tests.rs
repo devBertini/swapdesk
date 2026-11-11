@@ -497,3 +497,17 @@ fn the_dpapi_output_buffer_is_wiped_after_it_is_copied() {
     assert_eq!(copy, b"plaintext key material from DPAPI");
     assert!(buffer.iter().all(|&b| b == 0), "the system's buffer must be zeroed before it is freed");
 }
+
+/// The user scope of the release tool: a blob opens again with the same entropy, never with another, and is not
+/// the same blob as the machine scope's.
+#[test]
+fn a_user_scope_blob_opens_only_with_its_entropy() {
+    let data = b"release key bytes";
+    let blob = protect_user(data, b"purpose-a").unwrap();
+    assert_eq!(unprotect_user(&blob, b"purpose-a").unwrap(), data);
+    assert!(unprotect_user(&blob, b"purpose-b").is_err());
+    let mut altered = blob.clone();
+    let last = altered.len() - 1;
+    altered[last] ^= 1;
+    assert!(unprotect_user(&altered, b"purpose-a").is_err());
+}

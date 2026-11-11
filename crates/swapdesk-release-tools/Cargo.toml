@@ -1,0 +1,19 @@
+[package]
+name = "swapdesk-release-tools"
+description = "Release tools of Swapdesk, never shipped (docs/UPDATES.md 3, 4.4): swapdesk-pack makes the .sdpkg update package of a build, swapdesk-release-sign makes the release keys once and signs the release manifest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swapdesk-update = { path = "../swapdesk-update" }
+ring = { workspace = true }
+
+# The release signing key is kept under DPAPI in the user scope (UPDATES.md 4.4).
+[target.'cfg(windows)'.dependencies]
+swapdesk-secret-win = { path = "../swapdesk-secret-win" }

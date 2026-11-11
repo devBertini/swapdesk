@@ -71,6 +71,8 @@ function Invoke-Cargo([string[]]$CargoArgs) {
 if (-not $SkipBuild) {
     Invoke-Cargo @('build', '--profile', 'release', '-p', 'swapdesk-app', '-p', 'swapdesk-helper')
     Invoke-Cargo @('build', '--profile', 'release-service', '-p', 'swapdesk-service')
+    # The update packer (UPDATES.md 3): a release tool, never shipped.
+    Invoke-Cargo @('build', '--profile', 'release', '-p', 'swapdesk-release-tools', '--bin', 'swapdesk-pack')
 }
 
 # ---- stage ----
@@ -117,6 +119,24 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $hash = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath ($Zip + '.sha256') -Value ("{0} *{1}" -f $hash, (Split-Path -Leaf $Zip)) -Encoding Ascii
 
+# ---- update package (UPDATES.md 3): exactly the three programs, what an update replaces ----
+$Pkg = Join-Path $PackageRoot ("Swapdesk-windows-x64-{0}.sdpkg" -f $Version)
+$PkgStage = Join-Path $PackageRoot 'update-stage'
+if (-not ($PkgStage -like '*\package\update-stage')) { throw "refusing to clear an unexpected folder: $PkgStage" }
+if (Test-Path -LiteralPath $PkgStage) { Remove-Item -LiteralPath $PkgStage -Recurse -Force }
+New-Item -ItemType Directory -Path $PkgStage -Force | Out-Null
+foreach ($n in @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe')) {
+    Copy-Item -LiteralPath (Join-Path $Stage $n) -Destination (Join-Path $PkgStage $n) -Force
+}
+if (Test-Path -LiteralPath $Pkg) { Remove-Item -LiteralPath $Pkg -Force }
+$packer = Join-Path $Target 'release\swapdesk-pack.exe'
+if (-not (Test-Path -LiteralPath $packer -PathType Leaf)) { throw "missing ${packer}: build first" }
+& $packer $PkgStage $Pkg
+if ($LASTEXITCODE -ne 0) { throw "swapdesk-pack failed: $LASTEXITCODE" }
+& $packer --list $Pkg
+if ($LASTEXITCODE -ne 0) { throw "the package does not read back: $LASTEXITCODE" }
+Remove-Item -LiteralPath $PkgStage -Recurse -Force
+
 Write-Host ''
 Write-Host 'Staged files:'
 Get-ChildItem -LiteralPath $Stage | ForEach-Object { Write-Host ("  {0,-24} {1,12:N0} bytes" -f $_.Name, $_.Length) }
@@ -128,3 +148,4 @@ Write-Host ''
 Write-Host ("Zip:     {0}" -f $Zip)
 Write-Host ("Size:    {0:N0} bytes" -f (Get-Item -LiteralPath $Zip).Length)
 Write-Host ("SHA-256: {0}   (of the zip: put it in the release notes)" -f $hash)
+Write-Host ("Update:  {0}" -f $Pkg)
