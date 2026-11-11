@@ -15,7 +15,8 @@
     4. registers the service SwapdeskService (display name Swapdesk, LocalSystem, automatic start, recovery: restart
        after 1 s, 5 s and 30 s, counter reset after one day, also for non-crash failures) and the Event Log source
        Swapdesk in the Application log (one event, id 1000, at the end);
-    5. adds inbound UDP firewall rules for swapdesk-service.exe: 47820 and 47821 (session and pairing) and 5353
+    5. adds inbound UDP firewall rules for swapdesk-service.exe: 47820 to 47883 (the session and pairing ports of each
+       account's slot, ACCOUNTS.md 5.5) and 5353
        (mDNS discovery), only on the Private and Domain profiles and only from the local subnet;
     6. only with -EnableSas: saves the old SoftwareSASGeneration policy value and sets it to 1 (Services), so the
        service may simulate Ctrl+Alt+Del for UNATTENDED sessions; uninstall restores the saved value, and only when
@@ -70,7 +71,7 @@ $ServiceText    = 'Swapdesk remote desktop service (LAN only): trust store, sess
 $FirewallGroup  = 'Swapdesk'
 $RuleSession    = 'Swapdesk-UDP-Session-Pairing'
 $RuleMdns       = 'Swapdesk-UDP-mDNS'
-$PortsSession   = @(47820, 47821)
+$PortsSession   = '47820-47883'      # ACCOUNTS.md 5.5: 32 accounts, a session and a pairing port each
 $PortMdns       = 5353
 $ShortcutName   = 'Swapdesk.lnk'
 $SasKey         = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'

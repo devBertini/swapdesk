@@ -56,7 +56,9 @@ $OwnKey        = 'HKLM:\SOFTWARE\Swapdesk\Installer'
 $InstalledFiles = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe', 'LICENSE-MIT', 'LICENSE-APACHE')
 # CONTRACTS C5.2: identity.bin, trust.bin, settings.bin, audit-sessions.log, audit-network.log, trace.log
 # (rotation keeps <name>.1; a file that does not decode is set aside as <name>.damaged-<ms>; writes go through <name>.tmp).
-$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log')
+$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log', 'accounts.bin')
+# ACCOUNTS.md 10.6: each account's folder accounts\<SID> holds these.
+$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'audit-sessions.log', 'audit-network.log')
 $ProcessNames  = @('Swapdesk', 'swapdesk-helper', 'swapdesk-service')
 $EventSource   = 'Swapdesk'
 $EventLogName  = 'Application'
@@ -283,9 +285,23 @@ try {
     if ($KeepData) {
         Say ('  data kept: {0}' -f $DataDir)
     } elseif (Test-Path -LiteralPath $DataDir) {
+        $accountsDir = Join-Path $DataDir 'accounts'
         if ($DryRun) {
+            Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from each folder {1}\<SID>, then each folder and {1} if empty' -f ($AccountFiles -join ', '), $accountsDir)
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from {1}{2}, then the folder if empty' -f ($DataFiles -join ', '), $DataDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
         } else {
+            # ACCOUNTS.md 10.6: the accounts first, each by the names it holds; a link is never entered.
+            if (-not $Force -and (Test-Path -LiteralPath $accountsDir)) {
+                if (Test-ReparsePoint $accountsDir) {
+                    $leftovers += @(Remove-KnownFolder $accountsDir @() $false)
+                } else {
+                    foreach ($acct in (Get-ChildItem -LiteralPath $accountsDir -Force -Directory | Where-Object { $_.Name -match '^S-1-[0-9-]+$' })) {
+                        Say ("-> delete the account files in {0}" -f $acct.FullName)
+                        foreach ($l in @(Remove-KnownFolder $acct.FullName $AccountFiles $false)) { $leftovers += ("{0}: {1}" -f $acct.FullName, $l) }
+                    }
+                    foreach ($l in @(Remove-KnownFolder $accountsDir @() $false)) { $leftovers += ("{0}: {1}" -f $accountsDir, $l) }
+                }
+            }
             Say ("-> delete the data files in {0}" -f $DataDir)
             $dataLeft = @(Remove-KnownFolder $DataDir $DataFiles ([bool]$Force))
             foreach ($l in $dataLeft) { $leftovers += ("{0}: {1}" -f $DataDir, $l) }
