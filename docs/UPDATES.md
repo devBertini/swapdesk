@@ -260,7 +260,7 @@ The install button is disabled while an install runs, from any interface of the 
 
 Shown when any session is live. When this machine is being controlled, it adds a line for the person who may be clicking from elsewhere: the session ends, and coming back needs "Entrar sem perguntar" or someone at this computer to accept. That is the answer for a machine nobody is at: it is updated only by a person's click, at it or through a session, never by itself (owner decision 1).
 
-### 10.4 Texts (proposals, each the owner's to approve)
+### 10.4 Texts (approved by the owner, 2026-11-11, D58)
 
 | Key | pt-BR | en |
 |---|---|---|
