@@ -2882,7 +2882,10 @@ fn the_screen_button_lists_the_hosts_displays_and_a_pick_switches() {
     assert!(matches!(a.commands[0], Command::ListDisplays { session_id: 1 }));
     assert_eq!(a.effect, None, "nothing known yet: the list is asked");
     s.track(Ticket(77), &Command::ListDisplays { session_id: 1 });
-    s.apply(UiEvent::Reply { ticket: Ticket(77), result: Ok(Reply::Displays(vec![d(1, "", true), d(2, "LG", false)])) });
+    s.apply(UiEvent::Reply {
+        ticket: Ticket(77),
+        result: Ok(Reply::Displays(vec![d(1, "", true), d(2, "LG", false)])),
+    });
     let a = s.activate(ControlId::TbScreen);
     assert_eq!(a.effect, Some(Effect::Menu(SelectId::HostDisplay)));
     assert_eq!(SelectId::HostDisplay.anchor(), ControlId::TbScreen);
