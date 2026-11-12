@@ -183,7 +183,7 @@ The owner signs what the workflow built. That protects against a taken-over acco
 
 - `%ProgramData%\Swapdesk\update\` is made by the service with the data folder's rules (C5.2): owner SYSTEM, SYSTEM and Administrators only, a folder with another owner or a reparse point moved aside, never followed. A standard user can neither read the download nor swap it between check and install.
 - `update\update-state.txt` (text, first line `swapdesk-update-state 1`, machine-wide): `check` (default on), `last` (the last check, Unix ms), `dismissed <version>`, `rolled-back <version>` lines. Missing or unreadable reads as the defaults. Beside it: `journal` (one line per step: `applying <old> <new>`, `committed <new>`, `failed <old> <new>`, each written through), `staging\`, `rollback\<old>\`, `applier\` and `applier.log`.
-- The install folder only ever holds the five installed names, so `install.cmd` (which stops on an unknown file) and `uninstall.cmd` keep working; `uninstall.ps1` deletes the folder `update\` whole (a link never entered).
+- The install folder only ever holds the five installed names and the installed uninstaller (`uninstall.cmd`, `uninstall.ps1`, which the updater leaves alone), so `install.cmd` (which stops on an unknown file) and `uninstall.cmd` keep working; `uninstall.ps1` deletes the folder `update\` whole (a link never entered).
 
 ### 6.4 Rollback and interruptions
 

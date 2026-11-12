@@ -41,6 +41,24 @@ fn main() {
         let code = swapdesk_app::elevate::run_instance(&options, ticket, swapdesk_app::elevate::approve_as_asked);
         std::process::exit(i32::from(code));
     }
+    // F-SYS-01: one interface per session. A second start brings the first one's window forward and exits (the elevated
+    // instance above is a separate, short-lived process and never counts; a scripted mock run is a development tool).
+    let _single = if options.mock.is_some() {
+        None
+    } else {
+        match swapdesk_sys_win::instance::claim(options.instance) {
+            Ok(swapdesk_sys_win::instance::Claim::First(held)) => Some(held),
+            Ok(swapdesk_sys_win::instance::Claim::Second) => {
+                swapdesk_sys_win::instance::bring_first_forward();
+                std::process::exit(0);
+            }
+            // No mutex means no guard, not no interface.
+            Err(e) => {
+                swapdesk_shell_win::trace_line(&format!("swapdesk: single-instance guard unavailable: {e:?}"));
+                None
+            }
+        }
+    };
     let language = system_language();
     let waker = Arc::new(Waker::new());
     let mut state = UiState::new(language, system_dark());
@@ -80,6 +98,7 @@ fn main() {
     pipeline.set_waker(waker.clone());
     // C5.1: the per-user settings (ui.bin under %APPDATA%/Swapdesk) are read before the first paint. A development
     // instance (`--instance`, `--service-pid`) keeps its own defaults and never touches the user's file.
+    let mut follow_login: Option<bool> = None;
     if options.instance.is_none() && options.service_pid.is_none() {
         swapdesk_ui::prefs::set_note_hook(|line| swapdesk_shell_win::trace_line(&format!("swapdesk: {line}")));
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -87,6 +106,9 @@ fn main() {
             state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
             let p = state.user_prefs();
             pipeline.set_user_prefs(p.keyboard_mode, p.swap_ctrl_cmd, p.release_key);
+            // "Abrir ao ligar": the Run key is made to match the person's switch (the installed copy only).
+            follow_login = Some(p.open_at_login);
+            apply_login(p.open_at_login);
         }
     }
     // The service's pipe, tried for 30 s at launch and again after a break (a service that starts after the sign-in, a
@@ -104,11 +126,33 @@ fn main() {
         })
     };
     let backend: Arc<dyn UiBackend> = Arc::new(Reconnecting::start(connector, waker.clone(), Timing::default()));
+    // The switch flipped in the window: the Run key follows, off the UI thread.
+    let backend: Arc<dyn UiBackend> = match follow_login {
+        Some(on) => Arc::new(swapdesk_app::login_switch::Following::new(
+            backend,
+            on,
+            Box::new(|on| {
+                std::thread::spawn(move || apply_login(on));
+            }),
+        )),
+        None => backend,
+    };
     let startup = state.startup_commands();
     if let Err(e) = run_with_host(state, backend, waker, startup, Some(pipeline.clone())) {
         message_box(&format!("Swapdesk could not start: {e}"));
     }
     pipeline.shutdown();
+}
+
+/// Writes or removes the Run value for "Abrir ao ligar" and leaves one trace line (a development build writes nothing).
+#[cfg(windows)]
+fn apply_login(on: bool) {
+    let line = match swapdesk_sys_win::login::apply_open_at_login(on) {
+        Ok(Some(done)) => format!("swapdesk: open at login {on}: {done:?}"),
+        Ok(None) => return,
+        Err(e) => format!("swapdesk: open at login {on} failed: {e:?}"),
+    };
+    swapdesk_shell_win::trace_line(&line);
 }
 
 #[cfg(windows)]

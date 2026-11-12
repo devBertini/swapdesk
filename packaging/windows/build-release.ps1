@@ -9,8 +9,8 @@
     cargo build --profile release-service -p swapdesk-service                  (D15: panic = unwind)
 
   Then it stages, in <target>\package\Swapdesk\:
-    Swapdesk.exe, swapdesk-service.exe, swapdesk-helper.exe, the two licence files, THIRD-PARTY-LICENSES.md, and the install and uninstall
-    scripts with this README, so the zip is self-contained. Nothing else is needed at run time: the font is
+    Swapdesk.exe, swapdesk-service.exe, swapdesk-helper.exe, the two licence files, THIRD-PARTY-LICENSES.md, a VERSION file
+    (the number alone) and the install and uninstall scripts with this README, so the zip is self-contained. Nothing else is needed at run time: the font is
     embedded in the exe (include_bytes!) and the manifest is linked in by crates\swapdesk-app\build.rs.
   It also writes SHA256SUMS into the folder (lowercase hex, two spaces, file name, one line per other file, LF line
   ends, so `sha256sum -c` reads it); install.ps1 checks every file it installs against it.
@@ -103,8 +103,11 @@ if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -F
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 foreach ($f in $files) { Copy-Item -LiteralPath $f.From -Destination (Join-Path $Stage $f.Name) -Force }
 
+# VERSION: the number install.ps1 shows as DisplayVersion in the installed apps list (never installed itself).
+[System.IO.File]::WriteAllText((Join-Path $Stage 'VERSION'), ($Version + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
 # ---- SHA256SUMS (one line per shipped file; install.ps1 verifies against it) ----
-$sumLines = foreach ($f in ($files | Sort-Object { $_.Name })) {
+$sumLines = foreach ($f in (($files + @(@{ Name = 'VERSION' })) | Sort-Object { $_.Name })) {
     '{0}  {1}' -f (Get-FileHash -LiteralPath (Join-Path $Stage $f.Name) -Algorithm SHA256).Hash.ToLowerInvariant(), $f.Name
 }
 $sumsText = ($sumLines -join "`n") + "`n"

@@ -15,6 +15,7 @@
 //!
 //! - [`shared`]: the OS-free half of the viewer pipeline (mailbox, feedback, cursor, audio player, output side).
 
+pub mod login_switch;
 pub mod reconnect;
 pub mod shared;
 
@@ -34,5 +35,13 @@ mod tests {
     #[test]
     fn the_shell_opens_the_folder_the_crash_marker_goes_to() {
         assert_eq!(swapdesk_shell_win::logs_dir(), swapdesk_sys_win::user_log_dir());
+    }
+
+    /// The second start looks for the first one's window by the class the shell registers: one name, two definitions.
+    #[test]
+    fn the_second_start_finds_the_class_the_shell_registers() {
+        let shell = include_str!("../../swapdesk-shell-win/src/window.rs");
+        let wanted = format!("const CLASS_NAME: PCWSTR = w!(\"{}\");", swapdesk_sys_win::instance::WINDOW_CLASS);
+        assert!(shell.contains(&wanted), "window.rs no longer registers {}", swapdesk_sys_win::instance::WINDOW_CLASS);
     }
 }
