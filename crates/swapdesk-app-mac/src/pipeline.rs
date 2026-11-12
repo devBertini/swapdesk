@@ -451,6 +451,12 @@ impl ViewerSink for MacViewer {
             rgba: shape.rgba,
         });
     }
+
+    /// The drawer's terminal: its output goes to the shared panel's router, which waits for room in the panel's
+    /// bounded channel (back-pressure up the pipe to the host's shell) and wakes the UI thread.
+    fn term_output(&self, term_id: u32, bytes: Vec<u8>) {
+        swapdesk_shell_mac::terminal_output(term_id, bytes);
+    }
 }
 
 /// The UI's backend with the pipeline listening in: commands and events pass through unchanged.

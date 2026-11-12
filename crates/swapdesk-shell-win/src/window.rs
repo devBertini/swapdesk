@@ -919,8 +919,8 @@ impl Window {
             let grid_focused = ix.focus == Some(ControlId::TermGrid);
             drop(ix);
             drop(st);
-            // The drawer's terminal grid, over the frame (its renderer is made the first time the panel shows it).
-            terminal_commands = self.shared.terminal.borrow_mut().paint(dc, out.terminal, scale, grid_focused);
+            // The drawer's terminal grid, over the frame, through the same painter as the screens.
+            terminal_commands = self.shared.terminal.borrow_mut().paint(&painter, out.terminal, grid_focused);
             if let Err(e) = surface.end()
                 && e.code() == D2DERR_RECREATE_TARGET
             {

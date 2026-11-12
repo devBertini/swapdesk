@@ -12,6 +12,7 @@ mod screens_files;
 mod screens_main;
 mod screens_viewer;
 pub mod svg;
+pub mod term;
 mod view;
 
 pub use font::{INSTRUMENT_SANS, face_metrics, label_height, line_box};

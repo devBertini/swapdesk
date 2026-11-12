@@ -11,4 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+swapdesk-termview = { path = "../swapdesk-termview" }
 swapdesk-ui = { path = "../swapdesk-ui" }

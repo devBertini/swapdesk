@@ -11,22 +11,22 @@ use super::*;
 
 /// Text is 0.55 em per character on one line (or wrapped to `max_w`); it counts what the screens ask for.
 #[derive(Default)]
-struct Fixed {
-    ops: Cell<usize>,
-    clips: Cell<i32>,
-    clears: Cell<usize>,
+pub(crate) struct Fixed {
+    pub(crate) ops: Cell<usize>,
+    pub(crate) clips: Cell<i32>,
+    pub(crate) clears: Cell<usize>,
     /// Every rectangle filled, in order; the flag says it was a rounded one.
-    fills: RefCell<Vec<(Rect, Color, bool)>>,
+    pub(crate) fills: RefCell<Vec<(Rect, Color, bool)>>,
     /// Every text drawn, in order.
-    drawn: RefCell<Vec<String>>,
+    pub(crate) drawn: RefCell<Vec<String>>,
     /// Where each text was drawn: x, y and its height.
-    placed: RefCell<Vec<(f32, f32, f32)>>,
+    pub(crate) placed: RefCell<Vec<(f32, f32, f32)>>,
     /// Every text laid out centred: the text, the width of its box and its size.
-    centred_made: RefCell<Vec<(String, f32, f32)>>,
+    pub(crate) centred_made: RefCell<Vec<(String, f32, f32)>>,
     /// Every centred text drawn: the text, the middle of its box and its size.
-    centred: RefCell<Vec<(String, f32, f32)>>,
+    pub(crate) centred: RefCell<Vec<(String, f32, f32)>>,
     /// Every text laid out, with its style.
-    styled: RefCell<Vec<(String, TextStyle)>>,
+    pub(crate) styled: RefCell<Vec<(String, TextStyle)>>,
 }
 
 impl Fixed {

@@ -1178,6 +1178,7 @@ dependencies = [
 name = "swapdesk-paint"
 version = "1.0.0"
 dependencies = [
+ "swapdesk-termview",
  "swapdesk-ui",
 ]
 
@@ -1297,6 +1298,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "swapdesk-paint",
+ "swapdesk-termview",
  "swapdesk-ui",
 ]
 

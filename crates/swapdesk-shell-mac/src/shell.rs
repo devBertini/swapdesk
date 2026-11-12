@@ -23,6 +23,7 @@ use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
     NSObjectProtocol, NSString, NSTimer, NSURL, NSUserDefaults, ns_string,
 };
+use swapdesk_paint::term::{PUMP_BUDGET, TerminalPane};
 use swapdesk_ui::debounce::Debouncer;
 use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
@@ -240,6 +241,8 @@ pub struct Shell {
     raised_for: RefCell<Option<(Option<u32>, Option<swapdesk_ui::DialogKind>)>>,
     /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
     status_item: RefCell<Option<Retained<NSStatusItem>>>,
+    /// The drawer's terminal: the model of the open shell, drawn by the viewer's canvas (F-XTERM-01).
+    terminal: RefCell<TerminalPane>,
 }
 
 thread_local! {
@@ -257,6 +260,24 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&UiState) -> R) -> Option<R> {
     let shell = SHELL.with(|s| s.borrow().clone())?;
     let state = shell.state.try_borrow().ok()?;
     Some(f(&state))
+}
+
+/// Runs `f` on the drawer's terminal panel. `None` when there is no shell or the panel is in use further up the stack.
+pub(crate) fn with_terminal<R>(f: impl FnOnce(&mut TerminalPane) -> R) -> Option<R> {
+    let shell = SHELL.with(|s| s.borrow().clone())?;
+    let mut pane = shell.terminal.try_borrow_mut().ok()?;
+    Some(f(&mut pane))
+}
+
+/// The id of the shell that runs in the drawer's terminal (open, not ended).
+pub(crate) fn running_terminal() -> Option<u32> {
+    with_state(|st| matches!(st.term_phase(), swapdesk_ui::TermPhase::Open { .. }).then(|| st.term_id()).flatten())
+        .flatten()
+}
+
+/// Commands from a canvas outside an activation (the terminal's keys and its new size).
+pub(crate) fn send_from_canvas(commands: Vec<Command>) {
+    with_shell(|s| s.send_commands(commands));
 }
 
 /// A click on control `id` of the canvas of window `kind`.
@@ -375,7 +396,9 @@ fn start_with(
         appearance: std::cell::Cell::new(Theme::System),
         raised_for: RefCell::new(None),
         status_item: RefCell::new(None),
+        terminal: RefCell::new(TerminalPane::default()),
     });
+    swapdesk_paint::term::set_terminal_waker(shell.waker.clone());
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
     shell.apply_forced_appearance();
@@ -560,10 +583,40 @@ impl Shell {
         let want = self.state.borrow_mut().take_display_request();
         followups.extend(want);
         self.send_commands(followups);
+        self.pump_terminal();
         self.refresh(changed);
         self.apply_focus_request();
         self.minimize_main_for_session();
         self.restore_main_after_session();
+    }
+
+    /// Feeds the open shell's model with the output that arrived (a byte budget a turn, so a burst never holds the
+    /// thread, R-UI-1), writes back what the terminal answers the program, and repaints the viewer when the screen
+    /// changed. The same as the Windows shell's.
+    fn pump_terminal(&self) {
+        let want = {
+            let st = self.state.borrow();
+            matches!(st.term_phase(), swapdesk_ui::TermPhase::Open { .. } | swapdesk_ui::TermPhase::Exited { .. })
+                .then(|| st.term_id())
+                .flatten()
+        };
+        let pumped = {
+            let mut pane = self.terminal.borrow_mut();
+            pane.sync(want);
+            pane.pump(PUMP_BUDGET)
+        };
+        if let (Some(term_id), false) = (pumped.id, pumped.replies.is_empty()) {
+            self.send_commands(vec![Command::TermWrite { term_id, bytes: pumped.replies }]);
+        }
+        if pumped.repaint
+            && let Some(c) = self.canvas(WindowKind::Viewer)
+        {
+            c.setNeedsDisplay(true);
+        }
+        if pumped.more {
+            // More is queued: another turn of the main queue, not another loop here.
+            swapdesk_ui::UiWaker::wake(&*self.waker);
+        }
     }
 
     /// A session of this Mac just came up (either role): the main window goes to the Dock, once per session, unless

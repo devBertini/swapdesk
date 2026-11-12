@@ -188,6 +188,9 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
+            if crate::terminal::mouse_dragged(self, event) {
+                return;
+            }
             let hit = self.hit(event);
             self.hover(hit, hit.is_none() && self.over_video(event));
         }
@@ -205,6 +208,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if self.ivars().kind == WindowKind::Viewer && crate::terminal::mouse_down(self, event) {
+                return;
+            }
             let hit = self.hit(event);
             {
                 let mut ix = self.ivars().ix.borrow_mut();
@@ -231,6 +237,9 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
+            if crate::terminal::mouse_up(self) {
+                return;
+            }
             let hit = self.hit(event);
             let pressed = {
                 let mut ix = self.ivars().ix.borrow_mut();
@@ -249,6 +258,10 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            let line = text::TERM.size * text::TERM.line;
+            if self.ivars().kind == WindowKind::Viewer && crate::terminal::scroll(self, event, line) {
+                return;
+            }
             let max = self.ivars().out.borrow().scroll_max;
             if max <= 0.0 {
                 return;
@@ -498,17 +511,29 @@ impl CanvasView {
                 let ix = iv.ix.borrow();
                 let mut frame = Frame::new(&painter, state, &ix, size, false);
                 frame.video_under = iv.kind == WindowKind::Viewer;
-                swapdesk_paint::paint(frame, iv.kind)
+                let out = swapdesk_paint::paint(frame, iv.kind);
+                // The drawer's terminal grid, over the frame, through the same painter as the screens.
+                let commands = if iv.kind == WindowKind::Viewer {
+                    let focused = ix.focus == Some(ControlId::TermGrid);
+                    crate::shell::with_terminal(|t| t.paint(&painter, out.terminal, focused)).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                (out, commands)
             })
         });
         if !iv.forcing.get() {
             iv.passes.set(iv.passes.get() + 1);
         }
         // The state is busy only inside the shell's own calls, which mark the view dirty when they end.
-        let Some(out) = out else {
+        let Some((out, commands)) = out else {
             iv.skipped.set(iv.skipped.get() + 1);
             return;
         };
+        // A new grid size for the host's terminal goes out after the paint, outside `drawRect:`.
+        if !commands.is_empty() {
+            DispatchQueue::main().exec_async(move || crate::shell::send_from_canvas(commands));
+        }
         {
             // The wheel can leave the list scrolled past a list that got shorter; another scrolling content starts
             // at its top.
@@ -539,6 +564,9 @@ impl CanvasView {
     /// A key the canvas itself takes: `false` leaves it to AppKit.
     fn key(&self, event: &NSEvent) -> bool {
         let kind = self.ivars().kind;
+        if kind == WindowKind::Viewer && crate::terminal::key(self, event) {
+            return true;
+        }
         match event.keyCode() {
             KEY_TAB => {
                 self.move_focus(event.modifierFlags().contains(NSEventModifierFlags::Shift));
@@ -609,9 +637,11 @@ impl CanvasView {
     /// The keyboard leaves the text fields: it goes to the home view (see [`CanvasView::set_keyboard_home`]).
     fn take_keyboard(&self) {
         let Some(w) = self.window() else { return };
+        // The terminal grid takes the keys itself (they go to the other computer's shell, not as input events).
+        let grid = self.ivars().ix.borrow().focus == Some(ControlId::TermGrid);
         match self.ivars().home.borrow().as_ref() {
-            Some(home) => w.makeFirstResponder(Some(home)),
-            None => w.makeFirstResponder(Some(self)),
+            Some(home) if !grid => w.makeFirstResponder(Some(home)),
+            _ => w.makeFirstResponder(Some(self)),
         };
     }
 

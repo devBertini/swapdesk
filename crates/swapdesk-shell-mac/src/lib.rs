@@ -38,6 +38,8 @@ mod shell;
 #[cfg(target_os = "macos")]
 mod system;
 #[cfg(target_os = "macos")]
+mod terminal;
+#[cfg(target_os = "macos")]
 mod video;
 #[cfg(target_os = "macos")]
 mod viewer_window;
@@ -52,6 +54,9 @@ pub use shell::{ViewerHooks, run, run_with_host, selftest, set_shot};
 pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};
 #[cfg(target_os = "macos")]
 pub use shell::{selftest_click, selftest_display_passes, selftest_rename_begin, selftest_rename_end};
+/// The drawer's terminal output, from the service's reader thread (`ViewerSink::term_output`): the shared panel's
+/// router, which waits for room in the panel's channel and wakes the UI thread.
+pub use swapdesk_paint::term::terminal_output;
 #[cfg(target_os = "macos")]
 pub use system::{Waker, system_dark, system_language};
 #[cfg(target_os = "macos")]
