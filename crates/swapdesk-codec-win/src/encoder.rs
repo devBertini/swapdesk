@@ -308,11 +308,45 @@ pub struct MfH264Encoder {
     restore: Option<EncoderConfig>,
     /// Set while `refine` rebuilds the MFT: ask for the quality rate-control mode at this QP.
     quality_qp: Option<u32>,
+    /// How many MFTs this encoder has built (`configure` and every rebuild); a live refinement leaves it unchanged.
+    builds: u32,
 }
 
 impl MfH264Encoder {
     pub fn new(options: EncoderOptions) -> Self {
-        Self { options, active: None, last_cfg: None, restore: None, quality_qp: None }
+        Self { options, active: None, last_cfg: None, restore: None, quality_qp: None, builds: 0 }
+    }
+
+    /// The number of MFTs built so far (observable proof that a refinement did or did not rebuild the MFT).
+    pub fn builds(&self) -> u32 {
+        self.builds
+    }
+
+    /// The live refinement (see `refine`): `None` when the MFT does not take the change while streaming, and nothing
+    /// was left changed, so the caller falls back to the rebuild; `Some` is the answer of the refinement.
+    fn refine_live(&mut self, frame: &Frame) -> Option<Result<Vec<EncodedFrame>>> {
+        let a = self.active.as_mut()?;
+        // Measured 2026-11-12 on the NVIDIA MFT, which takes the mean live: the boosted rate gained only 1.3 dB (the
+        // VBV buffer stays three frames of the normal frame rate), against 30 dB or more through the rebuild. So the
+        // live path is for software MFTs only; a hardware MFT keeps the rebuild.
+        if a.candidate.hardware || a.codec.is_none() || !a.bitrate_live {
+            return None;
+        }
+        let normal = a.cfg;
+        let boosted = normal.kbps.saturating_mul(8).clamp(REFINE_MIN_KBPS, MAX_KBPS);
+        if a.set_rate(boosted, normal.fps).is_err() {
+            let _ = a.set_rate(normal.kbps, normal.fps); // best effort: the rebuild path configures anew anyway
+            return None;
+        }
+        let wait = a.options.output_wait;
+        a.options.output_wait = REFINE_OUTPUT_WAIT;
+        let out = a.encode(frame, true);
+        a.options.output_wait = wait;
+        if a.set_rate(normal.kbps, normal.fps).is_err() {
+            // The normal rate did not come back: the next `encode` rebuilds the MFT at the normal configuration.
+            self.restore = Some(normal);
+        }
+        Some(out)
     }
 
     /// The MFT in use, once configured.
@@ -406,6 +440,7 @@ impl VideoEncoder for MfH264Encoder {
                     let info = active.info.clone();
                     self.last_cfg = Some(*config);
                     self.active = Some(active);
+                    self.builds += 1;
                     return Ok(info);
                 }
                 Err(e) => failures.push(format!("{}: {e}", candidate.name)),
@@ -478,6 +513,14 @@ impl VideoEncoder for MfH264Encoder {
     /// which this encoder does not run. So the MFT is rebuilt for the refinement at a high bitrate and a very low frame
     /// rate, which makes the three-frame VBV buffer three seconds of bits; the next `encode` rebuilds the normal
     /// configuration lazily (a keyframe with new SPS/PPS, as after a `set_rate` rebuild).
+    ///
+    /// B7: before any rebuild, `refine_live` tries the change the MFT accepts while streaming: the mean bitrate (and the
+    /// peak that follows it) through `ICodecAPI` `AVEncCommonMeanBitRate` / `AVEncCommonMaxBitRate`, raised for one
+    /// forced IDR and put back right after, with no new MFT (`builds()` stays the same). It runs only when the MFT
+    /// reports the mean bitrate as modifiable while streaming. `AVEncVideoEncodeQP` / `AVEncCommonQuality` are not
+    /// used live: they apply only in the quality rate-control mode, which the streaming configuration never runs. On
+    /// Quick Sync the properties are reported not modifiable, so the rebuild below remains its path; whether any
+    /// software MFT gains enough through the live change is to be proven in the test phase.
     fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
         if self.restore.is_some() {
             return Ok(Vec::new()); // already refined, nothing changed since
@@ -486,6 +529,10 @@ impl VideoEncoder for MfH264Encoder {
         if frame.width != a.cfg.width || frame.height != a.cfg.height {
             return Ok(Vec::new()); // the display changed size since the picture was captured: nothing to refine
         }
+        if let Some(done) = self.refine_live(frame) {
+            return done;
+        }
+        let a = self.active_mut()?;
         let normal = a.cfg;
         let hardware = a.candidate.hardware;
         let cfg = EncoderConfig {

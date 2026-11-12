@@ -201,6 +201,47 @@ fn sixty_frames_start_with_a_keyframe_and_decode_back_to_the_source() {
     assert!(worst < 6.0, "worst mean absolute luma difference {worst}");
 }
 
+/// B7 (F-VIEW-05): after a busy stretch at a low rate, refining the still picture gives one key frame that decodes
+/// closer to the source than the last normal frame did, and the stream goes on from the same session with a P-frame.
+#[test]
+fn refinement_raises_the_psnr_of_a_still_frame() {
+    let (w, h) = (1280usize, 720usize);
+    let mut enc = encoder();
+    enc.configure(&config(w as u32, h as u32, 1500)).expect("configure");
+    let mut stream = encode_sequence(&mut enc, w, h, 0..30, noise);
+    let still = noise(w, h, 29);
+    let mut dec = VtH264Decoder::new(DecoderOptions { output: DecoderOutput::CpuBgra });
+    let mut last_diff = f64::MAX;
+    for (i, f) in stream.iter().enumerate() {
+        let frame = dec.decode(&header(i as u32, f), &f.annex_b).expect("decode").expect("a picture");
+        let Pixels::Cpu { data, .. } = &frame.pixels else { panic!("CPU pixels") };
+        last_diff = mean_abs_luma_diff(&still, data);
+    }
+    let refined = enc.refine(&cpu_frame(w, h, 29, still.clone())).expect("refine");
+    assert_eq!(refined.len(), 1, "exactly one refinement frame");
+    assert!(refined[0].keyframe && annexb::is_idr(&refined[0].annex_b), "the refinement frame is an IDR");
+    stream.extend(refined);
+    let f = stream.last().expect("the refinement frame");
+    let frame = dec.decode(&header(stream.len() as u32 - 1, f), &f.annex_b).expect("decode").expect("a picture");
+    let Pixels::Cpu { data, .. } = &frame.pixels else { panic!("CPU pixels") };
+    let refined_diff = mean_abs_luma_diff(&still, data);
+    println!("refinement: mean abs luma diff {last_diff:.2} -> {refined_diff:.2}, {} bytes", f.annex_b.len());
+    assert!(refined_diff < last_diff * 0.7, "the refined picture is not closer: {last_diff} -> {refined_diff}");
+
+    // The session is the same: the next changed picture is a P-frame with no new parameter sets.
+    let next = enc.encode(&cpu_frame(w, h, 30, noise(w, h, 30)), false).expect("encode after refine");
+    assert_eq!(next.len(), 1);
+    assert!(!next[0].keyframe && !next[0].config_change, "the session was rebuilt by the refinement");
+    // The normal rate is back: once the buffer the boost left is spent (the first frames after it may use it), the
+    // frames are as large as before the refinement, not as large as the refinement frame.
+    let before: usize = stream[20..30].iter().map(|f| f.annex_b.len()).sum::<usize>() / 10;
+    let after_frames = encode_sequence(&mut enc, w, h, 31..46, noise);
+    let after: usize = after_frames[5..].iter().map(|f| f.annex_b.len()).sum::<usize>() / (after_frames.len() - 5);
+    println!("normal frames: {before} bytes before the refinement, {after} after");
+    assert!(after < before * 2, "the rate control is not back to normal: {before} -> {after} bytes a frame");
+    assert!(after < f.annex_b.len() / 2, "the frames after are refinement-sized: {after}");
+}
+
 #[test]
 fn set_rate_moves_the_output_size_the_right_way() {
     let (w, h) = (1280usize, 720usize);

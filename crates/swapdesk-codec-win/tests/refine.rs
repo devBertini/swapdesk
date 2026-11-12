@@ -187,3 +187,33 @@ fn refinement_raises_psnr_by_six_db_and_the_rate_control_comes_back() {
     }
     assert!(refined > 0, "no encoder on this PC took the refinement");
 }
+
+/// B7: a refinement on an MFT that takes the mean bitrate while streaming does not build a new MFT, and the stream
+/// goes on from it (a P-frame, no new SPS/PPS keyframe). An MFT that does not (Quick Sync) may rebuild: reported only.
+#[test]
+fn refinement_does_not_rebuild_an_mft_that_takes_the_rate_live() {
+    let pages: Vec<Vec<u8>> = (0..=SCROLLED).map(page).collect();
+    for c in candidates() {
+        let who = format!("MF {} ({})", c.name, if c.hardware { "hardware" } else { "software" });
+        let mut enc = encoder(c);
+        enc.configure(&config(c, Preset::Motion, 60, KBPS)).unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+        for (n, p) in pages.iter().enumerate().take(SCROLLED) {
+            enc.encode(&frame(p, n), false).unwrap_or_else(|e| panic!("{who}: encode {n}: {e}"));
+        }
+        let live = enc.property_support().iter().any(|p| p.name == "AVEncCommonMeanBitRate" && p.modifiable);
+        let builds = enc.builds();
+        let refined = match enc.refine(&frame(&pages[SCROLLED - 1], SCROLLED - 1)) {
+            Ok(r) => r,
+            Err(e) if e.kind == ErrorKind::Unsupported => continue,
+            Err(e) => panic!("{who}: refine: {e}"),
+        };
+        println!("REFINE {who}: live-capable {live}, MFT builds {builds} -> {}", enc.builds());
+        assert_eq!(refined.len(), 1, "{who}: one refinement frame");
+        if live {
+            assert_eq!(enc.builds(), builds, "{who}: the refinement rebuilt the MFT");
+            let next = enc.encode(&frame(&pages[SCROLLED], SCROLLED), false).expect("encode after refine");
+            assert_eq!(next.len(), 1, "{who}: one frame after the refinement");
+            assert!(!next[0].keyframe, "{who}: the stream went on with a new keyframe");
+        }
+    }
+}

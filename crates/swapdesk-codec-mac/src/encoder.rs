@@ -279,6 +279,10 @@ mod vt {
     /// The mode in use unless [`VtH264Encoder::set_output_wait`] says otherwise: see the module documentation.
     pub const DEFAULT_WAIT: OutputWait = OutputWait::CompleteFrames;
 
+    /// The average bit rate of the key frame of a refinement is the normal one times eight, within these limits, kbps.
+    const REFINE_MIN_KBPS: u32 = 20_000;
+    const REFINE_MAX_KBPS: u32 = 200_000;
+
     enum Landed {
         Frame {
             keyframe: bool,
@@ -782,6 +786,41 @@ mod vt {
             self.eff = eff;
             self.skip_interval = skip_interval_us(&eff);
             Ok(())
+        }
+
+        /// Still-screen refinement (F-VIEW-05, B7): the picture is encoded once as a forced key frame while the
+        /// session's average bit rate is raised for that one frame, then the normal rate is put back, in the same
+        /// session (no rebuild, no new SPS/PPS: the next `encode` continues with a P-frame). Properties used:
+        /// `kVTEncodeFrameOptionKey_ForceKeyFrame` per frame and `kVTCompressionPropertyKey_AverageBitRate` /
+        /// `DataRateLimits` through `apply_rate` (the same calls as `set_rate`). Not proven on the Mac yet: how much
+        /// of the raised rate the hardware encoder spends on one frame
+        /// (`tests/encode.rs::refinement_raises_the_psnr_of_a_still_frame`).
+        fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
+            let cfg = self.cfg.ok_or_else(|| err(ErrorKind::Closed, "refine", "not configured"))?;
+            if self.session.is_none() || (frame.width, frame.height) != (cfg.width, cfg.height) {
+                return Ok(Vec::new()); // no session, or the display changed size since the capture: nothing to refine
+            }
+            let boosted =
+                effective(cfg.preset, cfg.kbps.saturating_mul(8).clamp(REFINE_MIN_KBPS, REFINE_MAX_KBPS), cfg.fps);
+            let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "refine", "not configured"))?;
+            apply_rate(&session.session, &boosted, true)?;
+            let mut result = self.submit(frame, true);
+            if matches!(&result, Ok(frames) if frames.is_empty()) {
+                // The output of one large key frame may not be out yet: wait for it.
+                result = self.flush();
+            }
+            // The normal rate goes back whatever happened above (a gone session is rebuilt by the next `encode`).
+            if let Some(session) = self.session.as_ref()
+                && let Err(e) = apply_rate(&session.session, &self.eff, true)
+            {
+                if is_session_gone(&e) {
+                    self.session = None;
+                    self.pending.clear();
+                } else if result.is_ok() {
+                    result = Err(e);
+                }
+            }
+            result
         }
 
         fn flush(&mut self) -> Result<Vec<EncodedFrame>> {
