@@ -481,6 +481,35 @@ pub struct Listing {
     pub truncated: bool,
 }
 
+/// A folder of this computer, as the explorer's left pane lists it (`Command::LocalList`): hidden entries left out,
+/// not sorted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalListing {
+    pub path: PathBuf,
+    pub entries: Vec<DirEntryView>,
+    pub truncated: bool,
+}
+
+/// What a place of the explorer's navigation pane is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlaceKind {
+    Home,
+    Desktop,
+    Documents,
+    Downloads,
+    /// A drive (Windows: its letter as `label`) or a volume (macOS: its name).
+    Volume,
+}
+
+/// One place or volume of this computer (`Command::LocalPlaces`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPlace {
+    pub kind: PlaceKind,
+    /// The volume's own name or letter; empty for a place (the interface names it in its language).
+    pub label: String,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferState {
     Queued,
@@ -771,6 +800,13 @@ pub enum Command {
         before_ms: Option<u64>,
         limit: u32,
     },
+    /// The explorer's left pane (FILES-UI.md, slice 1): a folder of this computer, listed by the UI process on a
+    /// worker thread (`None`: the default folder, Downloads). Answered `LocalListing`.
+    LocalList {
+        path: Option<PathBuf>,
+    },
+    /// This computer's places and drives or volumes for the navigation pane. Answered `LocalPlaces`.
+    LocalPlaces,
     /// Writes the activity log to `path` as CSV, in this interface's language and local time (`UiState::activity_export`
     /// fills both). The UI process writes the file; the service only lists the entries.
     ActivityExport {
@@ -865,6 +901,8 @@ impl core::fmt::Debug for Command {
             Self::ChatMarkRead { session_id, up_to } => dbg_fields!("ChatMarkRead", session_id, up_to),
             Self::Wake { device_id } => dbg_fields!("Wake", device_id),
             Self::ActivityList { before_ms, limit } => dbg_fields!("ActivityList", before_ms, limit),
+            Self::LocalList { path } => dbg_fields!("LocalList", path),
+            Self::LocalPlaces => f.write_str("LocalPlaces"),
             Self::ActivityExport { path, language, utc_offset_min } => {
                 dbg_fields!("ActivityExport", path, language, utc_offset_min)
             }
@@ -913,6 +951,8 @@ pub enum Reply {
     Settings(Settings),
     MissingPermissions(Vec<OsPermission>),
     Update(UpdateInfo),
+    LocalListing(LocalListing),
+    LocalPlaces(Vec<LocalPlace>),
 }
 
 // ---------- updates (UPDATES.md 10) ----------
@@ -1092,6 +1132,8 @@ impl Command {
                 | Command::ActivityList { .. }
                 | Command::ListDisplays { .. }
                 | Command::FilesList { .. }
+                | Command::LocalList { .. }
+                | Command::LocalPlaces
                 | Command::SetGrants { .. }
                 | Command::SetSettings { .. }
                 | Command::SelectDisplay { .. }
@@ -1122,6 +1164,8 @@ impl Command {
             // The same for the first listing of the files (D13), which then lists the folder.
             Command::TermOpen { .. } | Command::FilesList { .. } => 25,
             Command::ActivityList { .. } | Command::ActivityExport { .. } => 10,
+            // A slow volume (a network share, a sleeping disk) fails visibly instead of freezing the pane (R-UI-7).
+            Command::LocalList { .. } | Command::LocalPlaces => 8,
             _ => 5,
         }
     }

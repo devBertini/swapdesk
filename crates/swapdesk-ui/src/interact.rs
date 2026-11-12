@@ -21,7 +21,12 @@ fn start_button(intent: Intent) -> ControlId {
 /// Longest local name of a paired device, in bytes: what the trust record stores.
 const MAX_DEVICE_NAME: usize = 64;
 
+mod explorer;
 mod files_panel;
+pub(crate) use explorer::Explorer;
+pub use explorer::{
+    PaneView, PlaceView, PointerMods, RowView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, natural_cmp, type_of,
+};
 pub use files_panel::FILES_PAGE;
 pub(crate) use files_panel::FilesPanel;
 
@@ -140,6 +145,23 @@ pub enum ControlId {
     TransferResume(u32),
     /// "Cancelar" on the transfer with this number.
     TransferCancel(u32),
+    // The files explorer (FILES-UI.md): `true` names the other computer's pane.
+    /// "Tela": back from the Arquivos view to the picture.
+    ExpTela,
+    /// The primary "Copiar para ..." of the command bar.
+    ExpCopy,
+    /// Row `n` of a pane, in its sorted order.
+    ExpRow(bool, u16),
+    /// A column header: sorts by it (`SORT_NAME` to `SORT_MODIFIED`), again reverses.
+    ExpSort(bool, u8),
+    ExpBack(bool),
+    ExpForward(bool),
+    ExpUp(bool),
+    ExpRefresh(bool),
+    /// Place or volume `n` of a computer in the navigation pane.
+    ExpPlace(bool, u8),
+    /// "Mostrar" / "Ocultar" of the transfers bar.
+    ExpTransfers,
     ChatSend,
     ClipToggle,
     // host banner
@@ -1116,7 +1138,7 @@ impl UiState {
             (ControlId::TbFiles, MsgKey::TbFiles, DrawerTab::Files),
             (ControlId::TbChat, MsgKey::TbChat, DrawerTab::Chat),
         ] {
-            let open = self.drawer == Some(tab);
+            let open = if tab == DrawerTab::Files { self.explorer_open() } else { self.drawer == Some(tab) };
             let unread = self.chat_unread();
             let label = if tab == DrawerTab::Chat && unread > 0 && !open {
                 self.tm(&Msg::new(MsgKey::TbChatUnread).with(unread.to_string()))
@@ -1148,6 +1170,10 @@ impl UiState {
         if !self.session_bar_visible() {
             // Full screen with the bar hidden: its controls are not on screen, so they are not reachable either.
             s.v.retain(|c| c.region != Region::Toolbar);
+        }
+        if self.explorer_open() {
+            s.region(Region::Drawer);
+            self.explorer_controls(&mut s);
         }
         if let Some(open) = self.drawer {
             s.region(Region::Drawer);
@@ -1613,7 +1639,7 @@ impl UiState {
                 }
             }
             ControlId::TbTerminal => self.toggle_drawer(DrawerTab::Terminal, &mut a),
-            ControlId::TbFiles => self.toggle_drawer(DrawerTab::Files, &mut a),
+            ControlId::TbFiles => self.explorer_toggle(&mut a),
             ControlId::TbChat => self.toggle_drawer(DrawerTab::Chat, &mut a),
             // Not offered toward another OS (never drawn): an activation that still arrives does nothing.
             ControlId::TbSwap if self.viewer_session().is_some_and(|v| !self.swap_offered(v)) => {}
@@ -1666,6 +1692,18 @@ impl UiState {
             | ControlId::TransferResume(_)
             | ControlId::TransferCancel(_) => {
                 self.files_activate(id, &mut a);
+            }
+            ControlId::ExpTela
+            | ControlId::ExpCopy
+            | ControlId::ExpRow(..)
+            | ControlId::ExpSort(..)
+            | ControlId::ExpBack(_)
+            | ControlId::ExpForward(_)
+            | ControlId::ExpUp(_)
+            | ControlId::ExpRefresh(_)
+            | ControlId::ExpPlace(..)
+            | ControlId::ExpTransfers => {
+                self.explorer_activate(id, &mut a);
             }
             ControlId::BannerChat => a.changed = Changed::NONE,
             ControlId::ChatSend => {

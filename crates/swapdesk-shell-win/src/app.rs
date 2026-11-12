@@ -334,6 +334,12 @@ impl Shared {
                     crate::system::open_web_page(&url);
                 }
             }
+            Some(Effect::OpenLocal) => {
+                let target = self.state.borrow_mut().take_local_target();
+                if let Some(path) = target {
+                    crate::system::open_local_file(&path);
+                }
+            }
             Some(effect @ (Effect::Menu(_) | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder)) => {
                 from.set_pending_effect(effect)
             }

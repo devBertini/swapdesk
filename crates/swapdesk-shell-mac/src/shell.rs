@@ -688,6 +688,13 @@ impl Shell {
                     let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
                 }
             }
+            Handling::OpenLocalFile => {
+                let target = self.state.borrow_mut().take_local_target();
+                // Only an existing regular file: a folder opens in the explorer itself, and nothing else is started.
+                if let Some(path) = target.filter(|p| p.is_file()) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
+                }
+            }
             Handling::Menu(select) => self.pick(kind, select),
             Handling::SaveLogPanel => self.save_log(),
             Handling::ChooseFiles => {

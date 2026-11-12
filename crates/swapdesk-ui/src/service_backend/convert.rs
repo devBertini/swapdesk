@@ -613,6 +613,10 @@ pub enum Route {
     /// `ActivityExport`: a worker thread lists the activity log and writes the file (the path, the language, the
     /// offset of local time).
     Export(std::path::PathBuf, a::Language, i32),
+    /// `LocalList` and `LocalPlaces`: this computer's disk, read by a worker thread of this process
+    /// (`crate::local_disk`); nothing reaches the service.
+    LocalList(Option<std::path::PathBuf>),
+    LocalPlaces,
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -686,6 +690,8 @@ pub fn route(c: &a::Command) -> Route {
         C::ActivityExport { path, language, utc_offset_min } => {
             return Route::Export(path.clone(), *language, *utc_offset_min);
         }
+        C::LocalList { path } => return Route::LocalList(path.clone()),
+        C::LocalPlaces => return Route::LocalPlaces,
         C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }

@@ -104,6 +104,7 @@ fn every_effect() -> Vec<Effect> {
         Effect::PickFiles,
         Effect::PickReceiveFolder,
         Effect::OpenWebPage,
+        Effect::OpenLocal,
     ];
     for e in &all {
         match e {
@@ -115,7 +116,8 @@ fn every_effect() -> Vec<Effect> {
             | Effect::OpenLogs
             | Effect::PickFiles
             | Effect::PickReceiveFolder
-            | Effect::OpenWebPage => {}
+            | Effect::OpenWebPage
+            | Effect::OpenLocal => {}
         }
     }
     all

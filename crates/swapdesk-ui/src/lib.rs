@@ -18,6 +18,7 @@ pub mod home;
 pub mod inflight;
 pub mod interact;
 pub mod list;
+pub mod local_disk;
 pub mod mock;
 pub mod prefs;
 pub mod service_backend;

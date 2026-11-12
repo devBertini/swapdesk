@@ -161,6 +161,20 @@ pub fn open_web_page(url: &str) -> bool {
     result.0 as isize > 32
 }
 
+/// Opens a file of this computer with the app the system has for it (the explorer's left pane). Only an existing
+/// regular file: a folder opens in the explorer itself, and nothing else is ever started.
+pub fn open_local_file(path: &std::path::Path) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    if !path.is_file() {
+        return false;
+    }
+    // SAFETY: the strings outlive the call; no window is the parent; "open" is the file's default verb.
+    let result =
+        unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL) };
+    result.0 as isize > 32
+}
+
 pub fn loword(v: isize) -> u16 {
     (v & 0xFFFF) as u16
 }

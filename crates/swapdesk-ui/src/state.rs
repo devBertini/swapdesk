@@ -559,6 +559,8 @@ pub enum Effect {
     /// Open the web page of [`UiState::take_web_page`] in the system's browser (the release page of an update,
     /// UPDATES.md 10).
     OpenWebPage,
+    /// Open the local file of [`UiState::take_local_target`] with the system's app for it (the explorer's left pane).
+    OpenLocal,
 }
 
 /// What to restore when an optimistic change is refused.
@@ -629,6 +631,10 @@ pub struct UiState {
     pub(crate) transfers: Vec<TransferView>,
     pub(crate) listing: Option<Listing>,
     pub(crate) files: crate::interact::FilesPanel,
+    /// The files explorer of the session window (FILES-UI.md).
+    pub(crate) explorer: crate::interact::Explorer,
+    /// The local file `Effect::OpenLocal` opens.
+    pub(crate) local_target: Option<std::path::PathBuf>,
     pub(crate) term_account: Option<String>,
     pub(crate) term: TermPhase,
     /// The connection-wide id of the current terminal, once the service gave it.
@@ -746,6 +752,8 @@ impl UiState {
             transfers: Vec::new(),
             listing: None,
             files: crate::interact::FilesPanel::default(),
+            explorer: crate::interact::Explorer::default(),
+            local_target: None,
             term_account: None,
             term: TermPhase::Idle,
             term_id: None,
@@ -1025,6 +1033,12 @@ impl UiState {
         let peer = self.device_by_id(&v.device_id).map(|d| d.name.clone()).unwrap_or_default();
         match desktop {
             DesktopKind::AccountAway => Some((self.tm(&Msg::new(MsgKey::PausedAwayBody).with(peer)), false)),
+            // D24: a Mac's lock screen cannot be seen or controlled from here, so there is nothing to elevate to.
+            DesktopKind::Locked | DesktopKind::LoginWindow
+                if self.device_by_id(&v.device_id).is_some_and(|d| d.os == Os::MacOs) =>
+            {
+                Some((self.tm(&Msg::new(MsgKey::PausedMacLocked).with(peer)), false))
+            }
             _ if v.elevation == ElevationLevel::Available => {
                 Some((self.tm(&Msg::new(MsgKey::PausedElevateBody).with(peer)), true))
             }
@@ -2354,6 +2368,8 @@ impl UiState {
                 }
                 Changed::ALL
             }
+            Reply::LocalListing(l) => self.here_listed(l),
+            Reply::LocalPlaces(p) => self.places_listed(p),
             Reply::Listing(l) => {
                 self.consent_answered(Feature::Files);
                 self.listing = Some(l);
@@ -2424,6 +2440,12 @@ impl UiState {
             | Command::UpdateCancel
             | Command::UpdateDismiss { .. }
             | Command::UpdateSetCheck { .. } => return Changed::NONE,
+            _ => {}
+        }
+        // The explorer's own disk: the pane shows the failure in place (FILES-UI.md 2.9), no strip.
+        match &pending.command {
+            Command::LocalList { .. } => return self.here_failed(error.code),
+            Command::LocalPlaces => return Changed::NONE,
             _ => {}
         }
         // The step tells how the confirmation failed (a timeout of its own 120 s too): no strip over the content.

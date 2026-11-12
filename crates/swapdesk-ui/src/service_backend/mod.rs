@@ -337,6 +337,19 @@ impl ServiceBackend {
                         Route::Export(path, language, offset) => {
                             export::spawn(&writing, ticket, path, language, offset)
                         }
+                        route @ (Route::LocalList(_) | Route::LocalPlaces) => {
+                            let command = match route {
+                                Route::LocalList(path) => crate::api::Command::LocalList { path },
+                                _ => crate::api::Command::LocalPlaces,
+                            };
+                            let worker = Arc::clone(&writing);
+                            let spawned = thread::Builder::new()
+                                .name("swapdesk-ui-local-disk".into())
+                                .spawn(move || worker.reply(ticket, crate::local_disk::answer(&command)));
+                            if spawned.is_err() {
+                                writing.reply(ticket, Err(ApiError::new(ApiCode::Internal)));
+                            }
+                        }
                         Route::Op(op) => {
                             let req = writing.next_req.fetch_add(1, Ordering::Relaxed);
                             {

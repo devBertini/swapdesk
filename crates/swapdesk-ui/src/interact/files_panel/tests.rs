@@ -9,7 +9,7 @@ use crate::state::{DrawerTab, Fetch, WindowKind};
 
 fn open_panel() -> UiState {
     let mut s = Scenario::Visualizador.prepared_state();
-    let a = s.activate(ControlId::TbFiles);
+    let a = s.activate(ControlId::DrawerTab(DrawerTab::Files));
     assert!(
         matches!(a.commands[0], Command::FilesList { path: None, .. }),
         "the first opening lists the other computer's root"

@@ -645,8 +645,10 @@ fn the_drawer_opens_per_tab_and_asks_for_its_data_once() {
     s.activate(ControlId::DrawerClose);
     assert_eq!(s.drawer(), None);
     s.activate(ControlId::TbFiles);
+    assert!(s.explorer_open(), "the folder button opens the Arquivos view");
     s.activate(ControlId::TbFiles);
-    assert_eq!(s.drawer(), None, "the toolbar button toggles the drawer");
+    assert!(!s.explorer_open(), "and closes it");
+    assert_eq!(s.drawer(), None);
     s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Exited { code: Some(0) } });
     assert_eq!(s.term_account(), None);
 }
@@ -2675,7 +2677,7 @@ fn a_refused_terminal_ends_the_question_and_a_question_of_another_session_is_ign
 #[test]
 fn the_files_say_that_the_host_asks_its_user_until_the_listing_comes() {
     let mut s = viewer();
-    s.activate(ControlId::TbFiles);
+    s.activate(ControlId::DrawerTab(DrawerTab::Files));
     s.apply(consent_pending(Feature::Files, 20));
     assert_eq!(s.consent_wait(Feature::Files).unwrap().text.as_deref(), Some("0:20"));
     s.apply(reply_ok(Reply::Listing(Listing { path: String::new(), entries: Vec::new(), truncated: false })));

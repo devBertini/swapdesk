@@ -1,7 +1,7 @@
 //! The drawer's file panel drawn by the Windows renderer (stage 44): what it registers, and its captures.
 
 use swapdesk_ui::mock::Scenario;
-use swapdesk_ui::{ControlId, DirEntryView, Listing, Reply, Ticket, UiEvent, UiState, WindowKind};
+use swapdesk_ui::{ControlId, DirEntryView, DrawerTab, Listing, Reply, Ticket, UiEvent, UiState, WindowKind};
 
 use swapdesk_paint::{Interaction, design_size};
 use swapdesk_ui::{ApiCode, TransferState};
@@ -10,7 +10,7 @@ use crate::offscreen::render;
 
 fn panel_state() -> UiState {
     let mut s = Scenario::Visualizador.prepared_state();
-    s.activate(ControlId::TbFiles);
+    s.activate(ControlId::DrawerTab(DrawerTab::Files));
     let entries = (0..12)
         .map(|i| DirEntryView { name: format!("arquivo-{i:02}.pdf"), is_dir: i % 4 == 0, size: 1500 * i, mtime_ms: 1 })
         .collect();

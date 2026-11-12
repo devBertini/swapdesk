@@ -25,6 +25,8 @@ pub enum Handling {
     ChooseFolder,
     /// The page of `UiState::take_web_page` opens in the browser.
     OpenWebPage,
+    /// The explorer's local file, with the app macOS has for it (`/usr/bin/open`).
+    OpenLocalFile,
 }
 
 impl Handling {
@@ -37,7 +39,8 @@ impl Handling {
             | Handling::FocusControl(_)
             | Handling::Submit(_)
             | Handling::OpenLogsFolder
-            | Handling::OpenWebPage => false,
+            | Handling::OpenWebPage
+            | Handling::OpenLocalFile => false,
         }
     }
 }
@@ -54,5 +57,6 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::PickFiles => Handling::ChooseFiles,
         Effect::PickReceiveFolder => Handling::ChooseFolder,
         Effect::OpenWebPage => Handling::OpenWebPage,
+        Effect::OpenLocal => Handling::OpenLocalFile,
     }
 }

@@ -662,7 +662,7 @@ impl Scenario {
             Scenario::Arquivos => vec![
                 mac(),
                 Event(Self::viewer_session(18)),
-                Activate(ControlId::TbFiles),
+                Activate(ControlId::DrawerTab(DrawerTab::Files)),
                 Event(UiEvent::Transfer {
                     transfer_id: 1,
                     session_id: 1,
@@ -850,7 +850,12 @@ impl Scenario {
             Scenario::Carregando => vec![Startup, ArmPlaceholders],
             Scenario::AtividadeCarregando => vec![Goto(Nav::Activity), BeginFetch(DataKind::Activity), ArmPlaceholders],
             Scenario::ArquivosCarregando => {
-                vec![mac(), Event(Self::viewer_session(18)), Activate(ControlId::TbFiles), ArmPlaceholders]
+                vec![
+                    mac(),
+                    Event(Self::viewer_session(18)),
+                    Activate(ControlId::DrawerTab(DrawerTab::Files)),
+                    ArmPlaceholders,
+                ]
             }
             Scenario::TerminalAguardandoConsentimento => vec![
                 mac(),
@@ -870,7 +875,7 @@ impl Scenario {
             Scenario::ArquivosAguardandoConsentimento => vec![
                 mac(),
                 Event(Self::viewer_session(18)),
-                Activate(ControlId::TbFiles),
+                Activate(ControlId::DrawerTab(DrawerTab::Files)),
                 Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Files, remaining_s: 20 }),
                 Ticks(6),
                 ArmPlaceholders,
