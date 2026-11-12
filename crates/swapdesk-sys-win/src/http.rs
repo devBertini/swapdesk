@@ -283,5 +283,4 @@ impl HttpGet for WinHttp {
 }
 
 #[cfg(test)]
-#[path = "http_tests.rs"]
 mod tests;

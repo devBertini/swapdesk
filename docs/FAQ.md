@@ -20,7 +20,7 @@ Wake-on-LAN must be on in the computer's firmware (BIOS or UEFI) and in the netw
 
 ## Does anything leave my network?
 
-No. There is no account, no relay, no cloud, no telemetry and no update check over the internet. See [THREAT-MODEL.md](THREAT-MODEL.md).
+Your sessions, screen, input and files never do: there is no account, no relay, no cloud and no telemetry. The only request beyond the LAN is the update check, once a day to github.com, with no identifier of you or the computer; turn it off in Settings > Updates. See [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## Can I use it over the internet?
 

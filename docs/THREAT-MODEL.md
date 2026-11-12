@@ -17,6 +17,7 @@ To report a vulnerability, see [../SECURITY.md](../SECURITY.md).
 - The device private key (one Ed25519 key per account on Windows and per user on the Mac) and the trust store of paired devices and their grants, and what separates one account's data from another's.
 - Clipboard contents and files reachable through a session.
 - The audit log (its integrity matters as evidence of what happened).
+- The release signing key (version 1.1, D53): an Ed25519 key that signs the update manifest. Whoever holds it, together with control of what github.com serves for the repository, could install code as SYSTEM on every Windows install and with the Mac app's permissions on every Mac. It lives on the maintainer's computer under DPAPI with one offline copy, never on GitHub; a second, offline-only key is compiled in for rotation.
 
 ## Trust boundaries
 
@@ -25,6 +26,7 @@ To report a vulnerability, see [../SECURITY.md](../SECURITY.md).
 3. **The service to the helpers.** The service starts them from the per-machine install folder and checks their PID on the pipe. (CONTRACTS C2.1.)
 4. **The remote peer to the viewer.** Video is decoded only in the user-level viewer, never in a SYSTEM or root process. (SPEC.)
 5. **One account to another on the same machine.** Each account has its own key, store and port pair, the service routes each interface connection to its account's own hub, a host session is admitted only while its account owns the console, and the helpers hold capture and input at every desktop switch until the service has read who is at the console. (ACCOUNTS.md 5, 7.)
+6. **The internet to the updater (version 1.1, D53).** The only traffic beyond the LAN: the service (Windows, SYSTEM) or the app (Mac) fetches the signed release manifest from github.com over the system's HTTPS client, and the package after a person's click. Nothing it receives is read before the manifest's Ed25519 signature is checked against the compiled release keys, and the package is opened only after its size and SHA-256 match the signed manifest. It is not a peer connection, has no listening socket and can neither open a session nor change a grant; the LAN guard does not apply to it and is not changed by it. ([UPDATES.md](UPDATES.md) 4, 11.)
 
 ## Attackers considered
 
@@ -96,9 +98,27 @@ What it can still do: anything the user can do, such as start sessions to alread
 - Panic isolation: a panic in the service ends one session only, and the interface and helpers abort and are restarted (D15, F-SYS-03).
 - Dependencies are kept to a minimal audited list (D14).
 
+## The update channel
+
+Version 1.1 checks GitHub for a new release and installs it on a person's click (D53, design in [UPDATES.md](UPDATES.md)). The request carries no identifier of the user or the machine, and the switch in Settings > Updates turns it off; with it off the updater sends nothing.
+
+| Threat | What stops it, or what remains |
+|---|---|
+| Taken-over GitHub account (assets replaced, a malicious tag built and attested) | The manifest key is not on GitHub: no signature, no install. Remains: the attacker can withhold releases (users stay on their version) and can make the manual-download path serve anything |
+| Leaked release key | Useful only together with control of what github.com serves for this repository, or a broken TLS. Rotation to the offline key ([SECURITY.md](../SECURITY.md)). Remains: installs that have not updated keep trusting the leaked key until they do |
+| Man in the middle | TLS validated by the system; even a broken TLS cannot forge the signature. A replayed old manifest only delays |
+| Rollback to an old vulnerable version | The version must be greater than the running one; a rolled-back version is not offered again by itself |
+| Disk filled by a huge download | The size comes from the signed manifest and bounds the download, under a 256 MiB cap; free space is checked first; partial files are deleted on cancel or failure |
+| A standard user racing the downloaded file (Windows) | The file, the staging folder and the applier's copy live in a folder only SYSTEM and Administrators can open; the moved files are checked by the install policy |
+| A same-user process on the Mac | Can touch the update folder between the check and the swap: accepted, it can already replace the app; the staged bundle's code signature is checked again against the running app's just before the swap |
+| A standard user or a remote viewer starting an install | Allowed by design: only a newer signed release, and live sessions end only after the confirmation |
+| A peer on the LAN | No wire message about updates exists; the LAN guard is unchanged |
+| A new version that does not start | Rolled back within 60 seconds on both systems |
+| Parser bugs in a privileged process | Manifest and signature are bounded and parsed only after the signature check; the package is opened only after its hash matches; both readers are property-tested and fuzzed |
+
 ## Out of scope
 
-- Anything beyond the LAN. 1.x has no relay, cloud or NAT traversal. A later mode beyond the LAN (D36) gets its own threat model before it is built, and this one stays true for the LAN-only default.
+- Anything beyond the LAN, except the update check, covered above. 1.x has no relay, cloud or NAT traversal. A later mode beyond the LAN (D36) gets its own threat model before it is built, and this one stays true for the LAN-only default.
 - An attacker with administrator, SYSTEM or root on a machine, or with kernel code execution there. That includes an administrator reading another account's Swapdesk folder with Windows' own tools: the product gives an administrator no way into another account's data, and the disk does not stop one who uses the operating system's.
 - Physical access to an unlocked machine.
 - Hiding that Swapdesk is present from the LAN: names, OS and key fingerprints are visible through discovery.

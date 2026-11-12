@@ -23,6 +23,14 @@ This is a small open-source project. The maintainers will try to acknowledge a r
 
 A confirmed problem is fixed on the default branch first and published as a GitHub security advisory once the fix is out, crediting the reporter unless they ask otherwise.
 
+## The release signing key
+
+Since version 1.1 Swapdesk installs updates only when the release manifest carries an Ed25519 signature by one of the release keys compiled into it (design in [docs/UPDATES.md](docs/UPDATES.md)). The signing key is kept on the maintainer's computer, protected by the system, with one offline copy; it is never stored on GitHub. A second key, kept offline only, is compiled in beside it for rotation.
+
+- **If the signing key is lost:** the next release is signed with the rotation key and compiles in that key and a new successor, without the lost one.
+- **If the signing key leaks:** the same, at once, with a GitHub security advisory and a note in the release. Until an install updates, a leaked key is usable only together with control of what github.com serves for this repository.
+- **If both keys are lost:** no automatic path remains; the release notes ask for a manual install, and the new build compiles new keys.
+
 ## Supported versions
 
 Only the latest release and the latest commit on the default branch get fixes.

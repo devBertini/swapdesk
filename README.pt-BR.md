@@ -13,11 +13,11 @@ Um acesso remoto que funciona só na sua rede local, para Windows e macOS, feito
 
 ## O que é e por quê
 
-AnyDesk e TeamViewer chegam às suas máquinas por uma nuvem. O Swapdesk é para quando as duas máquinas são suas, estão na mesma rede local e nada deve sair dela.
+AnyDesk e TeamViewer chegam às suas máquinas por uma nuvem. O Swapdesk é para quando as duas máquinas são suas, estão na mesma rede local, e sua tela, teclado e arquivos nunca devem sair dela.
 
 O objetivo da versão 1 (de [docs/SPEC.md](docs/SPEC.md)): tela, áudio do sistema, mouse, teclado, terminal, arquivos, área de transferência, chat, Wake-on-LAN e acesso sem ninguém na frente da máquina, entre dois computadores. Qualquer um dos dois pode hospedar ou controlar. "Inverter" troca os papéis quando o outro lado aceita.
 
-O Swapdesk não tem relay, nuvem, travessia de NAT nem conta. Na 1.x nada sai da rede local, e o código garante isso ([Como ele fica na rede local](#como-ele-fica-na-rede-local)). Acesso de fora da rede local é uma direção possível para depois, ainda não projetada: se vier, vem como um modo que você liga, e só rede local continua sendo o padrão ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
+O Swapdesk não tem relay, nuvem, travessia de NAT nem conta. Na 1.x nenhuma sessão, pareamento ou descoberta sai da rede local, e o código garante isso ([Como ele fica na rede local](#como-ele-fica-na-rede-local)). A única requisição que sai da rede local é a procura por uma versão nova, um pedido HTTPS simples ao GitHub que você pode desligar ([Atualizações](#atualizações)). Acesso de fora da rede local é uma direção possível para depois, ainda não projetada: se vier, vem como um modo que você liga, e só rede local continua sendo o padrão ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
 
 ## Download
 
@@ -47,9 +47,19 @@ Requisitos: macOS 14 ou mais novo, em Apple silicon.
 2. O app é assinado ad hoc, não com um Apple Developer ID (decisão D22), então o macOS recusa a primeira abertura. Abra uma vez, vá em Ajustes do Sistema > Privacidade e Segurança, encontre a linha dizendo que o Swapdesk foi bloqueado e clique em **Abrir Mesmo Assim**.
 3. Permita o que ele pedir: **Rede Local** (para achar e alcançar o outro computador) e, para este Mac ser controlado, **Gravação do Áudio do Sistema e da Tela** e **Acessibilidade**. Para controlar outro computador a partir do Mac, também **Monitoramento de Entrada**.
 
-Na primeira vez que é aberto, o Swapdesk se adiciona aos itens que abrem no início de sessão e fica na barra de menus quando a janela é fechada, então o Mac pode ser alcançado enquanto você estiver com a sessão aberta. O interruptor "Abrir ao ligar o computador", em Ajustes, tira o Swapdesk dos itens de início de sessão e o coloca de volta. O macOS liga as permissões ao build exato de um app assinado ad hoc: depois de uma atualização, remova o Swapdesk de cada lista em Privacidade e Segurança e permita de novo.
+Na primeira vez que é aberto, o Swapdesk se adiciona aos itens que abrem no início de sessão e fica na barra de menus quando a janela é fechada, então o Mac pode ser alcançado enquanto você estiver com a sessão aberta. O interruptor "Abrir ao ligar o computador", em Ajustes, tira o Swapdesk dos itens de início de sessão e o coloca de volta. Da 1.1 em diante, as atualizações mantêm as permissões; instalar a 1.1 por cima da 1.0 pede as permissões mais uma vez.
 
 Para desinstalar no macOS: escolha "Sair do Swapdesk" no item dele na barra de menus, remova o Swapdesk de Ajustes do Sistema > Geral > Itens de Início de Sessão e Extensões e de cada lista em Privacidade e Segurança, mova o app de Aplicativos para o Lixo e apague `~/Library/Application Support/Swapdesk` (a chave do dispositivo, os dispositivos pareados e o log).
+
+## Atualizações
+
+A versão 1.0 não se atualiza sozinha. Instale a 1.1.0 à mão uma vez: no Windows, rode o `install.cmd` do novo zip (ele atualiza no lugar); no Mac, substitua o app em Aplicativos e permita de novo as permissões (a 1.0 foi assinada de um jeito que o macOS não reconhece entre versões). A partir da 1.1.0, o Swapdesk avisa quando sai uma versão nova e a instala com um clique.
+
+- **O que é pedido, e quando.** Alguns minutos depois de abrir, e depois uma vez por dia, o Swapdesk baixa um arquivo pequeno da versão mais recente do repositório no GitHub: o manifesto da versão e a sua assinatura. O pedido não leva versão, sistema, cookie nem identificador seu ou do computador. No Windows quem pergunta é o serviço, uma vez pela máquina toda; no Mac, o app. Uma procura que falha fica em silêncio e espera o dia seguinte.
+- **Nada se instala sozinho.** Uma versão nova aparece como um cartão na tela inicial; ela só é baixada e instalada quando alguém aperta "Atualizar agora" neste computador, ou por uma sessão. Com uma sessão aberta, o Swapdesk primeiro pede para encerrá-la.
+- **O que é conferido.** O manifesto é assinado com a chave de versões do Swapdesk, que fica fora do GitHub: um manifesto ou pacote sem essa assinatura é apagado e nada é instalado, mesmo que a conta do GitHub fosse tomada. O pacote precisa ter o tamanho e o SHA-256 que o manifesto assinado indica, e nunca é instalada uma versão menor ou igual à que está rodando.
+- **Se a versão nova não abrir.** No Windows os arquivos antigos ficam guardados até o novo serviço confirmar que iniciou; no Mac o app antigo espera ao lado do novo. Nos dois, uma versão que não inicia em um minuto é trocada pela que estava rodando, e não é oferecida de novo por conta própria.
+- **Para desligar.** Ajustes > Atualizações > "Procurar novas versões no GitHub". Com o interruptor desligado, o Swapdesk não envia nada; "Procurar agora" pergunta uma vez. A página de [versões](https://github.com/devBertini/swapdesk/releases) continua sendo o caminho para instalar à mão.
 
 ## Atualizando da 1.0
 
@@ -116,6 +126,7 @@ Isso é imposto no código, não deixado para configuração ([docs/SPEC.md](doc
 - Os pacotes QUIC saem com TTL (hop limit) 1, então não podem ser roteados para fora da sub-rede. O mDNS mantém TTL 255, como o multicast local exige.
 - Um endereço digitado à mão só é aceito se estiver na mesma sub-rede.
 - Relay, nuvem e travessia de NAT não existem na 1.x.
+- A única conexão além da rede local é a procura por atualização: HTTPS para github.com, sem nenhum identificador seu ou da máquina, desligada em Ajustes > Atualizações. Ela não é uma conexão com outro computador; as regras acima não se aplicam a ela, e ela não muda essas regras.
 
 ## Segurança em resumo
 

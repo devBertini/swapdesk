@@ -13,11 +13,11 @@ A remote desktop that works only on your local network, for Windows and macOS, b
 
 ## What it is and why
 
-AnyDesk and TeamViewer reach your machines through a cloud. Swapdesk is for the case where both machines are yours and on the same LAN, and nothing should leave it.
+AnyDesk and TeamViewer reach your machines through a cloud. Swapdesk is for the case where both machines are yours and on the same LAN, and your screen, keyboard and files should never leave it.
 
 The goal for version 1 (from [docs/SPEC.md](docs/SPEC.md)): screen, system audio, mouse, keyboard, terminal, files, clipboard, chat, Wake-on-LAN and unattended access between two machines. Either machine can host or control. "Inverter" ("Swap") inverts the roles when the other side accepts.
 
-Swapdesk has no relay, no cloud, no NAT traversal and no account. In 1.x nothing goes beyond the LAN, and the code enforces it ([How it stays on the LAN](#how-it-stays-on-the-lan)). Access from outside the LAN is a possible later direction, not designed yet: if it comes, it comes as a mode you turn on, and LAN-only stays the default ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
+Swapdesk has no relay, no cloud, no NAT traversal and no account. In 1.x no session, pairing or discovery goes beyond the LAN, and the code enforces it ([How it stays on the LAN](#how-it-stays-on-the-lan)). The one request that leaves the LAN is the check for a new version, a plain HTTPS request to GitHub that you can turn off ([Updates](#updates)). Access from outside the LAN is a possible later direction, not designed yet: if it comes, it comes as a mode you turn on, and LAN-only stays the default ([docs/DECISIONS.md](docs/DECISIONS.md), D36).
 
 ## Download
 
@@ -47,9 +47,19 @@ Requirements: macOS 14 or later on Apple silicon.
 2. The app is signed ad hoc, not with an Apple Developer ID (decision D22), so macOS refuses the first open. Open it once, then go to System Settings > Privacy & Security, find the line saying Swapdesk was blocked and click **Open Anyway**.
 3. Allow what it asks for: **Local Network** (to find and reach the other computer) and, for this Mac to be controlled, **Screen & System Audio Recording** and **Accessibility**. To control another computer from the Mac, also **Input Monitoring**.
 
-On its first start Swapdesk adds itself to the items that open at login and stays in the menu bar when its window is closed, so the Mac can be reached while you are logged in. The switch "Open when the computer starts" in Settings takes it out of the login items and puts it back. macOS ties the permissions to the exact build of an ad hoc signed app: after an update, remove Swapdesk from each list in Privacy & Security and allow it again.
+On its first start Swapdesk adds itself to the items that open at login and stays in the menu bar when its window is closed, so the Mac can be reached while you are logged in. The switch "Open when the computer starts" in Settings takes it out of the login items and puts it back. From 1.1 on, updates keep the permissions; installing 1.1 over 1.0 asks for them once more.
 
 To uninstall on macOS: choose "Quit Swapdesk" in its menu bar item, remove Swapdesk from System Settings > General > Login Items & Extensions and from each list in Privacy & Security, move the app from Applications to the Trash, and delete `~/Library/Application Support/Swapdesk` (the device key, the paired devices and the trace log).
+
+## Updates
+
+Version 1.0 cannot update itself. Install 1.1.0 by hand once: on Windows, run `install.cmd` from the new zip (it upgrades in place); on the Mac, replace the app in Applications and allow its permissions again (1.0 was signed in a way macOS cannot recognise across versions). From 1.1.0 on, Swapdesk tells you when a new version is out and installs it in one click.
+
+- **What is asked, and when.** A few minutes after it starts, and then once a day, Swapdesk downloads one small file from the repository's latest release on GitHub: the release manifest and its signature. The request carries no version, no system, no cookie and no identifier of you or the computer. On Windows the service asks, once for the whole machine; on the Mac the app asks. A failed check is silent and waits for the next day.
+- **Nothing installs by itself.** A new version shows as a card on the home screen; it is downloaded and installed only when someone presses "Update now" at this computer, or through a session. With a session open, Swapdesk first asks to end it.
+- **What is checked.** The manifest is signed with the Swapdesk release key, which is kept off GitHub: a manifest or a package without that signature is deleted and nothing is installed, even if the GitHub account were taken over. The package must match the size and the SHA-256 the signed manifest names, and nothing older than or equal to the running version is ever installed.
+- **If the new version does not start.** On Windows the old files are kept until the new service confirms its start; on the Mac the old app waits beside the new one. Either way, a version that does not start within a minute is replaced by the one that was running, and it is not offered again by itself.
+- **Turning it off.** Settings > Updates > "Check GitHub for new versions". With the switch off, Swapdesk sends nothing at all; "Check now" asks once. The [releases](https://github.com/devBertini/swapdesk/releases) page stays the way to install by hand.
 
 ## Updating from 1.0
 
@@ -116,6 +126,7 @@ This is enforced in code, not left to configuration ([docs/SPEC.md](docs/SPEC.md
 - QUIC packets are sent with IP TTL (hop limit) 1, so they cannot be routed off the subnet. mDNS keeps TTL 255, as link-local multicast requires.
 - A manually typed address is accepted only if it is on-link.
 - No relay, no cloud and no NAT traversal exist in 1.x.
+- The only connection beyond the LAN is the update check: HTTPS to github.com, with no identifier of you or the machine, turned off in Settings > Updates. It is not a peer connection and the rules above do not apply to it, nor does it change them.
 
 ## Security in brief
 

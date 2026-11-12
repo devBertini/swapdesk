@@ -1,6 +1,6 @@
 # Updates: a new version in one click
 
-Status: design note, written 2026-11-10 for version 1.1. Nothing of it is built. Paths are relative to the repository root. "Read" means the claim comes from reading the code or the scripts at the time of writing; nothing was run. **UNPROVEN** = no primary page read today settles it and a slice must prove it; **GUESS** = a design number or inference still to confirm.
+Status: design note, written 2026-11-10 for version 1.1; built in slices U1 to U8 (2026-11-11 and 12): the core, the HTTPS clients, the update manager, the Windows applier, the Mac swap and the interface. Left: the release tools and the key ceremony (U2) and the rehearsal of a real update (U9). Paths are relative to the repository root. "Read" means the claim comes from reading the code or the scripts at the time of writing; nothing was run. **UNPROVEN** = no primary page read today settles it and a slice must prove it; **GUESS** = a design number or inference still to confirm.
 
 The request (owner, 10/11/2026): can the software update itself when GitHub has a new release, without rebuilding anything on the machines that already have it installed?
 

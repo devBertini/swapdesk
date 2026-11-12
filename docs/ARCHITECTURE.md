@@ -63,6 +63,19 @@ What this costs against the design below: no administrator terminal on the Mac, 
 
 Unattended access on macOS needs macOS 14.4 or later. FileVault pre-boot is out of reach. What works at the login window depends on probes that have not been run yet.
 
+### Updates (version 1.1, D53)
+
+The only traffic beyond the LAN, and not a peer connection ([UPDATES.md](UPDATES.md)):
+
+| Process | Runs as | Does |
+|---|---|---|
+| `swapdesk-service.exe` (Windows) | LocalSystem | Once per machine, 2 to 10 minutes after the start and then every 24 hours while the switch is on: fetches the signed manifest from github.com through WinHTTP, checks its Ed25519 signature against the compiled release keys, and offers a newer stable version to the console session's interfaces. On a person's click it downloads the package into `%ProgramData%\Swapdesk\update` (SYSTEM and Administrators only), checks its size and SHA-256, stages it and starts the applier. |
+| `swapdesk-service.exe --apply-update` (Windows) | LocalSystem, a copy started from `update\applier` | Stops the service and every Swapdesk process of the install folder, keeps the old files, moves the new ones in (reset to the folder's ACL and checked by the install policy), starts the service and restores the old files when the new service does not commit within 60 s; a journal finishes or rolls back an apply cut short. The service then reopens `Swapdesk.exe --after-update` in the sessions that had an interface. |
+| `Swapdesk.app` (Mac) | The user | The same check and download in process, through an ephemeral `NSURLSession`, into `~/Library/Application Support/Swapdesk/updates`; the staged bundle must carry the running app's signing identity; it is swapped with the running bundle by `renamex_np(RENAME_SWAP)`. |
+| `Swapdesk --update-watch` (Mac) | The user, the old bundle's binary at its hidden path | Waits for the old app to quit, opens the new one, and swaps back when it does not commit within 60 s. |
+
+Development instances (`--instance`, `--console`, `--scratch`) never check and never install. `swapdesk-update` does not depend on the LAN crates, and nothing it receives can open a session or change a grant.
+
 ### Local IPC
 
 - **Windows: named pipes** under `\\.\pipe\swapdesk\`, byte mode, remote clients rejected. The UI pipe is created by the service for each interactive session with `FILE_FLAG_FIRST_PIPE_INSTANCE` (a squatted name is detected and no UI pipe is created). Its DACL is explicit: SYSTEM full, the session's user read/write without the right to add instances, nobody else. Helper pipes have a random 128-bit name, and the client PID must equal the PID the service launched. The client checks the server too: the UI opens the pipe with identification-level impersonation and compares the server PID to the one the Service Control Manager reports.

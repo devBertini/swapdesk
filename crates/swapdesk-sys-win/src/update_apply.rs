@@ -451,5 +451,4 @@ fn end_programs_inside(install: &Path) {
 }
 
 #[cfg(test)]
-#[path = "update_apply_tests.rs"]
 mod tests;

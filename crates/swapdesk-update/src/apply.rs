@@ -196,5 +196,4 @@ pub fn at_start(last: Option<&Journal>, me: &Version, applier_alive: bool, stage
 }
 
 #[cfg(test)]
-#[path = "apply_tests.rs"]
 mod tests;

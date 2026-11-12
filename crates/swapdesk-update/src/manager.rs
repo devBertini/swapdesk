@@ -505,5 +505,4 @@ impl UpdateManager {
 }
 
 #[cfg(test)]
-#[path = "manager_tests.rs"]
 mod tests;

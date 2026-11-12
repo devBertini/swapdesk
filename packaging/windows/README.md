@@ -53,6 +53,8 @@ Exit codes: 0 done, 1 failed (nothing is rolled back; running it again is safe),
 
 Not touched: the identity, trust store, settings and logs in `%ProgramData%\Swapdesk` (the service creates that folder itself, C5.2); the per-user "Abrir ao ligar" entry in HKCU Run; the development folder `%LOCALAPPDATA%\Swapdesk-dev`.
 
+Updates (1.1, D53): after this install, the service checks GitHub once a day for a newer signed release and installs it on a person's click, with no script and no UAC. Its applier stops the service and every process of the install folder, puts each new file in with the folder's ACL reset and the same install policy checked, and restores the old files when the new service does not start within 60 seconds. Its files live in `%ProgramData%\Swapdesk\update`, which `uninstall.cmd` removes; `install.cmd` stays the way to install by hand, and to go from 1.0 to 1.1.
+
 ## Test
 
 1. Open the Start menu, type Swapdesk, start it. `Swapdesk.exe` finds the service with `service_pid("SwapdeskService")` and connects to the UI pipe `\\.\pipe\swapdesk\ui-<session>`; without the service it reports `NoService`.

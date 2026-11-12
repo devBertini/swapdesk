@@ -61,5 +61,4 @@ fn back(w: &mut dyn Watcher, old: &Version, new: &Version, why: String) -> Outco
 }
 
 #[cfg(test)]
-#[path = "watch_tests.rs"]
 mod tests;
