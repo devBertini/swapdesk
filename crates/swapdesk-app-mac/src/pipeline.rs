@@ -220,6 +220,16 @@ impl MacViewer {
         lock(&self.shared.last_error).clone()
     }
 
+    /// Development: the last pointer shape the video view took (see `Shared::cursor_note`).
+    pub fn cursor_note(&self) -> Option<String> {
+        lock(&self.shared.cursor_note).clone()
+    }
+
+    /// Development: where the renderer's layers are (see `Shared::geometry_note`).
+    pub fn geometry_note(&self) -> Option<String> {
+        lock(&self.shared.geometry_note).clone()
+    }
+
     /// Stops every thread of the pipeline. Safe to call twice.
     pub fn shutdown(&self) {
         if self.stop.swap(true, Ordering::SeqCst) {

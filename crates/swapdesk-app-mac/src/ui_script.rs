@@ -242,6 +242,9 @@ mod mac {
                 let _ = writeln!(out, "pipeline.input_session={}", ctx.viewer.input_session());
                 let _ = writeln!(out, "pipeline.last_error={:?}", ctx.viewer.last_error());
                 let _ = writeln!(out, "pipeline.grabbing={}", ctx.viewer.grabbing());
+                let _ = writeln!(out, "pipeline.cursor={}", ctx.viewer.cursor_note().unwrap_or_else(|| "none".into()));
+                let _ =
+                    writeln!(out, "pipeline.geometry={}", ctx.viewer.geometry_note().unwrap_or_else(|| "none".into()));
                 // Where the pointer map puts the middle of the video area (the wire's 0 to 65535), if it maps at all.
                 let layout = ctx.viewer.layout();
                 match layout.get() {

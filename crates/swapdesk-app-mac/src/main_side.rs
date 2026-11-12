@@ -237,6 +237,17 @@ impl MainSide {
             (Some(_), Some(shape)) => match swapdesk_render_mac::cursor_image(shape) {
                 Ok(image) => {
                     let b = self.backing;
+                    *self.shared.cursor_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!(
+                        "shape {}x{} hot {},{} backing {b} view {:.1}x{:.1} hot {:.1},{:.1}",
+                        shape.width,
+                        shape.height,
+                        shape.hot_x,
+                        shape.hot_y,
+                        f64::from(shape.width) / b,
+                        f64::from(shape.height) / b,
+                        f64::from(shape.hot_x) / b,
+                        f64::from(shape.hot_y) / b
+                    ));
                     set_view_cursor(
                         &view,
                         ViewCursor::Image {
@@ -287,6 +298,8 @@ impl MainSide {
             _ => None,
         };
         self.layout.set(layout);
+        *self.shared.geometry_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            self.renderer.geometry_note();
     }
 
     /// The display of the last picture drawn (0 before the first).

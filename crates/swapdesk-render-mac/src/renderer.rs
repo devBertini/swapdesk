@@ -537,6 +537,25 @@ impl MacRenderer {
         self.att.as_ref().map(|a| &*a.video)
     }
 
+    /// Development: where the layers really are, in points (the parent's bounds and whether it is flipped, the
+    /// container's and the video layer's frames, the layout's destination in pixels), for the harness to compare
+    /// with the pointer map.
+    pub fn geometry_note(&self) -> Option<String> {
+        let a = self.att.as_ref()?;
+        let r = |f: CGRect| format!("{:.1} {:.1} {:.1} {:.1}", f.origin.x, f.origin.y, f.size.width, f.size.height);
+        let dest = a.shown.as_ref().map(|s| s.layout.dest);
+        Some(format!(
+            "parent {} flipped {} container {} flipped {} video {} dest {:?} backing {}",
+            r(a.parent.bounds()),
+            a.parent.isGeometryFlipped(),
+            r(a.container.frame()),
+            a.container.isGeometryFlipped(),
+            r(a.video.frame()),
+            dest,
+            a.backing
+        ))
+    }
+
     /// Whether the cursor layer is currently shown.
     pub fn cursor_visible(&self) -> bool {
         self.att.as_ref().is_some_and(|a| a.cursor.visible)
