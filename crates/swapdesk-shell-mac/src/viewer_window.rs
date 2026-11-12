@@ -88,7 +88,26 @@ impl ViewerWindow {
     /// Puts the video view on the rectangle the last paint left for it, snapped to device pixels as the painter
     /// snaps the fills around it (no seam, no overlap). `Some(area)` when the area changed since the last call.
     pub fn place_video(&self) -> Option<VideoArea> {
-        let r = self.canvas.video_rect()?;
+        // The Arquivos view leaves no video rectangle: the video view hides (nothing is torn down, so going back is
+        // instant) and gives the keyboard to the canvas, so no key reaches the other computer meanwhile.
+        let Some(r) = self.canvas.video_rect() else {
+            if !self.video.isHidden() {
+                self.video.setHidden(true);
+                let video_has_keys = self.window.firstResponder().is_some_and(|f| {
+                    std::ptr::eq(
+                        objc2::rc::Retained::as_ptr(&f).cast::<()>(),
+                        objc2::rc::Retained::as_ptr(&self.video).cast::<()>(),
+                    )
+                });
+                if video_has_keys {
+                    self.window.makeFirstResponder(Some(&self.canvas));
+                }
+            }
+            return None;
+        };
+        if self.video.isHidden() {
+            self.video.setHidden(false);
+        }
         let scale = self.window.backingScaleFactor();
         let snap = |v: f32| (f64::from(v) * scale).round() / scale;
         let (left, top, right, bottom) = (snap(r.x), snap(r.y), snap(r.right()), snap(r.bottom()));

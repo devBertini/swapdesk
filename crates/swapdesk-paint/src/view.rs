@@ -54,6 +54,9 @@ pub struct Output {
     pub scroll_key: u8,
     /// The drawer's scrollable list, if any, in DIPs (for wheel routing).
     pub list_area: Option<Rect>,
+    /// A second scrolling list beside the first (the explorer's right pane) and its largest offset: the wheel over it
+    /// moves `Interaction::drawer_scroll` instead of `scroll`.
+    pub second_list: Option<(Rect, f32)>,
     /// Where the drawer's terminal grid goes, in DIPs, when the panel shows the terminal tab: the window draws the
     /// grid there after the frame (R-UI-11: its renderer is made the first time this is `Some`).
     pub terminal: Option<Rect>,

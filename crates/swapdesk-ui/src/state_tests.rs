@@ -2829,7 +2829,8 @@ fn an_unattended_session_offers_elevar_controle_on_the_bar_and_on_the_paused_car
     assert!(body.contains("Esta conta não está mais na tela") && !button);
     assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate), "nothing to elevate");
 
-    // A prompted session: no button, and a pause shows no card (the 1.0 pause).
+    // A prompted session: no button. Paused at a Mac's lock screen, the card says the Mac is locked and nobody can
+    // unlock it from here (D24), with nothing to press.
     let mut s = viewer();
     assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate));
     s.apply(UiEvent::Session {
@@ -2837,7 +2838,8 @@ fn an_unattended_session_offers_elevar_controle_on_the_bar_and_on_the_paused_car
         device_id: MAC.into(),
         state: SessionState::Paused { desktop: DesktopKind::Locked },
     });
-    assert!(s.paused_card().is_none());
+    let (body, button) = s.paused_card().expect("the Mac's lock card");
+    assert!(body.contains("bloqueado") && !button, "{body}");
     assert!(s.activate(ControlId::TbElevate).commands.is_empty());
 }
 

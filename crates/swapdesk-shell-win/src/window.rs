@@ -84,6 +84,10 @@ pub struct Window {
     announced: Cell<Option<(swapdesk_platform::Rect, u32)>>,
     /// Mouse buttons (bit per `PointerButton`) whose press went to the pipeline and has not been released.
     held: Cell<u8>,
+    /// The explorer's second list (its right pane) and its largest scroll offset, for the wheel.
+    second_list: Cell<Option<(Rect, f32)>>,
+    /// The last click on a control: which and when (ms), for a double click on the explorer's rows.
+    last_click: Cell<Option<(ControlId, u64)>>,
     edit_font: Cell<Option<windows::Win32::Graphics::Gdi::HFONT>>,
     edit_brush: Cell<Option<(bool, HBRUSH)>>,
     /// A modal effect (menu, file dialog) to run after the message that asked for it has finished.
@@ -162,6 +166,8 @@ impl Window {
             video: Cell::new(None),
             announced: Cell::new(None),
             held: Cell::new(0),
+            second_list: Cell::new(None),
+            last_click: Cell::new(None),
             edit_font: Cell::new(None),
             edit_brush: Cell::new(None),
             pending_effect: RefCell::new(None),
@@ -296,6 +302,27 @@ impl Window {
         if self.kind == WindowKind::Viewer { self.shared.host.as_ref() } else { None }
     }
 
+    /// Before a click's activation: the state learns Ctrl, Shift and whether it was the second click on the same control
+    /// within the system's double-click time (the explorer's rows select and open with them).
+    fn note_pointer_mods(&self, id: ControlId) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, VK_CONTROL, VK_SHIFT};
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let now = u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX);
+        // SAFETY: plain reads of the keyboard state and the system's double-click time.
+        let (ctrl, shift, double) = unsafe {
+            (GetKeyState(i32::from(VK_CONTROL.0)) < 0, GetKeyState(i32::from(VK_SHIFT.0)) < 0, GetDoubleClickTime())
+        };
+        let again =
+            self.last_click.get().is_some_and(|(last, at)| last == id && now.saturating_sub(at) <= u64::from(double));
+        // A third click starts a new pair.
+        self.last_click.set(if again { None } else { Some((id, now)) });
+        self.shared.state.borrow_mut().set_pointer_mods(swapdesk_ui::PointerMods {
+            toggle: ctrl,
+            extend: shift,
+            clicks: if again { 2 } else { 1 },
+        });
+    }
+
     /// The video rectangle in whole window pixels.
     fn video_px(&self) -> Option<swapdesk_platform::Rect> {
         self.video_area().map(|r| swapdesk_platform::Rect {
@@ -311,7 +338,19 @@ impl Window {
     /// gives the rectangle).
     fn sync_viewer_host(&self) {
         let Some(host) = self.host() else { return };
-        let (Some(area), dpi) = (self.video_px(), self.dpi.get()) else { return };
+        let Some(area) = self.video_px() else {
+            // The Arquivos view: no video rectangle. The picture moves out of the window (nothing is torn down, so
+            // going back is instant; the pointer and the keys have no video to reach meanwhile).
+            if let Some((last, dpi)) = self.announced.get()
+                && last.x > -50_000
+            {
+                let away = swapdesk_platform::Rect { x: -100_000, y: -100_000, ..last };
+                host.resized(away, self.scale());
+                self.announced.set(Some((away, dpi)));
+            }
+            return;
+        };
+        let dpi = self.dpi.get();
         let scale = self.scale();
         match self.announced.get() {
             None => {
@@ -940,6 +979,7 @@ impl Window {
         self.shared.send_commands(terminal_commands);
         self.scroll_max.set(out.scroll_max);
         self.list_area.set(out.list_area);
+        self.second_list.set(out.second_list);
         self.video.set(out.video);
         self.sync_viewer_host();
         // The wheel can leave the list scrolled past a shorter list; another scrolling content starts at its top.
@@ -1192,6 +1232,7 @@ impl Window {
                     && p == h
                     && !matches!(p, ControlId::Edit(_))
                 {
+                    self.note_pointer_mods(p);
                     self.shared.activate(p, self);
                 }
                 Some(LRESULT(0))
@@ -1222,6 +1263,20 @@ impl Window {
             }
             WM_MOUSEWHEEL => {
                 let delta = i32::from(hiword(wparam.0 as isize) as i16);
+                // Over the explorer's right pane the wheel scrolls that pane (the wheel carries screen coordinates).
+                if let Some((area, max)) = self.second_list.get() {
+                    let mut pt = windows::Win32::Foundation::POINT { x: get_x(lparam.0), y: get_y(lparam.0) };
+                    // SAFETY: our window; converts a point to its client coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) };
+                    let scale = self.scale();
+                    if area.contains(pt.x as f32 / scale, pt.y as f32 / scale) {
+                        let mut ix = self.ix.borrow_mut();
+                        ix.drawer_scroll = (ix.drawer_scroll - delta as f32 / 120.0 * 50.0).clamp(0.0, max);
+                        drop(ix);
+                        self.invalidate();
+                        return Some(LRESULT(0));
+                    }
+                }
                 let max = self.scroll_max.get();
                 if max > 0.0 {
                     let mut ix = self.ix.borrow_mut();

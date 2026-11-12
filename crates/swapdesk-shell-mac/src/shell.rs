@@ -280,6 +280,11 @@ pub(crate) fn send_from_canvas(commands: Vec<Command>) {
     with_shell(|s| s.send_commands(commands));
 }
 
+/// The modifiers and click count of the click about to be reported (the explorer's rows read them).
+pub(crate) fn set_pointer_mods(mods: swapdesk_ui::PointerMods) {
+    with_shell(|s| s.state.borrow_mut().set_pointer_mods(mods));
+}
+
 /// A click on control `id` of the canvas of window `kind`.
 pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
     with_shell(|s| s.activate_from(kind, id));

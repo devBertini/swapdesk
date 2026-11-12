@@ -237,7 +237,8 @@ fn a_real_picture_gets_the_whole_video_column_and_a_mock_keeps_the_designs_frame
     let mut viewers = 0;
     for sc in Scenario::ALL {
         let mut state = sc.prepared_state();
-        if !state.windows().contains(&WindowKind::Viewer) {
+        // The Arquivos view shows no picture (FILES-UI.md 2.1).
+        if !state.windows().contains(&WindowKind::Viewer) || state.explorer_open() {
             continue;
         }
         viewers += 1;
@@ -275,7 +276,8 @@ fn with_the_video_under_the_canvas_the_viewer_leaves_its_rectangle_unpainted_and
     let mut viewers = 0;
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
-        if !state.windows().contains(&WindowKind::Viewer) {
+        // The Arquivos view shows no picture (FILES-UI.md 2.1).
+        if !state.windows().contains(&WindowKind::Viewer) || state.explorer_open() {
             continue;
         }
         viewers += 1;

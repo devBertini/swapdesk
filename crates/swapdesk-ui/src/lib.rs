@@ -41,7 +41,10 @@ mod state_tests;
 mod update_tests;
 
 pub use api::*;
-pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRole};
+pub use interact::{
+    ControlId, ControlSpec, DialogTexts, FILES_PAGE, PaneView, PlaceView, PointerMods, Region, RowView, SORT_MODIFIED,
+    SORT_NAME, SORT_SIZE, SORT_TYPE, UiRole,
+};
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
     Activation, ButtonSide, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId,

@@ -252,6 +252,13 @@ define_class!(
                 && p == h
                 && !matches!(p, ControlId::Edit(_))
             {
+                // The explorer's rows select and open with Command, Shift and a double click.
+                let flags = event.modifierFlags();
+                crate::shell::set_pointer_mods(swapdesk_ui::PointerMods {
+                    toggle: flags.contains(NSEventModifierFlags::Command),
+                    extend: flags.contains(NSEventModifierFlags::Shift),
+                    clicks: u8::try_from(event.clickCount().clamp(1, 2)).unwrap_or(1),
+                });
                 crate::shell::activate_from(self.ivars().kind, p);
             }
         }
@@ -261,6 +268,20 @@ define_class!(
             let line = text::TERM.size * text::TERM.line;
             if self.ivars().kind == WindowKind::Viewer && crate::terminal::scroll(self, event, line) {
                 return;
+            }
+            // The explorer's right pane scrolls on its own (its offset is `drawer_scroll`).
+            let second = self.ivars().out.borrow().second_list;
+            if let Some((area, max)) = second {
+                let p = self.convertPoint_fromView(event.locationInWindow(), None);
+                if area.contains(p.x as f32, p.y as f32) {
+                    let step = if event.hasPreciseScrollingDeltas() { 1.0 } else { WHEEL_LINE };
+                    let delta = event.scrollingDeltaY() as f32 * step;
+                    let mut ix = self.ivars().ix.borrow_mut();
+                    ix.drawer_scroll = (ix.drawer_scroll - delta).clamp(0.0, max);
+                    drop(ix);
+                    self.setNeedsDisplay(true);
+                    return;
+                }
             }
             let max = self.ivars().out.borrow().scroll_max;
             if max <= 0.0 {
@@ -640,7 +661,8 @@ impl CanvasView {
         // The terminal grid takes the keys itself (they go to the other computer's shell, not as input events).
         let grid = self.ivars().ix.borrow().focus == Some(ControlId::TermGrid);
         match self.ivars().home.borrow().as_ref() {
-            Some(home) if !grid => w.makeFirstResponder(Some(home)),
+            // A hidden video view (the Arquivos view) takes no keys.
+            Some(home) if !grid && !home.isHidden() => w.makeFirstResponder(Some(home)),
             _ => w.makeFirstResponder(Some(self)),
         };
     }

@@ -1033,14 +1033,14 @@ impl UiState {
         let peer = self.device_by_id(&v.device_id).map(|d| d.name.clone()).unwrap_or_default();
         match desktop {
             DesktopKind::AccountAway => Some((self.tm(&Msg::new(MsgKey::PausedAwayBody).with(peer)), false)),
-            // D24: a Mac's lock screen cannot be seen or controlled from here, so there is nothing to elevate to.
+            _ if v.elevation == ElevationLevel::Available => {
+                Some((self.tm(&Msg::new(MsgKey::PausedElevateBody).with(peer)), true))
+            }
+            // D24: a Mac's lock screen cannot be seen or controlled from here, which offers no elevation either.
             DesktopKind::Locked | DesktopKind::LoginWindow
                 if self.device_by_id(&v.device_id).is_some_and(|d| d.os == Os::MacOs) =>
             {
                 Some((self.tm(&Msg::new(MsgKey::PausedMacLocked).with(peer)), false))
-            }
-            _ if v.elevation == ElevationLevel::Available => {
-                Some((self.tm(&Msg::new(MsgKey::PausedElevateBody).with(peer)), true))
             }
             _ => None,
         }

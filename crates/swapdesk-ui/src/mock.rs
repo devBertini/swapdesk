@@ -25,6 +25,29 @@ const HOUR: u64 = 60 * MIN;
 const DAY: u64 = 24 * HOUR;
 
 /// A moment `back_days` days before today at `hour:minute` (UTC, the scenario clock has no offset).
+/// This computer's Downloads in the mock (the explorer's left pane).
+fn local_entries() -> Vec<DirEntryView> {
+    vec![
+        DirEntryView { name: "Fotos da viagem".into(), is_dir: true, size: 0, mtime_ms: at(10, 12, 3) },
+        DirEntryView { name: "orçamento-2026.xlsx".into(), is_dir: false, size: 48_200, mtime_ms: at(9, 41, 1) },
+        DirEntryView { name: "relatório final.pdf".into(), is_dir: false, size: 2_400_000, mtime_ms: at(14, 5, 0) },
+        DirEntryView { name: "instalador.exe".into(), is_dir: false, size: 84_000_000, mtime_ms: at(8, 30, 6) },
+    ]
+}
+
+/// This computer's places and drives in the mock.
+fn local_places() -> Vec<LocalPlace> {
+    let p = |kind, label: &str, path: &str| LocalPlace { kind, label: label.into(), path: path.into() };
+    vec![
+        p(PlaceKind::Home, "", "C:\\Users\\ana"),
+        p(PlaceKind::Desktop, "", "C:\\Users\\ana\\Desktop"),
+        p(PlaceKind::Documents, "", "C:\\Users\\ana\\Documents"),
+        p(PlaceKind::Downloads, "", "C:\\Users\\ana\\Downloads"),
+        p(PlaceKind::Volume, "C:", "C:\\"),
+        p(PlaceKind::Volume, "E:", "E:\\"),
+    ]
+}
+
 fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
     NOW_MS - (15 * HOUR + 30 * MIN) + hour * HOUR + minute * MIN - back_days * DAY
 }
@@ -209,6 +232,8 @@ pub enum Scenario {
     VisualizadorEscuro,
     Terminal,
     Arquivos,
+    /// The files explorer (FILES-UI.md): both panes listed, two files selected on the right, transfers running.
+    Explorador,
     Chat,
     /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
     AreaTransferencia,
@@ -262,7 +287,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 55] = [
+    pub const ALL: [Scenario; 56] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -290,6 +315,7 @@ impl Scenario {
         Scenario::VisualizadorEscuro,
         Scenario::Terminal,
         Scenario::Arquivos,
+        Scenario::Explorador,
         Scenario::Chat,
         Scenario::AreaTransferencia,
         Scenario::Banner,
@@ -350,6 +376,7 @@ impl Scenario {
             Scenario::VisualizadorEscuro => "visualizador-escuro",
             Scenario::Terminal => "terminal",
             Scenario::Arquivos => "arquivos",
+            Scenario::Explorador => "explorador",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
@@ -415,6 +442,7 @@ impl Scenario {
             Scenario::VisualizadorEscuro => "5. Visualizador escuro",
             Scenario::Terminal => "8. Terminal e ações rápidas (shell only)",
             Scenario::Arquivos => "9. Arquivos",
+            Scenario::Explorador => "new: Arquivos, the explorer (FILES-UI.md slice 1)",
             Scenario::Chat => "10. Chat e copiar e colar",
             Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
@@ -701,6 +729,45 @@ impl Scenario {
                     ],
                     truncated: false,
                 })))),
+            ],
+            Scenario::Explorador => vec![
+                mac(),
+                Event(Self::viewer_session(18)),
+                Activate(ControlId::TbFiles),
+                Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+                Event(reply(Ok(Reply::LocalListing(LocalListing {
+                    path: "C:\\Users\\ana\\Downloads".into(),
+                    entries: local_entries(),
+                    truncated: false,
+                })))),
+                Event(reply(Ok(Reply::Listing(Listing {
+                    path: "Documents".into(),
+                    entries: vec![
+                        DirEntryView { name: "Contratos".into(), is_dir: true, size: 0, mtime_ms: at(11, 2, 9) },
+                        DirEntryView {
+                            name: "foto 2.heic".into(),
+                            is_dir: false,
+                            size: 3_100_000,
+                            mtime_ms: at(9, 0, 2),
+                        },
+                        DirEntryView {
+                            name: "foto 10.heic".into(),
+                            is_dir: false,
+                            size: 2_900_000,
+                            mtime_ms: at(9, 1, 2),
+                        },
+                        DirEntryView { name: "notas.txt".into(), is_dir: false, size: 1_200, mtime_ms: at(15, 20, 0) },
+                    ],
+                    truncated: false,
+                })))),
+                Activate(ControlId::ExpRow(true, 1)),
+                Event(UiEvent::Transfer {
+                    transfer_id: 1,
+                    session_id: 1,
+                    name: "foto 2.heic".into(),
+                    outgoing: false,
+                    state: TransferState::Running { done: 1_100_000, total: 3_100_000, bytes_per_s: 9_400_000 },
+                }),
             ],
             Scenario::AreaTransferencia => vec![
                 mac(),
@@ -1284,6 +1351,13 @@ impl World {
             Command::FilesList { .. } => {
                 Ok(Reply::Listing(Listing { path: "Mesa".into(), entries: Vec::new(), truncated: false }))
             }
+            // [UI] this computer's disk, made up: a capture never shows the real one.
+            Command::LocalList { path } => Ok(Reply::LocalListing(LocalListing {
+                path: path.unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\ana\\Downloads")),
+                entries: local_entries(),
+                truncated: false,
+            })),
+            Command::LocalPlaces => Ok(Reply::LocalPlaces(local_places())),
             Command::ChatSend { text, .. } => {
                 Ok(Reply::Chat(ChatView { msg_id: 100, mine: true, text, sent_at_ms: NOW_MS, read: false }))
             }
@@ -1355,6 +1429,7 @@ mod tests {
             (Scenario::VisualizadorEscuro, Screen::Devices, &[Main, Viewer]),
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
             (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
+            (Scenario::Explorador, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),

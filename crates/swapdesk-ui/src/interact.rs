@@ -1167,8 +1167,9 @@ impl UiState {
         for c in s.v.iter_mut().filter(|c| c.region == Region::Toolbar) {
             c.description = self.toolbar_hint(c.id).filter(|hint| *hint != c.label);
         }
-        if !self.session_bar_visible() {
-            // Full screen with the bar hidden: its controls are not on screen, so they are not reachable either.
+        if !self.session_bar_visible() || self.explorer_open() {
+            // Full screen with the bar hidden, or the Arquivos view (its command bar's "Tela" goes back): the bar's
+            // controls are not on screen, so they are not reachable either.
             s.v.retain(|c| c.region != Region::Toolbar);
         }
         if self.explorer_open() {

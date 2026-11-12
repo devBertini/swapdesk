@@ -726,10 +726,10 @@ impl UiState {
                 s.button(ControlId::ExpUp(there), self.name_of(MsgKey::ExplorerUp));
             }
             s.button(ControlId::ExpRefresh(there), self.name_of(MsgKey::ExplorerRefresh));
+            // The Type column shows only in a wide pane (FILES-UI.md 2.3); its header is reached there by the mouse.
             for (col, key) in [
                 (SORT_NAME, MsgKey::ExplorerColName),
                 (SORT_SIZE, MsgKey::ExplorerColSize),
-                (SORT_TYPE, MsgKey::ExplorerColType),
                 (SORT_MODIFIED, MsgKey::ExplorerColModified),
             ] {
                 s.button(ControlId::ExpSort(there, col), self.name_of(key));

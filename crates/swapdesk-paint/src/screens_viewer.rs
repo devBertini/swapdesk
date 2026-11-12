@@ -54,6 +54,15 @@ pub fn paint_viewer(f: &mut Frame) {
 
     // The body: the video column and, when open, the drawer (448 px, border-left).
     let body = Rect::new(0.0, bar_h, f.w, f.h - bar_h);
+    // The Arquivos view takes the whole body: no picture (the shells hide it while `video` is none), no drawer.
+    if f.st.explorer_open() {
+        crate::screens_explorer::explorer(f, body);
+        if let Some(kind) = f.st.dialog(WindowKind::Viewer) {
+            f.out.widgets.clear();
+            swap_confirm(f, &kind);
+        }
+        return;
+    }
     let drawer = f.st.drawer();
     let video_col = Rect::new(0.0, body.y, if drawer.is_some() { body.w - layout::DRAWER_W } else { body.w }, body.h);
     let pad = if fullscreen {
