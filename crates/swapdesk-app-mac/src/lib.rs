@@ -52,6 +52,8 @@ pub mod slot;
 pub mod update;
 
 #[cfg(all(test, target_os = "macos"))]
+mod host_tests;
+#[cfg(all(test, target_os = "macos"))]
 mod input_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod media_tests;

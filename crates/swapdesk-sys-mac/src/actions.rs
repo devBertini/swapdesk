@@ -8,7 +8,15 @@
 //!   display (it locks only when the password is required immediately), and the login framework's lock call is private.
 //!   Sending the keystroke needs the Accessibility grant that hosting needs anyway; without it `osascript` fails and
 //!   the failure is reported.
-//! * Sleep: `/usr/bin/pmset sleepnow`.
+//!   Checked on the build Mac (macOS 27.2, 12/11/2026): `/System/Library/CoreServices/Menu Extras/User.menu` does not
+//!   exist, so the old `CGSession -suspend` is gone, and `man pmset` lists `displaysleepnow` as "causes display to go
+//!   to sleep immediately" only. GUESS (no Apple page read, for the main session to check): that Control-Command-Q
+//!   is still the "Lock Screen" shortcut on macOS 27 (support.apple.com, "Mac keyboard shortcuts"), and that
+//!   `osascript` started by this app is covered by the app's own Accessibility grant (TCC attributes a child process
+//!   to the app responsible for it) instead of needing a grant of its own. The first real lock on a hosted Mac is a
+//!   hand check; no test here sends it.
+//! * Sleep: `/usr/bin/pmset sleepnow` (`man pmset`: "causes an immediate system sleep"). GUESS: it needs no
+//!   administrator rights for the logged-in user; the man page does not say.
 //! * Restart: AppleScript `tell application "System Events" to restart`, which asks the open applications to close and
 //!   lets the user cancel, as macOS does. `osascript` waits for that, so it runs detached.
 //! * Task monitor: `/usr/bin/open -a "Activity Monitor"`.

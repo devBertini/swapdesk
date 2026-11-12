@@ -649,6 +649,41 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_reports_its_user_and_the_size_it_was_opened_with() {
+        let mut pty =
+            MacPtySpawner::current_user().spawn_pty(&PtyRequest { cols: 97, rows: 31, admin: false }).unwrap();
+        let rx = pump(pty.reader().unwrap());
+        let mut writer = pty.writer().unwrap();
+        // The echoed command line holds `$(whoami)`, never the expanded text, so a match is the shell's own output.
+        writer
+            .write_all(
+                b"echo who=$(whoami) size=$(stty size)
+",
+            )
+            .unwrap();
+        let mut text = Vec::new();
+        let want = format!("who={} size=31 97", user_name());
+        assert!(read_until(&rx, &mut text, &want), "{}", String::from_utf8_lossy(&text));
+    }
+
+    #[test]
+    fn a_resize_reaches_the_shell_as_sigwinch() {
+        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let rx = pump(pty.reader().unwrap());
+        let mut writer = pty.writer().unwrap();
+        writer
+            .write_all(
+                b"trap 'echo winch=$(stty size)' WINCH; echo armed=$((40+2))
+",
+            )
+            .unwrap();
+        let mut text = Vec::new();
+        assert!(read_until(&rx, &mut text, "armed=42"), "{}", String::from_utf8_lossy(&text));
+        pty.resize(101, 33).unwrap();
+        assert!(read_until(&rx, &mut text, "winch=33 101"), "{}", String::from_utf8_lossy(&text));
+    }
+
+    #[test]
     fn kill_ends_the_shell_and_what_it_started() {
         let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
         let rx = pump(pty.reader().unwrap());
