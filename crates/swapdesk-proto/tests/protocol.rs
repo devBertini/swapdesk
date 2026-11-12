@@ -813,11 +813,8 @@ fn every_capability_combination_picks_the_expected_codec() {
     for viewer in [&[][..], &[Codec::H264], &[Codec::Hevc], &[Codec::Hevc, Codec::H264]] {
         for minor in [0u16, 1, 7] {
             for host_hw in [false, true] {
-                let want = if host_hw && minor >= 1 && viewer.contains(&Codec::Hevc) {
-                    Codec::Hevc
-                } else {
-                    Codec::H264
-                };
+                let want =
+                    if host_hw && minor >= 1 && viewer.contains(&Codec::Hevc) { Codec::Hevc } else { Codec::H264 };
                 assert_eq!(caps_with(viewer).pick_codec(minor, host_hw), want, "{viewer:?} minor {minor} hw {host_hw}");
             }
         }

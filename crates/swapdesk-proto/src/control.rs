@@ -110,8 +110,8 @@ impl Capabilities {
     /// its hardware decodes it) and `host_hevc_hardware` says the host has a hardware HEVC encoder; H.264
     /// otherwise, which every build of every minor decodes.
     pub fn pick_codec(&self, viewer_minor: u16, host_hevc_hardware: bool) -> Codec {
-        let viewer_hevc = viewer_minor >= Codec::Hevc.min_minor()
-            && self.video_decode.iter().any(|c| c.codec == Codec::Hevc);
+        let viewer_hevc =
+            viewer_minor >= Codec::Hevc.min_minor() && self.video_decode.iter().any(|c| c.codec == Codec::Hevc);
         if viewer_hevc && host_hevc_hardware { Codec::Hevc } else { Codec::H264 }
     }
 }
