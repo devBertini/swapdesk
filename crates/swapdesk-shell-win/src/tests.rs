@@ -467,22 +467,18 @@ fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
 }
 
 #[test]
-fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
+fn the_banner_offers_swap_toward_either_os() {
     use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
     use swapdesk_ui::mock::MAC;
     let widget =
         |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
     let size = design_size(WindowKind::Banner);
-    // A Windows peer: chat, swap and disconnect, in that order, 14 apart.
+    // A Windows peer, then a Mac peer (1.1, F-XSWAP-01): chat, swap and disconnect, in that order, the same places.
     let state = Scenario::Banner.prepared_state();
     let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
-    let (chat, swap, disc) = (
-        widget(&r, ControlId::BannerChat).unwrap(),
-        widget(&r, ControlId::BannerSwap).expect("swap toward the same OS"),
-        widget(&r, ControlId::BannerDisconnect).unwrap(),
-    );
-    assert!(chat.right() < swap.x && swap.right() < disc.x);
-    // A Mac peer: no swap, and chat takes its place next to disconnect.
+    let ids = [ControlId::BannerChat, ControlId::BannerSwap, ControlId::BannerDisconnect];
+    let win: Vec<_> = ids.iter().map(|id| widget(&r, *id).expect("drawn")).collect();
+    assert!(win[0].right() < win[1].x && win[1].right() < win[2].x);
     let mut state = Scenario::Banner.prepared_state();
     state.apply(UiEvent::Session {
         session_id: 2,
@@ -495,44 +491,21 @@ fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
         },
     });
     let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
-    assert!(widget(&r, ControlId::BannerSwap).is_none(), "no swap toward another OS");
-    let (chat2, disc2) = (widget(&r, ControlId::BannerChat).unwrap(), widget(&r, ControlId::BannerDisconnect).unwrap());
-    assert_eq!(disc2.x, disc.x, "disconnect keeps its place");
-    assert!((disc2.x - chat2.right() - 14.0).abs() < 0.6, "no gap where swap was: {} {}", chat2.right(), disc2.x);
+    let mac: Vec<_> = ids.iter().map(|id| widget(&r, *id).expect("drawn toward a Mac too")).collect();
+    assert_eq!(mac[2].x, win[2].x, "disconnect keeps its place");
 }
 
 #[test]
-fn the_viewer_toolbar_has_no_swap_toward_another_os() {
+fn the_viewer_toolbar_offers_swap_toward_a_mac() {
     let widget =
         |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
     let size = design_size(WindowKind::Viewer);
-    // The Mac peer of the Visualizador scenario: no swap, the separator moves to "Desconectar".
+    // The Mac peer of the Visualizador scenario (1.1, F-XSWAP-01): swap between the chat button and "Desconectar".
     let state = Scenario::Visualizador.prepared_state();
-    let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
-    assert!(widget(&r, ControlId::TbSwap).is_none());
-    let (chat, disc) = (widget(&r, ControlId::TbChat).unwrap(), widget(&r, ControlId::TbDisconnect).unwrap());
-    assert!(
-        disc.x - chat.right() > 12.0 && disc.x - chat.right() < 24.0,
-        "one separator, no gap: {}",
-        disc.x - chat.right()
-    );
-    // A Windows peer keeps the swap button, between the chat button and "Desconectar".
-    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
-    let mut state = Scenario::Visualizador.prepared_state();
-    state.apply(UiEvent::Session {
-        session_id: 1,
-        device_id: swapdesk_ui::mock::DESKTOP.into(),
-        state: SessionState::Active {
-            since_ms: 0,
-            role: Role::Viewer,
-            granted: Permissions::NONE.with(Permission::View),
-            elevation: Default::default(),
-        },
-    });
     let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
     let (chat, swap, disc) = (
         widget(&r, ControlId::TbChat).unwrap(),
-        widget(&r, ControlId::TbSwap).expect("swap toward the same OS"),
+        widget(&r, ControlId::TbSwap).expect("swap toward a Mac"),
         widget(&r, ControlId::TbDisconnect).unwrap(),
     );
     assert!(chat.right() < swap.x && swap.right() < disc.x);

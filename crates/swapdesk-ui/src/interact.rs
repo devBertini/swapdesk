@@ -1278,11 +1278,10 @@ impl UiState {
     /// Whether "Inverter" is offered in session `s`: swap between Windows and macOS is not in 1.0, so only when the
     /// peer runs this machine's OS. When either OS is not known yet the control stays (the service refuses a swap
     /// toward another OS on its own).
-    pub fn swap_offered(&self, s: &SessionView) -> bool {
-        match (self.this.as_ref(), self.device_by_id(&s.device_id)) {
-            (Some(this), Some(peer)) => this.os == peer.os,
-            _ => true,
-        }
+    /// Since 1.1 a swap is offered toward any peer, Windows or Mac (F-XSWAP-01); a 1.0 peer across systems declines
+    /// it on its own side and the decline card says so.
+    pub fn swap_offered(&self, _s: &SessionView) -> bool {
+        true
     }
 
     /// "MacBook do escritório controla este computador há 12 min".

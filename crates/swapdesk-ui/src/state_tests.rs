@@ -2116,7 +2116,7 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
     let mut s = Scenario::Banner.prepared_state();
     let has = |s: &UiState, w, id| s.controls(w).iter().any(|c| c.id == id);
     assert!(has(&s, WindowKind::Banner, ControlId::BannerSwap));
-    // The same session with a Mac: no button, and an activation that still arrives does nothing.
+    // The same session with a Mac: offered too since 1.1 (F-XSWAP-01).
     s.apply(UiEvent::Session {
         session_id: 2,
         device_id: MAC.into(),
@@ -2127,16 +2127,14 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
             elevation: Default::default(),
         },
     });
-    assert!(!has(&s, WindowKind::Banner, ControlId::BannerSwap));
+    assert!(has(&s, WindowKind::Banner, ControlId::BannerSwap));
     assert!(
         has(&s, WindowKind::Banner, ControlId::BannerDisconnect) && has(&s, WindowKind::Banner, ControlId::BannerChat)
     );
-    let a = s.activate(ControlId::BannerSwap);
-    assert!(a.commands.is_empty() && s.swap().is_none());
 
-    // The viewer toolbar: Mac peer none, Windows peer present.
+    // The viewer toolbar: a Mac peer and a Windows peer both offer the swap (1.1, F-XSWAP-01).
     let v = viewer();
-    assert!(!has(&v, WindowKind::Viewer, ControlId::TbSwap) && has(&v, WindowKind::Viewer, ControlId::TbDisconnect));
+    assert!(has(&v, WindowKind::Viewer, ControlId::TbSwap) && has(&v, WindowKind::Viewer, ControlId::TbDisconnect));
     let mut v = viewer();
     v.apply(UiEvent::Session {
         session_id: 1,
