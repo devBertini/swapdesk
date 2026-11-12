@@ -46,6 +46,13 @@ pub enum Cmd {
     VideoKeys {
         text: String,
     },
+    /// The viewer window enters or leaves the system's full screen (the green button).
+    VideoFullscreen,
+    /// The Mac's real pointer moves to a fraction of the video through the window server (CGEventPost).
+    VideoRealMove {
+        fx: f64,
+        fy: f64,
+    },
     Shot {
         window: String,
         path: PathBuf,
@@ -129,7 +136,11 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
             Some("keys") => {
                 Ok(Cmd::VideoKeys { text: unescape(rest_after(line, 2).ok_or("video keys needs a text")?) })
             }
-            other => Err(format!("unknown video action {other:?} (click, move, keys)")),
+            Some("fullscreen") => Ok(Cmd::VideoFullscreen),
+            Some("realmove") => {
+                Ok(Cmd::VideoRealMove { fx: fraction(words.next(), "fx")?, fy: fraction(words.next(), "fy")? })
+            }
+            other => Err(format!("unknown video action {other:?} (click, move, keys, fullscreen)")),
         },
         "panel" => {
             let window = words.next().filter(|w| !w.is_empty()).ok_or("panel needs a window and a control")?;
@@ -274,6 +285,10 @@ mod mac {
             Cmd::VideoClick { fx, fy } => swapdesk_shell_mac::dev_video("click", *fx, *fy, "").map(|()| String::new()),
             Cmd::VideoMove { fx, fy } => swapdesk_shell_mac::dev_video("move", *fx, *fy, "").map(|()| String::new()),
             Cmd::VideoKeys { text } => swapdesk_shell_mac::dev_video("keys", 0.0, 0.0, text).map(|()| String::new()),
+            Cmd::VideoFullscreen => swapdesk_shell_mac::dev_video("fullscreen", 0.0, 0.0, "").map(|()| String::new()),
+            Cmd::VideoRealMove { fx, fy } => {
+                swapdesk_shell_mac::dev_video("realmove", *fx, *fy, "").map(|()| String::new())
+            }
             Cmd::Shot { window, path } => swapdesk_shell_mac::dev_shot(window, path).map(|()| String::new()),
             Cmd::Panel { window, control } => swapdesk_shell_mac::dev_panel(window, control).map(|t| format!("{t}\n")),
             // The real calls to the system, for the proof that turns the item off and on and puts it back as it

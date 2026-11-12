@@ -140,6 +140,30 @@ pub fn dev_video(action: &str, fx: f64, fy: f64, text: &str) -> Result<(), Strin
     with(|s| {
         let viewer = s.viewer.borrow();
         let v = viewer.as_ref().ok_or("there is no viewer window now")?;
+        // The system's own full screen (the green button), as a person enters and leaves it.
+        if action == "fullscreen" {
+            v.window.toggleFullScreen(None);
+            return Ok(());
+        }
+        // A real move of the Mac's pointer through the window server (it moves the person's cursor): the event comes
+        // back to the window as a trackpad's would, with the coordinates macOS gives it, not ones made here.
+        if action == "realmove" {
+            use objc2_core_graphics::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+            let b = v.video.bounds();
+            let local = NSPoint::new(b.size.width * fx, b.size.height * fy);
+            let in_window = v.video.convertPoint_toView(local, None);
+            let on_screen = v.window.convertPointToScreen(in_window);
+            let mtm = objc2_foundation::MainThreadMarker::new().ok_or("not the main thread")?;
+            let main_h = objc2_app_kit::NSScreen::screens(mtm)
+                .firstObject()
+                .map(|s| s.frame().size.height)
+                .ok_or("no screen")?;
+            let at = objc2_core_foundation::CGPoint { x: on_screen.x, y: main_h - on_screen.y };
+            let ev = CGEvent::new_mouse_event(None, CGEventType::MouseMoved, at, CGMouseButton::Left)
+                .ok_or("CGEventCreateMouseEvent returned NULL")?;
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+            return Ok(());
+        }
         let is_video_first = || {
             v.window
                 .firstResponder()
