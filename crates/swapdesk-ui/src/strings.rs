@@ -556,6 +556,9 @@ strings! {
     UpdCancel => "Cancelar", "Cancel";
     // The files explorer (docs/FILES-UI.md section 9; texts for the owner's approval in R1)
     PausedMacLocked => "O {0} está bloqueado e ninguém consegue desbloqueá-lo pela rede. A sessão continua quando o Mac for desbloqueado.", "{0} is locked, and nobody can unlock it remotely. The session continues when the Mac is unlocked.";
+    DisplayNumbered => "Tela {0}", "Display {0}";
+    DisplayOption => "{0}, {1}", "{0}, {1}";
+    DisplayOptionPrimary => "{0} (principal), {1}", "{0} (main), {1}";
     ExplorerTitle => "Arquivos", "Files";
     ExplorerBackToScreen => "Tela", "Screen";
     ExplorerThisComputer => "Este computador", "This computer";

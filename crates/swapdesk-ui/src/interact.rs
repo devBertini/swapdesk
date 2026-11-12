@@ -798,6 +798,7 @@ impl UiState {
             }
             SelectId::FullscreenMonitor => return self.fullscreen_monitor_options(),
             SelectId::SpecialKeys => return self.special_keys().into_iter().map(|(_, name)| (name, false)).collect(),
+            SelectId::HostDisplay => return self.host_display_options(),
             _ => {}
         }
         let Some(set) = &self.settings else { return Vec::new() };
@@ -821,8 +822,30 @@ impl UiState {
                 (self.name_of(MsgKey::KeyboardPhysical), set.keyboard_mode == KeyboardMode::Physical),
                 (self.name_of(MsgKey::KeyboardText), set.keyboard_mode == KeyboardMode::Text),
             ],
-            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys => Vec::new(),
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys | SelectId::HostDisplay => {
+                Vec::new()
+            }
         }
+    }
+
+    /// The other computer's displays for the screen button's list: "Tela 1 (principal), 2560 × 1600" and so on, the
+    /// one shown checked.
+    fn host_display_options(&self) -> Vec<(String, bool)> {
+        let Some(s) = self.viewer_session() else { return Vec::new() };
+        s.displays
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let name = if d.name.trim().is_empty() {
+                    self.tm(&Msg::new(MsgKey::DisplayNumbered).with((i + 1).to_string()))
+                } else {
+                    d.name.clone()
+                };
+                let key = if d.primary { MsgKey::DisplayOptionPrimary } else { MsgKey::DisplayOption };
+                let line = self.tm(&Msg::new(key).with(name).with(format!("{} × {}", d.width, d.height)));
+                (line, s.display.map_or(d.primary, |shown| shown == d.id))
+            })
+            .collect()
     }
 
     /// The text shown in a select's field.
@@ -1583,7 +1606,11 @@ impl UiState {
             }
             ControlId::TbScreen => {
                 if let Some(session_id) = self.session_id() {
+                    // The list is asked again each time (a display may have come or gone); what is known opens now.
                     a.commands.push(Command::ListDisplays { session_id });
+                    if self.viewer_session().is_some_and(|s| s.displays.len() > 1) {
+                        a.effect = Some(Effect::Menu(SelectId::HostDisplay));
+                    }
                 }
                 a.changed = Changed::VIEWER;
             }
@@ -1931,6 +1958,10 @@ impl UiState {
                 let Some(&keys) = SpecialKeys::ALL.get(index) else { return Activation::default() };
                 return self.send_keys(keys);
             }
+            SelectId::HostDisplay => {
+                let id = self.viewer_session().and_then(|s| s.displays.get(index)).map(|d| d.id);
+                return id.map_or_else(Activation::default, |id| self.choose_display(id));
+            }
             _ => {}
         }
         let mut a = Activation { changed: Changed::ALL, ..Activation::default() };
@@ -1941,7 +1972,7 @@ impl UiState {
             SelectId::Keyboard => {
                 s.keyboard_mode = [KeyboardMode::Auto, KeyboardMode::Physical, KeyboardMode::Text][index.min(2)]
             }
-            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys => {}
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys | SelectId::HostDisplay => {}
         });
         if id == SelectId::Language {
             self.lang = self.settings.as_ref().map_or(self.lang, |s| s.language);

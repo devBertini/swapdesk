@@ -118,6 +118,8 @@ pub enum SelectId {
     /// The keys the toolbar's keys button sends to the host (Ctrl+Alt+Del, Alt+Tab or Cmd+Tab, ...): a list of
     /// actions, none of them checked.
     SpecialKeys,
+    /// The other computer's displays, the one shown checked (F-VIEW-02): the toolbar's screen button opens it.
+    HostDisplay,
 }
 
 impl SelectId {
@@ -125,6 +127,7 @@ impl SelectId {
     pub fn anchor(self) -> ControlId {
         match self {
             SelectId::SpecialKeys => ControlId::TbKeys,
+            SelectId::HostDisplay => ControlId::TbScreen,
             other => ControlId::Select(other),
         }
     }

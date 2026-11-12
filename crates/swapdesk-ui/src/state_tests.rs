@@ -2864,3 +2864,32 @@ fn a_standard_accounts_confirmation_asks_for_an_administrators_name_and_password
     assert!(body(false).contains("nome e a senha de um administrador"), "{}", body(false));
     assert!(!body(true).contains("nome e a senha"), "{}", body(true));
 }
+
+/// F-VIEW-02: the toolbar's screen button lists the other computer's displays, the shown one checked, and a pick
+/// asks the host to switch.
+#[test]
+fn the_screen_button_lists_the_hosts_displays_and_a_pick_switches() {
+    let mut s = viewer();
+    let d = |id: u16, name: &str, primary: bool| DisplayView {
+        id,
+        name: name.into(),
+        width: 2560,
+        height: 1440,
+        scale_milli: 1500,
+        primary,
+    };
+    let a = s.activate(ControlId::TbScreen);
+    assert!(matches!(a.commands[0], Command::ListDisplays { session_id: 1 }));
+    assert_eq!(a.effect, None, "nothing known yet: the list is asked");
+    s.track(Ticket(77), &Command::ListDisplays { session_id: 1 });
+    s.apply(UiEvent::Reply { ticket: Ticket(77), result: Ok(Reply::Displays(vec![d(1, "", true), d(2, "LG", false)])) });
+    let a = s.activate(ControlId::TbScreen);
+    assert_eq!(a.effect, Some(Effect::Menu(SelectId::HostDisplay)));
+    assert_eq!(SelectId::HostDisplay.anchor(), ControlId::TbScreen);
+    let opts = s.select_options(SelectId::HostDisplay);
+    assert_eq!(opts[0], ("Tela 1 (principal), 2560 × 1440".to_string(), true));
+    assert_eq!(opts[1], ("LG, 2560 × 1440".to_string(), false));
+    let a = s.choose(SelectId::HostDisplay, 1);
+    assert_eq!(a.commands, vec![Command::SelectDisplay { session_id: 1, display_id: 2 }]);
+    assert!(s.select_options(SelectId::HostDisplay)[1].1, "the pick is checked");
+}
