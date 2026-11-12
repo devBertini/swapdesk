@@ -1,4 +1,9 @@
-//! `VideoDecoder` over a VideoToolbox `VTDecompressionSession`.
+//! `VideoDecoder` over a VideoToolbox `VTDecompressionSession` (H.264, and HEVC when `header.codec == Codec::Hevc`).
+//!
+//! HEVC (F-VIEW-07, stage B11): the format description comes from the VPS, SPS and PPS of the key frame
+//! (`CMVideoFormatDescriptionCreateFromHEVCParameterSets`, `nal_unit_header_length` 4, no extensions), the samples are the
+//! other NAL units behind 4-byte lengths, as for H.264. A stream that changes codec drops the session and the remembered
+//! parameter sets and waits for a key frame.
 //!
 //! Low-latency mode, no reordering: one Annex B access unit in, at most one picture out. The session decodes
 //! synchronously (no decode flags, so the output callback has run when `VTDecompressionSessionDecodeFrame` returns) and
@@ -31,7 +36,8 @@ use std::time::Instant;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
-    CMVideoFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets, kCMBlockBufferAssureMemoryNowFlag,
+    CMVideoFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
@@ -43,7 +49,7 @@ use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 use swapdesk_platform::{DecodedFrame, DisplayId, ErrorKind, GpuSurface, MonoMicros, Pixels, Result, VideoDecoder};
-use swapdesk_proto::VideoHeader;
+use swapdesk_proto::{Codec, VideoHeader};
 
 use crate::annexb::{self, AVCC_LENGTH_SIZE, ParamSets};
 use crate::sys::{err, status_err};
@@ -157,42 +163,52 @@ fn destination_attributes(output: DecoderOutput) -> CFRetained<CFDictionary> {
     unsafe { CFRetained::cast_unchecked::<CFDictionary>(dict) }
 }
 
-fn make_format(params: &ParamSets) -> Result<CFRetained<CMVideoFormatDescription>> {
+fn make_format(params: &ParamSets, codec: Codec) -> Result<CFRetained<CMVideoFormatDescription>> {
+    let op = match codec {
+        Codec::H264 => "CMVideoFormatDescriptionCreateFromH264ParameterSets",
+        Codec::Hevc => "CMVideoFormatDescriptionCreateFromHEVCParameterSets",
+    };
     let sets: Vec<&[u8]> = params.all().collect();
     let mut pointers: Vec<NonNull<u8>> = sets.iter().filter_map(|s| NonNull::new(s.as_ptr().cast_mut())).collect();
     let sizes: Vec<usize> = sets.iter().map(|s| s.len()).collect();
     if pointers.len() != sets.len() || sets.is_empty() {
-        return Err(err(
-            ErrorKind::InvalidInput,
-            "CMVideoFormatDescriptionCreateFromH264ParameterSets",
-            "empty parameter set",
-        ));
+        return Err(err(ErrorKind::InvalidInput, op, "empty parameter set"));
     }
     let mut out: *const CMFormatDescription = ptr::null();
     // SAFETY: `pointers` and `sizes` hold `sets.len()` valid entries that outlive the call; the framework copies the
-    // bytes. `out` is a valid pointer. On success the result carries one reference (the Create rule).
+    // bytes. `out` is a valid pointer. On success the result carries one reference (the Create rule). The HEVC call takes
+    // the same arguments plus `extensions`, none here.
     let status = unsafe {
-        CMVideoFormatDescriptionCreateFromH264ParameterSets(
-            None,
-            sets.len(),
-            NonNull::new_unchecked(pointers.as_mut_ptr()),
-            NonNull::new_unchecked(sizes.as_ptr().cast_mut()),
-            AVCC_LENGTH_SIZE as i32,
-            NonNull::from(&mut out),
-        )
+        match codec {
+            Codec::H264 => CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                None,
+                sets.len(),
+                NonNull::new_unchecked(pointers.as_mut_ptr()),
+                NonNull::new_unchecked(sizes.as_ptr().cast_mut()),
+                AVCC_LENGTH_SIZE as i32,
+                NonNull::from(&mut out),
+            ),
+            Codec::Hevc => CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                None,
+                sets.len(),
+                NonNull::new_unchecked(pointers.as_mut_ptr()),
+                NonNull::new_unchecked(sizes.as_ptr().cast_mut()),
+                AVCC_LENGTH_SIZE as i32,
+                None,
+                NonNull::from(&mut out),
+            ),
+        }
     };
     if status != 0 {
-        return Err(status_err("CMVideoFormatDescriptionCreateFromH264ParameterSets", status));
+        return Err(status_err(op, status));
     }
-    let ptr = NonNull::new(out.cast_mut()).ok_or_else(|| {
-        err(ErrorKind::Os, "CMVideoFormatDescriptionCreateFromH264ParameterSets", "no format description")
-    })?;
+    let ptr = NonNull::new(out.cast_mut()).ok_or_else(|| err(ErrorKind::Os, op, "no format description"))?;
     // SAFETY: Create rule, see above.
     Ok(unsafe { CFRetained::from_raw(ptr) })
 }
 
-fn make_session(params: &ParamSets, output: DecoderOutput) -> Result<Session> {
-    let format = make_format(params)?;
+fn make_session(params: &ParamSets, codec: Codec, output: DecoderOutput) -> Result<Session> {
+    let format = make_format(params, codec)?;
     let slot = Box::new(Slot(Mutex::new(None)));
     let record = VTDecompressionOutputCallbackRecord {
         decompressionOutputCallback: Some(on_frame),
@@ -312,6 +328,8 @@ pub struct VtH264Decoder {
     options: DecoderOptions,
     /// The last SPS/PPS seen; a keyframe without parameter sets decodes with these.
     params: Option<ParamSets>,
+    /// The codec of the stream so far (the last `header.codec`).
+    codec: Codec,
     session: Option<Session>,
     waiting_keyframe: bool,
     last_id: Option<u32>,
@@ -332,6 +350,7 @@ impl VtH264Decoder {
         Self {
             options,
             params: None,
+            codec: Codec::H264,
             session: None,
             waiting_keyframe: true,
             last_id: None,
@@ -367,14 +386,14 @@ impl VtH264Decoder {
             let params = self.params.as_ref().ok_or_else(|| {
                 err(ErrorKind::InvalidInput, "decode", "no SPS/PPS seen yet: the first keyframe must carry them")
             })?;
-            self.session = Some(make_session(params, self.options.output)?);
+            self.session = Some(make_session(params, self.codec, self.options.output)?);
             self.sessions += 1;
         }
         Ok(())
     }
 
     fn decode_unit(&mut self, header: &VideoHeader, annex_b: &[u8]) -> Result<Option<DecodedFrame>> {
-        let avcc = annexb::to_avcc(annex_b);
+        let avcc = annexb::to_length_prefixed(self.codec, annex_b);
         if avcc.is_empty() {
             return Ok(None);
         }
@@ -424,6 +443,13 @@ impl VtH264Decoder {
 
 impl VideoDecoder for VtH264Decoder {
     fn decode(&mut self, header: &VideoHeader, annex_b: &[u8]) -> Result<Option<DecodedFrame>> {
+        if header.codec != self.codec {
+            // The host switched codec: nothing of the old stream applies. Only a key frame of the new one starts it.
+            self.codec = header.codec;
+            self.params = None;
+            self.session = None;
+            self.reset();
+        }
         if !header.keyframe {
             // A hole in the frame ids: the picture would be wrong from here to the next keyframe.
             if let Some(last) = self.last_id
@@ -440,7 +466,7 @@ impl VideoDecoder for VtH264Decoder {
             }
         }
         // New parameter sets (first stream, size or configuration change) need a new session; the old one goes first.
-        if let Some(sets) = annexb::parameter_sets(annex_b)
+        if let Some(sets) = annexb::parameter_sets_for(self.codec, annex_b)
             && self.params.as_ref() != Some(&sets)
         {
             self.params = Some(sets);
@@ -448,7 +474,7 @@ impl VideoDecoder for VtH264Decoder {
         }
         // Parameter sets, SEI and delimiters alone are no picture: remembered above, nothing to decode, and the stream
         // is no closer to a keyframe.
-        if !annexb::has_picture(annex_b) {
+        if !annexb::has_picture_for(self.codec, annex_b) {
             return Ok(None);
         }
         self.ensure_session()?;

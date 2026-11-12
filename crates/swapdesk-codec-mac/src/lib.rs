@@ -1,4 +1,4 @@
-//! H.264 `VideoDecoder` and `VideoEncoder` for macOS (contract C3, `docs/CONTRACTS.md`) over VideoToolbox ([`encoder`]
+//! H.264 and HEVC (stage B11) `VideoDecoder` and `VideoEncoder` for macOS (contract C3, `docs/CONTRACTS.md`) over VideoToolbox ([`encoder`]
 //! holds the encoder and its pure preset/level/rate rules, which build on every host). Annex B access units come in (the wire format of PROTOCOL.md 7.1), pictures go out as `CVPixelBuffer`s
 //! (NV12, IOSurface-backed) for `swapdesk-render-mac`, or as BGRA bytes for tests.
 //!
@@ -21,4 +21,4 @@ mod sys;
 #[cfg(target_os = "macos")]
 pub use decoder::{DecoderOptions, DecoderOutput, VtH264Decoder};
 #[cfg(target_os = "macos")]
-pub use encoder::{DEFAULT_WAIT, OutputWait, VtH264Encoder};
+pub use encoder::{DEFAULT_WAIT, OutputWait, VtH264Encoder, hevc_support};

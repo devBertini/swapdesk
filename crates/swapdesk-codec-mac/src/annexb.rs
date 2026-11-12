@@ -8,6 +8,8 @@
 
 use std::ops::Range;
 
+use swapdesk_proto::Codec;
+
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;
 pub const NAL_SEI: u8 = 6;
@@ -15,6 +17,24 @@ pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 pub const NAL_AUD: u8 = 9;
 pub const NAL_FILLER: u8 = 12;
+
+/// HEVC NAL unit types (ITU-T H.265 Table 7-1; the type is bits 1 to 6 of the first header byte): VCL types 0 to 31
+/// (0 to 21 used), IRAP pictures 16 to 23 (IDR are 19 and 20), VPS 32, SPS 33, PPS 34, AUD 35, filler 38.
+pub const HEVC_VPS: u8 = 32;
+pub const HEVC_SPS: u8 = 33;
+pub const HEVC_PPS: u8 = 34;
+pub const HEVC_AUD: u8 = 35;
+pub const HEVC_FILLER: u8 = 38;
+
+/// The HEVC NAL unit type of a header byte.
+pub const fn hevc_type(header: u8) -> u8 {
+    (header >> 1) & 0x3F
+}
+
+/// True when `nal` (a NAL unit without start code) is a VPS, SPS or PPS.
+pub fn is_hevc_parameter_set(nal: &[u8]) -> bool {
+    nal.first().is_some_and(|b| matches!(hevc_type(*b), HEVC_VPS..=HEVC_PPS))
+}
 
 /// Bytes of the length field of the AVCC samples this crate builds (and `nal_unit_header_length` of the format
 /// description).
@@ -74,14 +94,16 @@ pub fn is_idr(data: &[u8]) -> bool {
 /// The SPS and PPS NAL units of an access unit, each without start code, in stream order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParamSets {
+    /// HEVC only (empty for H.264).
+    pub vps: Vec<Vec<u8>>,
     pub sps: Vec<Vec<u8>>,
     pub pps: Vec<Vec<u8>>,
 }
 
 impl ParamSets {
-    /// The sets in the order the format description wants: every SPS, then every PPS.
+    /// The sets in the order the format description wants: every VPS (HEVC), then every SPS, then every PPS.
     pub fn all(&self) -> impl Iterator<Item = &[u8]> {
-        self.sps.iter().chain(self.pps.iter()).map(Vec::as_slice)
+        self.vps.iter().chain(self.sps.iter()).chain(self.pps.iter()).map(Vec::as_slice)
     }
 }
 
@@ -96,6 +118,63 @@ pub fn parameter_sets(data: &[u8]) -> Option<ParamSets> {
         }
     }
     (!sets.sps.is_empty() && !sets.pps.is_empty()).then_some(sets)
+}
+
+/// The parameter sets of an HEVC access unit; `None` unless it holds at least one VPS, one SPS and one PPS.
+pub fn parameter_sets_hevc(data: &[u8]) -> Option<ParamSets> {
+    let mut sets = ParamSets::default();
+    for nal in scan(data) {
+        let body = nal.bytes(data);
+        match hevc_type(data[nal.payload]) {
+            HEVC_VPS => sets.vps.push(body.to_vec()),
+            HEVC_SPS => sets.sps.push(body.to_vec()),
+            HEVC_PPS => sets.pps.push(body.to_vec()),
+            _ => {}
+        }
+    }
+    (!sets.vps.is_empty() && !sets.sps.is_empty() && !sets.pps.is_empty()).then_some(sets)
+}
+
+/// The parameter sets of `data` under `codec`.
+pub fn parameter_sets_for(codec: Codec, data: &[u8]) -> Option<ParamSets> {
+    match codec {
+        Codec::H264 => parameter_sets(data),
+        Codec::Hevc => parameter_sets_hevc(data),
+    }
+}
+
+/// True when the access unit starts a new coded video sequence for decoding: an IDR slice (H.264 type 5; HEVC 19 or 20).
+pub fn is_idr_for(codec: Codec, data: &[u8]) -> bool {
+    scan(data).iter().any(|n| match codec {
+        Codec::H264 => n.kind == NAL_IDR,
+        Codec::Hevc => matches!(hevc_type(data[n.payload]), 19 | 20),
+    })
+}
+
+/// True when the access unit holds a coded slice under `codec`.
+pub fn has_picture_for(codec: Codec, data: &[u8]) -> bool {
+    scan(data).iter().any(|n| match codec {
+        Codec::H264 => (NAL_SLICE..=NAL_IDR).contains(&n.kind),
+        Codec::Hevc => hevc_type(data[n.payload]) <= 21,
+    })
+}
+
+/// Annex B to length-prefixed samples under `codec`: as [`to_avcc`], dropping the parameter sets, access unit
+/// delimiters and filler data of that codec (HEVC: types 32 to 35 and 38; the SEI units stay).
+pub fn to_length_prefixed(codec: Codec, data: &[u8]) -> Vec<u8> {
+    if codec == Codec::H264 {
+        return to_avcc(data);
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for nal in scan(data) {
+        if matches!(hevc_type(data[nal.payload]), HEVC_VPS..=HEVC_AUD | HEVC_FILLER) {
+            continue;
+        }
+        let body = nal.bytes(data);
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(body);
+    }
+    out
 }
 
 /// Annex B to AVCC: every NAL unit except SPS, PPS, access unit delimiters and filler data, each behind a 4-byte
@@ -319,6 +398,43 @@ mod tests {
         assert_eq!(avcc_to_annexb(&[], &[], 4).expect("empty is fine"), Vec::<u8>::new());
         // A zero-length NAL unit is skipped.
         assert_eq!(avcc_to_annexb(&[], &[0, 0, 0, 0, 0, 0, 0, 1, 7], 4).expect("valid"), [0, 0, 0, 1, 7]);
+    }
+
+    // HEVC: VPS (type 32: header 0x40 0x01), SPS (33: 0x42 0x01), PPS (34: 0x44 0x01), IDR_W_RADL (19: 0x26 0x01),
+    // TRAIL_R (1: 0x02 0x01), AUD (35: 0x46 0x01), prefix SEI (39: 0x4E 0x01).
+    const VPS_H: [u8; 4] = [0x40, 0x01, 0x0C, 0x01];
+    const SPS_H: [u8; 4] = [0x42, 0x01, 0x01, 0x01];
+    const PPS_H: [u8; 3] = [0x44, 0x01, 0xC1];
+    const IDR_H: [u8; 4] = [0x26, 0x01, 0xAF, 0x08];
+    const TRAIL_H: [u8; 3] = [0x02, 0x01, 0xD0];
+
+    #[test]
+    fn hevc_parameter_sets_need_vps_sps_and_pps() {
+        let both = join(&[(SC4, &VPS_H), (SC4, &SPS_H), (SC4, &PPS_H), (SC4, &IDR_H)]);
+        let sets = parameter_sets_for(Codec::Hevc, &both).expect("sets");
+        assert_eq!((sets.vps.len(), sets.sps.len(), sets.pps.len()), (1, 1, 1));
+        assert_eq!(sets.all().collect::<Vec<_>>(), [&VPS_H[..], &SPS_H[..], &PPS_H[..]]);
+        assert!(parameter_sets_for(Codec::Hevc, &join(&[(SC4, &SPS_H), (SC4, &PPS_H)])).is_none());
+        // The same bytes are no H.264 parameter sets.
+        assert!(parameter_sets_for(Codec::H264, &both).is_none());
+        assert!(is_hevc_parameter_set(&VPS_H) && is_hevc_parameter_set(&SPS_H) && is_hevc_parameter_set(&PPS_H));
+        assert!(!is_hevc_parameter_set(&IDR_H) && !is_hevc_parameter_set(&[]));
+    }
+
+    #[test]
+    fn hevc_pictures_and_idr() {
+        assert!(is_idr_for(Codec::Hevc, &join(&[(SC4, &VPS_H), (SC4, &IDR_H)])));
+        assert!(!is_idr_for(Codec::Hevc, &join(&[(SC4, &TRAIL_H)])));
+        assert!(has_picture_for(Codec::Hevc, &join(&[(SC4, &TRAIL_H)])));
+        assert!(!has_picture_for(Codec::Hevc, &join(&[(SC4, &VPS_H), (SC4, &SPS_H), (SC4, &PPS_H)])));
+        assert!(is_idr_for(Codec::H264, &join(&[(SC4, &IDR)])));
+    }
+
+    #[test]
+    fn hevc_length_prefixed_drops_parameter_sets_and_delimiters() {
+        let data = join(&[(SC4, &[0x46, 0x01, 0x50]), (SC4, &VPS_H), (SC4, &SPS_H), (SC4, &PPS_H), (SC3, &IDR_H[..3])]);
+        assert_eq!(to_length_prefixed(Codec::Hevc, &data), [0, 0, 0, 3, 0x26, 0x01, 0xAF]);
+        assert_eq!(to_length_prefixed(Codec::H264, &join(&[(SC4, &P)])), to_avcc(&join(&[(SC4, &P)])));
     }
 
     #[test]
