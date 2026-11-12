@@ -318,7 +318,23 @@ fn transfers(f: &mut Frame, r: Rect) {
         };
         let l = p.label(&line, text::CAPTION);
         p.draw(&l, r.x + 16.0, y + 8.0 + name.h + 4.0, pal.soft);
-        let track = Rect::new(r.right() - 16.0 - 240.0, y + 20.0, 240.0, 6.0);
+        // Buttons at the right (FILES-UI.md 5: "Cancelar" on the left, "Retomar" on the right), the bar before them.
+        let mut bx = r.right() - 16.0;
+        if matches!(t.state, TransferState::Paused { .. }) {
+            let label = f.t(MsgKey::TransferResume);
+            let w = f.button_width(&label, Kind::Primary);
+            bx -= w;
+            f.button(ControlId::TransferResume(t.id), Rect::new(bx, y + 9.0, w, 40.0), Kind::Primary, &label, false);
+            bx -= 8.0;
+        }
+        if !matches!(t.state, TransferState::Done) {
+            let label = f.t(MsgKey::Cancel);
+            let w = f.button_width(&label, Kind::Default);
+            bx -= w;
+            f.button(ControlId::TransferCancel(t.id), Rect::new(bx, y + 9.0, w, 40.0), Kind::Default, &label, false);
+            bx -= 16.0;
+        }
+        let track = Rect::new(bx - 240.0, y + 26.0, 240.0, 6.0);
         p.fill_rrect(track, 3.0, pal.line);
         p.fill_rrect(Rect::new(track.x, track.y, track.w * fraction.clamp(0.0, 1.0), 6.0), 3.0, pal.link);
     }

@@ -179,3 +179,13 @@ fn types_come_from_one_table() {
     assert_eq!(type_of(Language::En, "noext", false), "File");
     assert_eq!(type_of(Language::PtBr, "x", true), "Pasta");
 }
+
+#[test]
+fn sizes_read_in_the_unit_that_fits() {
+    use crate::api::Language;
+    assert_eq!(human_size(Language::PtBr, 1_200), "1 KB");
+    assert_eq!(human_size(Language::PtBr, 48_200), "48 KB");
+    assert_eq!(human_size(Language::PtBr, 2_400_000), "2,4 MB");
+    assert_eq!(human_size(Language::En, 2_400_000), "2.4 MB");
+    assert_eq!(human_size(Language::PtBr, 512), "512 B");
+}

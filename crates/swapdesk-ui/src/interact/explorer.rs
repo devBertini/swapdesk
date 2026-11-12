@@ -243,6 +243,23 @@ fn parent(folder: &str) -> Option<String> {
     (!folder.is_empty()).then(|| folder.rsplit_once('/').map(|(up, _)| up.to_string()).unwrap_or_default())
 }
 
+/// A size as the Size column shows it: B, KB, MB or GB (1000 based, as the file managers of both systems show), with
+/// the language's decimal mark.
+pub fn human_size(lang: crate::api::Language, bytes: u64) -> String {
+    const K: f64 = 1000.0;
+    let b = bytes as f64;
+    let s = if b >= K * K * K {
+        format!("{:.1} GB", b / (K * K * K))
+    } else if b >= K * K {
+        format!("{:.1} MB", b / (K * K))
+    } else if b >= K {
+        format!("{:.0} KB", b / K)
+    } else {
+        format!("{bytes} B")
+    };
+    if lang == crate::api::Language::PtBr { s.replace('.', ",") } else { s }
+}
+
 fn idx(there: bool) -> usize {
     usize::from(there)
 }
@@ -604,7 +621,7 @@ impl UiState {
             .map(|e| RowView {
                 name: e.name.clone(),
                 is_dir: e.is_dir,
-                size: if e.is_dir { String::new() } else { crate::format::size_mb(lang, e.size) },
+                size: if e.is_dir { String::new() } else { human_size(lang, e.size) },
                 kind: type_of(lang, &e.name, e.is_dir),
                 modified: if e.mtime_ms == 0 {
                     String::new()
@@ -640,9 +657,7 @@ impl UiState {
                 .filter(|e| pane.selected.contains(&e.name) && !e.is_dir)
                 .map(|e| e.size)
                 .sum();
-            self.tm(&Msg::new(MsgKey::ExplorerSelected)
-                .with(picked.len().to_string())
-                .with(crate::format::size_mb(lang, bytes)))
+            self.tm(&Msg::new(MsgKey::ExplorerSelected).with(picked.len().to_string()).with(human_size(lang, bytes)))
         };
         let truncated = if there {
             self.listing.as_ref().filter(|l| l.truncated).map(|l| l.entries.len())
@@ -740,6 +755,19 @@ impl UiState {
         }
         if !self.viewer_transfers().is_empty() {
             s.button(ControlId::ExpTransfers, self.name_of(MsgKey::ExplorerTransfers));
+        }
+        if self.explorer.transfers_open {
+            for t in self.viewer_transfers().into_iter().rev() {
+                if !matches!(t.state, crate::api::TransferState::Done) {
+                    s.button(ControlId::TransferCancel(t.id), format!("{}: {}", self.name_of(MsgKey::Cancel), t.name));
+                }
+                if matches!(t.state, crate::api::TransferState::Paused { .. }) {
+                    s.button(
+                        ControlId::TransferResume(t.id),
+                        format!("{}: {}", self.name_of(MsgKey::TransferResume), t.name),
+                    );
+                }
+            }
         }
     }
 }
