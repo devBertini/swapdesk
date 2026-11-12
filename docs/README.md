@@ -7,6 +7,7 @@ Project overview and status: the [README](../README.md). The Portuguese (pt-BR) 
 | File | What it is |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Processes, privilege boundaries, local IPC, wire summary, media pipelines. |
+| [PARITY.md](PARITY.md) | Every control of the viewer, its side panel and Settings, per direction between Windows and macOS: proven, built or missing. |
 | [THREAT-MODEL.md](THREAT-MODEL.md) | Assets, attackers, mitigations as designed, what is out of scope and what is not yet verified. |
 | [SPEC.md](SPEC.md) | Version 1 flows and criteria, budgets, threats table, risks, what is deferred. |
 | [PROTOCOL.md](PROTOCOL.md) | The wire protocol (QUIC, ALPN, streams, pairing, message formats). |
