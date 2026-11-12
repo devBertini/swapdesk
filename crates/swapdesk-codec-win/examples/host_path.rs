@@ -121,6 +121,7 @@ mod run {
                         kbps: START_KBPS,
                         preset,
                         adapter: display.adapter,
+                        codec: swapdesk_platform::Codec::H264,
                     };
                     let row = format!(
                         "| {backend:?} | {preset:?} | {} |",
@@ -310,8 +311,15 @@ mod run {
         }
         for (label, options, on) in runs {
             let mut enc = H264Encoder::new(options);
-            let cfg =
-                EncoderConfig { width: w, height: h, fps: 60, kbps: START_KBPS, preset: Preset::Auto, adapter: on };
+            let cfg = EncoderConfig {
+                width: w,
+                height: h,
+                fps: 60,
+                kbps: START_KBPS,
+                preset: Preset::Auto,
+                adapter: on,
+                codec: swapdesk_platform::Codec::H264,
+            };
             let info = match enc.configure(&cfg) {
                 Ok(i) => i,
                 Err(e) => {

@@ -172,8 +172,16 @@ fn refinement_raises_psnr_by_six_db_and_the_rate_control_comes_back() {
             let who = format!("NVENC {preset:?}");
             let uploader = TextureUploader::new(nv.id).expect("uploader");
             let mut enc = NvencEncoder::new(NvencOptions { device: Some(uploader.device()), ..Default::default() });
-            enc.configure(&EncoderConfig { width: W, height: H, fps: 60, kbps: KBPS, preset, adapter: nv.id })
-                .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+            enc.configure(&EncoderConfig {
+                width: W,
+                height: H,
+                fps: 60,
+                kbps: KBPS,
+                preset,
+                adapter: nv.id,
+                codec: swapdesk_platform::Codec::H264,
+            })
+            .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
             refined += usize::from(scenario(&mut enc, nv.id, &who));
         }
     } else {

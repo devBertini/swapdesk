@@ -66,6 +66,7 @@ fn main() {
             kbps: 8_000,
             preset: Preset::Auto,
             adapter: nv.id,
+            codec: swapdesk_platform::Codec::H264,
         })
         .expect("NVENC");
         write("nvenc", &mut enc);
@@ -81,6 +82,7 @@ fn main() {
             kbps: 8_000,
             preset: Preset::Auto,
             adapter: hw.id,
+            codec: swapdesk_platform::Codec::H264,
         }) {
             Ok(_) => write(name, &mut enc),
             Err(e) => println!("{name}: {e}"),

@@ -39,7 +39,15 @@ fn encoder() -> VtH264Encoder {
 }
 
 fn config(width: u32, height: u32, kbps: u32) -> EncoderConfig {
-    EncoderConfig { width, height, fps: 30, kbps, preset: Preset::Auto, adapter: AdapterId(0) }
+    EncoderConfig {
+        width,
+        height,
+        fps: 30,
+        kbps,
+        preset: Preset::Auto,
+        adapter: AdapterId(0),
+        codec: swapdesk_platform::Codec::H264,
+    }
 }
 
 /// A gray moving gradient (R = G = B, so the colour matrix does not matter for the luma comparison).

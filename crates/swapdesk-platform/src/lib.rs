@@ -3,6 +3,7 @@
 
 use core::time::Duration;
 use std::sync::mpsc::SyncSender;
+pub use swapdesk_proto::Codec;
 use swapdesk_proto::{Action, Desktop, H264Profile, InputEvent, Preset, VideoHeader};
 
 // ---------- errors ----------
@@ -182,6 +183,9 @@ pub struct EncoderConfig {
     pub kbps: u32,
     pub preset: Preset,
     pub adapter: AdapterId,
+    /// The codec to encode in (F-VIEW-07): H.264, or HEVC when the session picked it
+    /// (`Capabilities::pick_codec`); an encoder that cannot do the codec answers `ErrorKind::Unsupported`.
+    pub codec: Codec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

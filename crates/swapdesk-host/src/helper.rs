@@ -502,6 +502,7 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                         kbps,
                         preset: p.preset,
                         adapter,
+                        codec: swapdesk_platform::Codec::H264,
                     };
                     let enc = match encoder.as_mut() {
                         Some(e) => e,

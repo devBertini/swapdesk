@@ -65,6 +65,7 @@ fn encode_with(count: u32, keyframes_at: &[u32]) -> Vec<EncodedFrame> {
         kbps: 4000,
         preset: Preset::Auto,
         adapter: AdapterId(0),
+        codec: swapdesk_platform::Codec::H264,
     })
     .expect("configure");
     let mut out = Vec::new();

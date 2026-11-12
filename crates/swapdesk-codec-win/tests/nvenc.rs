@@ -89,7 +89,7 @@ macro_rules! need_nvidia {
 
 fn config(w: u32, adapter: AdapterId, preset: Preset, fps: u16, kbps: u32) -> EncoderConfig {
     let (width, height) = size(w);
-    EncoderConfig { width, height, fps, kbps, preset, adapter }
+    EncoderConfig { width, height, fps, kbps, preset, adapter, codec: swapdesk_platform::Codec::H264 }
 }
 
 fn nvenc_on(uploader: &TextureUploader) -> NvencEncoder {
@@ -501,8 +501,16 @@ fn thirty_seconds_of_real_capture_of_the_nvidia_display_encode_at_60_fps() {
         mf: EncoderOptions { device: Some(device), ..Default::default() },
         ..Default::default()
     });
-    enc.configure(&EncoderConfig { width: w, height: h, fps: 60, kbps: 30_000, preset: Preset::Auto, adapter: nv.id })
-        .expect("configure on the capture device");
+    enc.configure(&EncoderConfig {
+        width: w,
+        height: h,
+        fps: 60,
+        kbps: 30_000,
+        preset: Preset::Auto,
+        adapter: nv.id,
+        codec: swapdesk_platform::Codec::H264,
+    })
+    .expect("configure on the capture device");
     assert_eq!(enc.backend(), Some(ChosenBackend::Nvenc), "{:?}", enc.fallback_reason());
 
     let mut current = first;

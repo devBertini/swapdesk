@@ -89,7 +89,7 @@ pub fn software_candidate() -> Candidate {
 }
 
 pub fn config(c: &Candidate, preset: Preset, fps: u16, kbps: u32) -> EncoderConfig {
-    EncoderConfig { width: W, height: H, fps, kbps, preset, adapter: c.adapter }
+    EncoderConfig { width: W, height: H, fps, kbps, preset, adapter: c.adapter, codec: swapdesk_platform::Codec::H264 }
 }
 
 pub fn encoder(c: &Candidate) -> MfH264Encoder {

@@ -44,8 +44,15 @@ fn real_capture_of_a_display_off_the_nvidia_adapter_encodes_through_media_founda
         mf: EncoderOptions { device: Some(gf.device().device.clone()), ..Default::default() },
         ..Default::default()
     });
-    let config =
-        EncoderConfig { width: w, height: h, fps: 30, kbps: 20_000, preset: Preset::Auto, adapter: display.adapter };
+    let config = EncoderConfig {
+        width: w,
+        height: h,
+        fps: 30,
+        kbps: 20_000,
+        preset: Preset::Auto,
+        adapter: display.adapter,
+        codec: swapdesk_platform::Codec::H264,
+    };
     let info = enc.configure(&config).expect("configure on the capture device");
     assert_eq!(enc.backend(), Some(ChosenBackend::MediaFoundation), "{info:?}");
 
