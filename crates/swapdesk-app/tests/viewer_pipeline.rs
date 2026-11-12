@@ -45,6 +45,11 @@ impl ViewerOut for Recorder {
 
 /// `count` encoded frames of the synthetic screen (a moving gradient with a frame number), the first a keyframe.
 fn encode(count: u32) -> Vec<EncodedFrame> {
+    encode_with(count, &[])
+}
+
+/// As [`encode`], with a keyframe asked for at each input frame of `keyframes_at`.
+fn encode_with(count: u32, keyframes_at: &[u32]) -> Vec<EncodedFrame> {
     let mut screen = SyntheticScreen::new(SIZE.0, SIZE.1, FPS).with_clock(Arc::new(FakeClock::new(MonoMicros(0))));
     screen.open(DisplayId(0), CaptureConfig { max_fps: FPS }).expect("open the synthetic screen");
     let uploader = TextureUploader::new(AdapterId(0)).expect("uploader");
@@ -63,11 +68,11 @@ fn encode(count: u32) -> Vec<EncodedFrame> {
     })
     .expect("configure");
     let mut out = Vec::new();
-    for _ in 0..count {
+    for n in 0..count {
         let frame = screen.next_frame(Duration::from_secs(5)).expect("frame").expect("a frame");
         assert!(matches!(frame.pixels, Pixels::Cpu { .. }));
         let gpu = uploader.upload(&frame).expect("upload");
-        out.extend(enc.encode(&gpu, false).expect("encode"));
+        out.extend(enc.encode(&gpu, keyframes_at.contains(&n)).expect("encode"));
     }
     out.extend(enc.flush().expect("flush"));
     out
@@ -287,4 +292,68 @@ fn the_report_goes_out_once_a_second_with_a_decode_time() {
     assert!(report.frames_presented > 0, "{report:?}");
     assert!(report.decode_us_p50 > 0, "{report:?}");
     assert!(report.present_lag_us_p50 > 0, "{report:?}");
+}
+
+/// F-VIEW-08: the graphics device the viewer draws on is removed in the middle of a stream (a driver reset, the
+/// adapter gone). The pipeline sees the failed present, finds that the shell's device itself is gone, stops drawing and
+/// tells the shell, which makes a new device and hands a new surface; the renderer and the decoder are built on it, the
+/// host is asked for a keyframe, and the picture comes back. Nothing ends the session: no disconnect is asked for.
+#[test]
+fn a_lost_graphics_device_is_built_again_and_the_picture_returns_without_ending_the_session() {
+    let frames = encode_with(60, &[40]);
+    let again =
+        frames.iter().enumerate().skip(30).find(|(_, e)| e.keyframe).map(|(n, _)| n).expect("a second keyframe");
+    let r = rig();
+    r.pipeline.observe_event(&control_granted());
+    first_picture(&r, &frames);
+    for (n, e) in frames.iter().enumerate().take(20).skip(1) {
+        r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    wait_until("the picture of frame 19", Duration::from_secs(10), || {
+        r.presented.lock().unwrap().last().is_some_and(|e| e.frame_id == 19)
+    });
+    assert!(!r.pipeline.device_lost(), "nothing is lost yet");
+
+    // The driver removes the shell's device.
+    let swapdesk_platform::NativeSurface::Windows { d3d11_device, .. } = r._surface.native() else {
+        panic!("a Windows surface")
+    };
+    swapdesk_render_win::simulate_device_removed(d3d11_device);
+    for (n, e) in frames.iter().enumerate().take(again).skip(20) {
+        r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The pipeline stops drawing on the dead surface and tells the shell, once.
+    wait_until("the device loss to reach the shell", Duration::from_secs(10), || r.pipeline.device_lost());
+    assert!(!r.pipeline.device_lost(), "the shell is told once");
+    assert!(!r.pipeline.stats().attached, "nothing stays built on the dead device");
+    let shown_before = r.presented.lock().unwrap().last().map(|e| e.frame_id).expect("pictures were shown");
+    assert!(shown_before < 20, "no picture is presented on the removed device (last {shown_before})");
+
+    // The shell makes a new device and surface and hands it over, as `Shared::recover_device` does.
+    let fresh = HeadlessSurface::new().expect("a new device and surface");
+    r.pipeline.closed();
+    r.pipeline.opened(fresh.native(), Rect { x: 0, y: 0, width: SIZE.0, height: SIZE.1 }, 1.0);
+    wait_until("the renderer to attach on the new device", Duration::from_secs(10), || r.pipeline.stats().attached);
+    wait_until("the keyframe request", Duration::from_secs(5), || !r.recorder.keyframes.lock().unwrap().is_empty());
+    assert_eq!(r.recorder.keyframes.lock().unwrap()[0].0, SESSION);
+
+    // The host answers with a keyframe and the stream goes on.
+    for (n, e) in frames.iter().enumerate().skip(again) {
+        r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    let last = u32::try_from(frames.len() - 1).unwrap();
+    wait_until("the last frame on the new device", Duration::from_secs(10), || {
+        r.presented.lock().unwrap().last().is_some_and(|e| e.frame_id == last)
+    });
+    let ids: Vec<u32> = r.presented.lock().unwrap().iter().map(|e| e.frame_id).collect();
+    assert!(ids.windows(2).all(|w| w[1] > w[0]), "frame ids must increase: {ids:?}");
+    assert!(ids.contains(&(again as u32)), "the picture came back with the keyframe: {ids:?}");
+    assert!(!r.pipeline.device_lost());
+    assert!(r.pipeline.stats().attached);
+    // The pipeline detaches before the surface it attached to goes away.
+    r.pipeline.closed();
+    drop(fresh);
 }

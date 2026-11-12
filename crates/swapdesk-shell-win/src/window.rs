@@ -231,7 +231,7 @@ impl Window {
 
     /// The raw pointers a renderer attaches its video visual with (stage 15).
     pub fn native_surface(&self) -> Option<swapdesk_platform::NativeSurface> {
-        self.surface.borrow().as_ref().map(|s| s.native(&self.shared.gfx))
+        self.surface.borrow().as_ref().map(|s| s.native(&self.shared.gfx()))
     }
 
     /// The video rectangle in window pixels, as drawn (viewer only).
@@ -501,6 +501,17 @@ impl Window {
         }
         let text = String::from_utf16(&units).ok().filter(|t| !t.is_empty() && !t.chars().any(char::is_control));
         (text, dead)
+    }
+
+    /// Lets go of the drawing surface: the viewer's pipeline detaches from it first, and the next paint makes a new
+    /// one (and announces it to the pipeline again).
+    pub fn drop_surface(&self) {
+        if self.announced.take().is_some()
+            && let Some(host) = self.host()
+        {
+            host.closed();
+        }
+        *self.surface.borrow_mut() = None;
     }
 
     pub fn invalidate(&self) {
@@ -867,7 +878,7 @@ impl Window {
             return Ok(());
         }
         let (w, h) = self.client_size();
-        let s = Surface::new(&self.shared.gfx, self.hwnd(), w, h, self.kind == WindowKind::Viewer)?;
+        let s = Surface::new(&self.shared.gfx(), self.hwnd(), w, h, self.kind == WindowKind::Viewer)?;
         *self.surface.borrow_mut() = Some(s);
         Ok(())
     }
@@ -879,7 +890,7 @@ impl Window {
         if self.ensure_surface().is_err() {
             return;
         }
-        let gfx = &self.shared.gfx;
+        let gfx = self.shared.gfx();
         // The text formats follow the interface language (their DirectWrite locale); a change drops the cached ones.
         gfx.fonts.set_language(self.shared.state.borrow().language());
         let dpi = self.dpi.get() as f32;
@@ -914,8 +925,14 @@ impl Window {
                 && e.code() == D2DERR_RECREATE_TARGET
             {
                 drop(surface_ref);
-                *self.surface.borrow_mut() = None;
-                self.invalidate();
+                if gfx.device_removed() {
+                    // The device itself is gone: every window and the viewer move to a new one (they repaint when
+                    // it is made; while it cannot be, the next wake or message tries again, never a busy loop).
+                    let _ = self.shared.recover_device();
+                } else {
+                    *self.surface.borrow_mut() = None;
+                    self.invalidate();
+                }
                 return;
             }
         }
@@ -1002,7 +1019,7 @@ impl Window {
             WM_DPICHANGED => {
                 self.dpi.set(u32::from(loword(wparam.0 as isize)));
                 // The cached text layouts were made for the old scale.
-                self.shared.gfx.fonts.clear_layouts();
+                self.shared.gfx().fonts.clear_layouts();
                 if let Some(f) = self.edit_font.take() {
                     // SAFETY: the font is ours and no control uses it after the next WM_SETFONT.
                     unsafe {

@@ -91,6 +91,12 @@ pub trait ViewerHost: Send + Sync {
     fn take_shortcuts(&self) -> Vec<swapdesk_ui::ViewerAction> {
         Vec::new()
     }
+    /// True once each time the shell's graphics device was found gone (F-VIEW-08): the shell builds its device and its
+    /// windows' surfaces again and hands the new surface with `closed` then `opened`. The pipeline wakes the UI thread
+    /// when it turns true.
+    fn device_lost(&self) -> bool {
+        false
+    }
 }
 
 /// A composition tree with a D3D11 device and a parent visual, and no window: what the renderer needs from a shell,

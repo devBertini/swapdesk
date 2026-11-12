@@ -229,6 +229,7 @@ impl ViewerPipeline {
 
     /// Who to wake when a viewer shortcut was recognised on the hook thread (the shell's waker).
     pub fn set_waker(&self, waker: Arc<dyn UiWaker>) {
+        *lock(&self.shared.waker) = Some(Arc::clone(&waker));
         *lock(&self.shortcuts.waker) = Some(waker);
     }
 
@@ -561,6 +562,11 @@ impl ViewerHost for ViewerPipeline {
             self.shortcuts.push(action);
         }
         true
+    }
+
+    fn device_lost(&self) -> bool {
+        // Taken once: the shell builds one new device for it; a new surface that fails again sets it again.
+        self.shared.device_lost.swap(false, Ordering::SeqCst)
     }
 
     fn take_shortcuts(&self) -> Vec<ViewerAction> {

@@ -85,6 +85,11 @@ pub struct Shared {
     /// The last renderer or decoder failure, for the trace (never content).
     pub last_error: Mutex<Option<String>>,
     pub audio_underruns: Arc<std::sync::atomic::AtomicU32>,
+    /// The shell's graphics device is gone (F-VIEW-08): nothing can be drawn on the surface the window gave, so the
+    /// shell must build its device again and hand a new surface (`ViewerHost::opened`). Cleared by that attach.
+    pub device_lost: AtomicBool,
+    /// Who is woken when `device_lost` is set (the shell's waker, the same as the shortcuts').
+    pub waker: Mutex<Option<Arc<dyn swapdesk_ui::UiWaker>>>,
 }
 
 impl Shared {
@@ -211,6 +216,7 @@ impl Worker {
     fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Attach { surface, area, scale } => {
+                self.shared.device_lost.store(false, Ordering::SeqCst);
                 self.scale = scale;
                 self.surface = Some((surface, area));
                 self.attach();
@@ -283,6 +289,23 @@ impl Worker {
 
     fn detach(&mut self) {
         self.detach_renderer();
+    }
+
+    /// The graphics device was lost (F-VIEW-08): a picture failed to present or decode on it. The renderer and the
+    /// decoder are built again on the same surface, which heals a fault the shell's device survived, and the next
+    /// keyframe brings the picture back. When the shell's device itself is gone, nothing more is drawn until the
+    /// shell hands a new surface: it is told through `device_lost` and woken. The session goes on meanwhile.
+    fn device_gone(&mut self) {
+        self.owed = None;
+        self.attach();
+        if self.renderer.as_ref().is_none_or(WinRenderer::device_lost) {
+            self.detach_renderer();
+            self.shared.device_lost.store(true, Ordering::SeqCst);
+            let waker = self.shared.waker.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
     }
 
     fn publish_map(&self) {
@@ -391,8 +414,7 @@ impl Worker {
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
                 self.shared.error("present", &e);
                 if e.kind == ErrorKind::Unavailable {
-                    // A lost device: attach again on the same surface, then wait for a keyframe.
-                    self.attach();
+                    self.device_gone();
                 }
             }
         }
@@ -413,6 +435,12 @@ impl Worker {
             Ok(None) => self.owed = if left > 1 { Some((left - 1, arrived)) } else { None },
             Err(e) => {
                 self.owed = None;
+                if self.renderer.as_ref().is_some_and(WinRenderer::device_lost) {
+                    self.shared.error("decode", e);
+                    self.device_gone();
+                    return;
+                }
+                let Some(decoder) = self.decoder.as_mut() else { return };
                 decoder.reset();
                 self.feedback.on_lost(1);
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
@@ -440,6 +468,12 @@ impl Worker {
                 }
             }
             Err(e) => {
+                if self.renderer.as_ref().is_some_and(WinRenderer::device_lost) {
+                    self.shared.error("decode", e);
+                    self.device_gone();
+                    return;
+                }
+                let Some(decoder) = self.decoder.as_mut() else { return };
                 decoder.reset();
                 self.feedback.on_lost(1);
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);

@@ -36,7 +36,9 @@ use windows::core::Interface;
 use crate::cursor::CursorNode;
 use crate::layout::{self, Layout, PxRect};
 use crate::proc::{Proc, SourceKind};
-use crate::sys::{Ctx, DXGI_ERROR_WAS_STILL_DRAWING, Gpu, Waitable, err, now, os_err};
+use crate::sys::{
+    Ctx, DXGI_ERROR_WAS_STILL_DRAWING, Gpu, Waitable, device_removed, err, now, os_err, removed_err, simulated_removed,
+};
 
 const SWAP_FLAGS: i32 = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0;
 
@@ -195,6 +197,12 @@ impl WinRenderer {
     /// renderer's own when [`RendererOptions::adapter`] is set. `None` before `attach`.
     pub fn device(&self) -> Option<ID3D11Device> {
         self.att.as_ref().map(|a| a.gpu.device.clone())
+    }
+
+    /// The device this renderer draws on, or the shell's it composes into, was removed (a driver reset, the adapter
+    /// gone): nothing more can be drawn on this surface (F-VIEW-08). False before `attach`.
+    pub fn device_lost(&self) -> bool {
+        self.att.as_ref().is_some_and(|a| device_removed(&a.gpu.device) || device_removed(&a.shell.device))
     }
 
     /// Draws the last picture again under `scale` (the user changed Fit, 1:1 or the scroll position; a static host sends
@@ -476,7 +484,12 @@ impl Renderer for WinRenderer {
         };
         let dcomp: IDCompositionDevice = borrow(dcomp_device, "dcomp_device")?;
         let parent: IDCompositionVisual = borrow(parent_visual, "parent_visual")?;
-        let shell = Gpu::from_device(borrow::<ID3D11Device>(d3d11_device, "d3d11_device")?)?;
+        let shell_device = borrow::<ID3D11Device>(d3d11_device, "d3d11_device")?;
+        if device_removed(&shell_device) {
+            // The shell's device is gone: nothing can be built on this surface until the shell makes a new one.
+            return Err(removed_err("attach"));
+        }
+        let shell = Gpu::from_device(shell_device)?;
         let gpu = match self.options.adapter {
             Some(id) => Gpu::on_adapter(id)?,
             None => shell.clone(),
@@ -527,6 +540,9 @@ impl Renderer for WinRenderer {
 
     fn present(&mut self, frame: DecodedFrame, scale: ScaleMode) -> Result<PresentStats> {
         let a = self.att.as_mut().ok_or_else(closed)?;
+        if simulated_removed(&a.gpu.device) || simulated_removed(&a.shell.device) {
+            return Err(removed_err("Present"));
+        }
         a.scale = scale;
         let source = a.source_of(&frame)?;
         a.draw(source, true)

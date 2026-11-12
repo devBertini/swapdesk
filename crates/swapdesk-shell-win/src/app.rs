@@ -23,7 +23,8 @@ use crate::viewer::ViewerHost;
 use crate::window::{TIMER_BANNER, TIMER_PLACEHOLDER, TIMER_TICK, Window};
 
 pub struct Shared {
-    pub gfx: Gfx,
+    /// The graphics device and its factories; made again when the device is lost (F-VIEW-08).
+    gfx: RefCell<Rc<Gfx>>,
     pub state: RefCell<UiState>,
     pub backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
@@ -142,7 +143,7 @@ fn run_shell(
     }
     let dark_now = state.dark();
     let shared = Rc::new(Shared {
-        gfx,
+        gfx: RefCell::new(Rc::new(gfx)),
         state: RefCell::new(state),
         backend,
         waker: Arc::clone(&waker),
@@ -179,6 +180,34 @@ fn run_shell(
 }
 
 impl Shared {
+    /// The current graphics device and factories.
+    pub fn gfx(&self) -> Rc<Gfx> {
+        Rc::clone(&self.gfx.borrow())
+    }
+
+    /// The graphics device is gone (a driver reset, the adapter removed: F-VIEW-08). A new device is made; every
+    /// window lets go of its surface (the viewer's pipeline detaches first) and paints again on the new one, which
+    /// hands the viewer a new surface. A device that cannot be made yet is tried again at the next paint. The
+    /// sessions go on meanwhile. False when no device could be made.
+    pub fn recover_device(&self) -> bool {
+        let fresh = match Gfx::new() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::system::trace_line(&format!("swapdesk: the graphics device could not be made again: {e} "));
+                return false;
+            }
+        };
+        let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        for w in &windows {
+            w.drop_surface();
+        }
+        *self.gfx.borrow_mut() = Rc::new(fresh);
+        for w in &windows {
+            w.invalidate();
+        }
+        true
+    }
+
     pub fn window(&self, kind: WindowKind) -> Option<Rc<Window>> {
         self.windows.borrow().iter().find(|w| w.kind == kind).cloned()
     }
@@ -206,6 +235,9 @@ impl Shared {
         }
         // The viewer's own shortcuts (D30), recognised by the pipeline on the window's keys or the system-wide hook.
         if let Some(host) = &self.host {
+            if host.device_lost() {
+                let _ = self.recover_device();
+            }
             for action in host.take_shortcuts() {
                 let act = self.state.borrow_mut().run_shortcut(action);
                 self.send_commands(act.commands);
