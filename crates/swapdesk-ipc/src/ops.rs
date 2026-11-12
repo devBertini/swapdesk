@@ -189,6 +189,12 @@ pub enum UiOp {
     UpdateSetCheck {
         on: bool,
     },
+    /// Op 57: what this machine's GPU does in hardware, probed by the interface in the user's session (the service
+    /// runs where it cannot tell): HEVC encode and decode (F-VIEW-07).
+    MediaCaps {
+        hevc_encode: bool,
+        hevc_decode: bool,
+    },
     /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
     /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
     /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
@@ -247,6 +253,7 @@ impl UiOp {
             Self::UpdateCancel => 54,
             Self::UpdateDismiss { .. } => 55,
             Self::UpdateSetCheck { .. } => 56,
+            Self::MediaCaps { .. } => 57,
         }
     }
 
@@ -351,6 +358,10 @@ impl UiOp {
             }
             Self::UpdateDismiss { version } => w.put_str(version, crate::types::MAX_VERSION)?,
             Self::UpdateSetCheck { on } => w.put_bool(*on),
+            Self::MediaCaps { hevc_encode, hevc_decode } => {
+                w.put_bool(*hevc_encode);
+                w.put_bool(*hevc_decode);
+            }
             Self::ElevationConfirm { ticket, approve } => {
                 ticket.put(w, 0)?;
                 w.put_bool(*approve);
@@ -408,6 +419,7 @@ impl UiOp {
             54 => Self::UpdateCancel,
             55 => Self::UpdateDismiss { version: r.str(crate::types::MAX_VERSION)? },
             56 => Self::UpdateSetCheck { on: r.bool()? },
+            57 => Self::MediaCaps { hevc_encode: r.bool()?, hevc_decode: r.bool()? },
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }

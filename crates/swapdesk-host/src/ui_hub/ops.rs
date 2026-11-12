@@ -211,6 +211,12 @@ impl Hub {
             | UiOp::UpdateCancel
             | UiOp::UpdateDismiss { .. }
             | UiOp::UpdateSetCheck { .. } => self.update_op(conn, &op),
+            UiOp::MediaCaps { hevc_encode, hevc_decode } => {
+                if let Some(core) = self.core() {
+                    core.set_media_caps(hevc_encode, hevc_decode);
+                }
+                Ok(ReplyBody::Done)
+            }
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),

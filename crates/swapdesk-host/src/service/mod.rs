@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
@@ -117,6 +117,8 @@ struct Dialer {
     os_version: String,
     app_version: String,
     capabilities: swapdesk_proto::Capabilities,
+    /// The machine decodes HEVC in hardware (`ServiceCore::set_media_caps`): a viewer session then lists it.
+    hevc_decode: Arc<AtomicBool>,
     identity: Arc<swapdesk_trust::Identity>,
     trust: Arc<TrustHandle>,
     clock: Arc<dyn swapdesk_platform::Clock>,
@@ -263,7 +265,7 @@ impl Connector {
             d.os,
             &d.os_version,
             &d.app_version,
-            d.capabilities.clone(),
+            config::with_hevc_decode(d.capabilities.clone(), d.hevc_decode.load(Ordering::Relaxed)),
             Arc::clone(&d.clock),
         );
         cfg.intent = intent;
@@ -737,6 +739,7 @@ impl ServiceCore {
             os_version: cfg.os_version.clone(),
             app_version: cfg.app_version.clone(),
             capabilities: cfg.capabilities.clone(),
+            hevc_decode: Arc::clone(&shared.hevc_decode),
             identity: Arc::clone(&cfg.identity),
             trust: Arc::clone(&cfg.trust),
             clock: Arc::clone(&cfg.clock),
@@ -803,6 +806,13 @@ impl ServiceCore {
     /// console's owner and the lock state).
     pub fn set_desktop_sink(&self, sink: DesktopSink) {
         let _ = self.shared.desktop_sink.set(sink);
+    }
+
+    /// What this machine's GPU does in hardware, as the interface probed it (F-VIEW-07): a hosted session picks HEVC
+    /// only with `hevc_encode`, and a viewer session lists an HEVC decoder only with `hevc_decode`.
+    pub fn set_media_caps(&self, hevc_encode: bool, hevc_decode: bool) {
+        self.shared.host_hevc_hardware.store(hevc_encode, Ordering::Relaxed);
+        self.shared.hevc_decode.store(hevc_decode, Ordering::Relaxed);
     }
 
     /// How the secure attention sequence is sent for a viewer's `SendSpecial` (F-UNAT-01).

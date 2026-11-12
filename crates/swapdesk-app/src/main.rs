@@ -118,6 +118,16 @@ fn main() {
         Box::new(move || {
             let service = connect::connect(&options, waker.clone(), pipeline.clone()).ok()?;
             pipeline.set_out(service.clone());
+            // F-VIEW-07: the service runs where it cannot see the GPU; this process probes HEVC once (cached) and
+            // tells it, on every (re)connection, off the UI thread.
+            let caps_to = service.clone();
+            std::thread::spawn(move || {
+                let (hevc_encode, hevc_decode) = swapdesk_codec_win::hevc_support();
+                let _ = swapdesk_ui::UiBackend::send(
+                    &*caps_to,
+                    swapdesk_ui::Command::MediaCaps { hevc_encode, hevc_decode },
+                );
+            });
             let link = service.clone();
             Some(Linked {
                 backend: Arc::new(ObservingBackend::new(service, pipeline.clone())),

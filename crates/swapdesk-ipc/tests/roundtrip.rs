@@ -205,6 +205,7 @@ fn update_ops_round_trip() {
         (UiOp::UpdateCancel, 54),
         (UiOp::UpdateDismiss { version: "1.1.1".into() }, 55),
         (UiOp::UpdateSetCheck { on: false }, 56),
+        (UiOp::MediaCaps { hevc_encode: true, hevc_decode: false }, 57),
     ];
     for (op, code) in ops {
         assert_eq!(op.code(), code);

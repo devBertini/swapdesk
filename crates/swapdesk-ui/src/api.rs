@@ -841,6 +841,12 @@ pub enum Command {
     UpdateSetCheck {
         on: bool,
     },
+    /// What this machine's GPU does in hardware, probed by the interface at start (F-VIEW-07): the service offers and
+    /// picks HEVC only when it is told so.
+    MediaCaps {
+        hevc_encode: bool,
+        hevc_decode: bool,
+    },
 }
 
 /// Typed chat text and terminal input are never logged (CONTRACTS.md C2.3): `Debug` shows their size only. Written
@@ -917,6 +923,7 @@ impl core::fmt::Debug for Command {
             Self::UpdateCancel => f.write_str("UpdateCancel"),
             Self::UpdateDismiss { version } => dbg_fields!("UpdateDismiss", version),
             Self::UpdateSetCheck { on } => dbg_fields!("UpdateSetCheck", on),
+            Self::MediaCaps { hevc_encode, hevc_decode } => dbg_fields!("MediaCaps", hevc_encode, hevc_decode),
             Self::TermWrite { term_id, bytes } => f
                 .debug_struct("TermWrite")
                 .field("term_id", term_id)

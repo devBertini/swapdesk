@@ -129,6 +129,17 @@ impl ServiceConfig {
     }
 }
 
+/// `caps` with an HEVC decode entry added when `hevc_decode` (and none is there yet); unchanged otherwise.
+pub fn with_hevc_decode(mut caps: Capabilities, hevc_decode: bool) -> Capabilities {
+    if hevc_decode && !caps.video_decode.iter().any(|c| c.codec == Codec::Hevc) {
+        let hevc = capabilities_with_hevc(true).video_decode.into_iter().find(|c| c.codec == Codec::Hevc);
+        if let Some(entry) = hevc {
+            caps.video_decode.insert(0, entry);
+        }
+    }
+    caps
+}
+
 /// H.264 up to 4K60 and Opus; keyboard unknown until the shell says. No HEVC: see [`capabilities_with_hevc`].
 pub fn default_capabilities() -> Capabilities {
     capabilities_with_hevc(false)

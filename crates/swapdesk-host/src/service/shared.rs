@@ -149,6 +149,8 @@ pub(crate) struct Shared {
     links: Mutex<HashMap<std::net::IpAddr, IfKind>>,
     /// This machine has a hardware HEVC encoder (`ServiceConfig::host_hevc_hardware`); a session's codec is picked with it.
     pub host_hevc_hardware: AtomicBool,
+    /// This machine decodes HEVC in hardware: a viewer session lists HEVC in its capabilities (F-VIEW-07).
+    pub hevc_decode: Arc<AtomicBool>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -184,6 +186,7 @@ impl Shared {
             ptys: PtyRoutes::default(),
             links: Mutex::default(),
             host_hevc_hardware: AtomicBool::new(false),
+            hevc_decode: Arc::new(AtomicBool::new(false)),
         }
     }
 

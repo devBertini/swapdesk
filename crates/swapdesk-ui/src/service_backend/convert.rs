@@ -707,6 +707,9 @@ pub fn route(c: &a::Command) -> Route {
         C::UpdateCancel => O::UpdateCancel,
         C::UpdateDismiss { version } => O::UpdateDismiss { version: version.clone() },
         C::UpdateSetCheck { on } => O::UpdateSetCheck { on: *on },
+        C::MediaCaps { hevc_encode, hevc_decode } => {
+            O::MediaCaps { hevc_encode: *hevc_encode, hevc_decode: *hevc_decode }
+        }
     })
 }
 
