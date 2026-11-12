@@ -771,8 +771,12 @@ pub enum Command {
         before_ms: Option<u64>,
         limit: u32,
     },
+    /// Writes the activity log to `path` as CSV, in this interface's language and local time (`UiState::activity_export`
+    /// fills both). The UI process writes the file; the service only lists the entries.
     ActivityExport {
         path: PathBuf,
+        language: Language,
+        utc_offset_min: i32,
     },
     BlockAddress {
         ipv4: String,
@@ -861,7 +865,9 @@ impl core::fmt::Debug for Command {
             Self::ChatMarkRead { session_id, up_to } => dbg_fields!("ChatMarkRead", session_id, up_to),
             Self::Wake { device_id } => dbg_fields!("Wake", device_id),
             Self::ActivityList { before_ms, limit } => dbg_fields!("ActivityList", before_ms, limit),
-            Self::ActivityExport { path } => dbg_fields!("ActivityExport", path),
+            Self::ActivityExport { path, language, utc_offset_min } => {
+                dbg_fields!("ActivityExport", path, language, utc_offset_min)
+            }
             Self::BlockAddress { ipv4 } => dbg_fields!("BlockAddress", ipv4),
             Self::GetSettings => f.write_str("GetSettings"),
             Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),

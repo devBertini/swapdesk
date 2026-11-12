@@ -1180,3 +1180,49 @@ fn an_elevator_connection_ended_for_its_lifetime_exits_expired() {
     let exit = elevated_client::run(client_in, client_out, &TICKET, |_, _, _| panic!("nobody is asked"));
     assert_eq!((exit, exit.code()), (ElevatedExit::Expired, 5));
 }
+
+/// "Exportar registro": the service lists the activity log (op 21, the most it keeps) and this process writes the file,
+/// in the interface's language and local time, with the fields a spreadsheet splits on quoted.
+#[test]
+fn the_activity_log_is_listed_by_the_service_and_written_by_this_process() {
+    let (b, mut svc, _) = Fake::connect();
+    let path = files_temp("export").join("atividade.csv");
+    let rows = [
+        AuditView {
+            at_ms: 1_763_000_000_000,
+            device_name: "Mac; da sala".into(),
+            what: Msg::new(crate::strings::MsgKey::DrawerChat),
+            duration_s: Some(372),
+            alert: false,
+        },
+        AuditView {
+            at_ms: 1_762_990_000_000,
+            device_name: "PC".into(),
+            what: Msg::new(crate::strings::MsgKey::DrawerChat),
+            duration_s: None,
+            alert: false,
+        },
+    ];
+    let t = b.send(Command::ActivityExport { path: path.clone(), language: Language::PtBr, utc_offset_min: -180 });
+    let (req, op) = svc.request();
+    assert_eq!(op, UiOp::ActivityList { before_ms: None, limit: swapdesk_ipc::MAX_ACTIVITY as u32 });
+    svc.reply(req, ReplyBody::Activity(rows.iter().map(cv::audit_to_wire).collect()));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: t, result: Ok(Reply::Done) }]);
+    let csv = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[0], "quando;dispositivo;o que aconteceu;duracao_s");
+    assert_eq!(lines[1], "2025-11-12 23:13;\"Mac; da sala\";Chat;372");
+    assert_eq!(lines[2], "2025-11-12 20:26;PC;Chat;");
+    assert_eq!(lines.len(), 3);
+
+    // A file that cannot be written is an error, and nothing else is written.
+    let t = b.send(Command::ActivityExport {
+        path: path.with_file_name("no-such-folder").join("x.csv"),
+        language: Language::En,
+        utc_offset_min: 0,
+    });
+    let (req, _) = svc.request();
+    svc.reply(req, ReplyBody::Activity(Vec::new()));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: t, result: Err(ApiError::new(ApiCode::Internal)) }]);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

@@ -1282,27 +1282,9 @@ impl World {
             Command::ChatSend { text, .. } => {
                 Ok(Reply::Chat(ChatView { msg_id: 100, mine: true, text, sent_at_ms: NOW_MS, read: false }))
             }
-            Command::ActivityExport { path } => {
+            Command::ActivityExport { path, language, utc_offset_min } => {
                 // [UI] work: the UI process writes the exported log itself, here on the backend thread.
-                let lang = Language::PtBr;
-                let mut csv = String::from(
-                    "quando;dispositivo;o que aconteceu;duracao_s
-",
-                );
-                for r in activity() {
-                    let when = crate::format::table_when(
-                        lang,
-                        r.at_ms,
-                        crate::format::Clock { now_ms: NOW_MS, utc_offset_min: 0 },
-                    );
-                    let what = crate::strings::text(lang, &r.what);
-                    csv.push_str(&format!(
-                        "{when};{};{what};{}
-",
-                        r.device_name,
-                        r.duration_s.map_or(String::new(), |d| d.to_string())
-                    ));
-                }
+                let csv = crate::format::activity_csv(language, &activity(), utc_offset_min);
                 std::fs::write(&path, csv).map(|()| Reply::Done).map_err(|_| ApiError::new(ApiCode::Internal))
             }
             Command::RequestOsPermissions => Ok(Reply::MissingPermissions(Vec::new())),

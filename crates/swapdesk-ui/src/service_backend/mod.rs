@@ -16,7 +16,7 @@
 //!   whose `detail` says why; `TermOutput` messages go to [`ViewerSink::term_output`]; `TermExited` is
 //!   `UiEvent::Term { Exited }`.
 //! - Commands with no op (files, transfers, `CancelSwap`, `BlockAddress`,
-//!   `ActivityExport`, `OpenSystemSettings`, `RequestOsPermissions`) reply at once
+//!   `OpenSystemSettings`, `RequestOsPermissions`) reply at once
 //!   `Err(ApiError { code: Internal, detail: None })`. `ListDisplays` is op 27: the reply is the session's display list.
 //! - `Elevate` runs on a worker thread of its own ([`elevation`]): it asks the service for a ticket (op 35), lets the
 //!   platform's [`Elevator`] run, ends the ticket (op 38) and reports `UiEvent::ElevationResult`, then answers `Done`.
@@ -32,6 +32,7 @@
 pub mod clipboard;
 pub mod convert;
 pub mod elevation;
+mod export;
 pub mod files;
 
 use std::collections::{HashMap, VecDeque};
@@ -333,6 +334,9 @@ impl ServiceBackend {
                         }
                         Route::Invalid => writing.reply(ticket, Err(ApiError::new(ApiCode::Invalid))),
                         Route::Elevate(action, line, run) => elevation::spawn(&writing, ticket, action, line, run),
+                        Route::Export(path, language, offset) => {
+                            export::spawn(&writing, ticket, path, language, offset)
+                        }
                         Route::Op(op) => {
                             let req = writing.next_req.fetch_add(1, Ordering::Relaxed);
                             {

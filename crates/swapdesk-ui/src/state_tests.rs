@@ -507,12 +507,17 @@ fn reconnecting_and_waking_states_show_where_the_design_puts_them() {
 
 #[test]
 fn network_notices_replace_the_content_with_their_card() {
+    // The Windows notices open Windows' own Network & internet page through the shell, with no command.
+    let mut s = Scenario::EstadoRedePublica.prepared_state();
+    assert_eq!(s.notices(), vec![NoticeKind::Public]);
+    let a = s.activate(ControlId::Notice(NoticeKind::Public));
+    assert!(a.commands.is_empty(), "{:?}", a.commands);
+    assert_eq!(a.effect, Some(Effect::OpenWebPage));
+    assert_eq!(s.take_web_page().as_deref(), Some("ms-settings:network-status"));
+    assert!(crate::state::openable_page("ms-settings:network-status"));
+    assert!(!crate::state::openable_page("ms-settings:windowsupdate"), "only the listed system pages");
+    assert!(!crate::state::openable_page("file:///C:/Windows/System32/cmd.exe"));
     for (sc, kind, button) in [
-        (
-            Scenario::EstadoRedePublica,
-            NoticeKind::Public,
-            Command::OpenSystemSettings { target: SettingsTarget::NetworkCategory },
-        ),
         (
             Scenario::EstadoServicoMac,
             NoticeKind::Service,
@@ -592,10 +597,26 @@ fn the_toolbar_sends_session_commands_and_toggles() {
     assert!(matches!(s.activate(ControlId::TbAudio).commands[0], Command::SetAudio { on: false, .. }));
     assert!(!s.audio_on());
     assert!(matches!(s.activate(ControlId::TbGrab).commands[0], Command::SetGrab { on: false, .. }));
-    assert!(matches!(
-        s.activate(ControlId::TbKeys).commands[0],
-        Command::SendKeys { keys: SpecialKeys::CtrlAltDel, .. }
-    ));
+    // The keys button opens the list of keys under itself; the one picked is sent.
+    let a = s.activate(ControlId::TbKeys);
+    assert!(a.commands.is_empty());
+    assert_eq!(a.effect, Some(Effect::Menu(SelectId::SpecialKeys)));
+    assert_eq!(SelectId::SpecialKeys.anchor(), ControlId::TbKeys);
+    let names: Vec<String> = s
+        .select_options(SelectId::SpecialKeys)
+        .into_iter()
+        .map(|(n, on)| {
+            assert!(!on, "a list of actions: nothing is checked");
+            n
+        })
+        .collect();
+    assert_eq!(names.len(), SpecialKeys::ALL.len());
+    assert_eq!(names[0], "Ctrl+Alt+Del");
+    for (i, keys) in SpecialKeys::ALL.iter().enumerate() {
+        let a = s.choose(SelectId::SpecialKeys, i);
+        assert_eq!(a.commands, vec![Command::SendKeys { session_id: 1, keys: *keys }]);
+    }
+    assert!(s.choose(SelectId::SpecialKeys, SpecialKeys::ALL.len()).commands.is_empty(), "past the list: nothing");
     assert!(matches!(s.activate(ControlId::TbDisconnect).commands[0], Command::Disconnect { session_id: 1 }));
     let t = Ticket(8);
     s.track(t, &Command::Disconnect { session_id: 1 });

@@ -610,6 +610,9 @@ pub enum Route {
     Invalid,
     /// `Elevate`: a worker thread asks for a ticket, runs the platform's elevator, ends the ticket and reports.
     Elevate(a::ElevatedAction, String, u32),
+    /// `ActivityExport`: a worker thread lists the activity log and writes the file (the path, the language, the
+    /// offset of local time).
+    Export(std::path::PathBuf, a::Language, i32),
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -680,11 +683,13 @@ pub fn route(c: &a::Command) -> Route {
             return Route::LocalDone;
         }
         C::Elevate { action, line, run } => return Route::Elevate(action.clone(), line.clone(), *run),
+        C::ActivityExport { path, language, utc_offset_min } => {
+            return Route::Export(path.clone(), *language, *utc_offset_min);
+        }
         C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }
         | C::FilesGet { .. }
-        | C::ActivityExport { .. }
         | C::BlockAddress { .. }
         | C::OpenSystemSettings { .. }
         | C::RequestOsPermissions => return Route::Unsupported,

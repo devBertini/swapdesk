@@ -144,7 +144,7 @@ fn outcome_result(outcome: ElevationOutcome, run: ElevatorRun) -> Result<(), Api
 }
 
 /// Sends `op` through the backend thread and waits for the reader thread to hand over its answer.
-fn request(inner: &Inner, out: &mpsc::Sender<Item>, op: UiOp) -> Result<ReplyBody, ApiCode> {
+pub(super) fn request(inner: &Inner, out: &mpsc::Sender<Item>, op: UiOp) -> Result<ReplyBody, ApiCode> {
     let req = inner.next_req.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     {

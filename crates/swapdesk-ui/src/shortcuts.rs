@@ -7,7 +7,7 @@
 //! Ctrl+Alt+Del with Ctrl+Alt+End, disconnect Ctrl+Alt+Q. macOS: Control+Option in place of Ctrl+Alt and
 //! Control+Command+F for full screen. They stay with Swapdesk when "Capturar atalhos do sistema" is on.
 
-use crate::api::{Command, Msg};
+use crate::api::{Command, Msg, SpecialKeys};
 use crate::interact::ControlId;
 use crate::state::{Activation, Changed, UiState};
 use crate::strings::MsgKey;
@@ -206,7 +206,7 @@ impl UiState {
                 }
                 Activation { changed: Changed::VIEWER, ..Activation::default() }
             }
-            ViewerAction::CtrlAltDel => self.activate(ControlId::TbKeys),
+            ViewerAction::CtrlAltDel => self.send_keys(SpecialKeys::CtrlAltDel),
             ViewerAction::Disconnect => self.activate(ControlId::TbDisconnect),
         }
     }

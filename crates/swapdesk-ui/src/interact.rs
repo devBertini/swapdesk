@@ -775,6 +775,7 @@ impl UiState {
                 return ReleaseKey::ALL.iter().map(|k| (self.release_key_name(*k), *k == self.release_key)).collect();
             }
             SelectId::FullscreenMonitor => return self.fullscreen_monitor_options(),
+            SelectId::SpecialKeys => return self.special_keys().into_iter().map(|(_, name)| (name, false)).collect(),
             _ => {}
         }
         let Some(set) = &self.settings else { return Vec::new() };
@@ -798,7 +799,7 @@ impl UiState {
                 (self.name_of(MsgKey::KeyboardPhysical), set.keyboard_mode == KeyboardMode::Physical),
                 (self.name_of(MsgKey::KeyboardText), set.keyboard_mode == KeyboardMode::Text),
             ],
-            SelectId::ReleaseKey | SelectId::FullscreenMonitor => Vec::new(),
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys => Vec::new(),
         }
     }
 
@@ -1492,7 +1493,10 @@ impl UiState {
             ControlId::DialogPrimary | ControlId::DialogSecondary => self.activate_dialog(id, &mut a),
             ControlId::Notice(k) => match k {
                 NoticeKind::Public | NoticeKind::Firewall => {
-                    a.commands.push(Command::OpenSystemSettings { target: SettingsTarget::NetworkCategory });
+                    // Windows' own page (the two notices come only from a Windows service): Network & internet,
+                    // where each network's profile and the firewall's link are.
+                    self.web_page = Some(crate::state::WINDOWS_NETWORK_SETTINGS.to_owned());
+                    a.effect = Some(Effect::OpenWebPage);
                 }
                 NoticeKind::Service => {
                     a.commands.push(Command::OpenSystemSettings { target: SettingsTarget::LoginItems })
@@ -1597,8 +1601,9 @@ impl UiState {
                 a.changed = Changed::VIEWER;
             }
             ControlId::TbKeys => {
-                if let Some(session_id) = self.session_id() {
-                    a.commands.push(Command::SendKeys { session_id, keys: SpecialKeys::CtrlAltDel });
+                // The list of keys opens under the button; the one picked goes through `choose`.
+                if self.session_id().is_some() {
+                    a.effect = Some(Effect::Menu(SelectId::SpecialKeys));
                 }
                 a.changed = Changed::VIEWER;
             }
@@ -1884,6 +1889,10 @@ impl UiState {
                 return Activation { changed: Changed::ALL, commands: vec![command], ..Activation::default() };
             }
             SelectId::FullscreenMonitor => return self.choose_fullscreen_monitor(index),
+            SelectId::SpecialKeys => {
+                let Some(&keys) = SpecialKeys::ALL.get(index) else { return Activation::default() };
+                return self.send_keys(keys);
+            }
             _ => {}
         }
         let mut a = Activation { changed: Changed::ALL, ..Activation::default() };
@@ -1894,7 +1903,7 @@ impl UiState {
             SelectId::Keyboard => {
                 s.keyboard_mode = [KeyboardMode::Auto, KeyboardMode::Physical, KeyboardMode::Text][index.min(2)]
             }
-            SelectId::ReleaseKey | SelectId::FullscreenMonitor => {}
+            SelectId::ReleaseKey | SelectId::FullscreenMonitor | SelectId::SpecialKeys => {}
         });
         if id == SelectId::Language {
             self.lang = self.settings.as_ref().map_or(self.lang, |s| s.language);

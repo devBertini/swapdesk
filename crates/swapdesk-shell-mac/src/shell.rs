@@ -744,7 +744,7 @@ impl Shell {
             return;
         }
         let Some(canvas) = self.canvas(kind) else { return };
-        if let Some(index) = canvas.pick(&options, ControlId::Select(select)) {
+        if let Some(index) = canvas.pick(&options, select.anchor()) {
             let act = self.state.borrow_mut().choose(select, index);
             self.dispatch_from(kind, act);
         }
@@ -759,7 +759,8 @@ impl Shell {
         if panel.runModal() == NSModalResponseOK
             && let Some(path) = panel.URL().and_then(|u| u.path())
         {
-            self.send_commands(vec![Command::ActivityExport { path: std::path::PathBuf::from(path.to_string()) }]);
+            let export = self.state.borrow().activity_export(std::path::PathBuf::from(path.to_string()));
+            self.send_commands(vec![export]);
         }
     }
 

@@ -193,7 +193,7 @@ impl Shared {
         let fresh = match Gfx::new() {
             Ok(g) => g,
             Err(e) => {
-                crate::system::trace_line(&format!("swapdesk: the graphics device could not be made again: {e} "));
+                crate::system::trace_line(&format!("swapdesk: the graphics device could not be made again: {e}\0"));
                 return false;
             }
         };
@@ -357,7 +357,8 @@ impl Shared {
                 if let Some(path) =
                     crate::dialogs::save_log(from.hwnd(), &self.state.borrow().t(swapdesk_ui::MsgKey::ExportLog))
                 {
-                    self.send_commands(vec![Command::ActivityExport { path }]);
+                    let export = self.state.borrow().activity_export(path);
+                    self.send_commands(vec![export]);
                 }
             }
             Effect::PickFiles => {
@@ -389,7 +390,7 @@ impl Shared {
         if options.is_empty() {
             return None;
         }
-        let (x, y) = from.screen_point_of(ControlId::Select(select));
+        let (x, y) = from.screen_point_of(select.anchor());
         // SAFETY: a popup menu created, shown and destroyed here; the strings outlive the call.
         unsafe {
             let menu = CreatePopupMenu().ok()?;

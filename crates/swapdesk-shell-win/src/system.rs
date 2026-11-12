@@ -153,7 +153,7 @@ pub fn open_logs_folder() -> bool {
 pub fn open_web_page(url: &str) -> bool {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    if !url.starts_with("https://") {
+    if !swapdesk_ui::state::openable_page(url) {
         return false;
     }
     // SAFETY: the strings outlive the call; no window is the parent.

@@ -59,6 +59,50 @@ fn days_ago(at: LocalTime, clock: Clock) -> i64 {
     local_time(clock.now_ms, clock.utc_offset_min).day - at.day
 }
 
+/// Howard Hinnant's `civil_from_days` with the year: (year, month, day) of a day count since the epoch.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// "2026-11-12 15:25", local time: the moment of an exported activity line, sortable as text.
+pub fn export_when(at_ms: u64, utc_offset_min: i32) -> String {
+    let t = local_time(at_ms, utc_offset_min);
+    let (y, m, d) = civil(t.day);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", t.hour, t.minute)
+}
+
+/// One CSV field: quoted when it holds the separator, a quote or a line break.
+fn csv_field(s: &str) -> String {
+    if s.contains([';', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_owned() }
+}
+
+/// The activity log as the CSV file "Exportar registro" writes: a header line, then one line per entry, newest first,
+/// fields separated by ";" (what a spreadsheet in pt-BR opens by default), the moment in local time.
+pub fn activity_csv(lang: Language, rows: &[crate::api::AuditView], utc_offset_min: i32) -> String {
+    let mut csv = String::from(match lang {
+        Language::PtBr => "quando;dispositivo;o que aconteceu;duracao_s\n",
+        Language::En => "when;device;what happened;duration_s\n",
+    });
+    for r in rows {
+        csv.push_str(&format!(
+            "{};{};{};{}\n",
+            export_when(r.at_ms, utc_offset_min),
+            csv_field(&r.device_name),
+            csv_field(&text(lang, &r.what)),
+            r.duration_s.map_or(String::new(), |d| d.to_string())
+        ));
+    }
+    csv
+}
+
 /// "Hoje às 15:25", "Ontem às 23:40", "05/11 às 10:30".
 pub fn when_phrase(lang: Language, at_ms: u64, clock: Clock) -> String {
     let t = local_time(at_ms, clock.utc_offset_min);

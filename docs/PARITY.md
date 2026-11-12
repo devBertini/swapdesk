@@ -16,7 +16,7 @@ Both systems paint the same screens (`swapdesk-paint`) from the same state (`swa
 | Fit to window / 1:1 | scales the picture, locally | none | Built | Built | |
 | Audio | turns the host's system sound on or off | `AUDIO` | Proven | Proven | |
 | Capture keyboard | sends system keys to the host | `CONTROL` | Proven | Proven | |
-| Ctrl+Alt+Del | the secure attention sequence on a Windows host | `UNATTENDED` and the elevation step | Built | n/a | only Ctrl+Alt+Del is sent; see "Not wired on either system" |
+| Special keys | a list under the button: Ctrl+Alt+Del, Alt+Tab or Cmd+Tab, the Windows or Cmd key, Alt+F4 or Cmd+Q, Print Screen | `CONTROL`; Ctrl+Alt+Del also `UNATTENDED` and the elevation step | Built | Built | the names follow the host's system |
 | Elevate control | raises an entry without a prompt to the sign-in screen, the lock screen and administrator prompts | `UNATTENDED`, the system's confirmation on the controlling computer | Built | Built | the real UAC prompt and the Mac password dialog are a hand check |
 | Terminal | opens the side panel's terminal | `TERMINAL`, consent | **Missing** (M3: the Mac viewer has no terminal pane) | Built (M3) | the Mac host's shell runs; the Mac viewer cannot show one |
 | Files | opens the side panel's files | `FILES`, consent | Built (M3) | Built (M3) | |
@@ -44,7 +44,7 @@ Both systems paint the same screens (`swapdesk-paint`) from the same state (`swa
 |---|---|---|---|
 | Name, language, theme | Built | Built | |
 | Open when the computer starts | **Missing** (version 1.2: the installer writes and removes the Run key) | Built (the login item) | on Windows the service starts with the system; the switch does not change the interface's start yet |
-| Receive connections | Built in the hub, no system effect found on either | the same | to check in milestone M3 |
+| Receive connections | Built | Built | off: the account's endpoint stops listening and its record leaves the network |
 | Lock the computer when a session ends, keep awake | Built | Built | |
 | Updates: the switch, check now | Built | Built | the Mac swap waits for the rehearsal of a real update |
 | Default quality, show statistics, keyboard mode, Ctrl and Cmd, release key, full-screen monitor | Built | Built | |
@@ -54,9 +54,11 @@ Both systems paint the same screens (`swapdesk-paint`) from the same state (`swa
 These controls exist in the shared state but no shell opens them, so they do nothing on Windows or on the Mac. They are not a parity gap and are not listed as working:
 
 - **Choose display:** the button asks the host for its displays, but no list opens to pick one (switching displays is in 1.2, F-VIEW-02).
-- **Other special keys:** the keys button sends only Ctrl+Alt+Del; Alt+Tab, the Windows or Cmd key, Alt+F4 or Cmd+Q and Print Screen have no menu.
 - **Quality and view-only in the toolbar:** never drawn (Settings holds the default quality, and "Assistir" is chosen when connecting).
-- **Notice buttons and a few commands the service answers "not supported":** opening System Settings or the firewall page from a network notice, asking for the macOS permissions, blocking an address from the alert, cancelling a swap request, and exporting the activity log.
+- **Blocking an address from the activity alert:** the button is shown, but the service has no way to add an address to its block list yet.
+- **The macOS notices** (the login item waiting for approval, missing permissions) are designed and drawn, but the Mac app does not raise them yet.
+
+The Windows network notices open Settings > Network & internet, and "Export log" writes the newest 1000 entries of the activity log as CSV, on both systems.
 
 ## Proof
 

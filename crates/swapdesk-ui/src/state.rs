@@ -115,6 +115,19 @@ pub enum SelectId {
     ReleaseKey,
     /// The monitor full screen goes to (UI-local).
     FullscreenMonitor,
+    /// The keys the toolbar's keys button sends to the host (Ctrl+Alt+Del, Alt+Tab or Cmd+Tab, ...): a list of
+    /// actions, none of them checked.
+    SpecialKeys,
+}
+
+impl SelectId {
+    /// The control the select's list opens under: the select's own field, or the toolbar button that opens it.
+    pub fn anchor(self) -> ControlId {
+        match self {
+            SelectId::SpecialKeys => ControlId::TbKeys,
+            other => ControlId::Select(other),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -678,8 +691,20 @@ pub struct UiState {
     /// An update is being installed: the shell saves its window state and closes (Windows; on the Mac the app's own
     /// updater quits the app once the swap is done).
     pub(crate) quit_request: bool,
-    /// The page [`Effect::OpenWebPage`] opens.
+    /// The page [`Effect::OpenWebPage`] opens: a release page (`https://`), or one of [`SYSTEM_PAGES`].
     pub(crate) web_page: Option<String>,
+}
+
+/// Windows Settings > Network & internet ("ms-settings:network-status", Microsoft's ms-settings reference, read
+/// 2026-11-12): where a network's profile is set to Private and the firewall is reached.
+pub const WINDOWS_NETWORK_SETTINGS: &str = "ms-settings:network-status";
+
+/// The system pages [`Effect::OpenWebPage`] may open besides an `https://` page. Nothing else is handed to the system.
+pub const SYSTEM_PAGES: &[&str] = &[WINDOWS_NETWORK_SETTINGS];
+
+/// Whether a shell may hand `page` to the system: an `https://` page or one of [`SYSTEM_PAGES`].
+pub fn openable_page(page: &str) -> bool {
+    page.starts_with("https://") || SYSTEM_PAGES.contains(&page)
 }
 
 impl Default for UiState {
@@ -765,6 +790,12 @@ impl UiState {
     }
 
     // ----- reads -----
+
+    /// The command that writes the activity log to `path` (the shell's save panel picked it), in this interface's
+    /// language and local time.
+    pub fn activity_export(&self, path: std::path::PathBuf) -> Command {
+        Command::ActivityExport { path, language: self.language(), utc_offset_min: self.clock.utc_offset_min }
+    }
 
     pub fn language(&self) -> Language {
         self.lang
