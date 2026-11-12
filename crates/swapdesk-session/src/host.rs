@@ -239,6 +239,13 @@ pub trait HostUi: Send + Sync + 'static {
         None
     }
 
+    /// Whether this host can capture and control a desktop that is not `Default` (Windows: yes, through the SYSTEM
+    /// helper, D11; the Mac, D24: no, nothing can be captured or injected at its lock screen or login window). A host
+    /// that cannot refuses an entry while it is on another desktop and pauses every session there, `UNATTENDED` or not.
+    fn serves_other_desktops(&self) -> bool {
+        true
+    }
+
     fn lock_on_end(&self) -> bool {
         false
     }
@@ -646,6 +653,11 @@ impl HostInner {
         // without a prompt (the prompt below finds nobody present).
         if self.ui.console_owner() == ConsoleOwner::Other {
             return Decision::Refuse(ErrorCode::AccountAway);
+        }
+        // D24: a host that cannot serve its lock screen (the Mac) admits nobody while it is locked, an unattended
+        // device neither: nothing there could be seen or controlled.
+        if !self.ui.serves_other_desktops() && self.ui.current_desktop().is_some_and(|d| d != Desktop::Default) {
+            return Decision::Refuse(ErrorCode::NobodyPresent);
         }
 
         // A resume: the token is checked, and a token whose old connection is not yet known lost waits for it.

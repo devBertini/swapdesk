@@ -100,6 +100,11 @@ fn timeout_s(d: std::time::Duration) -> u16 {
 }
 
 impl HostUi for HubHostUi {
+    /// D24: the Mac cannot see or control its lock screen or login window; Windows can (the SYSTEM helper).
+    fn serves_other_desktops(&self) -> bool {
+        self.hub.p.os != swapdesk_proto::Os::MacOs
+    }
+
     fn somebody_present(&self) -> bool {
         let hub = &self.hub;
         !hub.console_conns().is_empty() && *lock(&hub.desktop) == Desktop::Default

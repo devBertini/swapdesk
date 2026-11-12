@@ -243,6 +243,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
         // Registered for the whole run of the app.
         std::mem::forget(observer);
     }
+    // D24: this Mac hosts only while its screen is unlocked. A normal run follows the lock; the self-test, the host
+    // drive and a scripted run have nobody at the keyboard and must keep hosting whatever the screen does, as the
+    // cross-machine proofs need.
+    if options.selftest.is_none() && options.drive_host.is_none() && options.ui_script.is_none() {
+        match crate::screen_lock::watch(
+            service.hub().clone(),
+            crate::screen_lock::read_screen,
+            crate::screen_lock::POLL,
+            Arc::clone(&trace),
+        ) {
+            // Kept for the whole run of the app, like the session observer.
+            Ok(watch) => std::mem::forget(watch),
+            Err(e) => trace.log(Level::Warn, "app", format_args!("the screen lock is not followed: {e}")),
+        }
+    }
     // UPDATES.md 2.2, 7: the installed app's updater (never a scratch run); a version that started after a swap commits.
     if !options.use_scratch()
         && let Some(home) = std::env::var_os("HOME")

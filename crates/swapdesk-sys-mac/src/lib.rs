@@ -5,6 +5,8 @@
 //! * [`actions::MacActions`]: the `ActionRunner` of the user scope (lock, sleep, restart, Activity Monitor, keep-awake).
 //! * [`http::MacHttp`]: the updater's HTTPS GET on `NSURLSession` (`docs/UPDATES.md` 5).
 //! * [`fs`]: the free space of a volume and the Settings pane that grants access to folders (F-FILE-03).
+//! * [`lock`]: whether this user's screen is locked (D24: the Mac hosts only an unlocked, logged-in session). The
+//!   decision is pure and built on every host; the reading is macOS only.
 //! * [`admin`]: the administrator confirmation through Authorization Services (`docs/ELEVATION-MAC.md`). Its outcome
 //!   type and status mapping are pure and built on every host; the calls are macOS only.
 
@@ -15,6 +17,7 @@ pub mod admin;
 pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod http;
+pub mod lock;
 #[cfg(target_os = "macos")]
 pub mod pty;
 #[cfg(target_os = "macos")]

@@ -40,8 +40,9 @@ pub const ACCOUNT_AWAY_LIMIT: Duration = Duration::from_secs(60);
 
 /// Whether a host session is paused on `desktop`: always while its account is away from the console; on a secure
 /// desktop unless it holds `UNATTENDED`.
-fn paused_for(desktop: Desktop, granted: PermissionSet) -> bool {
-    desktop == Desktop::AccountAway || (desktop != Desktop::Default && !granted.contains(PermissionSet::UNATTENDED))
+fn paused_for(desktop: Desktop, granted: PermissionSet, serves_other: bool) -> bool {
+    desktop == Desktop::AccountAway
+        || (desktop != Desktop::Default && (!serves_other || !granted.contains(PermissionSet::UNATTENDED)))
 }
 /// How long a closing session waits to hand its last message (`Bye`, `Error`) to the peer.
 const SAY_LIMIT: Duration = Duration::from_millis(500);
@@ -606,7 +607,7 @@ impl Actor {
             }
         };
         let info = service.ui.start_info();
-        let paused = paused_for(info.desktop, committed.granted);
+        let paused = paused_for(info.desktop, committed.granted, service.ui.serves_other_desktops());
         self.ctx.inner.state.send_replace(DesktopState { desktop: info.desktop, paused });
         // What the viewer is about to be told; a change after the commit is reported right behind it.
         self.reported = committed.granted;
@@ -773,7 +774,7 @@ impl Actor {
 
     fn on_grants_changed(&mut self, old: PermissionSet, new: PermissionSet) -> Option<Finish> {
         let desktop = self.ctx.desktop_state().desktop;
-        let paused = paused_for(desktop, new);
+        let paused = paused_for(desktop, new, self.serves_other_desktops());
         if let Some(f) = self.emit(PermissionsChanged { granted: new }, true) {
             return Some(f);
         }
@@ -798,8 +799,16 @@ impl Actor {
         None
     }
 
+    /// Whether this side's host serves desktops other than `Default` (the viewer side: always, it never pauses).
+    fn serves_other_desktops(&self) -> bool {
+        match &self.side {
+            Side::Host { service, .. } => service.ui.serves_other_desktops(),
+            _ => true,
+        }
+    }
+
     fn on_desktop(&mut self, desktop: Desktop) -> Option<Finish> {
-        let paused = paused_for(desktop, self.ctx.granted());
+        let paused = paused_for(desktop, self.ctx.granted(), self.serves_other_desktops());
         // ACCOUNTS.md 5.1: another account took the console. The session waits for it to come back, then ends.
         if desktop == Desktop::AccountAway {
             self.away_since.get_or_insert_with(now);
@@ -984,5 +993,25 @@ impl Actor {
             conn.close(app_code(f.close), b"");
         }
         end
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_that_cannot_serve_its_lock_screen_pauses_even_an_unattended_session() {
+        let unattended = PermissionSet::VIEW | PermissionSet::UNATTENDED;
+        let prompted = PermissionSet::VIEW;
+        // Windows (D11): an unattended session goes on at the lock screen; a prompted one pauses.
+        assert!(!paused_for(Desktop::Locked, unattended, true));
+        assert!(paused_for(Desktop::Locked, prompted, true));
+        // The Mac (D24): the lock screen cannot be seen or controlled, so every session pauses there.
+        assert!(paused_for(Desktop::Locked, unattended, false));
+        assert!(paused_for(Desktop::LoginWindow, unattended, false));
+        assert!(!paused_for(Desktop::Default, unattended, false));
+        // Another account at the console pauses everything, everywhere.
+        assert!(paused_for(Desktop::AccountAway, unattended, true));
     }
 }
