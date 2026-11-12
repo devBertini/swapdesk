@@ -106,7 +106,7 @@ impl Capabilities {
     }
 
     /// The codec a host sends to the viewer that announced these capabilities and `viewer_minor` (F-VIEW-07):
-    /// HEVC only when the viewer is of minor 1 or newer and lists an HEVC decoder (a viewer lists one only when
+    /// HEVC only when the viewer is of minor 2 or newer and lists an HEVC decoder (a viewer lists one only when
     /// its hardware decodes it) and `host_hevc_hardware` says the host has a hardware HEVC encoder; H.264
     /// otherwise, which every build of every minor decodes.
     pub fn pick_codec(&self, viewer_minor: u16, host_hevc_hardware: bool) -> Codec {

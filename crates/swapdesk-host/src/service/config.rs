@@ -205,10 +205,15 @@ mod codec_tests {
     fn the_session_codec_is_hevc_only_when_both_machines_and_the_minor_allow_it() {
         let hevc = capabilities_with_hevc(true);
         let h264_only = capabilities_with_hevc(false);
-        assert_eq!(session_codec(Some(&hevc), 1, true), Codec::Hevc);
-        assert_eq!(session_codec(Some(&hevc), 1, false), Codec::H264, "no hardware encoder on the host");
-        assert_eq!(session_codec(Some(&h264_only), 1, true), Codec::H264, "the viewer does not decode HEVC");
+        assert_eq!(session_codec(Some(&hevc), 2, true), Codec::Hevc);
+        assert_eq!(session_codec(Some(&hevc), 2, false), Codec::H264, "no hardware encoder on the host");
+        assert_eq!(session_codec(Some(&h264_only), 2, true), Codec::H264, "the viewer does not decode HEVC");
+        assert_eq!(
+            session_codec(Some(&hevc), 1, true),
+            Codec::H264,
+            "a minor-1 viewer (built before HEVC) never gets it"
+        );
         assert_eq!(session_codec(Some(&hevc), 0, true), Codec::H264, "a minor-0 viewer never gets HEVC");
-        assert_eq!(session_codec(None, 1, true), Codec::H264, "capabilities not received yet");
+        assert_eq!(session_codec(None, 2, true), Codec::H264, "capabilities not received yet");
     }
 }

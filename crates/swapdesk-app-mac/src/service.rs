@@ -204,6 +204,14 @@ impl InProcessService {
             dev_loopback,
             ports,
         })?;
+        // F-VIEW-07: the Mac hosts and views in this process, where the GPU is: HEVC is offered and picked only when
+        // VideoToolbox has it in hardware (the probe runs once and is cached).
+        #[cfg(target_os = "macos")]
+        {
+            let (hevc_encode, hevc_decode) = swapdesk_codec_mac::hevc_support();
+            config.capabilities = swapdesk_host::service::capabilities_with_hevc(hevc_decode);
+            config.host_hevc_hardware = hevc_encode;
+        }
         // ACCOUNTS.md 12.1: another account's app may hold this user's pair (fast user switching with both apps
         // running): take the next free pair and keep it in this user's settings.
         if production_ports {

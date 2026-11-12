@@ -10,7 +10,7 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// Video codec (9.2: 1 = H.264 Annex B, 2 = HEVC Annex B, minor 1).
+    /// Video codec (9.2: 1 = H.264 Annex B, 2 = HEVC Annex B, minor 2).
     Codec: u8 { H264 = 1, Hevc = 2 }
 }
 
@@ -19,7 +19,7 @@ impl Codec {
     /// never sent a capability naming it and never sent a frame in it.
     pub const fn min_minor(self) -> u16 {
         match self {
-            Self::Hevc => 1,
+            Self::Hevc => 2,
             Self::H264 => 0,
         }
     }
@@ -125,13 +125,13 @@ wire_enum! {
         AlreadyPaired = 21,
         /// Minor 1: the account that would answer is not at the console of its computer.
         AccountAway = 22,
-        /// Minor 1: the receiving volume has less free space than the file needs (F-FILE-03).
+        /// Minor 2: the receiving volume has less free space than the file needs (F-FILE-03).
         NoSpace = 23,
-        /// Minor 1: a delete to the bin on a volume that has no bin; nothing was deleted.
+        /// Minor 2: a delete to the bin on a volume that has no bin; nothing was deleted.
         NoBin = 24,
-        /// Minor 1: a new folder, rename or move onto a name that exists; nothing is replaced.
+        /// Minor 2: a new folder, rename or move onto a name that exists; nothing is replaced.
         Exists = 25,
-        /// Minor 1: the volume of a path is gone or now names another volume.
+        /// Minor 2: the volume of a path is gone or now names another volume.
         VolumeGone = 26,
     }
 }
@@ -141,7 +141,8 @@ impl ErrorCode {
     /// newer.
     pub const fn min_minor(self) -> u16 {
         match self {
-            Self::AccountAway | Self::NoSpace | Self::NoBin | Self::Exists | Self::VolumeGone => 1,
+            Self::AccountAway => 1,
+            Self::NoSpace | Self::NoBin | Self::Exists | Self::VolumeGone => 2,
             _ => 0,
         }
     }
@@ -288,11 +289,16 @@ mod tests {
     #[test]
     fn every_new_value_names_minor_1() {
         for code in ErrorCode::ALL {
-            let want = u16::from(code.tag() >= 22);
+            let want = match code.tag() {
+                22 => 1,
+                23.. => 2,
+                _ => 0,
+            };
             assert_eq!(code.min_minor(), want, "{code:?}");
             // A peer of minor 0 never gets a code it would refuse; a peer that knows the code gets it as it is.
             assert_eq!(code.for_minor(0).min_minor(), 0, "{code:?}");
-            assert_eq!(code.for_minor(1), *code);
+            assert_eq!(code.for_minor(2), *code);
+            assert!(code.for_minor(1).min_minor() <= 1, "{code:?}");
             assert_eq!(code.for_minor(u16::MAX), *code);
         }
         assert_eq!(ErrorCode::AccountAway.for_minor(0), ErrorCode::NobodyPresent);
@@ -301,7 +307,7 @@ mod tests {
         assert_eq!(ErrorCode::Exists.for_minor(0), ErrorCode::IoFailed);
         assert_eq!(ErrorCode::VolumeGone.for_minor(0), ErrorCode::NotFound);
         for codec in Codec::ALL {
-            assert_eq!(codec.min_minor(), u16::from(*codec == Codec::Hevc), "{codec:?}");
+            assert_eq!(codec.min_minor(), if *codec == Codec::Hevc { 2 } else { 0 }, "{codec:?}");
         }
         for desktop in Desktop::ALL {
             let want = u16::from(*desktop == Desktop::AccountAway);

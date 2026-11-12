@@ -135,12 +135,12 @@ const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[(0x000B, 1), (0x000C, 1), (0x0801, 
 /// Enum values introduced after minor 0: `(enum name, tag, minor)`. The same rule as for the types.
 const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[
     ("ErrorCode", 22, 1),
-    ("ErrorCode", 23, 1),
-    ("ErrorCode", 24, 1),
-    ("ErrorCode", 25, 1),
-    ("ErrorCode", 26, 1),
+    ("ErrorCode", 23, 2),
+    ("ErrorCode", 24, 2),
+    ("ErrorCode", 25, 2),
+    ("ErrorCode", 26, 2),
     ("Desktop", 4, 1),
-    ("Codec", 2, 1),
+    ("Codec", 2, 2),
 ];
 
 #[test]

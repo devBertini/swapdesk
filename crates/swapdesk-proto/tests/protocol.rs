@@ -797,8 +797,9 @@ fn caps_with(codecs: &[Codec]) -> Capabilities {
 #[test]
 fn an_hevc_decoder_is_never_listed_to_a_minor_0_peer() {
     let both = Message::Capabilities(caps_with(&[Codec::Hevc, Codec::H264]));
-    assert_eq!(both.min_minor(), 1);
-    assert_eq!(both.clone().for_peer(1), Some(both.clone()), "a minor-1 peer reads the HEVC entry");
+    assert_eq!(both.min_minor(), 2);
+    assert_eq!(both.clone().for_peer(2), Some(both.clone()), "a minor-2 peer reads the HEVC entry");
+    assert_eq!(both.clone().for_peer(1), Some(Message::Capabilities(caps_with(&[Codec::H264]))), "minor 1: left out");
     let old = both.for_peer(0).expect("Capabilities is a 1.0 type");
     assert_eq!(old, Message::Capabilities(caps_with(&[Codec::H264])));
     assert_eq!(old.min_minor(), 0);
@@ -811,10 +812,10 @@ fn an_hevc_decoder_is_never_listed_to_a_minor_0_peer() {
 #[test]
 fn every_capability_combination_picks_the_expected_codec() {
     for viewer in [&[][..], &[Codec::H264], &[Codec::Hevc], &[Codec::Hevc, Codec::H264]] {
-        for minor in [0u16, 1, 7] {
+        for minor in [0u16, 1, 2, 7] {
             for host_hw in [false, true] {
                 let want =
-                    if host_hw && minor >= 1 && viewer.contains(&Codec::Hevc) { Codec::Hevc } else { Codec::H264 };
+                    if host_hw && minor >= 2 && viewer.contains(&Codec::Hevc) { Codec::Hevc } else { Codec::H264 };
                 assert_eq!(caps_with(viewer).pick_codec(minor, host_hw), want, "{viewer:?} minor {minor} hw {host_hw}");
             }
         }
