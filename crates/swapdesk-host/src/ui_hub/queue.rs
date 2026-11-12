@@ -336,7 +336,7 @@ mod tests {
     }
 
     fn stats(session_id: u64, fps: u16) -> Message {
-        Message::UiNotify(Notify::Stats { session_id, latency_ms: 1, fps, kbps: 1 })
+        Message::UiNotify(Notify::Stats { session_id, latency_ms: 1, fps, kbps: 1, hevc: false })
     }
 
     #[test]

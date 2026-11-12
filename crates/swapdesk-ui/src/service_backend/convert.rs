@@ -514,8 +514,8 @@ pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
         w::Notify::Displays { session_id, list } => {
             E::Displays { session_id, displays: list.into_iter().map(display_from_wire).collect() }
         }
-        w::Notify::Stats { session_id, latency_ms, fps, kbps } => {
-            E::Stats { session_id, stats: a::Stats { latency_ms, fps, kbps } }
+        w::Notify::Stats { session_id, latency_ms, fps, kbps, hevc } => {
+            E::Stats { session_id, stats: a::Stats { latency_ms, fps, kbps, hevc } }
         }
         w::Notify::ActivityAlert(v) => E::ActivityAlert(audit_from_wire(v)?),
         w::Notify::SettingsChanged(v) => E::SettingsChanged(settings_from_wire(v)),
@@ -556,9 +556,13 @@ pub fn event_to_notify(e: &a::UiEvent) -> Option<w::Notify> {
         E::Displays { session_id, displays } => {
             w::Notify::Displays { session_id: *session_id, list: displays.iter().map(display_to_wire).collect() }
         }
-        E::Stats { session_id, stats } => {
-            w::Notify::Stats { session_id: *session_id, latency_ms: stats.latency_ms, fps: stats.fps, kbps: stats.kbps }
-        }
+        E::Stats { session_id, stats } => w::Notify::Stats {
+            session_id: *session_id,
+            latency_ms: stats.latency_ms,
+            fps: stats.fps,
+            kbps: stats.kbps,
+            hevc: stats.hevc,
+        },
         E::ActivityAlert(v) => w::Notify::ActivityAlert(audit_to_wire(v)),
         E::SettingsChanged(v) => w::Notify::SettingsChanged(settings_to_wire(v)),
         E::Swap { session_id, event } => w::Notify::Swap { session_id: *session_id, note: swap_note_to_wire(event) },
@@ -841,7 +845,7 @@ mod tests {
     fn notifications_round_trip_through_events() {
         let events = vec![
             a::UiEvent::DevicesChanged(vec![device()]),
-            a::UiEvent::Stats { session_id: 4, stats: a::Stats { latency_ms: 5, fps: 60, kbps: 9000 } },
+            a::UiEvent::Stats { session_id: 4, stats: a::Stats { latency_ms: 5, fps: 60, kbps: 9000, hevc: false } },
             a::UiEvent::Session { session_id: 4, device_id: "mac-1".into(), state: a::SessionState::Connecting },
             a::UiEvent::SettingsChanged(settings()),
             a::UiEvent::IncomingClosed { request_id: 2, reason: a::ApiCode::Timeout },

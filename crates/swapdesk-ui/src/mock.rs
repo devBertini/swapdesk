@@ -674,7 +674,10 @@ impl Scenario {
                     mac(),
                     Event(UiEvent::SettingsChanged(Settings { show_stats: true, ..settings() })),
                     Event(Self::viewer_session(12)),
-                    Event(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 18, fps: 60, kbps: 9000 } }),
+                    Event(UiEvent::Stats {
+                        session_id: 1,
+                        stats: Stats { latency_ms: 18, fps: 60, kbps: 9000, hevc: false },
+                    }),
                 ];
                 if self == Scenario::VisualizadorEscuro {
                     v.push(Event(UiEvent::ThemeChanged { dark: true }));

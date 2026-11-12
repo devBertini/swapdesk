@@ -356,7 +356,13 @@ pub fn notify() -> BoxedStrategy<Notify> {
             .boxed(),
         (any::<u64>(), vec(dv, 0..4)).prop_map(|(session_id, list)| Notify::Displays { session_id, list }).boxed(),
         (any::<u64>(), any::<u32>(), any::<u16>(), any::<u32>())
-            .prop_map(|(session_id, latency_ms, fps, kbps)| Notify::Stats { session_id, latency_ms, fps, kbps })
+            .prop_map(|(session_id, latency_ms, fps, kbps)| Notify::Stats {
+                session_id,
+                latency_ms,
+                fps,
+                kbps,
+                hevc: fps % 2 == 0,
+            })
             .boxed(),
         audit().prop_map(Notify::ActivityAlert).boxed(),
         settings().prop_map(Notify::SettingsChanged).boxed(),

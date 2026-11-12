@@ -429,6 +429,8 @@ pub struct Stats {
     pub latency_ms: u32,
     pub fps: u16,
     pub kbps: u32,
+    /// The pictures come in HEVC (else H.264), F-VIEW-07.
+    pub hevc: bool,
 }
 
 /// Why a swap this side asked for did not happen (F-SWAP-02): the card says which.

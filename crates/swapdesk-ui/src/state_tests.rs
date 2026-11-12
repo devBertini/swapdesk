@@ -696,7 +696,7 @@ fn chat_transfers_and_clipboard_events() {
 fn stats_redraw_only_when_the_option_is_on() {
     let mut s = viewer();
     assert!(s.settings().unwrap().show_stats);
-    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1 } });
+    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1, hevc: false } });
     assert!(c.hits(WindowKind::Viewer));
     assert_eq!(s.viewer_session().unwrap().stats.unwrap().fps, 30);
     let mut s = base();
@@ -710,7 +710,7 @@ fn stats_redraw_only_when_the_option_is_on() {
             elevation: Default::default(),
         },
     });
-    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1 } });
+    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1, hevc: false } });
     assert!(c.is_none(), "no redraw for numbers nobody sees");
 }
 

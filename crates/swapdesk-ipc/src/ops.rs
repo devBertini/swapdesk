@@ -599,6 +599,8 @@ pub enum Notify {
         latency_ms: u32,
         fps: u16,
         kbps: u32,
+        /// The last picture came in HEVC (else H.264): the latency panel names the codec (F-VIEW-07).
+        hevc: bool,
     },
     ActivityAlert(AuditView),
     SettingsChanged(Settings),
@@ -692,11 +694,12 @@ impl Notify {
                 w.put_u64(*session_id);
                 list.put(w, MAX_DISPLAYS)?;
             }
-            Self::Stats { session_id, latency_ms, fps, kbps } => {
+            Self::Stats { session_id, latency_ms, fps, kbps, hevc } => {
                 w.put_u64(*session_id);
                 w.put_u32(*latency_ms);
                 w.put_u16(*fps);
                 w.put_u32(*kbps);
+                w.put_bool(*hevc);
             }
             Self::ActivityAlert(v) => v.put(w, 0)?,
             Self::SettingsChanged(v) => v.put(w, 0)?,
@@ -741,7 +744,13 @@ impl Notify {
             5 => Self::IncomingClosed { request_id: r.u32()?, reason: ApiCode::get(r, 0)? },
             6 => Self::Session { session_id: r.u64()?, device_id: r.str(MAX_NAME)?, state: SessionState::get(r, 0)? },
             7 => Self::Displays { session_id: r.u64()?, list: <Vec<DisplayView>>::get(r, MAX_DISPLAYS)? },
-            8 => Self::Stats { session_id: r.u64()?, latency_ms: r.u32()?, fps: r.u16()?, kbps: r.u32()? },
+            8 => Self::Stats {
+                session_id: r.u64()?,
+                latency_ms: r.u32()?,
+                fps: r.u16()?,
+                kbps: r.u32()?,
+                hevc: r.bool()?,
+            },
             9 => Self::ActivityAlert(AuditView::get(r, 0)?),
             10 => Self::SettingsChanged(Settings::get(r, 0)?),
             11 => Self::Swap { session_id: r.u64()?, note: SwapNote::get(r, 0)? },

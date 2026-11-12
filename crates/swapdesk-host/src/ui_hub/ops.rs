@@ -680,6 +680,8 @@ impl Hub {
         let mut cancelled = false;
         let started = self.p.wall.unix_ms();
         let (mut frames, mut bytes) = (0u32, 0u64);
+        // The codec of the last picture relayed, for the latency panel (F-VIEW-07).
+        let mut hevc = false;
         let mut next_tick = Instant::now() + Duration::from_secs(1);
         let mut began = false;
         let mut reconnecting = false;
@@ -697,6 +699,7 @@ impl Hub {
                         latency_ms,
                         fps: u16::try_from(frames).unwrap_or(u16::MAX),
                         kbps,
+                        hevc,
                     }));
                     (frames, bytes) = (0, 0);
                     next_tick += Duration::from_secs(1);
@@ -708,6 +711,7 @@ impl Hub {
                     Ipc::ViewerVideo { header, payload, .. } => {
                         let (key, display, id) =
                             (header.keyframe || header.discontinuity, header.display_id, header.frame_id);
+                        let is_hevc = header.codec == swapdesk_proto::Codec::Hevc;
                         let len = payload.0.len() as u64;
                         // The UI's pipe is behind: video is dropped, not waited for (a wait would hold back the audio
                         // and the terminal behind it), up to the next keyframe, which is asked for.
@@ -720,6 +724,7 @@ impl Hub {
                                 skipping_video = false;
                                 last_good = id;
                                 frames = frames.saturating_add(1);
+                                hevc = is_hevc;
                                 bytes = bytes.saturating_add(len);
                             }
                             Some(_) if conn.queue.is_closed() => break,

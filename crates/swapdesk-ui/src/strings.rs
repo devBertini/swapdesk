@@ -331,7 +331,7 @@ strings! {
     ViewerControlling => "você controla há {0}", "you have been controlling for {0}";
     ViewerViewing => "você está vendo há {0}", "you have been watching for {0}";
     ViewerConnecting => "conectando…", "connecting…";
-    ViewerStats => "{0} ms, {1} qps", "{0} ms, {1} fps";
+    ViewerStats => "{0} ms, {1} qps, {2}", "{0} ms, {1} fps, {2}";
     ViewerScreenOf => "Tela do {0}", "Screen of {0}";
     VideoPlaceholder => "A tela remota aparece aqui.", "The remote screen shows here.";
     ToolbarLabel => "Sessão", "Session";

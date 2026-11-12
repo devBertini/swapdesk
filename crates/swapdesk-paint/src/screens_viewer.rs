@@ -45,8 +45,10 @@ pub fn paint_viewer(f: &mut Frame) {
         if let (Some(set), Some(stats)) = (f.st.settings(), session.stats)
             && set.show_stats
         {
-            let s =
-                f.st.tm(&Msg::new(MsgKey::ViewerStats).with(stats.latency_ms.to_string()).with(stats.fps.to_string()));
+            let s = f.st.tm(&Msg::new(MsgKey::ViewerStats)
+                .with(stats.latency_ms.to_string())
+                .with(stats.fps.to_string())
+                .with(if stats.hevc { "HEVC" } else { "H.264" }));
             let l = p.label(&s, text::CAPTION);
             p.draw(&l, f.w - 16.0 - l.w, (layout::VIEWER_BAR_H - l.h) / 2.0, pal.soft);
         }
