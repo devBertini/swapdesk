@@ -244,6 +244,9 @@ pub struct ViewerConfig {
     /// Copy and paste proof ([`crate::clip`]): after the keys, text and an image each way through this clipboard and
     /// the files in this folder. `None`: no clipboard steps.
     pub clip: Option<ClipStep>,
+    /// Files proof ([`crate::files`]): after the clipboard, a file each way and a cancel, meeting the orchestrator in
+    /// this folder. `None`: no file steps.
+    pub files: Option<PathBuf>,
     /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
     /// `pair_with_fresh_host`). `None`: the host is found by its address.
     pub host_up: Option<PathBuf>,
@@ -270,6 +273,7 @@ impl ViewerConfig {
             type_after: None,
             save_with_ctrl: false,
             clip: None,
+            files: None,
             host_up: None,
         }
     }
@@ -300,6 +304,8 @@ pub struct ViewerReport {
     pub forgotten: bool,
     /// The copy and paste proof failed (only when it ran): why.
     pub clip_failed: Option<String>,
+    /// The files proof failed: why.
+    pub files_failed: Option<String>,
 }
 
 impl ViewerReport {
@@ -601,6 +607,13 @@ fn script_media(
         if let Err(e) = crate::clip::clip_round(provider.as_mut(), &step.dir, Duration::from_secs(20), log) {
             log(&format!("CLIP_FAIL {e}"));
             report.clip_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.files {
+        log("VIEWER_NEED_FILES");
+        if let Err(e) = crate::files::files_round(pump, session_id, dir, Duration::from_secs(60), log) {
+            log(&format!("FILES_FAIL {e}"));
+            report.files_failed = Some(e);
         }
     }
     // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.

@@ -248,6 +248,13 @@ impl Fs for PipeFs {
         }
     }
 
+    fn free_space(&self, dir: &Path) -> Result<Option<u64>, ErrorCode> {
+        match self.ask(FsCall::FreeSpace { dir: virt(dir)? })? {
+            FsAnswer::Free(n) => Ok(n),
+            _ => Err(bad()),
+        }
+    }
+
     fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode> {
         if data.len() > MAX_FS_META {
             return Err(ErrorCode::TooLarge);
@@ -598,6 +605,7 @@ impl FsServer {
                 Ok(FsAnswer::Meta(fs.meta_read(&self.folder(&dir.0)?, &name.0)?.map(Bytes)))
             }
             FsCall::MetaWrite { dir, name, data } => done(fs.meta_write(&self.folder(&dir.0)?, &name.0, &data.0)),
+            FsCall::FreeSpace { dir } => Ok(FsAnswer::Free(fs.free_space(&self.folder(&dir.0)?)?)),
         }
     }
 

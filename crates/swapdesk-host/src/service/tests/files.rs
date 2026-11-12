@@ -275,13 +275,13 @@ fn files_travel_both_ways_through_the_proxies_and_never_overwrite() {
     };
     assert_eq!((entries[0].name.as_str(), entries[0].size), ("down.bin", down.len() as u64));
 
-    // F-FILE-01 upload into a folder of the host, then again: the name is taken, so it is saved as "up (1).bin".
+    // F-FILE-01 upload into a folder of the host, then again: the name is taken, so it is saved as "up (2).bin".
     run(&handle, Command::SendFile { id: 10, path: PathBuf::from(&up_path), dest: Some("incoming".into()) });
     vh.wait("the sender to hear it verified", |e| matches!(e, Event::Sent { id: 10 }));
     assert!(same(&std::fs::read(rig.home.join("incoming").join("up.bin")).unwrap(), &up));
     run(&handle, Command::SendFile { id: 11, path: PathBuf::from(&up_path), dest: Some("incoming".into()) });
     vh.wait("the second upload", |e| matches!(e, Event::Sent { id: 11 }));
-    assert!(same(&std::fs::read(rig.home.join("incoming").join("up (1).bin")).unwrap(), &up));
+    assert!(same(&std::fs::read(rig.home.join("incoming").join("up (2).bin")).unwrap(), &up));
     assert!(
         same(&std::fs::read(rig.home.join("incoming").join("up.bin")).unwrap(), &up),
         "the first file is untouched"
@@ -292,7 +292,7 @@ fn files_travel_both_ways_through_the_proxies_and_never_overwrite() {
         .collect();
     assert_eq!(
         saved,
-        [Path::new("incoming").join("up.bin"), Path::new("incoming").join("up (1).bin")],
+        [Path::new("incoming").join("up.bin"), Path::new("incoming").join("up (2).bin")],
         "the host's user is told where each went"
     );
 

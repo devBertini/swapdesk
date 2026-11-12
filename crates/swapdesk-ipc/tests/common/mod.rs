@@ -480,6 +480,7 @@ pub fn fs_call() -> BoxedStrategy<FsCall> {
         (p(), n(), kind()).prop_map(|(dir, name, kind)| FsCall::RemoveFile { dir, name, kind }).boxed(),
         (p(), n()).prop_map(|(dir, name)| FsCall::MetaRead { dir, name }).boxed(),
         (p(), n(), bytes(80)).prop_map(|(dir, name, data)| FsCall::MetaWrite { dir, name, data }).boxed(),
+        p().prop_map(|dir| FsCall::FreeSpace { dir }).boxed(),
     ];
     Union::new(all).boxed()
 }

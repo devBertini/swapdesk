@@ -11,6 +11,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use swapdesk_proto::ErrorCode;
 
+use crate::access::AccessState;
 use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
 use crate::fsutil::{Create, is_reparse, open_rw_nofollow};
 use crate::name::{META_SUFFIX, PART_SUFFIX, validate_name};
@@ -20,15 +21,32 @@ const MAX_OPEN: usize = 256;
 /// Most bytes `meta_read` returns.
 const META_READ_MAX: usize = 1024;
 
+/// Free bytes of the volume holding a folder (`swapdesk-sys-win` / `swapdesk-sys-mac` `free_bytes`), `None` when the
+/// system cannot say. A plain function so this crate needs no platform crate.
+pub type FreeSpaceFn = fn(&Path) -> Option<u64>;
+
 #[derive(Default)]
 pub struct LocalFs {
     next: AtomicU64,
     open: Mutex<HashMap<u64, Arc<Mutex<File>>>>,
+    free_space: Option<FreeSpaceFn>,
+    access: AccessState,
 }
 
 impl LocalFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The folder the system last refused this process in (macOS: no "Files and Folders" grant), until an operation
+    /// there works again. See [`crate::access`].
+    pub fn access_denied(&self) -> Option<PathBuf> {
+        self.access.denied()
+    }
+
+    /// A `LocalFs` that answers `Fs::free_space` with `probe`.
+    pub fn with_free_space(probe: FreeSpaceFn) -> Self {
+        Self { free_space: Some(probe), ..Self::default() }
     }
 }
 
@@ -36,8 +54,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-fn io_failed(_: io::Error) -> ErrorCode {
-    ErrorCode::IoFailed
+/// A full volume or an exhausted quota is `NoSpace`; anything else `IoFailed`.
+fn io_failed(e: io::Error) -> ErrorCode {
+    match e.kind() {
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => ErrorCode::NoSpace,
+        _ => ErrorCode::IoFailed,
+    }
 }
 
 fn mtime_of(meta: &Metadata) -> u64 {
@@ -101,8 +123,11 @@ impl LocalFs {
 
 impl Fs for LocalFs {
     fn list_dir(&self, path: &Path, max_entries: u32) -> Result<DirRead, ErrorCode> {
-        let read = std::fs::read_dir(path)
-            .map_err(|e| if e.kind() == io::ErrorKind::NotFound { ErrorCode::NotFound } else { ErrorCode::IoFailed })?;
+        let read = std::fs::read_dir(path).map_err(|e| {
+            self.access.note_error(path, &e);
+            if e.kind() == io::ErrorKind::NotFound { ErrorCode::NotFound } else { ErrorCode::IoFailed }
+        })?;
+        self.access.note_ok(path);
         let mut all: Vec<FsEntry> = Vec::new();
         for item in read.flatten() {
             let Some(name) = item.file_name().to_str().map(str::to_string) else { continue };
@@ -128,6 +153,10 @@ impl Fs for LocalFs {
         let truncated = all.len() > max;
         all.truncate(max);
         Ok(DirRead { entries: all, truncated })
+    }
+
+    fn free_space(&self, path: &Path) -> Result<Option<u64>, ErrorCode> {
+        Ok(self.free_space.and_then(|probe| probe(path)))
     }
 
     fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode> {
@@ -173,7 +202,12 @@ impl Fs for LocalFs {
     }
 
     fn part_create(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
-        open_rw_nofollow(&file_path(dir, name, Kind::Part)?, Create::New).map(drop).map_err(io_failed)
+        let made = open_rw_nofollow(&file_path(dir, name, Kind::Part)?, Create::New);
+        match &made {
+            Ok(_) => self.access.note_ok(dir),
+            Err(e) => self.access.note_error(dir, e),
+        }
+        made.map(drop).map_err(io_failed)
     }
 
     fn part_truncate(&self, dir: &Path, name: &str, len: u64) -> Result<(), ErrorCode> {

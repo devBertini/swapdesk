@@ -17,9 +17,11 @@ use std::sync::Arc;
 use ring::digest::{Context, SHA256, digest};
 use swapdesk_proto::ErrorCode;
 
+use crate::collide::unique_name;
 use crate::disk::{Fs, Kind, MAX_IO};
 use crate::local::LocalFs;
 use crate::name::validate_name;
+use crate::space::check_space;
 
 const META_MAGIC: &[u8; 8] = b"SDFMETA1";
 const META_LEN: usize = 40;
@@ -104,6 +106,8 @@ impl Incoming {
                 resume = Some(committed.min(pm.len).min(size));
             }
         }
+        // F-FILE-03: the bytes that do not fit are refused before the partial file is created or touched.
+        check_space(fs.free_space(dir)?, size, resume.unwrap_or(0))?;
         if resume.is_none() {
             for kind in [Kind::Part, Kind::Meta] {
                 if let Some(m) = fs.stat_file(dir, name, kind)? {
@@ -219,7 +223,7 @@ impl Incoming {
     }
 
     /// Verifies the SHA-256 against the sender's and moves the file to its final name (never over an existing
-    /// file: "name (1).ext" is used then). Returns the final path. A mismatch deletes the partial file. When the
+    /// file, nor over one that only differs by Unicode form or letter case: "name (2).ext" is used then). Returns the final path. A mismatch deletes the partial file. When the
     /// rename fails the partial file stays as it is.
     pub fn finish(&mut self, expected: &[u8; 32]) -> Result<PathBuf, FinishError> {
         if self.received != self.size {
@@ -260,18 +264,13 @@ impl Incoming {
         self.open = false;
     }
 
-    /// `name`, or `stem (n).ext` for the first n that is free in the folder.
+    /// `name`, or `stem (n).ext` for the first n from 2 that is not the same file as one in the folder (same after
+    /// Unicode composition and letter case: [`crate::collide`]). A name the folder read could not list (more entries
+    /// than it returns) is still caught by asking the disk for the exact name.
     fn unique_target(&self) -> String {
-        let free = |n: &str| !matches!(self.fs.stat(&self.dir.join(n), false), Ok(Some(_)));
-        if free(&self.name) {
-            return self.name.clone();
-        }
-        let name = &self.name;
-        let (stem, ext) = match name.rfind('.') {
-            Some(i) if i > 0 => (&name[..i], &name[i..]),
-            _ => (name.as_str(), ""),
-        };
-        (1u32..).map(|n| format!("{stem} ({n}){ext}")).find(|c| free(c)).unwrap_or_else(|| name.clone())
+        let listed = self.fs.list_dir(&self.dir, u32::MAX).map(|r| r.entries).unwrap_or_default();
+        let taken = |n: &str| !matches!(self.fs.stat(&self.dir.join(n), false), Ok(None));
+        unique_name(&self.name, listed.iter().map(|e| e.name.as_str()), taken)
     }
 }
 
@@ -326,8 +325,36 @@ mod tests {
         let mut rx = Incoming::open(&dir, "a.txt", 3, 1).unwrap();
         rx.write(0, b"abc").unwrap();
         let path = rx.finish(&sha(b"abc")).unwrap();
-        assert_eq!(path, dir.join("a (1).txt"));
+        assert_eq!(path, dir.join("a (2).txt"));
         assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"mine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_that_differs_by_normalization_or_case_gets_a_new_name() {
+        let dir = temp_dir("collide");
+        std::fs::write(dir.join("relat\u{f3}rio.txt"), b"mine").unwrap();
+        std::fs::write(dir.join("Foto.JPG"), b"mine").unwrap();
+        for (offered, expected) in [("relato\u{301}rio.txt", "relato\u{301}rio (2).txt"), ("foto.jpg", "foto (2).jpg")]
+        {
+            let mut rx = Incoming::open(&dir, offered, 3, 1).unwrap();
+            rx.write(0, b"abc").unwrap();
+            assert_eq!(rx.finish(&sha(b"abc")).unwrap(), dir.join(expected));
+        }
+        assert_eq!(std::fs::read(dir.join("relat\u{f3}rio.txt")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(dir.join("Foto.JPG")).unwrap(), b"mine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_space_is_refused_before_anything_is_written() {
+        let dir = temp_dir("nospace");
+        let fs: Arc<dyn Fs> = Arc::new(LocalFs::with_free_space(|_| Some(1000)));
+        let r = Incoming::open_with(Arc::clone(&fs), &dir, "big.bin", 5_000_000, 1);
+        assert_eq!(r.err(), Some(ErrorCode::NoSpace));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing was created");
+        let small = Incoming::open_with(fs, &dir, "empty.bin", 0, 1);
+        assert!(small.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

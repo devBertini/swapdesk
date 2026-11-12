@@ -983,6 +983,7 @@ dependencies = [
 name = "swapdesk-crossdrive"
 version = "1.0.0"
 dependencies = [
+ "ring",
  "swapdesk-fakes",
  "swapdesk-host",
  "swapdesk-ipc",

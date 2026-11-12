@@ -72,6 +72,9 @@ pub enum FsCall {
     MetaRead { dir: Text, name: Text },
     /// 17. `data` is the rest of the body (at most [`MAX_FS_META`]).
     MetaWrite { dir: Text, name: Text, data: Bytes },
+    /// 24 (`FILES-UI.md` 7.3; 18 to 23 are the explorer's): the free bytes of the volume that holds `dir`, for the
+    /// free-space check before a file is accepted (F-FILE-03).
+    FreeSpace { dir: Text },
 }
 
 impl FsCall {
@@ -95,6 +98,7 @@ impl FsCall {
             Self::RemoveFile { .. } => 15,
             Self::MetaRead { .. } => 16,
             Self::MetaWrite { .. } => 17,
+            Self::FreeSpace { .. } => 24,
         }
     }
 
@@ -116,7 +120,7 @@ impl FsCall {
                 path(w, p)?;
                 w.put_bool(*follow);
             }
-            Self::OpenRead { path: p } => path(w, p)?,
+            Self::OpenRead { path: p } | Self::FreeSpace { dir: p } => path(w, p)?,
             Self::ReadAt { id, offset, len } => {
                 w.put_u64(*id);
                 w.put_u64(*offset);
@@ -208,6 +212,7 @@ impl FsCall {
             15 => Self::RemoveFile { dir: path(r)?, name: name(r)?, kind: FsKind::get(r, 0)? },
             16 => Self::MetaRead { dir: path(r)?, name: name(r)? },
             17 => Self::MetaWrite { dir: path(r)?, name: name(r)?, data: rest(r, MAX_FS_META, "meta record")? },
+            24 => Self::FreeSpace { dir: path(r)? },
             other => return Err(CodecError::UnknownTag { what: "FsRequest call", tag: u64::from(other) }),
         })
     }
@@ -247,6 +252,8 @@ pub enum FsAnswer {
     Len(u64),
     /// 7: `MetaRead`: `None` when the file is missing or not a regular file.
     Meta(Option<Bytes>),
+    /// 10 (8 and 9 are the explorer's): `FreeSpace`; `None` when the disk cannot tell.
+    Free(Option<u64>),
 }
 
 impl FsAnswer {
@@ -294,6 +301,10 @@ impl FsAnswer {
                     }
                 }
             }
+            Self::Free(n) => {
+                w.put_u8(10);
+                n.put(w, 0)?;
+            }
         }
         Ok(())
     }
@@ -325,6 +336,7 @@ impl FsAnswer {
                     Self::Meta(None)
                 }
             }
+            10 => Self::Free(<Option<u64>>::get(r, 0)?),
             tag => return Err(CodecError::UnknownTag { what: "FsReply answer", tag: u64::from(tag) }),
         })
     }

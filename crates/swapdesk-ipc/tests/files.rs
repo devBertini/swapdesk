@@ -27,6 +27,7 @@ fn calls() -> Vec<FsCall> {
         FsCall::RemoveFile { dir: t("r1"), name: t("a.bin"), kind: FsKind::Part },
         FsCall::MetaRead { dir: t("r1"), name: t("a.bin") },
         FsCall::MetaWrite { dir: t("r1"), name: t("a.bin"), data: Bytes(vec![9; 40]) },
+        FsCall::FreeSpace { dir: t("r1") },
     ]
 }
 
@@ -34,6 +35,8 @@ fn answers() -> Vec<core::result::Result<FsAnswer, ErrorCode>> {
     let stat = FsStatView { is_dir: false, is_file: true, is_reparse: false, len: 3, mtime_ms: 4 };
     vec![
         Ok(FsAnswer::Done),
+        Ok(FsAnswer::Free(Some(7))),
+        Ok(FsAnswer::Free(None)),
         Ok(FsAnswer::Entries {
             entries: vec![FsEntryView { name: t("a"), is_dir: true, size: 0, mtime_ms: 1 }],
             truncated: true,
@@ -70,7 +73,9 @@ fn frame_of(ty: u64, body: &[u8]) -> Vec<u8> {
 #[test]
 fn every_call_and_answer_round_trips() {
     for (i, call) in calls().into_iter().enumerate() {
-        assert_eq!(usize::from(call.code()), i + 1);
+        // Calls 1 to 17 in order, then 24 (18 to 23 are the explorer's, FILES-UI.md 7.3).
+        let want = if i < 17 { i + 1 } else { 24 + (i - 17) };
+        assert_eq!(usize::from(call.code()), want);
         round(&Message::FsRequest { req: i as u32, call });
     }
     for (i, result) in answers().into_iter().enumerate() {

@@ -276,15 +276,15 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     finished(&mut p.host_ui, id, "the host's user hears of the file");
 
-    // The name is taken: the host saves "up (1).bin" and its user's UI is told which name it got.
+    // The name is taken: the host saves "up (2).bin" and its user's UI is told which name it got.
     let id2 = one_id(p.send(vec![pick], Some("incoming")));
     finished(&mut p.viewer_ui, id2, "the second upload");
-    assert!(std::fs::metadata(p.home.join("incoming").join("up (1).bin")).is_ok(), "the first file stays");
+    assert!(std::fs::metadata(p.home.join("incoming").join("up (2).bin")).is_ok(), "the first file stays");
     let saved = p.host_ui.notify("saved as", |n| match n {
         Notify::Files(FilesNote::SavedAs { transfer_id, name, .. }) if *transfer_id == id2 => Some(name.0.clone()),
         _ => None,
     });
-    assert_eq!(saved, "up (1).bin");
+    assert_eq!(saved, "up (2).bin");
 
     // F-FILE-02 download into the receive folder the UI chose; the second time the name is taken on this side.
     let g1 = one_id(p.get("docs/down.bin"));
@@ -295,9 +295,9 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
         Notify::Files(FilesNote::SavedAs { transfer_id, name, .. }) if *transfer_id == g2 => Some(name.0.clone()),
         _ => None,
     });
-    assert_eq!(saved, "down (1).bin");
+    assert_eq!(saved, "down (2).bin");
     finished(&mut p.viewer_ui, g2, "the second download");
-    assert!(same(&std::fs::read(p.recv.join("down (1).bin")).unwrap(), &down));
+    assert!(same(&std::fs::read(p.recv.join("down (2).bin")).unwrap(), &down));
 
     // Refusals: nothing reaches the host for a request that is not one of this UI's own.
     let other = p.viewer.client(info(false));

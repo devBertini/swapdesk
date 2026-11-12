@@ -109,7 +109,7 @@ fn a_file_is_received_through_the_pipe_and_never_overwrites() {
             inc.write((i * 256 * 1024) as u64, chunk).unwrap();
         }
         let path = inc.finish(&sha).unwrap();
-        let expect = if round == 0 { "report.bin" } else { "report (1).bin" };
+        let expect = if round == 0 { "report.bin" } else { "report (2).bin" };
         assert_eq!(path.file_name().unwrap().to_str().unwrap(), expect, "files never overwrite");
         assert_eq!(std::fs::read(home.join("Downloads").join("Swapdesk").join(expect)).unwrap(), body);
     }

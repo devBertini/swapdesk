@@ -402,7 +402,7 @@ fn an_existing_file_is_never_overwritten() {
     let outs = w.viewer.send_file(1, &src.join("a.txt"), None);
     w.pump(true, outs, None);
     assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"mine");
-    assert_eq!(std::fs::read(dst.join("a (1).txt")).unwrap(), b"new");
+    assert_eq!(std::fs::read(dst.join("a (2).txt")).unwrap(), b"new");
     let _ = (std::fs::remove_dir_all(&src), std::fs::remove_dir_all(&dst));
 }
 

@@ -83,6 +83,10 @@ pub fn main() -> ExitCode {
     if args.iter().any(|a| a == "--clip") {
         grants = grants.with(Permission::Clipboard);
     }
+    // `--files`: the files proof needs the files granted.
+    if args.iter().any(|a| a == "--files") {
+        grants = grants.with(Permission::Files);
+    }
     if stay {
         return match host_stay(&backend, grants, &log) {
             Ok(()) => ExitCode::SUCCESS,

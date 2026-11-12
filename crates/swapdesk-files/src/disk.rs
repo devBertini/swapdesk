@@ -71,6 +71,12 @@ pub trait Fs: Send + Sync {
     /// Lists `path`, sorted as [`DirRead`] says, at most `max_entries` entries. `NotFound` when it is missing.
     fn list_dir(&self, path: &Path, max_entries: u32) -> Result<DirRead, ErrorCode>;
 
+    /// Free bytes on the volume that holds the folder `path`, `None` when this disk cannot tell (the receiver then
+    /// skips the free-space check; a full disk later is `NoSpace` from the write).
+    fn free_space(&self, _path: &Path) -> Result<Option<u64>, ErrorCode> {
+        Ok(None)
+    }
+
     /// The entry at `path`: `None` when nothing is there. `follow` false looks at a link itself (`symlink_metadata`).
     fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode>;
 

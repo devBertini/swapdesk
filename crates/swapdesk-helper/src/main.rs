@@ -195,10 +195,12 @@ mod win {
         // The user helper serves the user's files to the service (C2.4 "Files"): its root is this user's home, chosen
         // here and never by the service; every path the service sends is checked against it again.
         let deps = match (args.role, home_dir()) {
-            (IpcRole::HelperUser, Some(home)) => deps.with_fs(Arc::new(FsServer::new(Roots::Home {
-                home,
-                receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()),
-            }))),
+            (IpcRole::HelperUser, Some(home)) => deps.with_fs(Arc::new(FsServer::with_fs(
+                // The disk knows its volumes' free space, so a file that does not fit is declined before any byte is
+                // written (F-FILE-03).
+                Arc::new(swapdesk_files::LocalFs::with_free_space(swapdesk_sys_win::free_bytes)),
+                Roots::Home { home, receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()) },
+            ))),
             _ => deps,
         };
         match run_helper(reader, writer, deps, args.role, std::process::id()) {

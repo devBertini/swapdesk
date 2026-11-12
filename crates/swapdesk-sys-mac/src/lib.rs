@@ -4,6 +4,7 @@
 //! * [`pty::MacPtySpawner`]: the terminal's `PtySpawner`, a login shell of the process's own user on an `openpty` pair.
 //! * [`actions::MacActions`]: the `ActionRunner` of the user scope (lock, sleep, restart, Activity Monitor, keep-awake).
 //! * [`http::MacHttp`]: the updater's HTTPS GET on `NSURLSession` (`docs/UPDATES.md` 5).
+//! * [`fs`]: the free space of a volume and the Settings pane that grants access to folders (F-FILE-03).
 //! * [`admin`]: the administrator confirmation through Authorization Services (`docs/ELEVATION-MAC.md`). Its outcome
 //!   type and status mapping are pure and built on every host; the calls are macOS only.
 
@@ -11,11 +12,16 @@
 pub mod actions;
 pub mod admin;
 #[cfg(target_os = "macos")]
+pub mod fs;
+#[cfg(target_os = "macos")]
 pub mod http;
 #[cfg(target_os = "macos")]
 pub mod pty;
 #[cfg(target_os = "macos")]
 pub mod update_mac;
+
+#[cfg(target_os = "macos")]
+pub use fs::{FILES_AND_FOLDERS_PANE, FULL_DISK_ACCESS_PANE, free_bytes};
 
 /// The uid of this process's user, as the user reference of the Mac app (C5.1: "macOS uid + name").
 #[cfg(target_os = "macos")]

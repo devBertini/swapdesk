@@ -185,17 +185,18 @@ pub fn main() -> ExitCode {
         (value(&args, "--host-addr"), value(&args, "--peer-code"), value(&args, "--go"))
     else {
         eprintln!(
-            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]"
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>]"
         );
         return ExitCode::from(2);
     };
     let Some(anchor) = value(&args, "--anchor-file") else {
         eprintln!(
-            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>]"
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>]"
         );
         return ExitCode::from(2);
     };
     let type_after = value(&args, "--type").map(PathBuf::from);
+    let files_dir = value(&args, "--files").map(PathBuf::from);
     match run(
         &host_addr,
         PathBuf::from(peer_code),
@@ -203,6 +204,7 @@ pub fn main() -> ExitCode {
         PathBuf::from(anchor),
         value(&args, "--clip"),
         type_after,
+        files_dir,
     ) {
         Ok(()) => {
             println!("VIEWER_RESULT PASS");
@@ -222,6 +224,7 @@ fn run(
     anchor: PathBuf,
     clip_dir: Option<String>,
     type_after: Option<PathBuf>,
+    files_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     let scratch = Scratch::new()?;
     let trace: Arc<dyn TraceSink> = Arc::new(StderrTrace);
@@ -310,6 +313,8 @@ fn run(
             provider: std::sync::Mutex::new(Box::new(swapdesk_input_mac::MacClipboard::new())),
         });
     }
+    // `--files <dir>`: the files proof; the orchestrator works the host's disk and meets this side in `<dir>`.
+    cfg.files = files_dir;
     let log = |line: &str| println!("{line}");
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
     println!("{}", report.counts_line());
@@ -337,6 +342,9 @@ fn run(
     result?;
     if let Some(why) = report.clip_failed {
         return Err(format!("copy and paste: {why}"));
+    }
+    if let Some(why) = report.files_failed {
+        return Err(format!("files: {why}"));
     }
     if report.frames_decoded == 0 {
         return Err("no frame decoded".into());

@@ -3,12 +3,17 @@
 //! - [`disk`]: the [`Fs`] trait every disk access goes through, and [`local`] its `LocalFs`.
 //! - [`proxy`]: [`PipeFs`], the [`Fs`] over a pipe, and [`FsServer`], what the process that owns the files runs.
 //! - [`name`]: the name rules both sides apply.
+//! - [`access`]: the state of the receiving folder when the system refuses this process (macOS grant missing).
+//! - [`collide`]: names that are the same file under normalization and letter case, and the new name chosen.
+//! - [`space`]: the free-space rule that declines an offer with `NO_SPACE`.
 //! - [`recv`]: safe receiving into a partial file, resume from the verified length, SHA-256 check, rename.
 //! - [`send`]: the offer and a reader that continues from the receiver's verified length.
 //! - [`listing`]: the remote folder listing.
 //! - [`engine`]: the state machine over the file messages, without network or tasks.
 //! - [`handler`]: [`FilesHandler`], the `ChannelHandler` that registers in `swapdesk-session`.
 
+pub mod access;
+pub mod collide;
 pub mod disk;
 pub mod engine;
 pub mod fsutil;
@@ -19,12 +24,14 @@ pub mod name;
 pub mod proxy;
 pub mod recv;
 pub mod send;
+pub mod space;
 
+pub use access::{AccessState, ReceiveAccess};
 pub use disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
 pub use engine::{DEFAULT_MAX_FILE_SIZE, Engine, Event, FilesConfig, Out, Side};
 pub use handler::{Command, FilesHandler, FilesSink};
 pub use listing::{Listing, list_dir, list_dir_with};
-pub use local::LocalFs;
+pub use local::{FreeSpaceFn, LocalFs};
 pub use name::validate_name;
 pub use proxy::{
     CALL_TIMEOUT, CallerSource, DEFAULT_RECEIVE, FsCaller, FsServer, Pending, PipeCaller, PipeFs, Roots, Tokens,

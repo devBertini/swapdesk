@@ -9,6 +9,7 @@ pub mod actions;
 pub mod dirwatch;
 pub mod elevate;
 mod env;
+pub mod fs;
 pub mod http;
 pub mod launch;
 pub mod panic_hook;
@@ -27,6 +28,7 @@ pub mod watcher;
 pub use acl::AceInfo;
 pub use dirwatch::DirWatch;
 pub use elevate::{ElevatedProcess, RunAsError, WaitOutcome, run_as_admin};
+pub use fs::free_bytes;
 pub use launch::{
     ChildProcess, HelperRole, InstallError, InstallPolicy, RestartBackoff, TRUSTED_INSTALLER_SID, UserTokenChoice,
     VerifiedExe, active_console_session, build_command_line, check_no_other_writers, choose_user_token, launch_helper,

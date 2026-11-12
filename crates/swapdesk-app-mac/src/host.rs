@@ -8,12 +8,13 @@
 //! runs: the sources report `PermissionDenied` to the service, which tells the viewer. [`ask_for_grants`] shows the
 //! system prompts once at start.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use swapdesk_capture_mac::audio::MacAudio;
 use swapdesk_capture_mac::screen::MacScreen;
 use swapdesk_codec_mac::VtH264Encoder;
-use swapdesk_files::{FsServer, Roots};
+use swapdesk_files::{Fs, FsServer, LocalFs, Roots};
 use swapdesk_host::helper::{HelperDeps, run_helper};
 use swapdesk_input_mac::{MacClipboard, MacInputSink};
 use swapdesk_ipc::IpcRole;
@@ -22,6 +23,15 @@ use swapdesk_sys_mac::actions::MacActions;
 use swapdesk_sys_mac::pty::MacPtySpawner;
 
 use crate::service::HostHelper;
+
+/// The disk of this user's files, kept so the app can ask which folder macOS refused (F-FILE-03).
+static USER_DISK: OnceLock<Arc<LocalFs>> = OnceLock::new();
+
+/// The folder macOS last refused this app (the "Files and Folders" grant is missing), until a read or create there
+/// works again. The UI says so and offers [`swapdesk_sys_mac::FILES_AND_FOLDERS_PANE`].
+pub fn receive_folder_denied() -> Option<PathBuf> {
+    USER_DISK.get().and_then(|d| d.access_denied())
+}
 
 /// The helper loop the supervisor runs, again after each end.
 pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
@@ -43,10 +53,17 @@ pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
         // The user's files (C2.4 "Files"): the root is this user's home, chosen here, never by the service.
         let deps =
             match std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|p| p.is_absolute() && p.is_dir()) {
-                Some(home) => deps.with_fs(Arc::new(FsServer::new(Roots::Home {
-                    home,
-                    receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()),
-                }))),
+                Some(home) => {
+                    // The free space of the receiving volume lets the receiver refuse a file that does not fit
+                    // before writing anything.
+                    let disk = Arc::clone(
+                        USER_DISK.get_or_init(|| Arc::new(LocalFs::with_free_space(swapdesk_sys_mac::free_bytes))),
+                    );
+                    deps.with_fs(Arc::new(FsServer::with_fs(
+                        disk as Arc<dyn Fs>,
+                        Roots::Home { home, receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()) },
+                    )))
+                }
                 None => deps,
             };
         run_helper(reader, writer, deps, IpcRole::HelperUser, std::process::id())
