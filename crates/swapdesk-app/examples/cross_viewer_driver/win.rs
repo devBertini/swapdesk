@@ -1,6 +1,7 @@
 //! Development tool of the stage 24 proof: this PC as the controlling machine, with no human at it.
 //!
-//! Connects to the UI pipe of the installed `SwapdeskService` as the logged-in user, exactly as `Swapdesk.exe` does
+//! Connects to the UI pipe of the installed `SwapdeskService` (or of a development instance: `--instance N
+//! --service-pid P`) as the logged-in user, exactly as `Swapdesk.exe` does
 //! (`swapdesk_app::connect::open_pipe`), picks an already paired device, and runs `swapdesk_crossdrive::viewer_drive`
 //! in its paired mode: connects with control, decodes the video with the Windows H.264 decoder, counts the audio
 //! datagrams and the host's cursor updates, sends a few small pointer moves and ends the session. Nothing is paired and
@@ -103,7 +104,14 @@ pub fn main() -> ExitCode {
         ExitCode::FAILURE
     };
 
-    let conn = match open_pipe(&Options::default()) {
+    // `--instance N --service-pid P`: a development instance of the service (`swapdesk-service --console --instance
+    // N`) instead of the installed one, which development never drives.
+    let options = Options {
+        instance: value(&args, "--instance").and_then(|v| v.parse().ok()),
+        service_pid: value(&args, "--service-pid").and_then(|v| v.parse().ok()),
+        ..Options::default()
+    };
+    let conn = match open_pipe(&options) {
         Ok(c) => c,
         Err(e) => return fail(&format!("cannot open the UI pipe: {e}")),
     };
