@@ -185,18 +185,20 @@ pub fn main() -> ExitCode {
         (value(&args, "--host-addr"), value(&args, "--peer-code"), value(&args, "--go"))
     else {
         eprintln!(
-            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>]"
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>] [--chat <dir>] [--reconnect <dir>]"
         );
         return ExitCode::from(2);
     };
     let Some(anchor) = value(&args, "--anchor-file") else {
         eprintln!(
-            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>]"
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>] [--chat <dir>] [--reconnect <dir>]"
         );
         return ExitCode::from(2);
     };
     let type_after = value(&args, "--type").map(PathBuf::from);
     let files_dir = value(&args, "--files").map(PathBuf::from);
+    let chat_dir = value(&args, "--chat").map(PathBuf::from);
+    let reconnect_dir = value(&args, "--reconnect").map(PathBuf::from);
     match run(
         &host_addr,
         PathBuf::from(peer_code),
@@ -205,6 +207,8 @@ pub fn main() -> ExitCode {
         value(&args, "--clip"),
         type_after,
         files_dir,
+        chat_dir,
+        reconnect_dir,
     ) {
         Ok(()) => {
             println!("VIEWER_RESULT PASS");
@@ -217,6 +221,7 @@ pub fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     host_addr: &str,
     peer_code: PathBuf,
@@ -225,6 +230,8 @@ fn run(
     clip_dir: Option<String>,
     type_after: Option<PathBuf>,
     files_dir: Option<PathBuf>,
+    chat_dir: Option<PathBuf>,
+    reconnect_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     let scratch = Scratch::new()?;
     let trace: Arc<dyn TraceSink> = Arc::new(StderrTrace);
@@ -315,6 +322,10 @@ fn run(
     }
     // `--files <dir>`: the files proof; the orchestrator works the host's disk and meets this side in `<dir>`.
     cfg.files = files_dir;
+    // `--chat <dir>`: the chat proof; the orchestrator carries the texts to and from the host through `<dir>`.
+    cfg.chat = chat_dir;
+    // `--reconnect <dir>`: the orchestrator drops this Mac's link for about 10 s and the session must come back (last).
+    cfg.reconnect = reconnect_dir;
     let log = |line: &str| println!("{line}");
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
     println!("{}", report.counts_line());
@@ -345,6 +356,12 @@ fn run(
     }
     if let Some(why) = report.files_failed {
         return Err(format!("files: {why}"));
+    }
+    if let Some(why) = report.chat_failed {
+        return Err(format!("chat: {why}"));
+    }
+    if let Some(why) = report.reconnect_failed {
+        return Err(format!("reconnect: {why}"));
     }
     if report.frames_decoded == 0 {
         return Err("no frame decoded".into());

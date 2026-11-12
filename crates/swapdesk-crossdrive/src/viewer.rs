@@ -59,6 +59,8 @@ struct Shared {
     last_error: Mutex<String>,
     need_keyframe: AtomicBool,
     first_frame_ms: AtomicU64,
+    /// When the last picture was decoded.
+    last_decoded: Mutex<Option<Instant>>,
     /// `width << 16 | height` of the last video header.
     dims: AtomicU32,
     display: AtomicU32,
@@ -157,6 +159,7 @@ fn decode_one(s: &Shared, decoder: &mut dyn VideoDecoder, header: &VideoHeader, 
     match decoder.decode(header, payload) {
         Ok(Some(frame)) => {
             let n = s.frames_decoded.fetch_add(1, Ordering::Relaxed) + 1;
+            *lock(&s.last_decoded) = Some(Instant::now());
             if header.keyframe {
                 s.need_keyframe.store(false, Ordering::Relaxed);
             }
@@ -247,6 +250,12 @@ pub struct ViewerConfig {
     /// Files proof ([`crate::files`]): after the clipboard, a file each way and a cancel, meeting the orchestrator in
     /// this folder. `None`: no file steps.
     pub files: Option<PathBuf>,
+    /// Chat proof ([`crate::chat`]): a message each way with its read state, meeting the orchestrator in this folder.
+    /// `None`: no chat steps.
+    pub chat: Option<PathBuf>,
+    /// Reconnect proof ([`crate::reconnect`]): the orchestrator drops the link for about 10 s and this side must see
+    /// the session come back and a picture inside the budget; they meet in this folder. Runs last. `None`: no drop.
+    pub reconnect: Option<PathBuf>,
     /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
     /// `pair_with_fresh_host`). `None`: the host is found by its address.
     pub host_up: Option<PathBuf>,
@@ -274,6 +283,8 @@ impl ViewerConfig {
             save_with_ctrl: false,
             clip: None,
             files: None,
+            chat: None,
+            reconnect: None,
             host_up: None,
         }
     }
@@ -306,6 +317,12 @@ pub struct ViewerReport {
     pub clip_failed: Option<String>,
     /// The files proof failed: why.
     pub files_failed: Option<String>,
+    /// The chat proof failed: why.
+    pub chat_failed: Option<String>,
+    /// The reconnect proof failed: why.
+    pub reconnect_failed: Option<String>,
+    /// What the reconnect proof measured (when it got that far).
+    pub reconnect_times: Option<crate::reconnect::Times>,
 }
 
 impl ViewerReport {
@@ -614,6 +631,33 @@ fn script_media(
         if let Err(e) = crate::files::files_round(pump, session_id, dir, Duration::from_secs(60), log) {
             log(&format!("FILES_FAIL {e}"));
             report.files_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.chat {
+        log("VIEWER_NEED_CHAT");
+        if let Err(e) = crate::chat::chat_round(pump, session_id, dir, Duration::from_secs(30), log) {
+            log(&format!("CHAT_FAIL {e}"));
+            report.chat_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.reconnect {
+        log("VIEWER_NEED_RECONNECT");
+        let last_decoded = || *lock(&shared.last_decoded);
+        let mut tick = || request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
+        match crate::reconnect::reconnect_round(
+            pump,
+            session_id,
+            dir,
+            Duration::from_secs(120),
+            &last_decoded,
+            &mut tick,
+            log,
+        ) {
+            Ok(times) => report.reconnect_times = Some(times),
+            Err(e) => {
+                log(&format!("RECONNECT_FAIL {e}"));
+                report.reconnect_failed = Some(e);
+            }
         }
     }
     // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.

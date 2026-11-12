@@ -8,7 +8,7 @@
 //! nothing is forgotten: the pairing outlives the tool.
 //!
 //!     cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files]
+//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--reconnect]
 //!
 //! `--pair` is the full script against a host run by `Swapdesk --drive-host` (a scratch identity on the Mac): it adds
 //! the host by address, prints `VIEWER_CODE <code>`, reads the host's code from `<folder>/peer-code.txt`, waits for
@@ -93,7 +93,7 @@ pub fn main() -> ExitCode {
     if device.is_none() == pair.is_none() {
         eprintln!(
             "usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip]"
+       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--reconnect]"
         );
         return ExitCode::from(2);
     }
@@ -166,6 +166,14 @@ pub fn main() -> ExitCode {
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--files"), &pair) {
         cfg.files = Some(PathBuf::from(dir));
     }
+    // `--chat`: the chat proof; the orchestrator carries the texts to and from the host through `<dir>`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--chat"), &pair) {
+        cfg.chat = Some(PathBuf::from(dir));
+    }
+    // `--reconnect`: the orchestrator drops the link for about 10 s and the session must come back (runs last).
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--reconnect"), &pair) {
+        cfg.reconnect = Some(PathBuf::from(dir));
+    }
     // `--fresh-host`: the orchestrator starts the host after this viewer and writes `<dir>/host-up`.
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--fresh-host"), &pair) {
         cfg.host_up = Some(PathBuf::from(dir).join("host-up"));
@@ -182,6 +190,14 @@ pub fn main() -> ExitCode {
         })
         .and_then(|()| match &report.files_failed {
             Some(why) => Err(format!("files: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.chat_failed {
+            Some(why) => Err(format!("chat: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.reconnect_failed {
+            Some(why) => Err(format!("reconnect: {why}")),
             None => Ok(()),
         });
     match (verdict, result) {

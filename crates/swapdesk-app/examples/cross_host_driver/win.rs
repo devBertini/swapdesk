@@ -5,7 +5,8 @@
 //! `swapdesk_crossdrive::host_drive`: opens pairing, confirms the code the viewer reports, grants the viewer VIEW,
 //! CONTROL and AUDIO, answers the incoming request with Accept, waits for the session to end and forgets the device.
 //!
-//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] [--clip]
+//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] [--clip] [--files]
+//!         [--chat <file>] [--reconnect]
 //!     cross_host_driver --stay
 //!
 //! `--stay` (hand testing) pairs nothing and forgets nothing: it accepts every session request of a paired device
@@ -87,6 +88,11 @@ pub fn main() -> ExitCode {
     if args.iter().any(|a| a == "--files") {
         grants = grants.with(Permission::Files);
     }
+    // `--reconnect`: the viewer's link is dropped for about 10 s; the host's script logs the session's drop and return
+    // (it needs no grant), and the session timeout below must cover the drop.
+    if args.iter().any(|a| a == "--reconnect") {
+        log("HOST_RECONNECT_WATCH");
+    }
     if stay {
         return match host_stay(&backend, grants, &log) {
             Ok(()) => ExitCode::SUCCESS,
@@ -98,6 +104,8 @@ pub fn main() -> ExitCode {
         pair_timeout: seconds(&args, "--pair-timeout", 100),
         session_timeout: seconds(&args, "--session-timeout", 120),
         grants,
+        // `--chat <file>`: the chat proof; once the orchestrator writes a text to <file> the host sends it.
+        chat_say: value(&args, "--chat").map(PathBuf::from),
     };
     let (outcome, result) = host_drive(&backend, &cfg, &log);
     match result {

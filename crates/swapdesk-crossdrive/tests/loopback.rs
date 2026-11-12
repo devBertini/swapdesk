@@ -383,6 +383,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         pair_timeout: Duration::from_secs(30),
         session_timeout: Duration::from_secs(40),
         grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
+        chat_say: Some(dir.join("chat-host-say")),
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),
@@ -391,6 +392,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         dir.join("anchor"),
     );
     viewer_cfg.pair_timeout = Duration::from_secs(30);
+    viewer_cfg.chat = Some(dir.clone());
 
     let (host_result, viewer_result) = std::thread::scope(|scope| {
         let host_task = scope.spawn(|| {
@@ -405,6 +407,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         });
         // The orchestrator: codes cross, then the go.
         let (mut sent_host, mut sent_viewer, mut sent_go, mut sent_anchor) = (false, false, false, false);
+        let (mut sent_got, mut sent_say) = (false, false);
         let end = Instant::now() + Duration::from_secs(90);
         while !(host_task.is_finished() && viewer_task.is_finished()) && Instant::now() < end {
             if !sent_viewer && let Some(code) = field(&viewer_lines, "VIEWER_CODE ") {
@@ -430,6 +433,16 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
                 std::fs::write(dir.join("go"), "go").expect("write");
                 sent_go = true;
             }
+            // The chat proof: what the host's interface received goes back to the viewer, and the text the viewer picked
+            // for the host's reply goes into the host's file.
+            if !sent_got && let Some(text) = field(&host_lines, "HOST_CHAT_GOT ") {
+                std::fs::write(dir.join("chat-host-got"), text).expect("write");
+                sent_got = true;
+            }
+            if !sent_say && let Ok(text) = std::fs::read_to_string(dir.join("chat-host-say-text")) {
+                std::fs::write(dir.join("chat-host-say"), text).expect("write");
+                sent_say = true;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         (host_task.join().expect("host task"), viewer_task.join().expect("viewer task"))
@@ -454,6 +467,18 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
     // The walk spans 20 px each way: an update that hides the pointer is not a position and adds nothing to it.
     assert!(report.pointer_max_deviation_px <= 24, "a hidden pointer counted as a position: {report:?}");
     assert!(report.ended_clean && report.forgotten);
+    assert_eq!(report.chat_failed, None, "chat proof");
+    {
+        let l = viewer_lines.lock().unwrap();
+        for marker in ["CHAT_TO_HOST_OK", "CHAT_READ_BY_HOST_OK"] {
+            assert!(l.iter().any(|x| x == marker), "{marker} in {l:?}");
+        }
+        assert!(l.iter().any(|x| x.starts_with("CHAT_FROM_HOST_OK")), "CHAT_FROM_HOST_OK in {l:?}");
+        let h = host_lines.lock().unwrap();
+        let got = h.iter().find_map(|x| x.strip_prefix("HOST_CHAT_GOT ")).expect("the host's interface got the text");
+        assert!(got.contains('\u{e7}'), "the accents arrived intact: {got}");
+        assert!(h.iter().any(|x| x == "HOST_CHAT_SENT"), "{h:?}");
+    }
     // Nothing stays paired on either side.
     assert_eq!(host.trust.read(|s| s.devices.len()), 0, "host forgot the viewer");
     assert_eq!(viewer.trust.read(|s| s.devices.len()), 0, "viewer forgot the host");
@@ -483,6 +508,7 @@ fn different_codes_end_the_pairing_without_a_device() {
         pair_timeout: Duration::from_secs(20),
         session_timeout: Duration::from_secs(5),
         grants: Permissions::NONE.with(Permission::Control),
+        chat_say: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),

@@ -85,6 +85,9 @@ pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), 
             .with(Permission::Audio)
             .with(Permission::Clipboard)
             .with(Permission::Files),
+        // The chat proof: the host sends the text the orchestrator writes to `<dir>/chat-host-say`. The reconnect proof
+        // needs nothing more here: the script logs the session's drop and return on its own.
+        chat_say: Some(dir.join("chat-host-say")),
     };
     std::thread::Builder::new()
         .name("swapdesk-drive-host".into())

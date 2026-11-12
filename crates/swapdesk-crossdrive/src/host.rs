@@ -2,12 +2,17 @@
 //!
 //! Markers printed through `log`, read by the orchestrator: `HOST_PAIR_OPEN`, `HOST_CODE <code>`, `HOST_READY <id>`
 //! (the viewer may connect now), `HOST_SESSION_ACTIVE`, `HOST_SESSION_ENDED`, `HOST_FORGOTTEN`.
+//!
+//! While the session is active the host's user also answers the chat proof ([`crate::chat`]): `HOST_CHAT_GOT <text>`
+//! is what its interface received (the message is then marked read), `HOST_CHAT_SENT` follows the sending of the text
+//! in the file [`HostConfig::chat_say`], `HOST_CHAT_READ_BY_PEER` is the viewer's read state; and it logs the session
+//! going `HOST_SESSION_RECONNECTING` and `HOST_SESSION_ACTIVE_AGAIN` for the reconnect proof.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swapdesk_ui::{
-    Command, Decision, PairingState, Permissions, Reply, RequestKind, Role, SessionState, UiBackend, UiEvent,
+    ApiCode, Command, Decision, PairingState, Permissions, Reply, RequestKind, Role, SessionState, UiBackend, UiEvent,
 };
 
 use crate::pump::{Pump, wait_file};
@@ -23,6 +28,9 @@ pub struct HostConfig {
     pub session_timeout: Duration,
     /// What the incoming request is answered with (VIEW, CONTROL and AUDIO).
     pub grants: Permissions,
+    /// The file the orchestrator writes a chat text to; once it exists the text is sent to the viewer on the hosted
+    /// session (`ChatSend`). `None`: the host sends no chat message.
+    pub chat_say: Option<PathBuf>,
 }
 
 /// What `host_drive` learned, for the caller's last line.
@@ -104,12 +112,7 @@ fn script(pump: &mut Pump<'_>, cfg: &HostConfig, log: &dyn Fn(&str), out: &mut H
     out.session_active = true;
     log(&format!("HOST_SESSION_ACTIVE session={session_id} granted={:#06x}", granted.0));
 
-    let end = pump.wait("the hosted session to end", cfg.session_timeout, |e| match e {
-        UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == session_id => {
-            Some(*reason)
-        }
-        _ => None,
-    });
+    let end = watch_session(pump, cfg, log, session_id);
     match end {
         Ok(reason) => {
             out.session_ended = true;
@@ -121,6 +124,60 @@ fn script(pump: &mut Pump<'_>, cfg: &HostConfig, log: &dyn Fn(&str), out: &mut H
             let _ = pump.request(Command::Disconnect { session_id }, REPLY);
             Err(e)
         }
+    }
+}
+
+/// Until the hosted session ends: shows the viewer's chat messages (and marks them read), sends the chat text once
+/// the orchestrator wrote it, and logs the session's drops and returns.
+fn watch_session(
+    pump: &mut Pump<'_>,
+    cfg: &HostConfig,
+    log: &dyn Fn(&str),
+    session_id: u64,
+) -> Result<Option<ApiCode>, String> {
+    let deadline = Instant::now() + cfg.session_timeout;
+    let mut cursor = 0;
+    let mut sent = false;
+    let mut reconnecting = false;
+    loop {
+        for e in pump.fresh(&mut cursor) {
+            match e {
+                UiEvent::Session { session_id: s, state, .. } if s == session_id => match state {
+                    SessionState::Ended { reason } => return Ok(reason),
+                    SessionState::Reconnecting { .. } if !reconnecting => {
+                        reconnecting = true;
+                        log("HOST_SESSION_RECONNECTING");
+                    }
+                    SessionState::Active { .. } if reconnecting => {
+                        reconnecting = false;
+                        log("HOST_SESSION_ACTIVE_AGAIN");
+                    }
+                    _ => {}
+                },
+                UiEvent::Chat { session_id: s, message } if s == session_id && !message.mine => {
+                    log(&format!("HOST_CHAT_GOT {}", message.text));
+                    pump.ask(Command::ChatMarkRead { session_id, up_to: message.msg_id }, REPLY)?;
+                }
+                UiEvent::ChatRead { session_id: s, .. } if s == session_id => log("HOST_CHAT_READ_BY_PEER"),
+                _ => {}
+            }
+        }
+        if !sent
+            && let Some(file) = &cfg.chat_say
+            && let Ok(text) = std::fs::read_to_string(file)
+            && !text.trim().is_empty()
+        {
+            sent = true;
+            pump.ask(Command::ChatSend { session_id, text: text.trim().to_string() }, REPLY)?;
+            log("HOST_CHAT_SENT");
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {}s waiting for the hosted session to end",
+                cfg.session_timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
