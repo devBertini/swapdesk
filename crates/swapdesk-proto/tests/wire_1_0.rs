@@ -133,7 +133,15 @@ fn a_hello_carries_its_own_minor_and_the_fixture_holds_the_minor_of_1_0() {
 const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[(0x000B, 1), (0x000C, 1), (0x0801, 1)];
 
 /// Enum values introduced after minor 0: `(enum name, tag, minor)`. The same rule as for the types.
-const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[("ErrorCode", 22, 1), ("Desktop", 4, 1)];
+const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[
+    ("ErrorCode", 22, 1),
+    ("ErrorCode", 23, 1),
+    ("ErrorCode", 24, 1),
+    ("ErrorCode", 25, 1),
+    ("ErrorCode", 26, 1),
+    ("Desktop", 4, 1),
+    ("Codec", 2, 1),
+];
 
 #[test]
 fn every_message_type_of_minor_0_has_a_fixture() {
@@ -175,6 +183,7 @@ fn every_enum_value_of_minor_0_is_carried_by_a_fixture() {
         let crate_minor = |tag: u64| match name {
             "ErrorCode" => ErrorCode::from_tag(tag as u16).map(ErrorCode::min_minor),
             "Desktop" => Desktop::from_tag(tag as u8).map(Desktop::min_minor),
+            "Codec" => Codec::from_tag(tag as u8).map(Codec::min_minor),
             _ => Some(0),
         };
         for tag in &defined {

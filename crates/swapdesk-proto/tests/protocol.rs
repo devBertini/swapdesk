@@ -337,7 +337,7 @@ fn every_unknown_tag_is_fatal() {
         }
     }
     check_u8::<Os>(&[0, 1]);
-    check_u8::<Codec>(&[1]);
+    check_u8::<Codec>(&[1, 2]);
     check_u8::<AudioCodec>(&[1]);
     check_u8::<Intent>(&[0, 1]);
     check_u8::<H264Profile>(&[0, 1]);
@@ -357,7 +357,7 @@ fn every_unknown_tag_is_fatal() {
 fn error_codes_outside_section_8_are_fatal() {
     for code in 0..=u16::MAX {
         let r = ErrorCode::decode(&code.to_le_bytes());
-        if code <= 22 {
+        if code <= 26 {
             assert_eq!(r.unwrap().tag(), code);
         } else {
             assert!(matches!(r, Err(CodecError::UnknownTag { .. })), "{code}");
@@ -379,8 +379,8 @@ fn bad_tags_inside_messages_are_fatal() {
     assert_eq!(Message::decode_payload(0x0107, &[2]), Err(CodecError::InvalidBool));
     assert_eq!(Message::decode_payload(0x0107, &[1]).unwrap(), Message::AudioControl(AudioControl { enabled: true }));
     // an unknown enum value in PairResult.code and Error.code
-    assert!(Message::decode_payload(0x0705, &[1, 23, 0]).is_err());
-    assert!(Message::decode_payload(0x0FFF, &[23, 0, 1, 0, 0, 0, 0, 0]).is_err());
+    assert!(Message::decode_payload(0x0705, &[1, 27, 0]).is_err());
+    assert!(Message::decode_payload(0x0FFF, &[27, 0, 1, 0, 0, 0, 0, 0]).is_err());
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn headers_refuse_wrong_kinds_versions_flags_and_reserved_bytes() {
             let want = match off {
                 0 => val == 1,
                 1 => val < 8,
-                24 => val == 1,
+                24 => val == 1 || val == 2,
                 _ => val == 0,
             };
             assert_eq!(ok, want, "offset {off} value {val}");
@@ -772,4 +772,76 @@ fn no_minor_1_type_or_value_reaches_a_minor_0_peer_in_any_message() {
             })
             .unwrap_or_else(|e| panic!("{e}"));
     }
+}
+
+fn caps_with(codecs: &[Codec]) -> Capabilities {
+    Capabilities {
+        video_decode: codecs
+            .iter()
+            .map(|c| VideoCap {
+                codec: *c,
+                profile: H264Profile::Main,
+                max_level: 51,
+                max_width: 3840,
+                max_height: 2160,
+                max_fps: 60,
+            })
+            .collect(),
+        audio: vec![AudioCodec::Opus48Stereo],
+        max_datagram: 1200,
+        keyboard: KeyboardInfo { kind: KbKind::Unknown, layout: String::new() },
+        features: 0,
+    }
+}
+
+#[test]
+fn an_hevc_decoder_is_never_listed_to_a_minor_0_peer() {
+    let both = Message::Capabilities(caps_with(&[Codec::Hevc, Codec::H264]));
+    assert_eq!(both.min_minor(), 1);
+    assert_eq!(both.clone().for_peer(1), Some(both.clone()), "a minor-1 peer reads the HEVC entry");
+    let old = both.for_peer(0).expect("Capabilities is a 1.0 type");
+    assert_eq!(old, Message::Capabilities(caps_with(&[Codec::H264])));
+    assert_eq!(old.min_minor(), 0);
+    assert_eq!(Message::decode_frame_exact(&old.encode_frame().unwrap()).unwrap(), old);
+    // A peer that lists only H.264 is sent its capabilities as they are.
+    let h264 = Message::Capabilities(caps_with(&[Codec::H264]));
+    assert_eq!(h264.clone().for_peer(0), Some(h264));
+}
+
+#[test]
+fn every_capability_combination_picks_the_expected_codec() {
+    for viewer in [&[][..], &[Codec::H264], &[Codec::Hevc], &[Codec::Hevc, Codec::H264]] {
+        for minor in [0u16, 1, 7] {
+            for host_hw in [false, true] {
+                let want = if host_hw && minor >= 1 && viewer.contains(&Codec::Hevc) {
+                    Codec::Hevc
+                } else {
+                    Codec::H264
+                };
+                assert_eq!(caps_with(viewer).pick_codec(minor, host_hw), want, "{viewer:?} minor {minor} hw {host_hw}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_video_header_in_hevc_round_trips() {
+    let header = VideoHeader {
+        keyframe: true,
+        config: true,
+        discontinuity: false,
+        display_id: 1,
+        frame_id: 9,
+        capture_us: 5,
+        encode_us: 3,
+        width: 1920,
+        height: 1080,
+        codec: Codec::Hevc,
+        payload_len: 4,
+    };
+    let mut w = swapdesk_proto::codec::Writer::new();
+    swapdesk_proto::codec::Wire::put(&header, &mut w, 0).unwrap();
+    let bytes = w.into_bytes();
+    let mut r = swapdesk_proto::codec::Reader::new(&bytes);
+    assert_eq!(<VideoHeader as swapdesk_proto::codec::Wire>::get(&mut r, 0).unwrap(), header);
 }

@@ -92,6 +92,30 @@ wire_struct! {
     }
 }
 
+impl Capabilities {
+    /// The newest minor among the codecs these capabilities name (an HEVC entry is of minor 1).
+    pub fn min_minor(&self) -> u16 {
+        self.video_decode.iter().map(|c| c.codec.min_minor()).max().unwrap_or(0)
+    }
+
+    /// These capabilities as a peer of `minor` may read them: every decode entry of a newer codec left out.
+    #[must_use]
+    pub fn for_minor(mut self, minor: u16) -> Self {
+        self.video_decode.retain(|c| c.codec.min_minor() <= minor);
+        self
+    }
+
+    /// The codec a host sends to the viewer that announced these capabilities and `viewer_minor` (F-VIEW-07):
+    /// HEVC only when the viewer is of minor 1 or newer and lists an HEVC decoder (a viewer lists one only when
+    /// its hardware decodes it) and `host_hevc_hardware` says the host has a hardware HEVC encoder; H.264
+    /// otherwise, which every build of every minor decodes.
+    pub fn pick_codec(&self, viewer_minor: u16, host_hevc_hardware: bool) -> Codec {
+        let viewer_hevc = viewer_minor >= Codec::Hevc.min_minor()
+            && self.video_decode.iter().any(|c| c.codec == Codec::Hevc);
+        if viewer_hevc && host_hevc_hardware { Codec::Hevc } else { Codec::H264 }
+    }
+}
+
 wire_struct! {
     /// 0x0004, host to viewer.
     PromptPending { timeout_s: u16 }
@@ -517,8 +541,9 @@ impl Message {
 
     /// The lowest minor a peer must have announced to be sent this message: the newest of its type and of the
     /// enum values it carries. A sender checks it against the peer's minor before it writes the message.
-    pub const fn min_minor(&self) -> u16 {
+    pub fn min_minor(&self) -> u16 {
         let carried = match self {
+            Self::Capabilities(m) => m.min_minor(),
             Self::SessionRefused(m) => m.code.min_minor(),
             Self::Bye(m) => m.code.min_minor(),
             Self::HostState(m) => m.desktop.min_minor(),
@@ -544,6 +569,7 @@ impl Message {
             return Some(self);
         }
         Some(match self {
+            Self::Capabilities(m) => Self::Capabilities(m.for_minor(minor)),
             Self::SessionRefused(mut m) => {
                 m.code = m.code.for_minor(minor);
                 Self::SessionRefused(m)

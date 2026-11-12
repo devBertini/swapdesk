@@ -10,8 +10,19 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// Video codec (9.2: 1 = H.264 Annex B).
-    Codec: u8 { H264 = 1 }
+    /// Video codec (9.2: 1 = H.264 Annex B, 2 = HEVC Annex B, minor 1).
+    Codec: u8 { H264 = 1, Hevc = 2 }
+}
+
+impl Codec {
+    /// The protocol minor that introduced this codec (PROTOCOL.md 1): a peer of an older minor is never offered it,
+    /// never sent a capability naming it and never sent a frame in it.
+    pub const fn min_minor(self) -> u16 {
+        match self {
+            Self::Hevc => 1,
+            Self::H264 => 0,
+        }
+    }
 }
 
 wire_enum! {
@@ -114,6 +125,14 @@ wire_enum! {
         AlreadyPaired = 21,
         /// Minor 1: the account that would answer is not at the console of its computer.
         AccountAway = 22,
+        /// Minor 1: the receiving volume has less free space than the file needs (F-FILE-03).
+        NoSpace = 23,
+        /// Minor 1: a delete to the bin on a volume that has no bin; nothing was deleted.
+        NoBin = 24,
+        /// Minor 1: a new folder, rename or move onto a name that exists; nothing is replaced.
+        Exists = 25,
+        /// Minor 1: the volume of a path is gone or now names another volume.
+        VolumeGone = 26,
     }
 }
 
@@ -122,15 +141,24 @@ impl ErrorCode {
     /// newer.
     pub const fn min_minor(self) -> u16 {
         match self {
-            Self::AccountAway => 1,
+            Self::AccountAway | Self::NoSpace | Self::NoBin | Self::Exists | Self::VolumeGone => 1,
             _ => 0,
         }
     }
 
     /// What a peer of `minor` is told in place of this code: itself when the peer knows it, otherwise the code
-    /// of its own minor that says the same (nobody is there to answer).
+    /// of its own minor that says the same (an absent account reads as nobody there to answer; no space and an
+    /// existing name as a failed write; a missing bin as not permitted; a volume that went away as not found).
     pub const fn for_minor(self, minor: u16) -> Self {
-        if self.min_minor() <= minor { self } else { Self::NobodyPresent }
+        if self.min_minor() <= minor {
+            return self;
+        }
+        match self {
+            Self::NoSpace | Self::Exists => Self::IoFailed,
+            Self::NoBin => Self::NotPermitted,
+            Self::VolumeGone => Self::NotFound,
+            _ => Self::NobodyPresent,
+        }
     }
 }
 
@@ -252,14 +280,15 @@ mod tests {
         assert_eq!(ErrorCode::Internal.tag(), 19);
         assert_eq!(ErrorCode::AlreadyPaired.tag(), 21);
         assert_eq!(ErrorCode::AccountAway.tag(), 22);
-        assert_eq!(ErrorCode::ALL.len(), 23);
-        assert_eq!(ErrorCode::from_tag(23), None);
+        assert_eq!(ErrorCode::VolumeGone.tag(), 26);
+        assert_eq!(ErrorCode::ALL.len(), 27);
+        assert_eq!(ErrorCode::from_tag(27), None);
     }
 
     #[test]
     fn every_new_value_names_minor_1() {
         for code in ErrorCode::ALL {
-            let want = u16::from(*code == ErrorCode::AccountAway);
+            let want = u16::from(code.tag() >= 22);
             assert_eq!(code.min_minor(), want, "{code:?}");
             // A peer of minor 0 never gets a code it would refuse; a peer that knows the code gets it as it is.
             assert_eq!(code.for_minor(0).min_minor(), 0, "{code:?}");
@@ -267,6 +296,13 @@ mod tests {
             assert_eq!(code.for_minor(u16::MAX), *code);
         }
         assert_eq!(ErrorCode::AccountAway.for_minor(0), ErrorCode::NobodyPresent);
+        assert_eq!(ErrorCode::NoSpace.for_minor(0), ErrorCode::IoFailed);
+        assert_eq!(ErrorCode::NoBin.for_minor(0), ErrorCode::NotPermitted);
+        assert_eq!(ErrorCode::Exists.for_minor(0), ErrorCode::IoFailed);
+        assert_eq!(ErrorCode::VolumeGone.for_minor(0), ErrorCode::NotFound);
+        for codec in Codec::ALL {
+            assert_eq!(codec.min_minor(), u16::from(*codec == Codec::Hevc), "{codec:?}");
+        }
         for desktop in Desktop::ALL {
             let want = u16::from(*desktop == Desktop::AccountAway);
             assert_eq!(desktop.min_minor(), want, "{desktop:?}");
@@ -280,7 +316,7 @@ mod tests {
     #[test]
     fn explicit_tags_of_9_2() {
         assert_eq!((Os::Windows.tag(), Os::MacOs.tag()), (0, 1));
-        assert_eq!(Codec::H264.tag(), 1);
+        assert_eq!((Codec::H264.tag(), Codec::Hevc.tag()), (1, 2));
         assert_eq!(AudioCodec::Opus48Stereo.tag(), 1);
         assert_eq!(Codec::from_tag(0), None);
     }
