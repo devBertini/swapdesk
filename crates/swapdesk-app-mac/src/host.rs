@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use swapdesk_capture_mac::audio::MacAudio;
-use swapdesk_capture_mac::screen::MacScreen;
+use swapdesk_capture_mac::screen::{DisplayRegistry, MacScreen};
 use swapdesk_codec_mac::VtH264Encoder;
 use swapdesk_files::{Fs, FsServer, LocalFs, Roots};
 use swapdesk_host::helper::{HelperDeps, run_helper};
@@ -37,8 +37,11 @@ pub fn receive_folder_denied() -> Option<PathBuf> {
 pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
     Arc::new(move |reader, writer| {
         let (screen_clock, encoder_clock, audio_clock) = (Arc::clone(&clock), Arc::clone(&clock), Arc::clone(&clock));
+        // One display numbering for every screen this helper makes (the listing and each stream), so switching
+        // displays live and plugging one in never changes what an id means.
+        let registry = DisplayRegistry::default();
         let deps = HelperDeps::new(
-            move |_display| MacScreen::new(Arc::clone(&screen_clock)),
+            move |_display| MacScreen::with_registry(Arc::clone(&screen_clock), Arc::clone(&registry)),
             move |_first, _config, _backend| Ok(VtH264Encoder::new(Arc::clone(&encoder_clock))),
             || Ok(MacInputSink::new()),
             move || MacAudio::new(Arc::clone(&audio_clock)),

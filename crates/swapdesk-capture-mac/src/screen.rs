@@ -370,7 +370,7 @@ fn state_error(op: &'static str, detail: &str) -> swapdesk_platform::PlatformErr
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{MacScreen, render_cursor, system_cursor_shape};
+pub use mac::{DisplayRegistry, MacScreen, render_cursor, system_cursor_shape};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -667,22 +667,42 @@ mod mac {
     /// `ScreenSource` for macOS. Built and used on one thread.
     pub struct MacScreen {
         clock: Arc<dyn Clock>,
-        known: Vec<u32>,
+        known: DisplayRegistry,
         target: Option<Target>,
         open: Option<OpenStream>,
         cursor: CursorState,
     }
 
+    /// The `CGDirectDisplayID` of each `DisplayId` index (see [`assign_display_ids`]), shared by every `MacScreen` of
+    /// one helper: the screen that lists the displays and the one that streams a display agree on what an id means,
+    /// whatever order the system lists a monitor in after one was plugged in.
+    pub type DisplayRegistry = Arc<std::sync::Mutex<Vec<u32>>>;
+
     impl MacScreen {
+        /// A screen with its own display ids.
         pub fn new(clock: Arc<dyn Clock>) -> Result<Self> {
-            Ok(Self { clock, known: Vec::new(), target: None, open: None, cursor: CursorState::default() })
+            Self::with_registry(clock, DisplayRegistry::default())
+        }
+
+        /// A screen whose display ids come from `registry`, shared with the other screens of the helper.
+        pub fn with_registry(clock: Arc<dyn Clock>, registry: DisplayRegistry) -> Result<Self> {
+            Ok(Self { clock, known: registry, target: None, open: None, cursor: CursorState::default() })
         }
 
         fn cg_of(&mut self, display: DisplayId) -> Result<u32> {
-            if self.known.is_empty() {
-                self.list()?;
-            }
-            self.known.get(usize::from(display.0)).copied().ok_or_else(|| PlatformError {
+            let index = usize::from(display.0);
+            let lookup = |known: &DisplayRegistry| {
+                known.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(index).copied()
+            };
+            // A display plugged in since the last listing has no index yet: list again before refusing.
+            let cg = match lookup(&self.known) {
+                Some(cg) => Some(cg),
+                None => {
+                    self.list()?;
+                    lookup(&self.known)
+                }
+            };
+            cg.ok_or_else(|| PlatformError {
                 kind: ErrorKind::InvalidInput,
                 op: "MacScreen::open",
                 os_code: None,
@@ -692,7 +712,8 @@ mod mac {
 
         fn list(&mut self) -> Result<Vec<(u16, u32)>> {
             let active = active_display_ids()?;
-            Ok(assign_display_ids(&mut self.known, &active, CGMainDisplayID()))
+            let mut known = self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            Ok(assign_display_ids(&mut known, &active, CGMainDisplayID()))
         }
 
         /// Builds and starts the stream inside an autorelease pool (the capture thread has no pool of its own).

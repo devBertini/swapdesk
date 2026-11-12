@@ -19,6 +19,7 @@ pub mod netcache;
 pub mod outbox;
 pub mod proxy;
 pub mod rpc;
+pub mod scale;
 pub mod service;
 pub mod ui_hub;
 

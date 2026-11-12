@@ -499,7 +499,13 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     let mut still = Still::default();
     let mut cursor = CursorState::default();
 
+    let mut relist = Throttle::new(RELIST_EVERY);
     while !ctl.stop.load(Ordering::Acquire) && !env.outbox.is_closed() {
+        // F-VIEW-02: a monitor plugged in or out, or another mode, reaches the viewer within seconds even while this
+        // display streams. A list that no longer holds this display ends this thread: the service restarts the video.
+        if relist.due(Instant::now()) && env.refresh_displays() && env.display(p.display).is_none() {
+            return Ok(());
+        }
         if let Some((k, f)) = lock(&ctl.rate).take() {
             (kbps, fps) = (k, f);
             if let (Some(enc), Some(cfg)) = (encoder.as_mut(), config.as_mut())
@@ -782,6 +788,49 @@ enum InputCmd {
 
 /// Pause between two listings of the displays made for pointers that name an unknown one.
 const RELIST_PAUSE: Duration = Duration::from_secs(1);
+
+/// How often a streaming display lists the displays again (the viewer learns of a change within 2 s, F-VIEW-02).
+const RELIST_EVERY: Duration = Duration::from_secs(1);
+
+/// Says when a periodic job is due: the first time it is asked, then once per period.
+#[derive(Debug)]
+struct Throttle {
+    every: Duration,
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    fn due(&mut self, now: Instant) -> bool {
+        // The first ask is not due: the video that just started listed the displays itself.
+        let last = *self.last.get_or_insert(now);
+        if now.saturating_duration_since(last) >= self.every {
+            self.last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+
+    #[test]
+    fn a_job_is_due_once_per_period_and_not_on_the_first_ask() {
+        let t0 = Instant::now();
+        let mut t = Throttle::new(Duration::from_secs(1));
+        assert!(!t.due(t0), "the start listed the displays already");
+        assert!(!t.due(t0 + Duration::from_millis(999)));
+        assert!(t.due(t0 + Duration::from_secs(1)));
+        assert!(!t.due(t0 + Duration::from_millis(1500)), "the period restarts at the last due");
+        assert!(t.due(t0 + Duration::from_secs(2)));
+    }
+}
 
 fn input_main<I: InputSink, S: ScreenSource, E>(
     factory: &InputFactory<I>,

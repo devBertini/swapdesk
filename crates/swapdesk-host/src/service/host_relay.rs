@@ -47,6 +47,31 @@ const MAX_BATCH: usize = 128;
 /// Bytes of an unfinished input record the stream task keeps; more is a protocol violation.
 const MAX_PENDING: usize = 4 * 1024;
 
+/// The display to stream: the viewer's choice if the host still has it, else the primary, else the first.
+fn pick_display(selected: Option<u16>, displays: &[swapdesk_proto::Display]) -> Option<u16> {
+    selected
+        .filter(|s| displays.iter().any(|d| d.id == *s))
+        .or_else(|| displays.iter().find(|d| d.primary).map(|d| d.id))
+        .or_else(|| displays.first().map(|d| d.id))
+}
+
+/// Whether the streamed display `id` is not what it was when its video started: gone from the new list, or the same
+/// id on another monitor (its name, place, scale or rotation differ). A size change alone is not: the capture follows
+/// a new size by itself and sends a keyframe at it.
+fn display_replaced(old: &[swapdesk_proto::Display], new: &[swapdesk_proto::Display], id: u16) -> bool {
+    let Some(now) = new.iter().find(|d| d.id == id) else { return true };
+    match old.iter().find(|d| d.id == id) {
+        Some(was) => {
+            was.name != now.name
+                || (was.x, was.y) != (now.x, now.y)
+                || was.scale_milli != now.scale_milli
+                || was.rotation != now.rotation
+        }
+        // The old list did not hold it (an empty list from before the helper came): nothing to compare.
+        None => false,
+    }
+}
+
 fn code(c: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(c.tag()))
 }
@@ -324,6 +349,13 @@ impl HostRelay {
     async fn media(&mut self, ev: MediaEv) {
         match ev {
             MediaEv::Displays(list) => {
+                // F-VIEW-02: the display on the wire may now be another monitor, or gone, or laid out anew: the video
+                // starts again on the right one (a keyframe at its size follows) instead of streaming a stale source.
+                if let Some(run) = &self.video
+                    && display_replaced(&self.displays, &list, run.display)
+                {
+                    self.stop_video().await;
+                }
                 self.displays = list.clone();
                 let _ = self.ctx.send(DisplayList { displays: list }).await;
             }
@@ -359,15 +391,14 @@ impl HostRelay {
     }
 
     fn fps(&self) -> u16 {
-        if self.max_fps == 0 { 60 } else { self.max_fps.clamp(1, 240) }
+        let refresh =
+            self.pick_display().and_then(|id| self.displays.iter().find(|d| d.id == id)).map_or(0, |d| d.refresh_mhz);
+        crate::scale::target_fps(self.preset, self.max_fps, refresh)
     }
 
     /// The display to stream: the viewer's choice if the host still has it, else the primary, else the first.
     fn pick_display(&self) -> Option<u16> {
-        self.selected
-            .filter(|s| self.displays.iter().any(|d| d.id == *s))
-            .or_else(|| self.displays.iter().find(|d| d.primary).map(|d| d.id))
-            .or_else(|| self.displays.first().map(|d| d.id))
+        pick_display(self.selected, &self.displays)
     }
 
     /// Brings the helper's work in line with the session's grants and the viewer's choices.
@@ -606,5 +637,57 @@ async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st:
     }
     if !helper.send(Ipc::Input { events: Events(events) }).await {
         st.dropped = true;
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use swapdesk_proto::Display;
+
+    fn display(id: u16, x: i32, scale_milli: u16, primary: bool) -> Display {
+        Display {
+            id,
+            name: format!("Display {id}"),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_milli,
+            refresh_mhz: 60_000,
+            rotation: 0,
+            primary,
+        }
+    }
+
+    #[test]
+    fn the_viewers_choice_wins_while_the_host_has_it_else_the_primary_else_the_first() {
+        let list = [display(0, 0, 1000, false), display(1, 1920, 2000, true), display(2, 3840, 1500, false)];
+        assert_eq!(pick_display(None, &list), Some(1), "the primary by default");
+        assert_eq!(pick_display(Some(2), &list), Some(2));
+        assert_eq!(pick_display(Some(9), &list), Some(1), "a display that is gone falls back to the primary");
+        let no_primary = [display(3, 0, 1000, false), display(4, 100, 1000, false)];
+        assert_eq!(pick_display(Some(9), &no_primary), Some(3));
+        assert_eq!(pick_display(None, &[]), None);
+    }
+
+    #[test]
+    fn a_streamed_display_is_replaced_when_gone_or_another_monitor_but_not_for_a_size_change() {
+        let old = [display(0, 0, 1000, true), display(1, 1920, 2000, false)];
+        assert!(!display_replaced(&old, &old, 1), "an unchanged list");
+        assert!(display_replaced(&old, &old[..1], 1), "gone");
+        let moved = [display(0, 0, 1000, true), display(1, 2560, 2000, false)];
+        assert!(display_replaced(&old, &moved, 1), "another place");
+        let rescaled = [display(0, 0, 1000, true), display(1, 1920, 1500, false)];
+        assert!(display_replaced(&old, &rescaled, 1), "another scale");
+        let mut other = old.clone();
+        other[1].name = "Other".into();
+        assert!(display_replaced(&old, &other, 1), "another name");
+        let mut resized = old.clone();
+        resized[1].width = 2560;
+        resized[1].primary = true;
+        assert!(!display_replaced(&old, &resized, 1), "the capture follows a size change itself");
+        assert!(!display_replaced(&old[..1], &old, 1), "no earlier entry to compare");
+        assert!(!display_replaced(&old, &old, 0), "another display's entry is not this one's");
     }
 }
