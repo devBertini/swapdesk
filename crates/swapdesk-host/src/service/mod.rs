@@ -58,11 +58,16 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot;
 
 pub use clip_actions::ClipActionHooks;
-pub use config::{DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceDeps, default_capabilities};
+pub use config::{
+    DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceDeps, capabilities_with_hevc, default_capabilities,
+    session_codec,
+};
 pub use extras::{ChatNote, ExtrasHooks};
 pub use files::ViewerFiles;
 pub use helper_link::{AttachError, HelperEvent, HelperLink};
-pub use routing::{HelperKind, input_helper, media_helper};
+pub use routing::{
+    HelperKind, InputRoute, SpecialVerdict, effective_desktop, input_helper, input_route, media_helper, special_verdict,
+};
 pub use shared::CoreEvent;
 pub use terminal::TerminalEnv;
 pub use viewer::{
@@ -319,6 +324,13 @@ pub const UNREADABLE_USER: &str = "unreadable";
 
 /// Reads [`ConsoleRead`] now; set by the service on a machine of several accounts.
 pub type ConsoleProbe = Arc<dyn Fn() -> ConsoleRead + Send + Sync>;
+
+/// Where the media helper's report of the input desktop goes; set by the account's hub (see `Hub::set_helper_desktop`).
+pub type DesktopSink = Arc<dyn Fn(swapdesk_proto::Desktop) + Send + Sync>;
+
+/// Sends the secure attention sequence now (Windows: `SendSAS(FALSE)` from the service process); the error says why
+/// it could not. Set by the service binary; the session's gate (UNATTENDED, not away) has been passed before it runs.
+pub type SasSender = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 struct CoreUi {
     inner: Arc<dyn HostUi>,
@@ -586,6 +598,7 @@ impl ServiceCore {
         let (events_tx, events_rx) = std::sync::mpsc::sync_channel(shared::CORE_EVENTS);
         let shared =
             Arc::new(Shared::new(runtime.handle().clone(), Arc::clone(&cfg.trace), cfg.audio_exclude_pid, events_tx));
+        shared.host_hevc_hardware.store(cfg.host_hevc_hardware, Ordering::Relaxed);
 
         let mut registry = Registry::new();
         // The registry is empty: this cannot clash. A failure would be a bug of this crate and would show as a session
@@ -784,6 +797,17 @@ impl ServiceCore {
     /// How the fence reads who is at the console now (ACCOUNTS.md 5.1).
     pub fn set_console_probe(&self, probe: ConsoleProbe) {
         let _ = self.shared.console_probe.set(probe);
+    }
+
+    /// Where the media helper's report of the input desktop goes (the account's hub, which combines it with the
+    /// console's owner and the lock state).
+    pub fn set_desktop_sink(&self, sink: DesktopSink) {
+        let _ = self.shared.desktop_sink.set(sink);
+    }
+
+    /// How the secure attention sequence is sent for a viewer's `SendSpecial` (F-UNAT-01).
+    pub fn set_sas_sender(&self, sender: SasSender) {
+        let _ = self.shared.sas_sender.set(sender);
     }
 
     /// Whether this account receives connections now (ACCOUNTS.md 6: only with a pairing, or while pairing mode is

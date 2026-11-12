@@ -1,13 +1,13 @@
 //! Finding H.264 MFTs: `MFTEnum2` with the adapter LUID for hardware, `MFTEnumEx` for the software transform, and the
 //! table of `ICodecAPI` properties the probe asks every encoder about (risk R2).
 
-use swapdesk_platform::{AdapterId, Result};
+use swapdesk_platform::{AdapterId, Codec, Result};
 use windows::Win32::Media::MediaFoundation::{
     ICodecAPI, IMFActivate, IMFAttributes, IMFShutdown, IMFTransform, MF_TRANSFORM_ASYNC, MFCreateAttributes,
     MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
     MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnum2, MFTEnumEx,
-    MFVideoFormat_H264,
+    MFVideoFormat_H264, MFVideoFormat_HEVC,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{GUID, Interface};
@@ -76,11 +76,24 @@ fn collect(ptr: *mut Option<IMFActivate>, count: u32, hardware: bool) -> Vec<Mft
     out
 }
 
+/// The Media Foundation subtype of a codec.
+pub(crate) fn subtype(codec: Codec) -> GUID {
+    match codec {
+        Codec::H264 => MFVideoFormat_H264,
+        Codec::Hevc => MFVideoFormat_HEVC,
+    }
+}
+
 /// Hardware MFTs of the category for the H.264 codec. With an adapter, `MFTEnum2` with `MFT_ENUM_ADAPTER_LUID` returns
 /// only the MFTs of that GPU; without one, `MFTEnumEx` returns all of them.
 pub(crate) fn hardware(cat: Category, adapter: Option<AdapterId>) -> Result<Vec<Mft>> {
+    hardware_for(cat, adapter, Codec::H264)
+}
+
+/// [`hardware`] for any codec.
+pub(crate) fn hardware_for(cat: Category, adapter: Option<AdapterId>, codec: Codec) -> Result<Vec<Mft>> {
     init_thread()?;
-    let h264 = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    let h264 = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(codec) };
     let none = MFT_REGISTER_TYPE_INFO::default();
     let (cat_guid, input, output) = match cat {
         Category::Encoder => (MFT_CATEGORY_VIDEO_ENCODER, None, Some(&h264 as *const _)),
@@ -114,8 +127,13 @@ pub(crate) fn hardware(cat: Category, adapter: Option<AdapterId>) -> Result<Vec<
 
 /// The software MFTs of the category (synchronous transforms such as the inbox encoder and decoder).
 pub(crate) fn software(cat: Category) -> Result<Vec<Mft>> {
+    software_for(cat, Codec::H264)
+}
+
+/// [`software`] for any codec (for HEVC: the inbox decoder of the "HEVC Video Extensions", when installed).
+pub(crate) fn software_for(cat: Category, codec: Codec) -> Result<Vec<Mft>> {
     init_thread()?;
-    let h264 = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+    let h264 = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(codec) };
     let (cat_guid, input, output) = match cat {
         Category::Encoder => (MFT_CATEGORY_VIDEO_ENCODER, None, Some(&h264 as *const _)),
         Category::Decoder => (MFT_CATEGORY_VIDEO_DECODER, Some(&h264 as *const _), None),

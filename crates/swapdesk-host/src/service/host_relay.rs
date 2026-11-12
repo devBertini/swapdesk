@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use quinn::{RecvStream, VarInt};
 use swapdesk_ipc::{Events, Message as Ipc, VideoBackend};
-use swapdesk_platform::Level;
+use swapdesk_platform::{Codec, Level};
 use swapdesk_proto::{
     CodecError, DisplayList, ErrorCode, HostMute, InputEvent, Message as Ctl, PermissionSet, Preset, StreamKind, Wire,
 };
@@ -31,9 +31,11 @@ use tokio::sync::mpsc;
 
 use super::helper_link::HelperLink;
 use super::media_path::{DirectOut, VideoPath, VideoRun};
-use super::routing::{HelperKind, input_helper};
+use super::routing::{HelperKind, InputRoute, SpecialVerdict, input_route, special_verdict};
 use super::shared::{MediaEv, RelayEv, RelayHandle, Shared};
 
+/// The message type of `SendSpecial`, as `Error.about_type` names it.
+const SEND_SPECIAL_TYPE: u16 = 0x0109;
 /// Messages the relay's queue holds before the helper pump waits.
 const RELAY_QUEUE: usize = 512;
 /// The relay's housekeeping beat (keyframe wants that no frame prompts).
@@ -104,10 +106,17 @@ impl ChannelHandler for HostRelays {
         let (tx, rx) = mpsc::channel(RELAY_QUEUE);
         let ended = Arc::new(AtomicBool::new(false));
         let video = VideoPath::new();
+        video.set_gate(ctx.clone());
         let out = Arc::new(DirectOut::new(Some(ctx.clone()), ctx.connection().cloned()));
         self.shared.register_relay(
             ctx.session_id(),
-            RelayHandle { tx: tx.clone(), ended: Arc::clone(&ended), video: Arc::clone(&video), out: Arc::clone(&out) },
+            RelayHandle {
+                tx: tx.clone(),
+                ended: Arc::clone(&ended),
+                video: Arc::clone(&video),
+                out: Arc::clone(&out),
+                ctx: ctx.clone(),
+            },
         );
         let relay = HostRelay::new(Arc::clone(&self.shared), ctx.clone(), tx.clone(), ended, video, out);
         self.shared.rt.spawn(relay.run(rx));
@@ -137,6 +146,8 @@ struct RunVideo {
     display: u16,
     fps: u16,
     preset: Preset,
+    /// The codec picked for this session's video (F-VIEW-07).
+    codec: Codec,
     kbps_sent: u32,
 }
 
@@ -260,8 +271,53 @@ impl HostRelay {
                 }
             }
             Ctl::AudioControl(c) => self.audio_on = c.enabled,
-            Ctl::SendSpecial(_) => self.shared.log(Level::Info, format_args!("SendSpecial is not wired in this build")),
+            Ctl::SendSpecial(m) => self.send_special(m.key),
             _ => {}
+        }
+    }
+
+    /// A viewer's `SendSpecial` (PROTOCOL.md 0x0109, D11): the session needs `UNATTENDED` (the session layer already
+    /// refuses it otherwise with `NOT_PERMITTED`; the verdict checks again, with the desktop, at the moment of
+    /// sending), and the service process sends the sequence. A refusal or a failure is an `Error` about the message,
+    /// not fatal.
+    fn send_special(&self, key: swapdesk_proto::Special) {
+        let granted = self.ctx.granted();
+        let desktop = self.ctx.desktop_state().desktop;
+        let refused = |code: ErrorCode| {
+            let _ = self.ctx.try_send(swapdesk_proto::ErrorMessage {
+                code,
+                fatal: false,
+                about_type: SEND_SPECIAL_TYPE,
+                about_id: 0,
+            });
+        };
+        match special_verdict(key, granted, desktop) {
+            SpecialVerdict::Refuse(code) => {
+                self.shared.log(
+                    Level::Warn,
+                    format_args!("session {:#x}: SendSpecial refused ({code:?})", self.ctx.session_id()),
+                );
+                refused(code);
+            }
+            SpecialVerdict::Send => match self.shared.sas_sender.get() {
+                Some(send) => match send() {
+                    Ok(()) => self.shared.log(
+                        Level::Info,
+                        format_args!("session {:#x}: the secure attention sequence was sent", self.ctx.session_id()),
+                    ),
+                    Err(why) => {
+                        self.shared.log(Level::Warn, format_args!("the secure attention sequence failed: {why}"));
+                        refused(ErrorCode::Unavailable);
+                    }
+                },
+                None => {
+                    self.shared.log(
+                        Level::Info,
+                        format_args!("no sender for the secure attention sequence on this core: SendSpecial refused"),
+                    );
+                    refused(ErrorCode::Unavailable);
+                }
+            },
         }
     }
 
@@ -291,6 +347,15 @@ impl HostRelay {
         if let Some(sender) = &self.sender {
             self.path.poll_keyframe(sender);
         }
+    }
+
+    /// F-VIEW-07: HEVC for this viewer only when both machines have it in hardware and the viewer's minor knows it.
+    fn session_codec(&self) -> Codec {
+        super::session_codec(
+            self.ctx.peer_capabilities().as_ref(),
+            self.ctx.peer_minor(),
+            self.shared.host_hevc_hardware.load(Ordering::Relaxed),
+        )
     }
 
     fn fps(&self) -> u16 {
@@ -325,9 +390,14 @@ impl HostRelay {
     async fn reconcile_video(&mut self, view: bool, media: Option<&Arc<HelperLink>>) {
         let want = if view { media.zip(self.pick_display()) } else { None };
         let (fps, preset) = (self.fps(), self.preset);
+        let codec = self.session_codec();
         let same = match (&self.video, want) {
             (Some(run), Some((helper, display))) => {
-                run.helper.id == helper.id && run.display == display && run.fps == fps && run.preset == preset
+                run.helper.id == helper.id
+                    && run.display == display
+                    && run.fps == fps
+                    && run.preset == preset
+                    && run.codec == codec
             }
             (None, None) => true,
             _ => false,
@@ -348,17 +418,18 @@ impl HostRelay {
             if let Some((helper, display)) = want {
                 let kbps = self.sender.as_ref().map_or(DEFAULT_KBPS, VideoSender::target_kbps);
                 let started = helper
-                    .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto })
+                    .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto, codec })
                     .await;
                 self.shared.log(
                     Level::Debug,
                     format_args!(
-                        "session {:#x}: StartVideo display {display} fps {fps} sent: {started}",
+                        "session {:#x}: StartVideo display {display} fps {fps} codec {codec:?} sent: {started}",
                         self.ctx.session_id()
                     ),
                 );
                 if started {
-                    self.video = Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, kbps_sent: kbps });
+                    self.video =
+                        Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, codec, kbps_sent: kbps });
                     let (link, rt) = (Arc::clone(helper), self.shared.rt.clone());
                     // A keyframe is asked for from the video task, which must not wait on the helper's queue.
                     let key = Arc::new(move || {
@@ -501,7 +572,15 @@ async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st:
         st.dropped = true;
         return;
     }
-    let kind = input_helper(ctx.granted());
+    // Which helper takes the records on the desktop the host is on (D11, F-UNAT-01): a protected desktop only from the
+    // system helper and only for `UNATTENDED`; nothing while another account is at the console.
+    let kind = match input_route(ctx.granted(), ctx.desktop_state().desktop) {
+        InputRoute::Helper(kind) => kind,
+        InputRoute::Drop => {
+            st.dropped = true;
+            return;
+        }
+    };
     let Some(helper) = shared.helper(kind) else {
         // Never the other helper: a prompted session must not reach the SYSTEM injector (D11).
         st.dropped = true;

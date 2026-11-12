@@ -3,13 +3,13 @@
 //! point here without a cycle.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use swapdesk_platform::{IfKind, Level, TraceSink};
 use swapdesk_proto::{CursorPosition, CursorShape, Display, ErrorCode, RedactedLen, VideoHeader};
-use swapdesk_session::{Forwarded, HostService};
+use swapdesk_session::{Forwarded, HostService, SessionCtx};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
@@ -95,6 +95,8 @@ pub(crate) struct RelayHandle {
     pub video: Arc<VideoPath>,
     /// Audio and cursor, sent straight from the helper pump.
     pub out: Arc<DirectOut>,
+    /// The session, for what must be true of it before a held helper goes on (see [`Shared::sessions_follow`]).
+    pub ctx: SessionCtx,
 }
 
 #[derive(Default)]
@@ -134,11 +136,19 @@ pub(crate) struct Shared {
     pub account: OnceLock<String>,
     /// Reads who is at the console now, for the fence (ACCOUNTS.md 5.1); unset: the cached owner alone decides.
     pub console_probe: OnceLock<super::ConsoleProbe>,
+    /// Where the media helper's report of the input desktop goes (the account's hub, which keeps the console's
+    /// desktop and tells the sessions the effective one); unset: the sessions are told the helper's value as it is.
+    pub desktop_sink: OnceLock<super::DesktopSink>,
+    /// Sends the secure attention sequence (the service process only); unset: a `SendSpecial` is answered
+    /// `UNAVAILABLE`.
+    pub sas_sender: OnceLock<super::SasSender>,
     /// The shells the user helper runs for the terminal proxy.
     pub ptys: PtyRoutes,
     /// The kind of the interface behind each local address a peer connected to, as the gate saw it when it let the
     /// connection in: a session's video starts at the rate of its link (F-VIEW-09) without asking the system again.
     links: Mutex<HashMap<std::net::IpAddr, IfKind>>,
+    /// This machine has a hardware HEVC encoder (`ServiceConfig::host_hevc_hardware`); a session's codec is picked with it.
+    pub host_hevc_hardware: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -169,8 +179,11 @@ impl Shared {
             events_dropped: AtomicU64::new(0),
             account: OnceLock::new(),
             console_probe: OnceLock::new(),
+            desktop_sink: OnceLock::new(),
+            sas_sender: OnceLock::new(),
             ptys: PtyRoutes::default(),
             links: Mutex::default(),
+            host_hevc_hardware: AtomicBool::new(false),
         }
     }
 
@@ -319,6 +332,13 @@ impl Shared {
         }
     }
 
+    /// Whether every live host session has taken `desktop` as its own (its pause flag and `HostState` follow from it).
+    /// A held helper goes on only then: a picture of a protected desktop never reaches a session that has not yet
+    /// been paused for it (the session applies a desktop report on its own task, a moment after the report).
+    pub fn sessions_follow(&self, desktop: swapdesk_proto::Desktop) -> bool {
+        self.relays().iter().all(|h| h.ended.load(Ordering::Acquire) || h.ctx.desktop_state().desktop == desktop)
+    }
+
     pub fn wake_all(&self) {
         for h in self.relays() {
             let _ = h.tx.try_send(RelayEv::Wake);
@@ -329,6 +349,8 @@ impl Shared {
 /// How often a held helper is looked at again, and after how long its sessions pause meanwhile (ACCOUNTS.md 5.1,
 /// GUESS values).
 const FENCE_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+/// How often the sessions' catch-up with a desktop is looked at once the fence would let the helper go on.
+const FENCE_FOLLOW: std::time::Duration = std::time::Duration::from_millis(20);
 const FENCE_PAUSE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The fence, the service's side: the helper's capture and input go on after a desktop switch only once this account
@@ -343,12 +365,19 @@ async fn resume_when_allowed(shared: Arc<Shared>, host: HostService, link: Arc<H
             return;
         }
         if fence_allows(&shared, &host) {
+            let desktop = host.desktop_now();
+            if paused {
+                host.set_desktop(desktop);
+                paused = false;
+            }
+            // The sessions are on the desktop the helper now captures before its pictures may reach them (F-UNAT-01).
+            if !shared.sessions_follow(desktop) {
+                tokio::time::sleep(FENCE_FOLLOW).await;
+                continue;
+            }
             link.resumed.store(generation, std::sync::atomic::Ordering::SeqCst);
             link.send_now(swapdesk_ipc::Message::ResumeCapture { generation });
             shared.log(Level::Info, format_args!("the helper goes on after the switch ({generation})"));
-            if paused {
-                host.set_desktop(host.desktop_now());
-            }
             return;
         }
         if !paused && started.elapsed() >= FENCE_PAUSE_AFTER {
@@ -414,8 +443,14 @@ pub(crate) async fn pump(
             }
             HelperEvent::Desktop(desktop) => {
                 shared.log(Level::Info, format_args!("{kind:?} helper reports desktop {desktop:?}"));
+                // Only the media helper's desktop counts: it is the one whose pictures the sessions see. The report
+                // goes to the hub, which combines it with the console's owner and the lock state; without a hub
+                // (a bare core) the sessions get it as it is.
                 if is_media {
-                    host.set_desktop(desktop);
+                    match shared.desktop_sink.get() {
+                        Some(sink) => sink(desktop),
+                        None => host.set_desktop(desktop),
+                    }
                 }
             }
             HelperEvent::CaptureHeld(generation) => {
@@ -424,7 +459,11 @@ pub(crate) async fn pump(
                 link.held.fetch_max(generation, std::sync::atomic::Ordering::SeqCst);
                 shared.rt.spawn(resume_when_allowed(Arc::clone(&shared), host.clone(), Arc::clone(&link), generation));
             }
-            HelperEvent::SasRequest => shared.emit(CoreEvent::SasRequested { kind }),
+            // Only the SYSTEM helper may ask for the secure attention sequence (D11): the user helper runs as a
+            // user and its asking is a sign of something wrong.
+            HelperEvent::SasRequest if kind == HelperKind::System => shared.emit(CoreEvent::SasRequested { kind }),
+            HelperEvent::SasRequest => shared
+                .log(Level::Warn, format_args!("{kind:?} helper asked for the secure attention sequence: ignored")),
             // Only the user helper runs shells (a system helper refuses them): its words about a terminal count, and
             // only for a terminal it was asked to open. The output waits for room (back-pressure toward the helper).
             HelperEvent::PtyOpenReply { id, code, account } if kind == HelperKind::User => {
@@ -443,6 +482,12 @@ pub(crate) async fn pump(
                 shared.emit(CoreEvent::HelperFault { kind, code, what });
             }
             HelperEvent::Gone { error } => {
+                // What the gone media helper said about the input desktop dies with it: the next one reports its own
+                // before it sends a frame (it reports at the start of its capture), and a picture of a protected
+                // desktop cannot come from a helper that is not there.
+                if is_media && let Some(sink) = shared.desktop_sink.get() {
+                    sink(swapdesk_proto::Desktop::Default);
+                }
                 shared.remove_if(kind, link.id);
                 shared.ptys.fail_link(link.id);
                 match &error {

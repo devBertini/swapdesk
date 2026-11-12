@@ -6,6 +6,7 @@
 
 mod acl;
 pub mod actions;
+pub mod desktop;
 pub mod dirwatch;
 pub mod elevate;
 mod env;
@@ -28,6 +29,7 @@ pub mod update_apply;
 pub mod watcher;
 
 pub use acl::AceInfo;
+pub use desktop::{classify_input_desktop, input_desktop, input_desktop_name};
 pub use dirwatch::DirWatch;
 pub use elevate::{ElevatedProcess, RunAsError, WaitOutcome, run_as_admin};
 pub use fs::free_bytes;
@@ -42,7 +44,7 @@ pub use pipe::{
     PipeWriter, connect, helper_pipe_name, random_hex_128, session_of_pid, ui_pipe_name,
 };
 pub use power::KeepAwake;
-pub use sas::{sas_available, send_sas};
+pub use sas::{policy_lets_services_send, sas_available, sas_policy_allows_service, sas_policy_value, send_sas};
 pub use service::{ServiceContext, ServiceError, ServiceStatus, StopSignal, query_service, run_service, service_pid};
 pub use sys::{account_name_of_sid, current_account_is_administrator, current_user_sid};
 pub use trace::FileTrace;

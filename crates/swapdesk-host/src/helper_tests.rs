@@ -1,8 +1,8 @@
 //! Helper loop tests: a service-side driver talks to `run_helper` over an in-memory duplex pipe, with the C7 fakes.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -174,11 +174,26 @@ fn rig_full(
     moved: Option<Arc<AtomicBool>>,
     fence: bool,
 ) -> Rig {
+    rig_probed(lost_at, fs, moved, fence, None)
+}
+
+/// `desktop`: what the helper's probe of the input desktop answers (the test changes it as the OS would).
+fn rig_probed(
+    lost_at: Option<u32>,
+    fs: Option<Arc<swapdesk_files::FsServer>>,
+    moved: Option<Arc<AtomicBool>>,
+    fence: bool,
+    desktop: Option<Arc<Mutex<swapdesk_proto::Desktop>>>,
+) -> Rig {
     let input = RecordingInputSink::new();
     let live = Arc::new(AtomicUsize::new(0));
     let (helper_end, service_end) = duplex();
     let d = deps_moving(lost_at, &input, &live, moved);
     let d = if fence { d.with_fence() } else { d };
+    let d = match desktop {
+        Some(cell) => d.with_desktop_probe(move || *cell.lock().unwrap()),
+        None => d,
+    };
     let d = match fs {
         Some(server) => d.with_fs(server),
         None => d,
@@ -213,6 +228,7 @@ impl Rig {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         });
     }
 
@@ -324,6 +340,7 @@ fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_str
         kbps: 1000,
         quality: Preset::Auto,
         backend: VideoBackend::Auto,
+        codec: swapdesk_proto::Codec::H264,
     });
     let (first, _) = rig.next_frame();
     assert_eq!(first.display_id, MOVED_DISPLAY, "the picture of the display that exists");
@@ -338,6 +355,7 @@ fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_str
         kbps: 1000,
         quality: Preset::Auto,
         backend: VideoBackend::Auto,
+        codec: swapdesk_proto::Codec::H264,
     });
     let end = Instant::now() + WAIT;
     loop {
@@ -458,6 +476,63 @@ fn a_desktop_switch_holds_frames_and_input_until_the_service_resumes() {
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
     assert_eq!(rig.input.events(), vec![InputEvent::Text("sim".into())]);
+}
+
+/// F-UNAT-01: the helper names the input desktop to the service when a capture starts and after every switch, and
+/// the name of a switch comes before any picture of the new desktop (the service pauses the sessions that may not
+/// see it from that message on).
+#[test]
+fn the_helper_names_the_input_desktop_at_the_start_and_before_the_pictures_of_a_switch() {
+    use swapdesk_proto::Desktop;
+    let desktop = Arc::new(Mutex::new(Desktop::Default));
+    let mut rig = rig_probed(Some(3), None, None, true, Some(Arc::clone(&desktop)));
+    rig.start_video();
+    // The first thing a capture says is where it is, before its first frame.
+    let first = rig.wait(|m| match m {
+        Message::DesktopChanged(d) => Some(*d),
+        Message::VideoFrame { .. } => panic!("a frame came before the desktop was named"),
+        _ => None,
+    });
+    assert_eq!(first, Desktop::Default);
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    // The desktop changes under the capture (the scripted source loses its duplication after 3 frames).
+    *desktop.lock().unwrap() = Desktop::Secure;
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before the service let it"),
+        _ => None,
+    });
+    let named = rig.wait(|m| match m {
+        Message::DesktopChanged(d) => Some(*d),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before it was named"),
+        _ => None,
+    });
+    assert_eq!(named, Desktop::Secure);
+    rig.send(&Message::ResumeCapture { generation });
+    rig.next_frame();
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+/// Without a probe (a development console, the macOS daemon's shape) the helper says nothing about desktops.
+#[test]
+fn a_helper_without_a_probe_never_names_a_desktop() {
+    let mut rig = rig_full(Some(3), None, None, true);
+    rig.start_video();
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::DesktopChanged(_) => panic!("a helper without a probe named a desktop"),
+        _ => None,
+    });
+    rig.send(&Message::ResumeCapture { generation });
+    rig.next_frame();
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
 }
 
 #[test]
@@ -602,6 +677,7 @@ fn a_failing_encoder_factory_is_a_fault_and_the_loop_goes_on() {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         })
         .unwrap();
     let Some(Message::HelperFault { code, what }) = reader.read_message().unwrap() else { panic!("expected a fault") };
@@ -672,6 +748,7 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         })
         .unwrap();
     loop {

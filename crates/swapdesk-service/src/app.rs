@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use swapdesk_capture_win::QpcClock;
 use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts, PORT_HELD};
 use swapdesk_host::netcache::CachedInterfaces;
-use swapdesk_host::service::{ConsoleRead, TerminalEnv};
+use swapdesk_host::service::{ConsoleRead, SpecialVerdict, TerminalEnv, special_verdict};
 use swapdesk_host::service::{
     CoreEvent, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps, ServiceError,
 };
@@ -22,12 +22,12 @@ use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
 use swapdesk_net_win::{NetworkWatcher, WindowsNetInterfaces};
 use swapdesk_platform::{Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink};
-use swapdesk_proto::{Os, PermissionSet};
+use swapdesk_proto::{Os, Special};
 use swapdesk_secret_win::{FolderSpec, WinSecretStore};
 use swapdesk_sys_win::pty::{ConPtySpawner, Shell};
 use swapdesk_sys_win::{
     FileTrace, InstallPolicy, KeepAwake, ServiceContext, active_console_session, console_state, current_user_sid,
-    send_sas, session_user_sid,
+    sas_policy_allows_service, send_sas, session_user_sid,
 };
 use swapdesk_trust::{Identity, SystemWallClock, TrustHandle, WallClock};
 
@@ -204,10 +204,35 @@ fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Swapdesk PC".to_string())
 }
 
+/// Sends the secure attention sequence for a viewer's `SendSpecial` (F-UNAT-01). The session's gate (`UNATTENDED`, the
+/// account at the console) was passed before this runs. `SendSAS(FALSE)` works only from this service process, and
+/// only when the machine's policy `SoftwareSASGeneration` lets services simulate it: a policy that reads as off is
+/// logged at every request (the values are GUESS until the owner's proof, so the call is still made).
+fn send_sas_now(trace: &dyn TraceSink) -> Result<(), String> {
+    if !sas_policy_allows_service() {
+        trace.log(
+            Level::Warn,
+            "service",
+            format_args!(
+                "SoftwareSASGeneration does not let services simulate Ctrl+Alt+Del (install with -EnableSas): the                  key may be ignored by Windows"
+            ),
+        );
+    }
+    send_sas().map_err(|e| e.to_string())
+}
+
 fn sas(core: &ServiceCore, trace: &dyn TraceSink) {
-    // A helper asked for Ctrl+Alt+Del: only an UNATTENDED session may have it (D11).
-    if core.host().sessions().iter().any(|s| s.granted.contains(PermissionSet::UNATTENDED)) {
-        match send_sas() {
+    // A helper asked for Ctrl+Alt+Del: the same gate as a viewer's `SendSpecial` (D11). Some session must hold
+    // `UNATTENDED`, and the account must be the one at the console: otherwise the sequence would land on another
+    // account's session.
+    let desktop = core.host().desktop_now();
+    let allowed = core
+        .host()
+        .sessions()
+        .iter()
+        .any(|s| special_verdict(Special::SecureAttention, s.granted, desktop) == SpecialVerdict::Send);
+    if allowed {
+        match send_sas_now(trace) {
             Ok(()) => trace.log(Level::Info, "service", format_args!("the secure attention sequence was sent")),
             Err(e) => trace.log(Level::Warn, "service", format_args!("SendSAS failed: {e}")),
         }
@@ -216,7 +241,7 @@ fn sas(core: &ServiceCore, trace: &dyn TraceSink) {
             Level::Warn,
             "service",
             format_args!(
-                "a helper asked for the secure attention sequence in a session that is not UNATTENDED; ignored"
+                "a helper asked for the secure attention sequence in a session that is not UNATTENDED, or while                  another account is at the console; ignored"
             ),
         );
     }
@@ -626,6 +651,17 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             opts.dev_loopback
         ),
     );
+    // F-UNAT-01: the policy that lets a service simulate Ctrl+Alt+Del is off unless the install turned it on; a viewer's
+    // Ctrl+Alt+Del does nothing then, and the log says why.
+    if !opts.console && !sas_policy_allows_service() {
+        trace.log(
+            Level::Info,
+            "service",
+            format_args!(
+                "SoftwareSASGeneration is not set to let services simulate Ctrl+Alt+Del: a viewer's Ctrl+Alt+Del is                  off until Swapdesk is installed with -EnableSas"
+            ),
+        );
+    }
 
     // What 1.1 reads of the root folder (ACCOUNTS.md 10.2): the base of the port slots and whether 1.0 data is there.
     let mut machine = root_facts(&store)?;
@@ -754,6 +790,12 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             hub.set_console_session(active_console_session());
             hub.set_console_user(read_console(dev_mode).hub_user());
             core.set_console_probe(Arc::new(move || read_console(dev_mode)));
+            // Ctrl+Alt+Del for a viewer's `SendSpecial`: only the installed service process can send it (the
+            // development console runs as a user and never does; its `SendSpecial` is answered UNAVAILABLE).
+            if !dev_mode {
+                let trace = Arc::clone(&trace);
+                core.set_sas_sender(Arc::new(move || send_sas_now(&*trace)));
+            }
             let rx = core.take_events().ok_or("the core's events were taken")?;
             // The loop sleeps until something wakes it: the core says so after each event it queues.
             core.set_event_waker({

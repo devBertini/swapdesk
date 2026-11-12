@@ -96,8 +96,13 @@ pub fn encoder(c: &Candidate) -> MfH264Encoder {
     MfH264Encoder::new(EncoderOptions { choice: MftChoice::Clsid(c.clsid.clone()), ..Default::default() })
 }
 
-/// The video header of the `frame_id`-th encoded frame.
+/// The video header of the `frame_id`-th encoded frame (H.264).
 pub fn header(e: &EncodedFrame, frame_id: u32) -> VideoHeader {
+    header_of(e, frame_id, Codec::H264)
+}
+
+/// The video header of the `frame_id`-th encoded frame of a stream in `codec`.
+pub fn header_of(e: &EncodedFrame, frame_id: u32, codec: Codec) -> VideoHeader {
     VideoHeader {
         keyframe: e.keyframe,
         config: e.config_change,
@@ -108,7 +113,7 @@ pub fn header(e: &EncodedFrame, frame_id: u32) -> VideoHeader {
         encode_us: e.encode_us,
         width: e.width,
         height: e.height,
-        codec: Codec::H264,
+        codec,
         payload_len: e.annex_b.len() as u32,
     }
 }

@@ -68,6 +68,9 @@ pub(crate) struct VideoPath {
     stale: AtomicU64,
     awaiting_key: AtomicU64,
     asked: AtomicU64,
+    /// The session the frames are for: a frame is never sent while its session is paused or lacks `VIEW`, whatever the
+    /// sender's own flag says (the relay sets that one a moment after the session changes; F-UNAT-01).
+    gate: Mutex<Option<SessionCtx>>,
 }
 
 impl VideoPath {
@@ -82,7 +85,18 @@ impl VideoPath {
             stale: AtomicU64::new(0),
             awaiting_key: AtomicU64::new(0),
             asked: AtomicU64::new(0),
+            gate: Mutex::new(None),
         })
+    }
+
+    /// Names the session whose pause and grants gate every frame.
+    pub fn set_gate(&self, ctx: SessionCtx) {
+        *lock(&self.gate) = Some(ctx);
+    }
+
+    /// Whether the session forbids a picture now: paused on a desktop it may not see, or no `VIEW`.
+    fn shut(&self) -> bool {
+        lock(&self.gate).as_ref().is_some_and(|c| c.is_paused() || !c.granted().contains(PermissionSet::VIEW))
     }
 
     /// The capture that runs now (`None`: none). Whatever waited in the slot belonged to the old one.
@@ -195,7 +209,13 @@ impl VideoPath {
                 self.wake.notified().await;
                 continue;
             };
-            if let Some(frame) = self.admit(stamped, lost) {
+            if self.shut() {
+                // Dropped here, so the stream has a gap: a keyframe is asked for, and the P-frames that follow are
+                // dropped until it comes.
+                if let Some(run) = lock(&self.run).clone() {
+                    self.want_key(&run);
+                }
+            } else if let Some(frame) = self.admit(stamped, lost) {
                 let _ = sender.send(frame).await;
             }
             self.poll_keyframe(&sender);

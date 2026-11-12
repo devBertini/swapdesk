@@ -24,8 +24,8 @@ use swapdesk_platform::{
     ErrorKind, Frame, InputSink, PlatformError, ScreenSource, VideoEncoder,
 };
 use swapdesk_proto::{
-    Codec, CursorPosition, CursorShapeHeader, Display, DisplayList, ErrorCode, InputEvent, MAX_VIDEO_PAYLOAD, Preset,
-    VideoHeader,
+    Codec, CursorPosition, CursorShapeHeader, Desktop, Display, DisplayList, ErrorCode, InputEvent, MAX_VIDEO_PAYLOAD,
+    Preset, VideoHeader,
 };
 
 use crate::helper_pty::{PtyFactory, PtyServer};
@@ -60,6 +60,9 @@ type AudioFactory<A> = Arc<dyn Fn() -> PResult<A> + Send + Sync>;
 type AudioModeFn<A> = Arc<dyn Fn(&A) -> AudioModeKind + Send + Sync>;
 type ClipFactory = Arc<dyn Fn() -> PResult<Box<dyn ClipboardProvider>> + Send + Sync>;
 type ActionFactory = Arc<dyn Fn() -> PResult<Box<dyn ActionRunner>> + Send + Sync>;
+/// Names the desktop that receives input now: `Default` for the user's own, `Secure` for anything else or anything
+/// that cannot be told (F-UNAT-01; Windows: `swapdesk_sys_win::input_desktop`).
+type DesktopProbe = Arc<dyn Fn() -> Desktop + Send + Sync>;
 
 /// Why `run_helper` failed.
 #[derive(Debug)]
@@ -119,6 +122,8 @@ pub struct HelperDeps<S, E, I, A> {
     fs: Option<Arc<swapdesk_files::FsServer>>,
     /// Hold capture and input after every desktop switch until the service resumes them (ACCOUNTS.md 5.1).
     fence: bool,
+    /// Reports the input desktop to the service (`DesktopChanged`) before a picture of it is sent, or none.
+    desktop: Option<DesktopProbe>,
 }
 
 impl<S, E, I, A> HelperDeps<S, E, I, A> {
@@ -147,7 +152,17 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
             pty: None,
             fs: None,
             fence: false,
+            desktop: None,
         }
+    }
+
+    /// Reports which desktop receives input, to the service, whenever a capture starts and after every desktop switch,
+    /// always before the first picture of the new desktop (F-UNAT-01): the service pauses the sessions that may not see
+    /// a protected desktop. Without it the helper reports nothing and the sessions stay on what the session events say.
+    #[must_use]
+    pub fn with_desktop_probe(mut self, probe: impl Fn() -> Desktop + Send + Sync + 'static) -> Self {
+        self.desktop = Some(Arc::new(probe));
+        self
     }
 
     /// The user's clipboard, built on the thread that serves `ClipChangeCount`, `ClipRead` and `ClipWrite` (stage 42).
@@ -322,6 +337,8 @@ struct StartParams {
     kbps: u32,
     preset: Preset,
     backend: VideoBackend,
+    /// The codec the encoder is configured with and the video header names (F-VIEW-07).
+    codec: Codec,
 }
 
 struct CaptureEnv<S, E> {
@@ -339,6 +356,10 @@ struct CaptureEnv<S, E> {
     desktop_epoch: Arc<AtomicU64>,
     /// ACCOUNTS.md 5.1: after a desktop switch, capture and input wait for the service.
     fence: Arc<Fence>,
+    /// The probe of the input desktop and the last value it reported (held across the send, so two capture threads
+    /// never reorder two reports).
+    desktop_probe: Option<DesktopProbe>,
+    desktop_sent: Mutex<Option<Desktop>>,
 }
 
 /// The fence of ACCOUNTS.md 5.1: after every desktop switch the helper captures and injects nothing until the service
@@ -411,6 +432,18 @@ impl<S: ScreenSource, E> CaptureEnv<S, E> {
         true
     }
 
+    /// Tells the service which desktop receives input now, when that is not what it was last told (F-UNAT-01). The
+    /// message is a control message: it leaves ahead of any picture queued after it.
+    fn report_desktop(&self) {
+        let Some(probe) = &self.desktop_probe else { return };
+        let now = probe();
+        let mut sent = lock(&self.desktop_sent);
+        if *sent != Some(now) {
+            *sent = Some(now);
+            self.outbox.send_control(Message::DesktopChanged(now));
+        }
+    }
+
     /// The helper is ending: lets go of the input thread's queue.
     fn close_input(&self) {
         self.input_tx.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -440,6 +473,8 @@ fn capture_run<S: ScreenSource, E: VideoEncoder>(
         env.refresh_displays();
         return Err(e);
     }
+    // The service hears which desktop this is before the first picture of it.
+    env.report_desktop();
     let result = capture_loop(env, p, ctl, ids, &mut source);
     source.close();
     result
@@ -502,7 +537,7 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                         kbps,
                         preset: p.preset,
                         adapter,
-                        codec: swapdesk_platform::Codec::H264,
+                        codec: p.codec,
                     };
                     let enc = match encoder.as_mut() {
                         Some(e) => e,
@@ -534,6 +569,9 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     let generation = env.fence.hold();
                     env.outbox.send_control(Message::CaptureHeld { generation });
                 }
+                // The switch is named before anything else: the probe opens the input desktop on its own, without
+                // the capture having followed it yet.
+                env.report_desktop();
                 env.desktop_epoch.fetch_add(1, Ordering::AcqRel);
                 loop {
                     if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
@@ -542,6 +580,9 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     match source.reacquire() {
                         Ok(()) => break,
                         Err(e) => {
+                            // A desktop this process cannot capture (a secure one, to a helper below SYSTEM) is
+                            // reported as what it is while the capture waits.
+                            env.report_desktop();
                             if !faulted {
                                 platform_fault(&env.outbox, &format!("video {}: reacquire", p.display), &e);
                                 faulted = true;
@@ -556,11 +597,14 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                         }
                     }
                 }
+                env.report_desktop();
                 while env.fence.is_held() {
                     if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
                         return Ok(());
                     }
                     std::thread::sleep(FENCE_POLL);
+                    // A switch that came in meanwhile (the probe reads the desktop now, not the one of the loss).
+                    env.report_desktop();
                 }
                 faulted = false;
                 discontinuity = true;
@@ -608,7 +652,7 @@ fn emit_frames<S: ScreenSource, E: VideoEncoder>(
             encode_us: if encode_us == 0 { e.encode_us } else { encode_us },
             width: e.width,
             height: e.height,
-            codec: Codec::H264,
+            codec: p.codec,
             payload_len,
         };
         let sent = env.outbox.send_media(Message::VideoFrame { header, payload: Payload::from(e.annex_b) });
@@ -958,8 +1002,8 @@ where
     fn handle(&mut self, msg: Message) -> bool {
         match msg {
             Message::Shutdown | Message::Bye { .. } => return false,
-            Message::StartVideo { display, fps, kbps, quality, backend } => {
-                self.start_video(StartParams { display, fps: fps.max(1), kbps, preset: quality, backend });
+            Message::StartVideo { display, fps, kbps, quality, backend, codec } => {
+                self.start_video(StartParams { display, fps: fps.max(1), kbps, preset: quality, backend, codec });
             }
             Message::StopVideo { display } => self.stop_video(display),
             Message::SetRate { display, kbps, fps } => {
@@ -1169,6 +1213,7 @@ where
         pty,
         fs,
         fence: fence_on,
+        desktop: desktop_probe,
     } = deps;
 
     let displays = {
@@ -1196,6 +1241,8 @@ where
         input_tx: Mutex::new(Some(input_tx.clone())),
         desktop_epoch: Arc::clone(&desktop_epoch),
         fence: Arc::clone(&fence),
+        desktop_probe,
+        desktop_sent: Mutex::new(None),
     });
     let input_thread = {
         let outbox = outbox.clone();
@@ -1321,3 +1368,7 @@ mod stall_tests;
 #[cfg(test)]
 #[path = "helper_rate_tests.rs"]
 mod rate_tests;
+
+#[cfg(test)]
+#[path = "helper_codec_tests.rs"]
+mod codec_tests;

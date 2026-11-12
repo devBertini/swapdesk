@@ -165,6 +165,9 @@ pub(crate) struct Hub {
     next_conn: AtomicU64,
     console: Mutex<Option<u32>>,
     desktop: Mutex<Desktop>,
+    /// What the media helper's probe of the input desktop says (`Default` or `Secure`): a UAC prompt or the secure
+    /// desktop is no event the session watcher sees (F-UNAT-01).
+    helper_desktop: Mutex<Desktop>,
     pub mode: Arc<PairingMode>,
     pairing: pairing::PairState,
     incoming: Mutex<HashMap<u32, host_ui::Pending>>,
@@ -218,13 +221,8 @@ impl Hub {
     /// sign-in screen (nobody at the console) counts as `Locked`, so only a session that entered without a prompt
     /// goes on there (ACCOUNTS.md 5.1); else the console's.
     pub fn effective_desktop(&self) -> Desktop {
-        use swapdesk_session::ConsoleOwner;
-        let desktop = *lock(&self.desktop);
-        match self.console_owner() {
-            ConsoleOwner::Other => Desktop::AccountAway,
-            ConsoleOwner::Nobody if desktop == Desktop::Default => Desktop::Locked,
-            _ => desktop,
-        }
+        let (session, helper) = (*lock(&self.desktop), *lock(&self.helper_desktop));
+        crate::service::effective_desktop(session, helper, self.console_owner())
     }
 
     /// Tells this account's sessions the desktop they are on ([`Hub::effective_desktop`]).
@@ -350,6 +348,7 @@ impl UiHub {
             next_conn: AtomicU64::new(1),
             console: Mutex::new(None),
             desktop: Mutex::new(Desktop::Default),
+            helper_desktop: Mutex::new(Desktop::Default),
             mode,
             pairing: pairing::PairState::default(),
             incoming: Mutex::new(HashMap::new()),
@@ -404,6 +403,16 @@ impl UiHub {
         let _ = self.hub.rt.set(core.runtime().clone());
         // Swap questions, the new session of a swap and chat reach the UI through the hub.
         core.set_extras(Arc::new(HubExtras { hub: Arc::downgrade(&self.hub) }));
+        // What the media helper says about the input desktop goes through the hub, which knows who is at the console.
+        core.set_desktop_sink({
+            let hub = Arc::downgrade(&self.hub);
+            Arc::new(move |desktop| {
+                if let Some(hub) = hub.upgrade() {
+                    *lock(&hub.helper_desktop) = desktop;
+                    hub.push_desktop();
+                }
+            })
+        });
         // The viewer role's clipboard, the clipboard notices and the audit of quick actions.
         core.set_clip_actions(Arc::new(clip_actions::HubClipActions { hub: Arc::downgrade(&self.hub) }));
         // The core is up: what is on the network now is synced (GRANTS-SYNC.md 4.4).
@@ -476,6 +485,13 @@ impl UiHub {
     /// account owns the console and end after a minute; they go on when it comes back.
     pub fn set_console_user(&self, sid: Option<String>) {
         *lock(&self.hub.console_user) = sid;
+        self.hub.push_desktop();
+    }
+
+    /// The media helper reported the input desktop (`Default` or `Secure`; F-UNAT-01): kept, and told to this
+    /// account's sessions as [`Hub::effective_desktop`] works it out.
+    pub fn set_helper_desktop(&self, desktop: Desktop) {
+        *lock(&self.hub.helper_desktop) = desktop;
         self.hub.push_desktop();
     }
 

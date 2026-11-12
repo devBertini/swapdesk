@@ -22,6 +22,8 @@ mod events;
 #[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
+mod hevc;
+#[cfg(windows)]
 mod mf;
 #[cfg(windows)]
 mod mft;
@@ -42,6 +44,8 @@ pub use decoder::{DecoderOptions, DecoderOutput, GPU_RING, MfH264Decoder};
 pub use encoder::{EncoderOptions, FrameTiming, MfH264Encoder, MftChoice, MftSummary, PropertySupport, SettingOutcome};
 #[cfg(windows)]
 pub use gpu::TextureUploader;
+#[cfg(windows)]
+pub use hevc::{HevcProbe, hevc_probe, hevc_support};
 #[cfg(windows)]
 pub use nvenc::{NvencEncoder, NvencOptions, NvencSummary, NvencTuning};
 #[cfg(windows)]

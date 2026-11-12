@@ -176,6 +176,10 @@ mod win {
         // The user's clipboard and quick actions, for the service's clipboard sync and `QuickAction` (stage 42).
         // ACCOUNTS.md 5.1: after every desktop switch, capture and input wait until the service lets them go on.
         .with_fence()
+        // F-UNAT-01: which desktop receives input (`Winlogon` and every desktop of another name is `Secure`), told to
+        // the service before the first picture of it. The system helper follows onto the secure desktop; the user
+        // helper cannot open it, which the probe also reports as `Secure`.
+        .with_desktop_probe(swapdesk_sys_win::input_desktop)
         .with_clipboard(|| Ok(swapdesk_input_win::clipboard::WinClipboard::new()))
         .with_actions(|| Ok(swapdesk_sys_win::actions::WinActions::user()))
         // Terminals (stage 43): the shell runs as this helper's user. `ConPtySpawner` re-runs the token guard (`check_spawn`)

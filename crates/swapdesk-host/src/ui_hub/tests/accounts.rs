@@ -264,6 +264,29 @@ fn each_console_owner_gives_the_sessions_their_desktop_and_an_unreadable_user_is
     assert_eq!(at(None), Desktop::Secure, "a secure desktop stays what it is");
 }
 
+/// F-UNAT-01: what the media helper says about the input desktop (a UAC prompt no session event announces) reaches
+/// the sessions as the effective desktop, and another account at the console still wins.
+#[test]
+fn the_helpers_report_of_a_protected_desktop_is_combined_with_the_console_owner() {
+    let base = free_slots();
+    let (accounts, _built) = machine(base);
+    let a = accounts.account(A).unwrap();
+    a.hub.set_account(A);
+    a.hub.set_console_user(Some(A.to_string()));
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::Default);
+    a.hub.set_helper_desktop(Desktop::Secure);
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::Secure, "a UAC prompt");
+    a.hub.set_desktop(Desktop::Locked);
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::Locked, "the lock the session knows keeps its name");
+    a.hub.set_desktop(Desktop::Default);
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::Secure, "unlocked, the helper's report still holds");
+    a.hub.set_console_user(Some(B.to_string()));
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::AccountAway);
+    a.hub.set_console_user(Some(A.to_string()));
+    a.hub.set_helper_desktop(Desktop::Default);
+    assert_eq!(a.hub.hub.effective_desktop(), Desktop::Default, "back on the user's desktop");
+}
+
 /// Review of S3: two first calls for one account at once build it once, at its own slot.
 #[test]
 fn an_account_asked_for_twice_at_once_is_built_once() {

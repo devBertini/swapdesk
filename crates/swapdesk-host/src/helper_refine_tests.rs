@@ -147,8 +147,17 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
         fence: Arc::default(),
+        desktop_probe: None,
+        desktop_sent: Mutex::default(),
     };
-    let p = StartParams { display: 0, fps: 60, kbps: 5000, preset: Preset::Auto, backend: VideoBackend::Auto };
+    let p = StartParams {
+        display: 0,
+        fps: 60,
+        kbps: 5000,
+        preset: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_platform::Codec::H264,
+    };
     let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };
     let ids = AtomicU32::new(0);
     std::thread::scope(|s| {

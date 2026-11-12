@@ -1,5 +1,7 @@
 //! Annex B helpers: NAL unit scan, parameter-set extraction, SPS fields. Pure code, no OS calls.
 
+use swapdesk_proto::Codec;
+
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;
 pub const NAL_SEI: u8 = 6;
@@ -15,8 +17,13 @@ pub struct Nal {
     pub kind: u8,
 }
 
-/// Splits an Annex B buffer at its 3- and 4-byte start codes.
+/// Splits an Annex B buffer at its 3- and 4-byte start codes (H.264 NAL types: the low 5 bits of the header byte).
 pub fn scan(data: &[u8]) -> Vec<Nal> {
+    scan_with(data, |header| header & 0x1F)
+}
+
+/// `scan` with the NAL type read by `kind` from the first header byte.
+fn scan_with(data: &[u8], kind: fn(u8) -> u8) -> Vec<Nal> {
     let mut found: Vec<(usize, usize)> = Vec::new(); // (start code offset, payload offset)
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -36,9 +43,70 @@ pub fn scan(data: &[u8]) -> Vec<Nal> {
             end -= 1;
         }
         let Some(&header) = data.get(payload) else { continue };
-        out.push(Nal { start, payload, end, kind: header & 0x1F });
+        out.push(Nal { start, payload, end, kind: kind(header) });
     }
     out
+}
+
+/// HEVC (H.265) Annex B: the NAL type is bits 1 to 6 of the first header byte (ITU-T H.265, 7.3.1.2, `nal_unit_type`
+/// is `u(6)` right after `forbidden_zero_bit`); the type numbers below are Table 7-1 of the same document.
+pub mod hevc {
+    use super::{Nal, scan_with};
+
+    /// `IDR_W_RADL` and `IDR_N_LP`: the two types that start a new coded video sequence without a leading picture.
+    pub const NAL_IDR_W_RADL: u8 = 19;
+    pub const NAL_IDR_N_LP: u8 = 20;
+    pub const NAL_VPS: u8 = 32;
+    pub const NAL_SPS: u8 = 33;
+    pub const NAL_PPS: u8 = 34;
+
+    /// Splits an HEVC Annex B buffer; `Nal::kind` is the HEVC `nal_unit_type`.
+    pub fn scan(data: &[u8]) -> Vec<Nal> {
+        scan_with(data, |header| (header >> 1) & 0x3F)
+    }
+
+    pub fn contains(data: &[u8], kind: u8) -> bool {
+        scan(data).iter().any(|n| n.kind == kind)
+    }
+
+    /// The VPS, SPS and PPS NAL units of `data` (with their start codes), in stream order.
+    pub fn parameter_sets(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for nal in scan(data) {
+            if matches!(nal.kind, NAL_VPS | NAL_SPS | NAL_PPS) {
+                out.extend_from_slice(&data[nal.start..nal.end]);
+            }
+        }
+        out
+    }
+
+    pub fn is_idr(data: &[u8]) -> bool {
+        scan(data).iter().any(|n| n.kind == NAL_IDR_W_RADL || n.kind == NAL_IDR_N_LP)
+    }
+}
+
+/// Whether the access unit holds the sequence parameter set of `codec`.
+pub fn has_sps(codec: Codec, data: &[u8]) -> bool {
+    match codec {
+        Codec::Hevc => hevc::contains(data, hevc::NAL_SPS),
+        Codec::H264 => contains(data, NAL_SPS),
+    }
+}
+
+/// The parameter-set NAL units (H.264: SPS, PPS; HEVC: VPS, SPS, PPS) of `data`.
+pub fn parameter_sets_of(codec: Codec, data: &[u8]) -> Vec<u8> {
+    match codec {
+        Codec::Hevc => hevc::parameter_sets(data),
+        Codec::H264 => parameter_sets(data),
+    }
+}
+
+/// Whether the access unit holds an IDR picture of `codec`.
+pub fn is_idr_of(codec: Codec, data: &[u8]) -> bool {
+    match codec {
+        Codec::Hevc => hevc::is_idr(data),
+        Codec::H264 => is_idr(data),
+    }
 }
 
 /// True when any NAL unit has this type.
@@ -290,6 +358,26 @@ fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HEVC NAL headers are two bytes with the type in bits 1 to 6 of the first: VPS 0x40, SPS 0x42, PPS 0x44, IDR_W_RADL 0x26.
+    #[test]
+    fn hevc_nal_types_are_read_from_the_first_header_byte() {
+        let au = [
+            &[0, 0, 0, 1, 0x40, 0x01, 0xAA][..],
+            &[0, 0, 0, 1, 0x42, 0x01, 0xBB][..],
+            &[0, 0, 0, 1, 0x44, 0x01, 0xCC][..],
+            &[0, 0, 1, 0x26, 0x01, 0xDD, 0xEE][..],
+        ]
+        .concat();
+        let kinds: Vec<u8> = hevc::scan(&au).iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, [hevc::NAL_VPS, hevc::NAL_SPS, hevc::NAL_PPS, hevc::NAL_IDR_W_RADL]);
+        assert!(has_sps(Codec::Hevc, &au));
+        assert!(is_idr_of(Codec::Hevc, &au));
+        assert_eq!(parameter_sets_of(Codec::Hevc, &au), au[..au.len() - 7]);
+        // Read as H.264 the same bytes are not an IDR picture (0x26 & 0x1F = 6, an SEI).
+        assert!(!is_idr_of(Codec::H264, &au));
+        assert!(!hevc::is_idr(&au[..au.len() - 7]));
+    }
 
     /// Found by the fuzz target `annex_b` (stage 13): a short SPS whose fields run past its end must be refused, not
     /// panic.

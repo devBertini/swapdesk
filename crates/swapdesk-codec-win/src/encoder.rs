@@ -11,7 +11,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use swapdesk_platform::{
-    AdapterId, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, Result, VideoEncoder,
+    AdapterId, Codec, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, Result,
+    VideoEncoder,
 };
 use swapdesk_proto::H264Profile;
 use windows::Win32::Graphics::Direct3D11::{
@@ -32,8 +33,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFNominalRange_16_235,
     MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_NV12, MFVideoPrimaries_BT709,
+    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncH265VProfile_Main_420_8,
 };
 use windows::core::{GUID, Interface};
 
@@ -385,30 +386,34 @@ impl MfH264Encoder {
     }
 }
 
-fn candidates(gpu: &Gpu, choice: &MftChoice) -> Result<Vec<Mft>> {
+fn candidates(gpu: &Gpu, choice: &MftChoice, codec: Codec) -> Result<Vec<Mft>> {
     let hardware = |g: &Gpu| -> Result<Vec<Mft>> {
         if g.adapter.software {
             return Ok(Vec::new());
         }
-        mft::hardware(Category::Encoder, Some(g.adapter.id))
+        mft::hardware_for(Category::Encoder, Some(g.adapter.id), codec)
     };
+    // HEVC is offered by hardware MFTs only (D39: the project ships no HEVC implementation and the inbox software
+    // transform is not a candidate), so the software list is never consulted for it.
+    let software =
+        |c: Category| -> Result<Vec<Mft>> { if codec == Codec::Hevc { Ok(Vec::new()) } else { mft::software(c) } };
     let mut out = Vec::new();
     match choice {
         MftChoice::Auto => {
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
         }
-        MftChoice::SoftwareOnly => out.extend(mft::software(Category::Encoder)?),
+        MftChoice::SoftwareOnly => out.extend(software(Category::Encoder)?),
         MftChoice::HardwareOnly => out.extend(hardware(gpu)?),
         MftChoice::Named(text) => {
             let needle = text.to_lowercase();
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
             out.retain(|m| m.name.to_lowercase().contains(&needle));
         }
         MftChoice::Clsid(text) => {
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
             out.retain(|m| crate::mft::guid_text(&m.clsid) == text.to_lowercase());
         }
     }
@@ -425,12 +430,16 @@ impl VideoEncoder for MfH264Encoder {
             Some(d) => Gpu::from_device(d.clone())?,
             None => Gpu::on_adapter(config.adapter)?,
         };
-        let list = candidates(&gpu, &self.options.choice)?;
+        let list = candidates(&gpu, &self.options.choice, config.codec)?;
         if list.is_empty() {
+            let (kind, name) = match config.codec {
+                Codec::H264 => (ErrorKind::Unavailable, "H.264"),
+                Codec::Hevc => (ErrorKind::Unsupported, "hardware HEVC"),
+            };
             return Err(err(
-                ErrorKind::Unavailable,
+                kind,
                 "VideoEncoder::configure",
-                format!("no H.264 encoder MFT for {:?} on adapter {}", self.options.choice, gpu.adapter.name),
+                format!("no {name} encoder MFT for {:?} on adapter {}", self.options.choice, gpu.adapter.name),
             ));
         }
         let mut failures = Vec::new();
@@ -446,7 +455,8 @@ impl VideoEncoder for MfH264Encoder {
                 Err(e) => failures.push(format!("{}: {e}", candidate.name)),
             }
         }
-        Err(err(ErrorKind::Unavailable, "VideoEncoder::configure", failures.join("; ")))
+        let kind = if config.codec == Codec::Hevc { ErrorKind::Unsupported } else { ErrorKind::Unavailable };
+        Err(err(kind, "VideoEncoder::configure", failures.join("; ")))
     }
 
     fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> Result<Vec<EncodedFrame>> {
@@ -819,7 +829,7 @@ impl Active {
         let staging = if d3d_input { None } else { Some(Staging::new(gpu, cfg.width, cfg.height, NV12)?) };
 
         // SPS/PPS from the output type, when the MFT publishes them.
-        let seq_header = sequence_header(&transform);
+        let seq_header = sequence_header(&transform, cfg.codec);
 
         let low_latency =
             outcomes.iter().any(|o| (o.name == "AVEncCommonLowLatency" || o.name == "AVLowLatencyMode") && o.applied)
@@ -1111,10 +1121,11 @@ impl Active {
         }
         // SAFETY: a getter on the sample.
         let clean = unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.map(|v| v != 0).unwrap_or(false);
-        let keyframe = annexb::is_idr(&data) || clean;
-        let has_sps = annexb::contains(&data, annexb::NAL_SPS);
+        let codec = self.cfg.codec;
+        let keyframe = annexb::is_idr_of(codec, &data) || clean;
+        let has_sps = annexb::has_sps(codec, &data);
         if has_sps {
-            let ps = annexb::parameter_sets(&data);
+            let ps = annexb::parameter_sets_of(codec, &data);
             if !ps.is_empty() {
                 self.seq_header = ps;
             }
@@ -1123,7 +1134,7 @@ impl Active {
             with.extend_from_slice(&data);
             data = with;
         }
-        let carries_ps = annexb::contains(&data, annexb::NAL_SPS);
+        let carries_ps = annexb::has_sps(codec, &data);
         let config_change = keyframe && carries_ps && self.config_pending;
         if config_change {
             self.config_pending = false;
@@ -1217,12 +1228,18 @@ fn set_types(
     kbps: u32,
     level: u32,
 ) -> Result<(H264Profile, u32)> {
-    let attempts: [(u32, Option<u32>, H264Profile); 3] =
-        [(100, Some(level), H264Profile::High), (100, None, H264Profile::High), (77, None, H264Profile::Main)];
+    // HEVC: the Main profile (`eAVEncH265VProfile_Main_420_8`, codecapi.h) with the level left to the MFT. The H.264
+    // profile and level numbers do not apply, so `EncoderInfo` reports `Main` and level 0 as "not an H.264 value".
+    let attempts: [(u32, Option<u32>, H264Profile); 3] = match cfg.codec {
+        Codec::Hevc => [(eAVEncH265VProfile_Main_420_8.0 as u32, None, H264Profile::Main); 3],
+        Codec::H264 => {
+            [(100, Some(level), H264Profile::High), (100, None, H264Profile::High), (77, None, H264Profile::Main)]
+        }
+    };
     let mut last = None;
     let mut accepted = None;
     for (profile, lvl, which) in attempts {
-        let t: IMFMediaType = video_type(&MFVideoFormat_H264, cfg.width, cfg.height, coded_fps)?;
+        let t: IMFMediaType = video_type(&mft::subtype(cfg.codec), cfg.width, cfg.height, coded_fps)?;
         // SAFETY: attribute writes on our media type, then the type is offered to the MFT.
         let result = unsafe {
             t.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000).ctx("MF_MT_AVG_BITRATE")?;
@@ -1240,7 +1257,7 @@ fn set_types(
         };
         match result {
             Ok(()) => {
-                accepted = Some((which, lvl.unwrap_or(level)));
+                accepted = Some((which, if cfg.codec == Codec::Hevc { 0 } else { lvl.unwrap_or(level) }));
                 break;
             }
             Err(e) => last = Some(os_err("IMFTransform::SetOutputType", &e)),
@@ -1274,7 +1291,7 @@ fn set_types(
 }
 
 /// SPS and PPS the MFT published in its output type (`MF_MT_MPEG_SEQUENCE_HEADER`), as Annex B.
-fn sequence_header(transform: &IMFTransform) -> Vec<u8> {
+fn sequence_header(transform: &IMFTransform, codec: Codec) -> Vec<u8> {
     // SAFETY: reads a blob attribute of the current output type into a buffer sized from GetBlobSize.
     unsafe {
         let Ok(t) = transform.GetOutputCurrentType(0) else { return Vec::new() };
@@ -1284,6 +1301,6 @@ fn sequence_header(transform: &IMFTransform) -> Vec<u8> {
         if attrs.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut buf, None).is_err() {
             return Vec::new();
         }
-        annexb::parameter_sets(&buf)
+        annexb::parameter_sets_of(codec, &buf)
     }
 }

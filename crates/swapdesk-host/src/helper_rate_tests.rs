@@ -113,8 +113,17 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
         input_tx: std::sync::Mutex::new(None),
         desktop_epoch: Arc::default(),
         fence: Arc::default(),
+        desktop_probe: None,
+        desktop_sent: Mutex::default(),
     };
-    let p = StartParams { display: 0, fps: 60, kbps: 20_000, preset: Preset::Auto, backend: VideoBackend::Auto };
+    let p = StartParams {
+        display: 0,
+        fps: 60,
+        kbps: 20_000,
+        preset: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_platform::Codec::H264,
+    };
     let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };
     let ids = AtomicU32::new(0);
     let result = std::thread::scope(|s| {

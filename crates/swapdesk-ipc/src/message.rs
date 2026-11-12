@@ -56,6 +56,8 @@ pub enum Message {
         kbps: u32,
         quality: Preset,
         backend: VideoBackend,
+        /// The codec the session picked (`Capabilities::pick_codec`): the helper encodes in it.
+        codec: swapdesk_proto::Codec,
     },
     StopVideo {
         display: u16,
@@ -457,12 +459,13 @@ impl Message {
                 w.put_u32(*win_session);
             }
             Self::Bye { code } => code.put(w, 0)?,
-            Self::StartVideo { display, fps, kbps, quality, backend } => {
+            Self::StartVideo { display, fps, kbps, quality, backend, codec } => {
                 w.put_u16(*display);
                 w.put_u16(*fps);
                 w.put_u32(*kbps);
                 quality.put(w, 0)?;
                 backend.put(w, 0)?;
+                codec.put(w, 0)?;
             }
             Self::StopVideo { display } | Self::ForceKeyframe { display } => w.put_u16(*display),
             Self::SetRate { display, kbps, fps } => {
@@ -601,6 +604,7 @@ impl Message {
                 kbps: r.u32()?,
                 quality: Preset::get(r, 0)?,
                 backend: VideoBackend::get(r, 0)?,
+                codec: swapdesk_proto::Codec::get(r, 0)?,
             },
             0x21 => Self::StopVideo { display: r.u16()? },
             0x22 => Self::SetRate { display: r.u16()?, kbps: r.u32()?, fps: r.u16()? },

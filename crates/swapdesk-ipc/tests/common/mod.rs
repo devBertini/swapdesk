@@ -383,6 +383,7 @@ pub fn message() -> BoxedStrategy<Message> {
                 kbps,
                 quality,
                 backend,
+                codec: swapdesk_proto::Codec::H264,
             })
             .boxed(),
         any::<u16>().prop_map(|display| Message::StopVideo { display }).boxed(),

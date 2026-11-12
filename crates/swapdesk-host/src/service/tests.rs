@@ -32,6 +32,7 @@ mod clip_actions;
 mod extras;
 mod files;
 mod terminal;
+mod unattended;
 
 const WAIT: Duration = Duration::from_secs(10);
 const ALL: PermissionSet = PermissionSet::CONTROL.union(PermissionSet::AUDIO);
