@@ -5,6 +5,7 @@
 
 mod card;
 mod font;
+pub mod grid;
 pub mod input;
 mod painter;
 mod screens_files;

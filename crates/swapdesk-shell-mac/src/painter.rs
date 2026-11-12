@@ -15,11 +15,16 @@ use crate::cg::*;
 
 /// The 'wght' axis tag of a variable font.
 const WGHT: i32 = i32::from_be_bytes(*b"wght");
+/// The system's monospaced face (the terminal grid).
+const MONO_FAMILY: &str = "Menlo";
+/// `CTFontSymbolicTraits`: `kCTFontTraitItalic` (1 << 0) and `kCTFontTraitBold` (1 << 1).
+const TRAIT_ITALIC: u32 = 1 << 0;
+const TRAIT_BOLD: u32 = 1 << 1;
 /// The layout cache is cleared when it holds more than this many entries.
 const LAYOUT_CACHE_MAX: usize = 512;
 
 /// The text, style bits, width in device pixels, alignment, trimming, bold prefix and scale of a cached layout.
-type LayoutKey = (String, (u32, u16, u32, u32), i32, Align, bool, usize, u32);
+type LayoutKey = (String, (u32, u16, u32, u32, u8), i32, Align, bool, usize, u32);
 
 /// A CTFont shared by the cache and the attributed strings made from it.
 type SharedFont = std::rc::Rc<Owned>;
@@ -29,7 +34,10 @@ pub struct Fonts {
     base: Option<Owned>,
     ascent: f32,
     descent: f32,
-    fonts: RefCell<HashMap<(u32, u16), Option<SharedFont>>>,
+    /// Ascent and descent of the monospaced face as fractions of the em.
+    mono_ascent: f32,
+    mono_descent: f32,
+    fonts: RefCell<HashMap<(u32, u16, u8), Option<SharedFont>>>,
     layouts: RefCell<HashMap<LayoutKey, Label>>,
     pub layouts_created: Cell<u64>,
 }
@@ -42,10 +50,18 @@ impl Fonts {
                 .and_then(|data| Owned::new(CTFontManagerCreateFontDescriptorFromData(data.get())))
         };
         let (ascent, descent) = swapdesk_paint::face_metrics(INSTRUMENT_SANS).unwrap_or((1.0, 0.25));
+        // SAFETY: a plain Create call with a string made here; the font is owned once and read.
+        let (mono_ascent, mono_descent) = cf_string(MONO_FAMILY)
+            .and_then(|name| unsafe { Owned::new(CTFontCreateWithName(name.get(), 100.0, std::ptr::null())) })
+            .map_or((0.8, 0.2), |f| unsafe {
+                ((CTFontGetAscent(f.get()) / 100.0) as f32, (CTFontGetDescent(f.get()) / 100.0) as f32)
+            });
         Fonts {
             base,
             ascent,
             descent,
+            mono_ascent,
+            mono_descent,
             fonts: RefCell::default(),
             layouts: RefCell::default(),
             layouts_created: Cell::new(0),
@@ -54,7 +70,7 @@ impl Fonts {
 
     /// The face at `size` points and CSS `weight` (the variable font's 'wght' axis).
     pub(crate) fn font(&self, size: f32, weight: u16) -> Option<std::rc::Rc<Owned>> {
-        let key = (size.to_bits(), weight);
+        let key = (size.to_bits(), weight, 0);
         if let Some(f) = self.fonts.borrow().get(&key) {
             return f.clone();
         }
@@ -73,10 +89,49 @@ impl Fonts {
         font
     }
 
+    /// Ascent and descent (fractions of the em) of the face a style uses.
+    fn metrics(&self, st: TextStyle) -> (f32, f32) {
+        if st.mono { (self.mono_ascent, self.mono_descent) } else { (self.ascent, self.descent) }
+    }
+
+    /// The face of a style: the interface's at its weight, or Menlo, bold from weight 600 and italic when asked
+    /// (a trait the face lacks keeps the plain face).
+    fn styled(&self, st: TextStyle) -> Option<std::rc::Rc<Owned>> {
+        if !st.mono {
+            return self.font(st.size, st.weight);
+        }
+        let key = (st.size.to_bits(), st.weight, st.face_bits());
+        if let Some(f) = self.fonts.borrow().get(&key) {
+            return f.clone();
+        }
+        let traits = if st.weight >= 600 { TRAIT_BOLD } else { 0 } | if st.italic { TRAIT_ITALIC } else { 0 };
+        let name = cf_string(MONO_FAMILY);
+        // SAFETY: plain Create calls on references made here; each result is owned once.
+        let font = unsafe {
+            name.and_then(|name| Owned::new(CTFontCreateWithName(name.get(), f64::from(st.size), std::ptr::null())))
+                .map(|plain| {
+                    if traits == 0 {
+                        return plain;
+                    }
+                    Owned::new(CTFontCreateCopyWithSymbolicTraits(
+                        plain.get(),
+                        0.0,
+                        std::ptr::null(),
+                        traits,
+                        TRAIT_BOLD | TRAIT_ITALIC,
+                    ))
+                    .unwrap_or(plain)
+                })
+        }
+        .map(std::rc::Rc::new);
+        self.fonts.borrow_mut().insert(key, font.clone());
+        font
+    }
+
     /// An attributed string of `text` in the style, its first `bold_utf16` units semi-bold.
     fn attributed(&self, text: &str, st: TextStyle, bold_utf16: isize) -> Option<(Owned, isize)> {
         let s = cf_string(text)?;
-        let regular = self.font(st.size, st.weight)?;
+        let regular = self.styled(st)?;
         // SAFETY: plain Core Foundation calls on references created here.
         unsafe {
             let a = Owned::new(CFAttributedStringCreateMutable(std::ptr::null(), 0))?;
@@ -121,7 +176,7 @@ impl Fonts {
     ) -> Label {
         let key: LayoutKey = (
             text.to_owned(),
-            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits()),
+            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits(), st.face_bits()),
             (max_w * scale).round() as i32,
             align,
             ellipsis,
@@ -152,7 +207,8 @@ impl Fonts {
         bold_chars: usize,
     ) -> Label {
         self.layouts_created.set(self.layouts_created.get() + 1);
-        let (line_h, baseline) = swapdesk_paint::line_box(st, scale, self.ascent, self.descent);
+        let (ascent, descent) = self.metrics(st);
+        let (line_h, baseline) = swapdesk_paint::line_box(st, scale, ascent, descent);
         let bold_utf16 = text.chars().take(bold_chars).map(char::len_utf16).sum::<usize>() as isize;
         let mut lines: Vec<Line> = Vec::new();
         if let Some((a, len)) = self.attributed(text, st, bold_utf16) {
@@ -459,7 +515,8 @@ impl Painter for CgPainter<'_> {
     }
 
     fn content_height(&self, st: TextStyle) -> f32 {
-        (self.fonts.ascent + self.fonts.descent) * st.size
+        let (ascent, descent) = self.fonts.metrics(st);
+        (ascent + descent) * st.size
     }
 
     fn layout(&self, text: &str, st: TextStyle, max_w: f32, align: Align, ellipsis: bool, bold_chars: usize) -> Label {

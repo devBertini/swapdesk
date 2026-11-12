@@ -25,11 +25,11 @@ use swapdesk_paint::Painter;
 pub use swapdesk_paint::{Align, Label, Rect};
 
 /// Size, weight, line height, tracking and scale, as bits.
-type FormatKey = (u32, u16, u32, u32);
+type FormatKey = (u32, u16, u32, u32, u8);
 
 /// What a cached layout depends on: the text, the style (size, weight, line height, tracking), the width rounded to
 /// device pixels, the alignment, trimming, bold prefix, the language and the scale.
-type LayoutKey = (String, (u32, u16, u32, u32), i32, Align, bool, u32, swapdesk_ui::Language, u32);
+type LayoutKey = (String, (u32, u16, u32, u32, u8), i32, Align, bool, u32, swapdesk_ui::Language, u32);
 
 /// The layout cache is cleared when it holds more than this many entries.
 const LAYOUT_CACHE_MAX: usize = 512;
@@ -43,6 +43,11 @@ pub struct Fonts {
     /// Ascent and descent of the face as fractions of the em; CSS centres them in the line box.
     ascent: f32,
     descent: f32,
+    /// The system's monospaced face (the terminal grid): Cascadia Mono, else Consolas, and its metrics.
+    mono_collection: IDWriteFontCollection,
+    mono_family: HSTRING,
+    mono_ascent: f32,
+    mono_descent: f32,
     formats: RefCell<HashMap<FormatKey, (IDWriteTextFormat, f32)>>,
     /// The ellipsis trimming sign of each text format, made once.
     signs: RefCell<HashMap<FormatKey, IDWriteInlineObject>>,
@@ -95,6 +100,17 @@ impl Fonts {
             }
         };
         let (ascent, descent) = face_metrics(&collection, &family).unwrap_or((1.0, 0.25));
+        let mut system = None;
+        // SAFETY: `system` receives the shared system collection.
+        unsafe { factory.GetSystemFontCollection(&mut system, false)? };
+        let mono_collection = system.ok_or_else(windows::core::Error::empty)?;
+        let mono_family = HSTRING::from(
+            ["Cascadia Mono", "Consolas"]
+                .into_iter()
+                .find(|f| has_family(&mono_collection, &HSTRING::from(*f)))
+                .unwrap_or("Consolas"),
+        );
+        let (mono_ascent, mono_descent) = face_metrics(&mono_collection, &mono_family).unwrap_or((0.8, 0.2));
         Ok(Fonts {
             factory,
             collection,
@@ -102,6 +118,10 @@ impl Fonts {
             loader,
             ascent,
             descent,
+            mono_collection,
+            mono_family,
+            mono_ascent,
+            mono_descent,
             formats: RefCell::default(),
             signs: RefCell::default(),
             layouts: RefCell::default(),
@@ -112,23 +132,32 @@ impl Fonts {
 
     /// The content area (ascent plus descent) of a style, as an inline box would have it.
     pub fn content_height(&self, st: TextStyle) -> f32 {
-        (self.ascent + self.descent) * st.size
+        let (ascent, descent) = self.metrics(st);
+        (ascent + descent) * st.size
+    }
+
+    /// Ascent and descent (fractions of the em) of the face a style uses.
+    fn metrics(&self, st: TextStyle) -> (f32, f32) {
+        if st.mono { (self.mono_ascent, self.mono_descent) } else { (self.ascent, self.descent) }
     }
 
     /// A text format with CSS line spacing, and the baseline offset inside the line box in DIPs.
     fn format(&self, st: TextStyle, scale: f32) -> Result<(IDWriteTextFormat, f32)> {
-        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits());
+        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits(), st.face_bits());
         if let Some(f) = self.formats.borrow().get(&key) {
             return Ok(f.clone());
         }
         let locale = HSTRING::from(locale_name(self.language.get()));
+        let (family, collection) =
+            if st.mono { (&self.mono_family, &self.mono_collection) } else { (&self.family, &self.collection) };
+        let style = if st.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL };
         // SAFETY: the collection, family name and locale outlive the call.
         let format = unsafe {
             self.factory.CreateTextFormat(
-                &self.family,
-                &self.collection,
+                family,
+                collection,
                 DWRITE_FONT_WEIGHT(i32::from(st.weight)),
-                DWRITE_FONT_STYLE_NORMAL,
+                style,
                 DWRITE_FONT_STRETCH_NORMAL,
                 st.size,
                 &locale,
@@ -136,7 +165,8 @@ impl Fonts {
         };
         // CSS puts the content area in the middle of the line box. Browsers lay text out in device pixels and round
         // the font's ascent and descent there, so the half-leading is worked out the same way.
-        let (line_height, baseline) = swapdesk_paint::line_box(st, scale, self.ascent, self.descent);
+        let (ascent, descent) = self.metrics(st);
+        let (line_height, baseline) = swapdesk_paint::line_box(st, scale, ascent, descent);
         // SAFETY: plain setter on a format we own.
         unsafe { format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_height, baseline)? };
         self.formats.borrow_mut().insert(key, (format.clone(), baseline));
@@ -145,7 +175,7 @@ impl Fonts {
 
     /// The ellipsis trimming sign of a text format, created once per format.
     fn ellipsis_sign(&self, st: TextStyle, scale: f32, format: &IDWriteTextFormat) -> Result<IDWriteInlineObject> {
-        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits());
+        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits(), st.face_bits());
         if let Some(sign) = self.signs.borrow().get(&key) {
             return Ok(sign.clone());
         }
@@ -169,7 +199,7 @@ impl Fonts {
     ) -> Result<Label> {
         let key: LayoutKey = (
             text.to_owned(),
-            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits()),
+            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits(), st.face_bits()),
             (max_w * scale).round() as i32,
             align,
             ellipsis,
@@ -279,6 +309,14 @@ fn load_private(factory: &IDWriteFactory) -> Result<(IDWriteFontCollection, IDWr
             }
         }
     }
+}
+
+/// Whether the collection holds a family of that name (`FindFamilyName` answers index 0 for a missing one).
+fn has_family(collection: &IDWriteFontCollection, family: &HSTRING) -> bool {
+    let mut index = 0;
+    let mut exists = BOOL(0);
+    // SAFETY: out-pointers are valid locals.
+    unsafe { collection.FindFamilyName(family, &mut index, &mut exists) }.is_ok() && exists.as_bool()
 }
 
 fn face_metrics(collection: &IDWriteFontCollection, family: &HSTRING) -> Result<(f32, f32)> {
@@ -749,7 +787,7 @@ mod tests {
     #[test]
     fn the_layout_cache_is_bounded_and_trimming_signs_are_made_once() {
         let fonts = Fonts::new().expect("fonts");
-        let st = swapdesk_ui::tokens::TextStyle { size: 14.0, weight: 400, line: 1.4, tracking: 0.0 };
+        let st = swapdesk_ui::tokens::TextStyle::new(14.0, 400).line(1.4);
         for i in 0..(LAYOUT_CACHE_MAX + 40) {
             fonts.layout(&format!("row {i}"), st, 1.0, 100.0, Align::Start, true, 0).expect("layout");
         }
@@ -758,9 +796,28 @@ mod tests {
     }
 
     #[test]
+    fn the_monospaced_face_gives_every_glyph_one_advance_and_has_formats_of_its_own() {
+        let fonts = Fonts::new().expect("fonts");
+        let mono = swapdesk_ui::tokens::text::TERM;
+        let ui = swapdesk_ui::tokens::TextStyle::new(13.0, 400).line(1.3);
+        let width = |t: &str, st| fonts.layout(t, st, 1.0, 1000.0, Align::Start, false, 0).expect("layout").w;
+        let (i, m) = (width("iiii", mono), width("mmmm", mono));
+        assert!(i > 0.0 && (i - m).abs() < 0.01, "monospaced: {i} against {m}");
+        assert!(width("mmmm", ui) > width("iiii", ui) + 1.0, "the interface's face is proportional");
+        fonts.layout("x", mono.italic(), 1.0, 1000.0, Align::Start, false, 0).expect("italic layout");
+        assert_eq!(fonts.formats.borrow().len(), 3, "the interface's, the monospaced and its italic");
+        assert!(fonts.content_height(mono) > 0.0);
+        assert!(
+            ["Cascadia Mono", "Consolas"].contains(&fonts.mono_family.to_string().as_str()),
+            "{}",
+            fonts.mono_family
+        );
+    }
+
+    #[test]
     fn changing_language_drops_the_cached_formats() {
         let fonts = Fonts::new().expect("fonts");
-        let st = swapdesk_ui::tokens::TextStyle { size: 14.0, weight: 400, line: 1.4, tracking: 0.0 };
+        let st = swapdesk_ui::tokens::TextStyle::new(14.0, 400).line(1.4);
         fonts.layout("a", st, 1.0, 100.0, Align::Start, false, 0).expect("layout");
         assert_eq!(fonts.formats.borrow().len(), 1);
         assert!(!fonts.set_language(Language::PtBr), "same language keeps the cache");

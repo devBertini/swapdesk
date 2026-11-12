@@ -178,6 +178,16 @@ unsafe extern "C" {
         size: f64,
         matrix: *const CGAffineTransform,
     ) -> CTFontRef;
+    pub fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: *const CGAffineTransform) -> CTFontRef;
+    pub fn CTFontCreateCopyWithSymbolicTraits(
+        font: CTFontRef,
+        size: f64,
+        matrix: *const CGAffineTransform,
+        sym_trait_value: u32,
+        sym_trait_mask: u32,
+    ) -> CTFontRef;
+    pub fn CTFontGetAscent(font: CTFontRef) -> f64;
+    pub fn CTFontGetDescent(font: CTFontRef) -> f64;
     pub fn CTTypesetterCreateWithAttributedString(string: CFMutableAttributedStringRef) -> CTTypesetterRef;
     pub fn CTTypesetterSuggestLineBreak(typesetter: CTTypesetterRef, start_index: isize, width: f64) -> isize;
     pub fn CTTypesetterCreateLine(typesetter: CTTypesetterRef, string_range: CFRange) -> CTLineRef;

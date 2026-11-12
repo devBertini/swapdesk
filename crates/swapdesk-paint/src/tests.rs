@@ -25,6 +25,8 @@ struct Fixed {
     centred_made: RefCell<Vec<(String, f32, f32)>>,
     /// Every centred text drawn: the text, the middle of its box and its size.
     centred: RefCell<Vec<(String, f32, f32)>>,
+    /// Every text laid out, with its style.
+    styled: RefCell<Vec<(String, TextStyle)>>,
 }
 
 impl Fixed {
@@ -89,6 +91,7 @@ impl Painter for Fixed {
         if align == Align::Center {
             self.centred_made.borrow_mut().push((text.to_owned(), max_w, st.size));
         }
+        self.styled.borrow_mut().push((text.to_owned(), st));
         let one_line = text.chars().count() as f32 * st.size * 0.55;
         let lines = if ellipsis || one_line <= max_w { 1.0 } else { (one_line / max_w).ceil() };
         Label::new(one_line.min(max_w), lines * st.size * st.line, st.size, text.to_owned())
@@ -571,4 +574,64 @@ fn the_note_after_the_update_from_1_0_shows_under_an_empty_paired_list_only() {
     let paired = st.t(MsgKey::SidebarPaired);
     assert!(with[..at].contains(&paired), "under the Pareados caption");
     assert!(!drawn(Scenario::Inicio).contains(&note), "not with paired devices");
+}
+
+/// The terminal grid over the trait: one cell box for every face (0.6 em by one line, snapped), backgrounds in runs of
+/// one colour, each glyph centred in its box in the monospaced face (bold, italic), a wide glyph over two columns with
+/// its second column not drawn, underline and strike as rectangles in the glyph's colour.
+#[test]
+fn a_terminal_grid_paints_backgrounds_glyphs_lines_and_wide_cells() {
+    use crate::grid::{GridCell, grid_metrics, paint_grid};
+    use swapdesk_ui::tokens::text::TERM;
+    let p = Fixed::default();
+    let ink = Color { r: 220, g: 220, b: 220, a: 255 };
+    let red = Color { r: 200, g: 0, b: 0, a: 255 };
+    let cell = |t: &str| GridCell { text: t.into(), ..GridCell::blank(ink) };
+    let rows = vec![
+        vec![
+            GridCell { bg: Some(red), ..cell("a") },
+            GridCell { bg: Some(red), bold: true, ..cell("b") },
+            cell(" "),
+            GridCell { wide: true, ..cell("漢") },
+            GridCell::blank(ink),
+            GridCell { italic: true, underline: true, strike: true, ..cell("c") },
+        ],
+        vec![cell("$")],
+    ];
+    let m = paint_grid(&p, (10.0, 20.0), &rows, TERM);
+    const { assert!(TERM.mono, "the grid's style is the monospaced face") };
+    assert_eq!(m, grid_metrics(&p, TERM));
+    assert_eq!((m.cell_w, m.cell_h), (8.0, 17.0), "13 px: 0.6 em and 1.3 lines, snapped");
+    assert_eq!(m.fit(Rect::new(0.0, 0.0, 81.0, 40.0)), (10, 2));
+
+    // One background run for the two red cells, nothing for cells without their own background.
+    let fills = p.fills.borrow();
+    let backgrounds: Vec<_> = fills.iter().filter(|(_, c, _)| *c == red).collect();
+    assert_eq!(backgrounds.len(), 1);
+    assert_eq!(backgrounds[0].0, Rect::new(10.0, 20.0, 16.0, 17.0));
+
+    // Glyphs: a space and the wide cell's second column draw nothing; the second row starts one line lower.
+    assert_eq!(*p.drawn.borrow(), vec!["a", "b", "漢", "c", "$"]);
+    let placed = p.placed.borrow();
+    let styled = p.styled.borrow();
+    let label_w = |t: &str| t.chars().count() as f32 * TERM.size * 0.55;
+    let wide_x = 10.0 + 3.0 * 8.0;
+    assert_eq!(placed[2].0, (wide_x + (16.0 - label_w("漢")) / 2.0).round(), "centred over two columns");
+    assert_eq!(
+        placed[3].0,
+        (10.0 + 5.0 * 8.0 + (8.0 - label_w("c")) / 2.0).round(),
+        "after the wide cell's two columns"
+    );
+    assert!(placed[4].1 >= 20.0 + 17.0, "the second row");
+    let style_of = |t: &str| styled.iter().find(|(s, _)| s == t).map(|(_, st)| *st).unwrap();
+    assert!(style_of("a").mono && style_of("a").weight == 400 && !style_of("a").italic);
+    assert_eq!(style_of("b").weight, 700, "bold");
+    assert!(style_of("c").italic && style_of("c").mono, "italic in the monospaced face");
+
+    // Underline at the bottom of the cell and strike across its middle, both one device pixel and in the glyph's ink.
+    let lines: Vec<Rect> = fills.iter().filter(|(_, c, _)| *c == ink).map(|(r, ..)| *r).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let c_x = 10.0 + 5.0 * 8.0;
+    assert_eq!(lines[0], Rect::new(c_x, 20.0 + 17.0 - 2.0, 8.0, 1.0), "underline");
+    assert_eq!(lines[1], Rect::new(c_x, (20.0f32 + 17.0 * 0.55).round(), 8.0, 1.0), "strike");
 }

@@ -126,18 +126,37 @@ pub mod fixed {
     pub const SHADOW_DIALOG: Color = Color::rgba(0, 0, 0, 45);
 }
 
-/// A CSS-like text style: size in px, weight, line height as a multiple of the size, tracking in em.
+/// A CSS-like text style: size in px, weight, line height as a multiple of the size, tracking in em; the interface's
+/// face or the system's monospaced one (the terminal grid), upright or italic (the monospaced face only).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextStyle {
     pub size: f32,
     pub weight: u16,
     pub line: f32,
     pub tracking: f32,
+    /// The system's monospaced face (Windows: Cascadia Mono, else Consolas; the Mac: Menlo) instead of the
+    /// interface's.
+    pub mono: bool,
+    /// Italic (honoured on the monospaced face; the interface's face has no italic).
+    pub italic: bool,
 }
 
 impl TextStyle {
     pub const fn new(size: f32, weight: u16) -> TextStyle {
-        TextStyle { size, weight, line: 1.45, tracking: 0.0 }
+        TextStyle { size, weight, line: 1.45, tracking: 0.0, mono: false, italic: false }
+    }
+    pub const fn mono(self) -> TextStyle {
+        TextStyle { mono: true, ..self }
+    }
+    pub const fn italic(self) -> TextStyle {
+        TextStyle { italic: true, ..self }
+    }
+    pub const fn weight(self, weight: u16) -> TextStyle {
+        TextStyle { weight, ..self }
+    }
+    /// The bits a shell's text caches tell styles apart by (the face and the slant).
+    pub const fn face_bits(self) -> u8 {
+        (self.mono as u8) | ((self.italic as u8) << 1)
     }
     pub const fn line(self, line: f32) -> TextStyle {
         TextStyle { line, ..self }
@@ -173,6 +192,8 @@ pub mod text {
     pub const TABLE_HEAD: TextStyle = TextStyle::new(12.0, 600);
     pub const BAR: TextStyle = TextStyle::new(13.0, 600);
     pub const MONO: TextStyle = TextStyle::new(13.0, 400).line(1.7);
+    /// The terminal grid: the monospaced face; a cell is 0.6 em wide and one line high (`swapdesk_paint::grid`).
+    pub const TERM: TextStyle = TextStyle::new(13.0, 400).line(1.3).mono();
 }
 
 /// Layout numbers of the main window, in CSS pixels.

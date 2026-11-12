@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn the_baseline_sits_inside_the_line_box_at_every_scale() {
         let (a, d) = face_metrics(INSTRUMENT_SANS).unwrap();
-        let st = TextStyle { size: 14.0, weight: 400, line: 1.45, tracking: 0.0 };
+        let st = TextStyle::new(14.0, 400);
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (lh, base) = line_box(st, scale, a, d);
             assert!(base > 0.0 && base < lh, "scale {scale}: baseline {base} of {lh}");

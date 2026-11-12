@@ -107,3 +107,18 @@ fn hovering_a_button_of_the_session_bar_paints_that_buttons_hint_under_it() {
     widths.dedup();
     assert_eq!(widths.len(), 5, "each button has a hint of its own");
 }
+
+#[test]
+fn the_monospaced_face_gives_every_glyph_one_advance_and_bold_and_italic_are_faces_of_their_own() {
+    use swapdesk_paint::Align;
+    use swapdesk_ui::tokens::TextStyle;
+    use swapdesk_ui::tokens::text::TERM;
+    let fonts = Fonts::new();
+    let width = |t: &str, st: TextStyle| fonts.layout(t, st, 1.0, 1000.0, Align::Start, false, 0).w;
+    let (i, m) = (width("iiii", TERM), width("mmmm", TERM));
+    assert!(i > 0.0 && (i - m).abs() < 0.01, "monospaced: {i} against {m}");
+    let ui = TextStyle::new(13.0, 400).line(1.3);
+    assert!(width("mmmm", ui) > width("iiii", ui) + 1.0, "the interface's face is proportional");
+    assert!(width("iiii", TERM.weight(700)) > 0.0 && width("iiii", TERM.italic()) > 0.0);
+    assert!(fonts.layout("x", TERM, 1.0, 1000.0, Align::Start, false, 0).h > 0.0);
+}
