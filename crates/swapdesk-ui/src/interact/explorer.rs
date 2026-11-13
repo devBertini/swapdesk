@@ -25,13 +25,16 @@ pub const SORT_MODIFIED: u8 = 3;
 
 /// The other computer's places, as paths from its home folder (FILES-UI.md 2.3): the home folder, Desktop,
 /// Documents, Downloads and Swapdesk's receive folder. Both systems name these folders in English on disk.
-const REMOTE_PLACES: [(&str, MsgKey); 5] = [
+pub(super) const REMOTE_PLACES: [(&str, MsgKey); 5] = [
     ("", MsgKey::ExplorerPlacePersonal),
     ("Desktop", MsgKey::ExplorerPlaceDesktop),
     ("Documents", MsgKey::ExplorerPlaceDocuments),
     ("Downloads", MsgKey::ExplorerPlaceDownloads),
     ("Downloads/Swapdesk", MsgKey::ExplorerPlaceReceived),
 ];
+
+/// Most entries the navigation pane lists for one computer (a place's number is a byte).
+pub(super) const MAX_REMOTE_PLACES: usize = 255;
 
 /// The modifiers and click count of the pointer press the shell is about to report as an activation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,6 +85,8 @@ pub(crate) struct Explorer {
     pub here_shown: Vec<DirEntryView>,
     /// Slice 2a: managing this computer's files.
     pub manage: super::explorer_manage::Manage,
+    /// Slice 2b: the other computer's volumes, 1.1 listing and changes.
+    pub there: super::explorer_remote::There,
 }
 
 impl Default for Explorer {
@@ -100,6 +105,7 @@ impl Default for Explorer {
             note: None,
             here_shown: Vec::new(),
             manage: super::explorer_manage::Manage::default(),
+            there: super::explorer_remote::There::default(),
         }
     }
 }
@@ -133,6 +139,16 @@ pub struct PaneView {
     pub can_up: bool,
     pub sort: (u8, bool),
     pub focused: bool,
+    /// Slice 2b, the right pane: the line the status shows in place of the count (a change's notice, or the 1.0 note).
+    pub notice: Option<String>,
+    /// The notice says a change failed (drawn as a warning); the 1.0 note is information.
+    pub notice_error: bool,
+    /// Slice 2b, the right pane: the free space of the shown folder's volume, for the header.
+    pub free: Option<String>,
+    /// Slice 2b: the pane has a "Mostrar itens ocultos" switch (the left one always, the right one with a 1.1 peer)
+    /// and whether it shows them.
+    pub hidden_switch: bool,
+    pub show_hidden: bool,
 }
 
 /// A place or volume of the navigation pane.
@@ -143,6 +159,10 @@ pub struct PlaceView {
     pub label: String,
     pub volume: bool,
     pub selected: bool,
+    /// Slice 2b: what kind of volume the other computer's one is (removable and network ones get the mark).
+    pub volume_kind: Option<crate::api::VolumeType>,
+    /// Slice 2b: the volume's space line ("120 GB livres de 500 GB"), shown on hover.
+    pub hint: Option<String>,
 }
 
 /// Natural order, case-insensitive: a number inside a name compares by value ("foto 2" before "foto 10").
@@ -241,11 +261,11 @@ fn sorted(entries: &[DirEntryView], sort: (u8, bool)) -> Vec<&DirEntryView> {
 }
 
 /// `parent/name` with `/`, the empty path being the root.
-fn join(folder: &str, name: &str) -> String {
+pub(super) fn join(folder: &str, name: &str) -> String {
     if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") }
 }
 
-fn parent(folder: &str) -> Option<String> {
+pub(super) fn parent(folder: &str) -> Option<String> {
     (!folder.is_empty()).then(|| folder.rsplit_once('/').map(|(up, _)| up.to_string()).unwrap_or_default())
 }
 
@@ -266,7 +286,7 @@ pub fn human_size(lang: crate::api::Language, bytes: u64) -> String {
     if lang == crate::api::Language::PtBr { s.replace('.', ",") } else { s }
 }
 
-fn idx(there: bool) -> usize {
+pub(super) fn idx(there: bool) -> usize {
     usize::from(there)
 }
 
@@ -287,20 +307,28 @@ impl UiState {
     }
 
     fn there_entries(&self) -> &[DirEntryView] {
+        let t = &self.explorer.there;
+        if t.proto == super::explorer_remote::Proto::V11 && t.listed {
+            return &t.shown;
+        }
         self.listing.as_ref().map_or(&[], |l| &l.entries)
     }
 
-    fn entries(&self, there: bool) -> &[DirEntryView] {
+    pub(super) fn entries(&self, there: bool) -> &[DirEntryView] {
         if there { self.there_entries() } else { self.here_entries() }
     }
 
     /// The rows of a pane in their order (what `ExpRow(there, n)` numbers).
-    fn sorted_rows(&self, there: bool) -> Vec<&DirEntryView> {
+    pub(super) fn sorted_rows(&self, there: bool) -> Vec<&DirEntryView> {
         sorted(self.entries(there), self.explorer.panes[idx(there)].sort)
     }
 
     /// The other computer's folder the right pane shows ("" its home folder).
-    fn there_folder(&self) -> String {
+    pub(super) fn there_folder(&self) -> String {
+        let t = &self.explorer.there;
+        if t.proto == super::explorer_remote::Proto::V11 && t.listed {
+            return t.folder.clone();
+        }
         self.listing.as_ref().map(|l| l.path.clone()).unwrap_or_default()
     }
 
@@ -319,12 +347,19 @@ impl UiState {
         if self.explorer.places.is_empty() {
             a.commands.push(Command::LocalPlaces);
         }
+        self.there_prepare(a);
         if self.listing.is_none()
+            && !self.explorer.there.listed
             && self.fetch(DataKind::Listing) == Fetch::Missing
             && let Some(session_id) = self.session_id()
         {
             self.fetch.insert(DataKind::Listing, Fetch::Pending);
-            a.commands.push(Command::FilesList { session_id, path: None });
+            self.explorer.there.want = Some(String::new());
+            if self.there_v11() {
+                a.commands.push(Command::FilesListPage { session_id, path: String::new(), start: 0 });
+            } else {
+                a.commands.push(Command::FilesList { session_id, path: None });
+            }
         }
         a.changed = Changed::VIEWER;
     }
@@ -339,18 +374,29 @@ impl UiState {
     fn list_there(&mut self, path: Option<String>, a: &mut Activation) {
         if let Some(session_id) = self.session_id() {
             self.fetch.insert(DataKind::Listing, Fetch::Pending);
-            a.commands.push(Command::FilesList { session_id, path });
+            self.explorer.there.want = Some(path.clone().unwrap_or_default());
+            self.explorer.there.notice = None;
+            if self.there_v11() {
+                a.commands.push(Command::FilesListPage { session_id, path: path.unwrap_or_default(), start: 0 });
+            } else {
+                a.commands.push(Command::FilesList { session_id, path });
+            }
         }
         a.changed = Changed::VIEWER;
     }
 
-    /// Goes to `folder` in a pane, keeping the history (back, forward).
-    fn go(&mut self, there: bool, folder: String, a: &mut Activation) {
-        let current = if there {
-            self.listing.as_ref().map(|l| l.path.clone())
+    /// The folder a pane shows (`None` before its first listing).
+    fn pane_folder(&self, there: bool) -> Option<String> {
+        if there {
+            (self.listing.is_some() || self.explorer.there.listed).then(|| self.there_folder())
         } else {
             self.explorer.here_dir.as_ref().map(|d| d.to_string_lossy().into_owned())
-        };
+        }
+    }
+
+    /// Goes to `folder` in a pane, keeping the history (back, forward).
+    fn go(&mut self, there: bool, folder: String, a: &mut Activation) {
+        let current = self.pane_folder(there);
         let pane = &mut self.explorer.panes[idx(there)];
         if let Some(c) = current
             && c != folder
@@ -446,39 +492,10 @@ impl UiState {
         }
     }
 
-    /// "Copiar para ...": the focused pane's selected files go to the other pane's folder.
+    /// "Copiar para ...": the focused pane's selection goes to the other pane's folder (the conflict card first when
+    /// names exist there, folders by the walk of a 1.1 peer).
     fn explorer_copy(&mut self, a: &mut Activation) {
-        let Some(session_id) = self.session_id() else { return };
-        let there = self.explorer.focus_there;
-        let picked: Vec<(String, bool)> = self
-            .sorted_rows(there)
-            .into_iter()
-            .filter(|e| self.explorer.panes[idx(there)].selected.contains(&e.name))
-            .map(|e| (e.name.clone(), e.is_dir))
-            .collect();
-        self.explorer.note = picked.iter().any(|(_, d)| *d).then_some(MsgKey::ExplorerFoldersLater);
-        let files: Vec<String> = picked.into_iter().filter(|(_, d)| !d).map(|(n, _)| n).collect();
-        if files.is_empty() {
-            a.changed = Changed::VIEWER;
-            return;
-        }
-        if there {
-            let Some(local_dir) = self.explorer.here_dir.clone() else { return };
-            let folder = self.there_folder();
-            for name in files {
-                a.commands.push(Command::FilesGet {
-                    session_id,
-                    remote_path: join(&folder, &name),
-                    local_dir: local_dir.clone(),
-                });
-            }
-        } else {
-            let Some(dir) = self.explorer.here_dir.clone() else { return };
-            let local_paths = files.iter().map(|n| dir.join(n)).collect();
-            a.commands.push(Command::FilesSend { session_id, local_paths, remote_dir: Some(self.there_folder()) });
-        }
-        self.explorer.transfers_open = true;
-        a.changed = Changed::VIEWER;
+        self.start_copy(a);
     }
 
     /// The local file the last `Effect::OpenLocal` names, once.
@@ -503,11 +520,7 @@ impl UiState {
             }
             ControlId::ExpBack(there) | ControlId::ExpForward(there) => {
                 let forward = matches!(id, ControlId::ExpForward(_));
-                let current = if there {
-                    self.listing.as_ref().map(|l| l.path.clone())
-                } else {
-                    self.explorer.here_dir.as_ref().map(|d| d.to_string_lossy().into_owned())
-                };
+                let current = self.pane_folder(there);
                 let pane = &mut self.explorer.panes[idx(there)];
                 let target = if forward { pane.forward.pop() } else { pane.back.pop() };
                 if let Some(t) = target {
@@ -519,7 +532,7 @@ impl UiState {
             }
             ControlId::ExpUp(there) => {
                 let up = if there {
-                    parent(&self.there_folder())
+                    self.there_up()
                 } else {
                     self.explorer.here_dir.as_deref().and_then(Path::parent).map(|p| p.to_string_lossy().into_owned())
                 };
@@ -537,7 +550,7 @@ impl UiState {
             }
             ControlId::ExpPlace(there, i) => {
                 let target = if there {
-                    REMOTE_PLACES.get(usize::from(i)).map(|(p, _)| (*p).to_string())
+                    self.remote_nav().get(usize::from(i)).map(|n| n.path.clone())
                 } else {
                     self.explorer.places.get(usize::from(i)).map(|p| p.path.to_string_lossy().into_owned())
                 };
@@ -557,7 +570,7 @@ impl UiState {
 
     // ----- what the screen draws -----
 
-    fn crumbs_here(&self) -> Vec<String> {
+    pub(super) fn crumbs_here(&self) -> Vec<String> {
         let Some(dir) = &self.explorer.here_dir else { return Vec::new() };
         let place = self
             .explorer
@@ -605,15 +618,20 @@ impl UiState {
                 label: self.place_label(p),
                 volume: p.kind == PlaceKind::Volume,
                 selected: here == Some(p.path.as_path()),
+                volume_kind: None,
+                hint: None,
             })
             .collect();
-        let folder = self.listing.as_ref().map(|l| l.path.as_str());
-        out.extend(REMOTE_PLACES.iter().enumerate().map(|(i, (path, key))| PlaceView {
+        let nav = self.remote_nav();
+        let on = self.remote_nav_selected(&nav);
+        out.extend(nav.into_iter().enumerate().map(|(i, n)| PlaceView {
             there: true,
             index: i as u8,
-            label: self.t(*key),
-            volume: false,
-            selected: folder == Some(*path),
+            label: n.label,
+            volume: n.volume.is_some(),
+            selected: on == Some(i),
+            volume_kind: n.volume,
+            hint: n.hint,
         }));
         out
     }
@@ -641,7 +659,7 @@ impl UiState {
             .collect();
         let loading = if there { self.placeholder(DataKind::Listing) } else { self.explorer.here_loading };
         let error = if there {
-            None
+            self.there_error_reason().map(|reason| (self.t(MsgKey::ExplorerErrTitle), reason))
         } else {
             self.explorer.here_error.map(|code| {
                 let reason = match code {
@@ -668,18 +686,16 @@ impl UiState {
             self.tm(&Msg::new(MsgKey::ExplorerSelected).with(picked.len().to_string()).with(human_size(lang, bytes)))
         };
         let truncated = if there {
-            self.listing.as_ref().filter(|l| l.truncated).map(|l| l.entries.len())
+            if self.there_v11() && self.explorer.there.listed {
+                self.explorer.there.capped.then(|| self.explorer.there.entries.len() + self.explorer.there.hidden.len())
+            } else {
+                self.listing.as_ref().filter(|l| l.truncated).map(|l| l.entries.len())
+            }
         } else {
             self.explorer.here.as_ref().filter(|l| l.truncated).map(|l| l.entries.len())
         }
         .map(|n| self.tm(&Msg::new(MsgKey::ExplorerShowingFirst).with(n.to_string())));
-        let crumbs = if there {
-            let mut c = vec![self.t(MsgKey::ExplorerPlacePersonal)];
-            c.extend(self.there_folder().split('/').filter(|s| !s.is_empty()).map(str::to_string));
-            c
-        } else {
-            self.crumbs_here()
-        };
+        let crumbs = if there { self.crumbs_there() } else { self.crumbs_here() };
         PaneView {
             there,
             title: if there { peer } else { self.t(MsgKey::ExplorerThisComputer) },
@@ -692,12 +708,17 @@ impl UiState {
             can_back: !pane.back.is_empty(),
             can_forward: !pane.forward.is_empty(),
             can_up: if there {
-                !self.there_folder().is_empty()
+                self.there_up().is_some()
             } else {
                 self.explorer.here_dir.as_deref().and_then(Path::parent).is_some()
             },
             sort: pane.sort,
             focused: self.explorer.focus_there == there,
+            notice: if there { self.there_notice_text() } else { None },
+            notice_error: there && self.explorer.there.notice.is_some(),
+            free: if there { self.there_free_text() } else { None },
+            hidden_switch: !there || self.there_v11(),
+            show_hidden: if there { self.explorer.there.show_hidden } else { self.explorer.manage.show_hidden },
         }
     }
 
@@ -712,8 +733,7 @@ impl UiState {
 
     /// Whether the focused pane has a file selected to copy.
     pub fn explorer_can_copy(&self) -> bool {
-        let there = self.explorer.focus_there;
-        self.entries(there).iter().any(|e| !e.is_dir && self.explorer.panes[idx(there)].selected.contains(&e.name))
+        self.copy_has_something()
     }
 
     /// The note under the command bar (a folder left out of a copy, a file that opens only there).
@@ -726,7 +746,7 @@ impl UiState {
     }
 
     /// The name of the other computer of the viewer session.
-    fn peer_name(&self) -> String {
+    pub(super) fn peer_name(&self) -> String {
         self.viewer_session().and_then(|s| self.device_by_id(&s.device_id)).map(|d| d.name.clone()).unwrap_or_default()
     }
 
@@ -735,19 +755,27 @@ impl UiState {
         s.button(ControlId::ExpTela, self.name_of(MsgKey::ExplorerBackToScreen));
         s.button(ControlId::ExpCopy, self.explorer_copy_label());
         let m = self.explorer_manage();
-        for (id, key, on) in [
-            (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, true),
-            (ControlId::ExpRename, MsgKey::ExplorerRename, m.can_rename),
-            (ControlId::ExpDelete, MsgKey::ExplorerDelete, m.can_delete),
-            (ControlId::ExpProps, MsgKey::ExplorerProps, true),
+        for (id, key, on, why) in [
+            (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, m.can_new_folder, &m.change_why),
+            (ControlId::ExpRename, MsgKey::ExplorerRename, m.can_rename, &m.change_why),
+            (ControlId::ExpDelete, MsgKey::ExplorerDelete, m.can_delete, &m.delete_why),
+            (ControlId::ExpProps, MsgKey::ExplorerProps, m.can_props, &None),
         ] {
             s.button(id, self.name_of(key));
             if let Some(c) = s.v.last_mut() {
                 c.disabled = !on;
+                if !on {
+                    c.description = why.clone();
+                }
             }
         }
         let hidden = if m.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden };
         s.button(ControlId::ExpHidden, self.name_of(hidden));
+        if self.there_v11() {
+            let hidden =
+                if self.explorer.there.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden };
+            s.button(ControlId::ExpHiddenThere, self.name_of(hidden));
+        }
         if let Some((name, error)) = &m.renaming {
             let c = s.add(ControlId::Edit(EditId::ExpRename), UiRole::TextInput, self.name_of(MsgKey::ExplorerRename));
             c.value = Some(name.clone());
@@ -769,13 +797,22 @@ impl UiState {
             s.button(ControlId::ExpPropsClose, self.name_of(MsgKey::Close));
             s.region(Region::Content);
         }
+        self.remote_cards_controls(s);
         if let Some(n) = &m.notice {
             s.region(Region::Status);
             s.text(UiRole::Text, n.clone());
             s.region(Region::Content);
         }
+        if let Some(n) = self.there_notice_text() {
+            s.region(Region::Status);
+            s.text(UiRole::Text, n);
+            s.region(Region::Content);
+        }
         for p in self.explorer_places() {
             s.button(ControlId::ExpPlace(p.there, p.index), p.label);
+            if let Some(c) = s.v.last_mut() {
+                c.description = p.hint;
+            }
         }
         for there in [false, true] {
             let v = self.explorer_pane(there);

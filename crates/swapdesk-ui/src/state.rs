@@ -1101,7 +1101,7 @@ impl UiState {
     }
 
     /// The answer to the question about `feature` came (the feature opened, or the request failed).
-    fn consent_answered(&mut self, feature: Feature) {
+    pub(crate) fn consent_answered(&mut self, feature: Feature) {
         if self.consent_wait.is_some_and(|w| w.feature == feature) {
             self.consent_wait = None;
         }
@@ -1778,11 +1778,11 @@ impl UiState {
         }
     }
 
-    fn finish_fetch(&mut self, kind: DataKind) {
+    pub(crate) fn finish_fetch(&mut self, kind: DataKind) {
         self.fetch.insert(kind, Fetch::Ready);
     }
 
-    fn fail_fetch(&mut self, kind: DataKind) {
+    pub(crate) fn fail_fetch(&mut self, kind: DataKind) {
         if kind == DataKind::Activity {
             self.activity_refresh = false;
         }
@@ -2083,8 +2083,7 @@ impl UiState {
                 }
                 Changed::VIEWER
             }
-            // Slice 2b (in progress): the explorer's right pane takes the other computer's volumes.
-            UiEvent::RemoteVolumes { .. } => Changed::NONE,
+            UiEvent::RemoteVolumes { session_id, volumes } => self.there_volumes_event(session_id, volumes),
             UiEvent::ServiceReconnected => {
                 // The sessions of the old service ended with it.
                 let ended: Vec<(u64, String)> = self.sessions.iter().map(|s| (s.id, s.device_id.clone())).collect();
@@ -2451,11 +2450,21 @@ impl UiState {
                 }
                 Changed::ALL
             }
-            Reply::LocalListing(l) => self.here_listed(l),
+            Reply::LocalListing(l) => {
+                let asked = pending.map(|p| p.command);
+                match self.walk_listed(asked.as_ref(), l) {
+                    Ok(changed) => changed,
+                    Err(l) => self.here_listed(l),
+                }
+            }
             Reply::LocalProps(p) => self.props_counted(p),
             Reply::LocalPlaces(p) => self.places_listed(p),
             Reply::Listing(l) => {
                 self.consent_answered(Feature::Files);
+                // A 1.1 peer lists through pages (slice 2b); a late FilesList answer is not the pane's any more.
+                if self.there_v11() {
+                    return Changed::NONE;
+                }
                 self.listing = Some(l);
                 self.files.page = 0;
                 self.finish_fetch(DataKind::Listing);
@@ -2508,8 +2517,15 @@ impl UiState {
                 Changed::VIEWER
             }
             Reply::TransferIds(_) | Reply::TransferId(_) => Changed::NONE,
-            // Slice 2b (in progress): the explorer's right pane.
-            Reply::RemotePage(_) | Reply::ChangeResults(_) | Reply::RemoteVolumes(_) => Changed::NONE,
+            Reply::RemotePage(page) => {
+                let asked = match pending.map(|p| p.command) {
+                    Some(Command::FilesListPage { path, start, .. }) => Some((path, start)),
+                    _ => None,
+                };
+                self.there_page(asked, page)
+            }
+            Reply::ChangeResults(results) => self.there_change_results(pending.map(|p| p.command), results),
+            Reply::RemoteVolumes(v) => self.there_volumes(v),
         }
     }
 
@@ -2535,7 +2551,15 @@ impl UiState {
         }
         // The explorer's own disk: the pane shows the failure in place (FILES-UI.md 2.9), no strip.
         match &pending.command {
-            Command::LocalList { .. } => return self.here_failed(error.code),
+            Command::LocalList { path } => {
+                if self.walk_list_failed(path.as_ref()) {
+                    return Changed::VIEWER;
+                }
+                return self.here_failed(error.code);
+            }
+            Command::FilesVolumes { .. } => return self.there_volumes_failed(error.code),
+            c @ Command::FilesListPage { .. } => return self.there_page_failed(c, error.code),
+            c @ Command::FilesChange { .. } => return self.there_change_failed(c, error.code),
             Command::LocalPlaces => return Changed::NONE,
             c @ (Command::LocalMakeDir { .. }
             | Command::LocalRename { .. }

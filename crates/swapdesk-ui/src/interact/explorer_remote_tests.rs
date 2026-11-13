@@ -1,0 +1,828 @@
+//! Slice 2b: the right pane, the other computer (FILES-UI.md 10).
+
+use std::path::PathBuf;
+
+use super::super::{PointerMods, Region};
+use super::*;
+use crate::api::{ApiError, Language, Listing, LocalListing, RemotePlace, Reply, Role, Ticket, UiEvent};
+use crate::interact::explorer_manage::ExplorerKey;
+use crate::mock::Scenario;
+use crate::state::WindowKind;
+
+fn entry(name: &str, is_dir: bool, size: u64) -> DirEntryView {
+    DirEntryView { name: name.into(), is_dir, size, mtime_ms: 0 }
+}
+
+fn remote(name: &str, kind: RemoteKind, size: u64) -> RemoteEntry {
+    RemoteEntry { name: name.into(), kind, size, mtime_ms: 0, hidden: false, system: false, read_only: false }
+}
+
+fn vol(id: u32, kind: VolumeType, label: &str, letter: Option<char>, has_bin: bool) -> RemoteVolume {
+    RemoteVolume {
+        id,
+        kind,
+        label: label.into(),
+        letter,
+        total_bytes: 500_000_000_000,
+        free_bytes: 120_000_000_000,
+        has_bin,
+    }
+}
+
+fn volumes_11() -> RemoteVolumes {
+    RemoteVolumes {
+        home: ":1/Users/ana".into(),
+        places: vec![
+            RemotePlace { kind: PlaceName::Desktop, path: ":1/Users/ana/Desktop".into() },
+            RemotePlace { kind: PlaceName::Documents, path: ":1/Users/ana/Documents".into() },
+        ],
+        volumes: vec![
+            vol(1, VolumeType::System, "", Some('C'), true),
+            vol(2, VolumeType::Fixed, "Backup", Some('D'), true),
+            vol(3, VolumeType::Removable, "", Some('E'), false),
+        ],
+    }
+}
+
+fn page(path: &str, start: u32, entries: Vec<RemoteEntry>, next: Option<u32>) -> RemotePage {
+    RemotePage { path: path.into(), start, entries, next, free: Some(80_000_000_000) }
+}
+
+fn reply(s: &mut UiState, r: Reply) {
+    s.apply(UiEvent::Reply { ticket: Ticket(0), result: Ok(r) });
+}
+
+/// The command `command`, sent and answered under its own ticket, as the backend does.
+fn answer(s: &mut UiState, command: &Command, result: Result<Reply, ApiError>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(40_000);
+    let t = Ticket(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    s.track(t, command);
+    s.apply(UiEvent::Reply { ticket: t, result });
+}
+
+fn local_listing(s: &mut UiState) {
+    reply(
+        s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("foto.jpg", false, 10), entry("Fotos", true, 0), entry("novo.txt", false, 4)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+}
+
+/// The explorer opened: what it asked on opening, with this computer's folder listed.
+fn open() -> (UiState, Vec<Command>) {
+    let mut s = Scenario::Visualizador.prepared_state();
+    let a = s.activate(ControlId::TbFiles);
+    assert!(s.explorer_open());
+    local_listing(&mut s);
+    (s, a.commands)
+}
+
+fn volumes_cmd(cmds: &[Command]) -> Command {
+    cmds.iter().find(|c| matches!(c, Command::FilesVolumes { .. })).cloned().expect("FilesVolumes asked on opening")
+}
+
+fn first_page_cmd(s: &mut UiState) -> Command {
+    s.take_followups()
+        .into_iter()
+        .find(|c| matches!(c, Command::FilesListPage { start: 0, .. }))
+        .expect("the first page asked")
+}
+
+/// A 1.1 peer: volumes answered, the home folder listed by pages.
+fn opened_11() -> UiState {
+    let (mut s, cmds) = open();
+    answer(&mut s, &volumes_cmd(&cmds), Ok(Reply::RemoteVolumes(volumes_11())));
+    let c = first_page_cmd(&mut s);
+    assert!(matches!(&c, Command::FilesListPage { path, .. } if path.is_empty()), "the home folder first");
+    answer(
+        &mut s,
+        &c,
+        Ok(Reply::RemotePage(page(
+            "",
+            0,
+            vec![
+                remote("Contratos", RemoteKind::Dir, 0),
+                remote("notas.txt", RemoteKind::File, 1_200),
+                remote("foto.jpg", RemoteKind::File, 3_000_000),
+            ],
+            None,
+        ))),
+    );
+    s
+}
+
+/// A 1.0 peer: `FilesVolumes` answered `Invalid`, the home folder listed by `FilesList`.
+fn opened_10() -> UiState {
+    let (mut s, cmds) = open();
+    answer(&mut s, &volumes_cmd(&cmds), Err(ApiError::new(ApiCode::Invalid)));
+    reply(
+        &mut s,
+        Reply::Listing(Listing {
+            path: String::new(),
+            entries: vec![entry("nota.txt", false, 5), entry("Documents", true, 0)],
+            truncated: false,
+        }),
+    );
+    s
+}
+
+fn there_rows(s: &UiState) -> Vec<String> {
+    s.explorer_pane(true).rows.into_iter().map(|r| r.name).collect()
+}
+
+fn select_there(s: &mut UiState, name: &str) {
+    let n = there_rows(s).iter().position(|r| r == name).expect("the row");
+    s.activate(ControlId::ExpRow(true, n as u16));
+}
+
+fn select_here(s: &mut UiState, name: &str) {
+    let n = s.explorer_pane(false).rows.iter().position(|r| r.name == name).expect("the row");
+    s.activate(ControlId::ExpRow(false, n as u16));
+}
+
+fn labels(s: &UiState) -> Vec<String> {
+    s.explorer_places().into_iter().filter(|p| p.there).map(|p| p.label).collect()
+}
+
+fn files_change(s: &UiState, change: RemoteChange) -> Command {
+    Command::FilesChange { session_id: s.session_id().unwrap(), change }
+}
+
+fn change_cmd(a: &Activation) -> Command {
+    a.commands.iter().find(|c| matches!(c, Command::FilesChange { .. })).cloned().expect("a FilesChange")
+}
+
+// ----- the 1.0 fallback -----
+
+#[test]
+fn a_1_0_peer_shows_the_home_places_the_note_and_disables_every_change() {
+    let mut s = opened_10();
+    assert_eq!(labels(&s).len(), 5, "places derived from the home folder, no volumes");
+    assert!(s.explorer_places().iter().all(|p| !p.volume));
+    let v = s.explorer_pane(true);
+    let note = v.notice.expect("the note");
+    assert!(note.contains("usa o Swapdesk 1.0: só a pasta pessoal aparece"), "{note}");
+    assert!(note.starts_with("O ") && note.contains(&v.title), "{note}");
+    assert!(!v.hidden_switch, "a 1.0 peer cannot flag hidden entries");
+    select_there(&mut s, "nota.txt");
+    let m = s.explorer_manage();
+    assert!(!m.can_new_folder && !m.can_rename && !m.can_delete);
+    let why = m.change_why.expect("the reason");
+    assert!(why.contains("usa o Swapdesk 1.0. Atualize o Swapdesk de lá"), "{why}");
+    for id in [ControlId::ExpNewFolder, ControlId::ExpRename, ControlId::ExpDelete] {
+        let a = s.activate(id);
+        assert!(a.commands.is_empty(), "{id:?}");
+    }
+    assert!(s.explorer_manage().trash_there.is_none(), "no card for a change that cannot happen");
+    // The disabled button keeps its reason as its description in the controls list.
+    let specs = s.controls(WindowKind::Viewer);
+    let del = specs.iter().find(|c| c.id == ControlId::ExpDelete).unwrap();
+    assert!(del.disabled && del.description.as_deref() == Some(why.as_str()));
+    // Folder upload is refused with the same sentence, files still go.
+    s.explorer.focus_there = false;
+    let folder = s.explorer_pane(false).rows.iter().position(|r| r.is_dir).expect("a folder here");
+    s.activate(ControlId::ExpRow(false, folder as u16));
+    let a = s.activate(ControlId::ExpCopy);
+    assert!(a.commands.is_empty());
+    assert!(s.explorer_note().is_some_and(|n| n.contains("usa o Swapdesk 1.0")));
+}
+
+#[test]
+fn volumes_are_asked_once_when_the_explorer_opens() {
+    let (mut s, cmds) = open();
+    assert_eq!(cmds.iter().filter(|c| matches!(c, Command::FilesVolumes { .. })).count(), 1);
+    s.activate(ControlId::ExpTela);
+    let a = s.activate(ControlId::TbFiles);
+    assert!(!a.commands.iter().any(|c| matches!(c, Command::FilesVolumes { .. })), "never refetched per visit");
+}
+
+// ----- volumes in the navigation pane -----
+
+#[test]
+fn volumes_fill_the_navigation_pane_and_follow_the_pushed_list() {
+    let mut s = opened_11();
+    assert_eq!(
+        labels(&s),
+        [
+            "Pasta pessoal",
+            "Área de trabalho",
+            "Documentos",
+            "Disco local (C:)",
+            "Backup (D:)",
+            "Unidade removível (E:)"
+        ]
+    );
+    let removable = s.explorer_places().into_iter().find(|p| p.label == "Unidade removível (E:)").unwrap();
+    assert!(removable.volume && removable.volume_kind == Some(VolumeType::Removable));
+    assert_eq!(removable.hint.as_deref(), Some("120,0 GB livres de 500,0 GB"));
+    assert!(s.explorer_places().iter().find(|p| p.there && p.label == "Pasta pessoal").unwrap().selected);
+
+    // A Mac volume is named by its label, or "Volume sem nome"; a network drive by its kind.
+    let mut v = volumes_11();
+    v.volumes = vec![
+        vol(1, VolumeType::System, "Macintosh HD", None, true),
+        vol(4, VolumeType::Image, "", None, true),
+        vol(5, VolumeType::Network, "", Some('Z'), false),
+        vol(6, VolumeType::Optical, "", Some('F'), false),
+    ];
+    let c = s.apply(UiEvent::RemoteVolumes { session_id: 1, volumes: v });
+    assert_eq!(c, Changed::VIEWER);
+    assert_eq!(labels(&s)[3..], ["Macintosh HD", "Volume sem nome", "Unidade de rede (Z:)", "Unidade de CD/DVD (F:)"]);
+    // An event of another session changes nothing.
+    let c = s.apply(UiEvent::RemoteVolumes { session_id: 99, volumes: volumes_11() });
+    assert_eq!(c, Changed::NONE);
+    assert_eq!(labels(&s).len(), 7);
+}
+
+#[test]
+fn a_pane_on_a_removed_volume_shows_its_error() {
+    let mut s = opened_11();
+    s.activate(ControlId::ExpPlace(true, 5));
+    let c = Command::FilesListPage { session_id: 1, path: ":3".into(), start: 0 };
+    answer(&mut s, &c, Ok(Reply::RemotePage(page(":3", 0, vec![remote("a.jpg", RemoteKind::File, 5)], None))));
+    assert_eq!(s.explorer_pane(true).crumbs, ["Unidade removível (E:)"]);
+    assert!(s.explorer_places().iter().find(|p| p.there && p.label == "Unidade removível (E:)").unwrap().selected);
+    let mut v = volumes_11();
+    v.volumes.truncate(2);
+    s.apply(UiEvent::RemoteVolumes { session_id: 1, volumes: v });
+    let (title, why) = s.explorer_pane(true).error.expect("the error state");
+    assert!(!title.is_empty());
+    assert_eq!(why, "O disco Unidade removível (E:) foi removido do MacBook do escritório.");
+}
+
+// ----- the listing by pages -----
+
+#[test]
+fn a_1_1_peer_lists_by_pages_and_fetches_every_one() {
+    let (mut s, cmds) = open();
+    answer(&mut s, &volumes_cmd(&cmds), Ok(Reply::RemoteVolumes(volumes_11())));
+    let first = first_page_cmd(&mut s);
+    let mut system = remote("NTUSER.DAT", RemoteKind::File, 9);
+    system.system = true;
+    let mut flagged = remote("oculto.txt", RemoteKind::File, 9);
+    flagged.hidden = true;
+    answer(
+        &mut s,
+        &first,
+        Ok(Reply::RemotePage(page(
+            "",
+            0,
+            vec![remote("b.txt", RemoteKind::File, 2), remote(".config", RemoteKind::Dir, 0), system, flagged],
+            Some(4),
+        ))),
+    );
+    // The next page is asked at once, from `next`.
+    let again = s.take_followups();
+    assert_eq!(again, vec![Command::FilesListPage { session_id: 1, path: String::new(), start: 4 }]);
+    assert_eq!(there_rows(&s), ["b.txt"], "hidden and system entries stay hidden");
+    answer(&mut s, &again[0], Ok(Reply::RemotePage(page("", 4, vec![remote("a.txt", RemoteKind::File, 1)], None))));
+    assert!(s.take_followups().is_empty(), "the last page ends the chain");
+    assert_eq!(there_rows(&s), ["a.txt", "b.txt"]);
+    assert_eq!(s.explorer_pane(true).free.as_deref(), Some("80,0 GB livres de 500,0 GB"));
+    // The right pane's own hidden switch.
+    assert!(s.explorer_pane(true).hidden_switch);
+    s.activate(ControlId::ExpHiddenThere);
+    assert_eq!(there_rows(&s).len(), 5);
+    assert!(s.explorer_pane(true).show_hidden && !s.explorer_pane(false).show_hidden, "each pane has its own");
+    // A page nobody asked for any more is dropped.
+    let c = Command::FilesListPage { session_id: 1, path: "Documents".into(), start: 0 };
+    s.activate(ControlId::ExpRow(true, 0));
+    answer(&mut s, &c, Ok(Reply::RemotePage(page("Documents", 0, vec![remote("x", RemoteKind::File, 1)], None))));
+}
+
+#[test]
+fn a_page_for_a_folder_the_pane_left_is_dropped() {
+    let mut s = opened_11();
+    let to_a = s.activate(ControlId::ExpPlace(true, 2));
+    let a_cmd = to_a.commands.into_iter().next().unwrap();
+    assert!(matches!(&a_cmd, Command::FilesListPage { path, start: 0, .. } if path == ":1/Users/ana/Documents"));
+    let to_b = s.activate(ControlId::ExpPlace(true, 1));
+    let b_cmd = to_b.commands.into_iter().next().unwrap();
+    answer(
+        &mut s,
+        &a_cmd,
+        Ok(Reply::RemotePage(page(":1/Users/ana/Documents", 0, vec![remote("late", RemoteKind::File, 1)], None))),
+    );
+    assert!(!there_rows(&s).contains(&"late".to_string()), "the answer for the older click is stale");
+    answer(
+        &mut s,
+        &b_cmd,
+        Ok(Reply::RemotePage(page(":1/Users/ana/Desktop", 0, vec![remote("mesa", RemoteKind::File, 1)], None))),
+    );
+    assert_eq!(there_rows(&s), ["mesa"]);
+    assert_eq!(s.explorer_pane(true).crumbs, ["Pasta pessoal", "Desktop"]);
+    assert!(s.explorer_pane(true).can_up);
+}
+
+// ----- changes there -----
+
+#[test]
+fn delete_there_always_asks_and_sends_trash_only_after_excluir() {
+    let mut s = opened_11();
+    select_there(&mut s, "notas.txt");
+    let a = s.activate(ControlId::ExpDelete);
+    assert!(a.commands.is_empty(), "never straight to the bin there");
+    let card = s.explorer_manage().trash_there.expect("the card");
+    assert_eq!(card.title, "Mandar 1 item para a Lixeira do MacBook do escritório?");
+    assert_eq!(card.lines, ["Eles podem ser recuperados na Lixeira do MacBook do escritório."]);
+    let ids: Vec<ControlId> = card.buttons.iter().map(|b| b.id).collect();
+    assert_eq!(ids, [ControlId::ExpThereTrashCancel, ControlId::ExpThereTrashConfirm], "Cancelar left, Excluir right");
+    assert_eq!(card.buttons[1].style, CardStyle::Danger);
+    assert!(card.buttons.iter().all(|b| b.style != CardStyle::Primary), "never the default");
+    // In the controls list: a dialog with its heading.
+    let specs = s.controls(WindowKind::Viewer);
+    let at = specs.iter().position(|c| c.id == ControlId::ExpThereTrashCancel).unwrap();
+    assert_eq!(specs[at].region, Region::Dialog);
+    assert!(
+        specs[..at].iter().any(|c| c.role == UiRole::Heading && c.label == card.title && c.region == Region::Dialog)
+    );
+    // Shift+Delete does nothing there; Esc and Cancelar close the card without a command.
+    assert!(s.explorer_key(ExplorerKey::DeleteForever).commands.is_empty());
+    assert!(s.explorer_manage().forever.is_none());
+    let a = s.activate(ControlId::ExpThereTrashCancel);
+    assert!(a.commands.is_empty() && s.explorer_manage().trash_there.is_none());
+    s.explorer_key(ExplorerKey::Delete);
+    assert!(s.explorer_manage().trash_there.is_some());
+    s.explorer_key(ExplorerKey::Escape);
+    assert!(s.explorer_manage().trash_there.is_none());
+    // Excluir sends Trash, then the folder is listed again.
+    s.explorer_key(ExplorerKey::Delete);
+    let a = s.activate(ControlId::ExpThereTrashConfirm);
+    let trash = files_change(&s, RemoteChange::Trash { dir: String::new(), names: vec!["notas.txt".into()] });
+    assert_eq!(a.commands, vec![trash.clone()]);
+    answer(&mut s, &trash, Ok(Reply::ChangeResults(vec![("notas.txt".into(), ChangeOutcome::Done)])));
+    assert!(matches!(s.take_followups().as_slice(), [Command::FilesListPage { start: 0, .. }]));
+    assert!(s.explorer_pane(true).notice.is_none());
+}
+
+#[test]
+fn the_trash_card_of_a_windows_peer_says_recycle_bin_in_english() {
+    let mut s = Scenario::ExploradorLixeiraDeLa.prepared_state();
+    let card = s.explorer_manage().trash_there.expect("the scenario's card");
+    assert!(card.title.starts_with("Mandar 1 item para a Lixeira do "), "{}", card.title);
+    s.set_language(Language::En);
+    let card = s.explorer_manage().trash_there.expect("the card");
+    assert!(card.title.contains("Recycle Bin"), "{}", card.title);
+    let mut mac = opened_11();
+    mac.set_language(Language::En);
+    select_there(&mut mac, "notas.txt");
+    mac.activate(ControlId::ExpDelete);
+    assert!(mac.explorer_manage().trash_there.unwrap().title.contains("Trash"));
+}
+
+#[test]
+fn a_taken_name_keeps_the_rename_open_and_a_new_folder_is_named_then_renamed() {
+    let mut s = opened_11();
+    select_there(&mut s, "notas.txt");
+    s.activate(ControlId::ExpRename);
+    assert_eq!(s.explorer_manage().renaming, Some(("notas.txt".into(), None)));
+    assert!(s.explorer_manage().renaming_there);
+    let a = s.submit_edit(EditId::ExpRename, "a:b".into());
+    assert!(a.commands.is_empty(), "an invalid name never leaves the window");
+    let a = s.submit_edit(EditId::ExpRename, "foto.jpg".into());
+    let rename = files_change(
+        &s,
+        RemoteChange::Rename { dir: String::new(), name: "notas.txt".into(), new_name: "foto.jpg".into() },
+    );
+    assert_eq!(a.commands, vec![rename.clone()]);
+    answer(&mut s, &rename, Ok(Reply::ChangeResults(vec![("notas.txt".into(), ChangeOutcome::Exists)])));
+    let (name, error) = s.explorer_manage().renaming.expect("still open");
+    assert_eq!((name.as_str(), error.as_deref()), ("notas.txt", Some("Já existe um item com esse nome aqui.")));
+    assert!(s.take_followups().is_empty(), "nothing changed, nothing listed again");
+
+    s.explorer_key(ExplorerKey::Escape);
+    let a = s.activate(ControlId::ExpNewFolder);
+    let mk = files_change(&s, RemoteChange::MakeDir { parent: String::new(), name: "Nova pasta".into() });
+    assert_eq!(a.commands, vec![mk.clone()]);
+    answer(&mut s, &mk, Ok(Reply::ChangeResults(vec![("Nova pasta".into(), ChangeOutcome::Done)])));
+    let list = first_page_cmd(&mut s);
+    answer(
+        &mut s,
+        &list,
+        Ok(Reply::RemotePage(page(
+            "",
+            0,
+            vec![remote("Nova pasta", RemoteKind::Dir, 0), remote("notas.txt", RemoteKind::File, 1)],
+            None,
+        ))),
+    );
+    assert_eq!(s.explorer_manage().renaming, Some(("Nova pasta".into(), None)), "its name opens for editing");
+    // The second "Nova pasta" is numbered.
+    s.explorer_key(ExplorerKey::Escape);
+    let a = s.activate(ControlId::ExpNewFolder);
+    assert!(
+        matches!(change_cmd(&a), Command::FilesChange { change: RemoteChange::MakeDir { name, .. }, .. } if name == "Nova pasta (2)")
+    );
+}
+
+#[test]
+fn cut_and_paste_moves_inside_the_right_pane() {
+    let mut s = opened_11();
+    select_there(&mut s, "notas.txt");
+    s.explorer_key(ExplorerKey::Cut);
+    // A folder to paste into: open Contratos, then paste there.
+    s.set_pointer_mods(PointerMods { clicks: 2, ..PointerMods::default() });
+    let go = s.activate(ControlId::ExpRow(true, 0));
+    let go = go.commands.into_iter().next().unwrap();
+    assert!(matches!(&go, Command::FilesListPage { path, .. } if path == "Contratos"));
+    answer(&mut s, &go, Ok(Reply::RemotePage(page("Contratos", 0, vec![], None))));
+    let a = s.explorer_key(ExplorerKey::Paste);
+    let mv = files_change(
+        &s,
+        RemoteChange::Move { from_dir: String::new(), names: vec!["notas.txt".into()], to_dir: "Contratos".into() },
+    );
+    assert_eq!(a.commands, vec![mv.clone()]);
+    answer(&mut s, &mv, Ok(Reply::ChangeResults(vec![("notas.txt".into(), ChangeOutcome::InvalidName)])));
+    assert_eq!(s.explorer_pane(true).notice.as_deref(), Some("Uma pasta não pode ir para dentro dela mesma."));
+    // Paste with the focus on this computer moves nothing there.
+    s.explorer.focus_there = false;
+    assert!(s.explorer_key(ExplorerKey::Paste).commands.is_empty());
+}
+
+#[test]
+fn a_trash_answered_no_bin_shows_the_notice_and_the_others_their_own() {
+    let s = Scenario::ExploradorSemLixeira.prepared_state();
+    assert_eq!(s.explorer_pane(true).notice.as_deref(), Some("Este local não tem Lixeira; nada foi excluído."));
+    assert!(
+        s.controls(WindowKind::Viewer)
+            .iter()
+            .any(|c| c.region == Region::Status && c.label.contains("não tem Lixeira"))
+    );
+    assert!(s.explorer_manage().trash_there.is_none(), "the card closed");
+
+    let cases = [
+        (ChangeOutcome::NotPermitted, "Sem permissão para mudar esse item."),
+        (ChangeOutcome::NotFound, "O item não está mais aí."),
+        (ChangeOutcome::Failed, "Não deu para concluir. Nada foi mudado."),
+        (ChangeOutcome::NoSpace, "Não deu para concluir. Nada foi mudado."),
+    ];
+    for (outcome, text) in cases {
+        let mut s = opened_11();
+        select_there(&mut s, "notas.txt");
+        s.activate(ControlId::ExpDelete);
+        let a = s.activate(ControlId::ExpThereTrashConfirm);
+        let c = change_cmd(&a);
+        answer(&mut s, &c, Ok(Reply::ChangeResults(vec![("notas.txt".into(), outcome)])));
+        assert_eq!(s.explorer_pane(true).notice.as_deref(), Some(text), "{outcome:?}");
+    }
+    let mut s = opened_11();
+    s.activate(ControlId::ExpPlace(true, 5));
+    let to_e = Command::FilesListPage { session_id: 1, path: ":3".into(), start: 0 };
+    answer(&mut s, &to_e, Ok(Reply::RemotePage(page(":3", 0, vec![remote("a.jpg", RemoteKind::File, 5)], None))));
+    select_there(&mut s, "a.jpg");
+    let m = s.explorer_manage();
+    assert!(!m.can_delete, "Excluir is disabled in advance on a volume without a bin");
+    assert_eq!(m.delete_why.as_deref(), Some("Este local não tem Lixeira; nada foi excluído."));
+    let a = s.activate(ControlId::ExpDelete);
+    assert!(a.commands.is_empty() && s.explorer_manage().trash_there.is_none());
+    // A volume that went away during the change says so.
+    let mut s = opened_11();
+    select_there(&mut s, "notas.txt");
+    s.activate(ControlId::ExpDelete);
+    let c = change_cmd(&s.activate(ControlId::ExpThereTrashConfirm));
+    answer(&mut s, &c, Ok(Reply::ChangeResults(vec![("notas.txt".into(), ChangeOutcome::VolumeGone)])));
+    assert!(s.explorer_pane(true).notice.is_some_and(|n| n.starts_with("O disco ") && n.contains("foi removido do")));
+}
+
+#[test]
+fn changes_need_files_and_control_together() {
+    let mut s = opened_11();
+    select_there(&mut s, "notas.txt");
+    assert!(s.explorer_manage().can_delete && s.explorer_manage().can_new_folder);
+    // The session now holds FILES alone.
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: crate::mock::MAC.into(),
+        state: SessionState::Active {
+            since_ms: 1,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View).with(Permission::Files),
+            elevation: Default::default(),
+        },
+    });
+    let m = s.explorer_manage();
+    assert!(!m.can_new_folder && !m.can_rename && !m.can_delete);
+    assert_eq!(
+        m.change_why.as_deref(),
+        Some("Mudar arquivos no MacBook do escritório precisa também da permissão de controlar.")
+    );
+    for id in [ControlId::ExpNewFolder, ControlId::ExpRename, ControlId::ExpDelete] {
+        assert!(s.activate(id).commands.is_empty(), "{id:?}");
+    }
+    assert!(s.explorer_manage().trash_there.is_none());
+    // Browsing and copying stay.
+    assert!(s.explorer_pane(true).error.is_none() && s.explorer_pane(true).rows.len() == 3);
+    // CONTROL alone is not enough either.
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: crate::mock::MAC.into(),
+        state: SessionState::Active {
+            since_ms: 1,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::Control),
+            elevation: Default::default(),
+        },
+    });
+    assert!(!s.explorer_manage().can_new_folder);
+}
+
+// ----- the conflict card -----
+
+#[test]
+fn a_conflict_asks_once_keep_both_is_the_default_and_skip_leaves_the_name_out() {
+    let mut s = opened_11();
+    // foto.jpg exists on both sides; novo.txt only here.
+    s.explorer.focus_there = false;
+    select_here(&mut s, "foto.jpg");
+    let a = s.activate(ControlId::ExpCopy);
+    assert!(a.commands.is_empty(), "nothing is sent before the answer");
+    let card = s.explorer_manage().conflict.expect("the card");
+    assert_eq!(card.title, "“foto.jpg” já existe em Pasta pessoal");
+    assert!(card.check.is_none(), "one name: no check");
+    let ids: Vec<ControlId> = card.buttons.iter().map(|b| b.id).collect();
+    assert_eq!(
+        ids,
+        [
+            ControlId::ExpConflictCancel,
+            ControlId::ExpConflictSkip,
+            ControlId::ExpConflictReplace,
+            ControlId::ExpConflictKeepBoth
+        ]
+    );
+    let styles: Vec<CardStyle> = card.buttons.iter().map(|b| b.style).collect();
+    assert_eq!(styles, [CardStyle::Default, CardStyle::Default, CardStyle::Danger, CardStyle::Primary]);
+    assert!(card.buttons.iter().all(|b| b.enabled), "a 1.1 peer with FILES and CONTROL and a bin");
+    let specs = s.controls(WindowKind::Viewer);
+    assert!(specs.iter().any(|c| c.id == ControlId::ExpConflictKeepBoth && c.region == Region::Dialog));
+    // Keep both: the copy goes as before and the engine saves "foto (2).jpg".
+    let a = s.activate(ControlId::ExpConflictKeepBoth);
+    assert_eq!(
+        a.commands,
+        vec![Command::FilesSend {
+            session_id: 1,
+            local_paths: vec![PathBuf::from("C:/u/Downloads").join("foto.jpg")],
+            remote_dir: Some(String::new())
+        }]
+    );
+    assert!(s.explorer_manage().conflict.is_none());
+    // Skip: nothing of that name goes.
+    select_here(&mut s, "foto.jpg");
+    s.activate(ControlId::ExpCopy);
+    let a = s.activate(ControlId::ExpConflictSkip);
+    assert!(a.commands.is_empty());
+    // Cancelar drops the job.
+    s.activate(ControlId::ExpCopy);
+    let a = s.activate(ControlId::ExpConflictCancel);
+    assert!(a.commands.is_empty() && s.explorer_manage().conflict.is_none());
+}
+
+#[test]
+fn several_conflicts_ask_once_for_all_or_one_by_one() {
+    let mut s = opened_11();
+    reply(
+        &mut s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("foto.jpg", false, 1), entry("notas.txt", false, 1), entry("novo.txt", false, 1)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+    s.explorer.focus_there = false;
+    for n in 0..3 {
+        s.set_pointer_mods(PointerMods { toggle: true, ..PointerMods::default() });
+        s.activate(ControlId::ExpRow(false, n));
+    }
+    s.activate(ControlId::ExpCopy);
+    let card = s.explorer_manage().conflict.expect("the card");
+    assert_eq!(card.title, "2 itens já existem em Pasta pessoal");
+    assert_eq!(card.check.as_ref().map(|c| c.2), Some(true), "checked when more than one");
+    // Applied to all: one answer, both names skipped, novo.txt still goes.
+    let a = s.activate(ControlId::ExpConflictSkip);
+    assert_eq!(
+        a.commands,
+        vec![Command::FilesSend {
+            session_id: 1,
+            local_paths: vec![PathBuf::from("C:/u/Downloads").join("novo.txt")],
+            remote_dir: Some(String::new())
+        }]
+    );
+    // Unchecked: the first name only, then the next is asked.
+    s.activate(ControlId::ExpCopy);
+    s.activate(ControlId::ExpConflictApplyAll);
+    let a = s.activate(ControlId::ExpConflictSkip);
+    assert!(a.commands.is_empty());
+    assert_eq!(s.explorer_manage().conflict.unwrap().title, "“notas.txt” já existe em Pasta pessoal");
+}
+
+#[test]
+fn replace_sends_the_old_file_to_the_bin_first_in_both_directions() {
+    // Upload: Trash there, the copy only after it answered Done.
+    let mut s = opened_11();
+    s.explorer.focus_there = false;
+    select_here(&mut s, "foto.jpg");
+    s.activate(ControlId::ExpCopy);
+    let a = s.activate(ControlId::ExpConflictReplace);
+    let trash = files_change(&s, RemoteChange::Trash { dir: String::new(), names: vec!["foto.jpg".into()] });
+    assert_eq!(a.commands, vec![trash.clone()], "the bin first, no copy yet");
+    answer(&mut s, &trash, Ok(Reply::ChangeResults(vec![("foto.jpg".into(), ChangeOutcome::Done)])));
+    let after = s.take_followups();
+    assert!(
+        after.iter().any(|c| matches!(c, Command::FilesSend { remote_dir: Some(d), .. } if d.is_empty())),
+        "{after:?}"
+    );
+    // A bin that refuses keeps the old file and sends nothing.
+    select_here(&mut s, "foto.jpg");
+    s.activate(ControlId::ExpCopy);
+    let a = s.activate(ControlId::ExpConflictReplace);
+    let trash = change_cmd(&a);
+    answer(&mut s, &trash, Ok(Reply::ChangeResults(vec![("foto.jpg".into(), ChangeOutcome::NoBin)])));
+    assert!(!s.take_followups().iter().any(|c| matches!(c, Command::FilesSend { .. })));
+    assert!(s.explorer_pane(true).notice.is_some());
+
+    // Download: the local bin first, then FilesGet.
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    reply(
+        &mut s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("foto.jpg", false, 1)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+    select_there(&mut s, "foto.jpg");
+    s.activate(ControlId::ExpCopy);
+    let a = s.activate(ControlId::ExpConflictReplace);
+    let local = Command::LocalTrash { paths: vec![PathBuf::from("C:/u/Downloads").join("foto.jpg")] };
+    assert_eq!(a.commands, vec![local.clone()]);
+    answer(&mut s, &local, Ok(Reply::Done));
+    let after = s.take_followups();
+    assert!(after.contains(&Command::FilesGet {
+        session_id: 1,
+        remote_path: "foto.jpg".into(),
+        local_dir: PathBuf::from("C:/u/Downloads"),
+    }));
+}
+
+#[test]
+fn replace_is_disabled_with_its_reason_without_a_1_1_peer_control_or_a_bin() {
+    // A 1.0 peer.
+    let mut s = opened_10();
+    reply(
+        &mut s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("nota.txt", false, 1)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+    s.explorer.focus_there = false;
+    s.activate(ControlId::ExpRow(false, 0));
+    s.activate(ControlId::ExpCopy);
+    let card = s.explorer_manage().conflict.expect("the card");
+    let replace = card.buttons.iter().find(|b| b.id == ControlId::ExpConflictReplace).unwrap();
+    assert!(!replace.enabled && replace.why.as_deref().is_some_and(|w| w.contains("usa o Swapdesk 1.0")));
+    assert!(s.activate(ControlId::ExpConflictReplace).commands.is_empty(), "a disabled button does nothing");
+    assert!(s.explorer_manage().conflict.is_some(), "the card stays");
+    let specs = s.controls(WindowKind::Viewer);
+    let b = specs.iter().find(|c| c.id == ControlId::ExpConflictReplace).unwrap();
+    assert!(b.disabled && b.description.is_some());
+    // Keep both is still there.
+    assert!(!s.activate(ControlId::ExpConflictKeepBoth).commands.is_empty());
+
+    // A volume without a bin.
+    let mut s = opened_11();
+    s.activate(ControlId::ExpPlace(true, 5));
+    let to_e = Command::FilesListPage { session_id: 1, path: ":3".into(), start: 0 };
+    answer(&mut s, &to_e, Ok(Reply::RemotePage(page(":3", 0, vec![remote("foto.jpg", RemoteKind::File, 5)], None))));
+    s.explorer.focus_there = false;
+    select_here(&mut s, "foto.jpg");
+    s.activate(ControlId::ExpCopy);
+    let card = s.explorer_manage().conflict.expect("the card");
+    let replace = card.buttons.iter().find(|b| b.id == ControlId::ExpConflictReplace).unwrap();
+    assert!(!replace.enabled);
+    assert_eq!(replace.why.as_deref(), Some("Este local não tem Lixeira; nada foi excluído."));
+}
+
+// ----- folder upload -----
+
+#[test]
+fn a_folder_upload_makes_the_folders_before_sending_their_files() {
+    let mut s = opened_11();
+    s.explorer.focus_there = false;
+    let n = s.explorer_pane(false).rows.iter().position(|r| r.name == "Fotos").unwrap();
+    s.activate(ControlId::ExpRow(false, n as u16));
+    assert!(s.explorer_can_copy(), "a folder can go to a 1.1 peer");
+    let a = s.activate(ControlId::ExpCopy);
+    let mk = files_change(&s, RemoteChange::MakeDir { parent: String::new(), name: "Fotos".into() });
+    assert_eq!(a.commands, vec![mk.clone()], "the folder is made first, nothing is sent yet");
+    answer(&mut s, &mk, Ok(Reply::ChangeResults(vec![("Fotos".into(), ChangeOutcome::Done)])));
+    let local = PathBuf::from("C:/u/Downloads").join("Fotos");
+    let f = s.take_followups();
+    assert_eq!(f, vec![Command::LocalList { path: Some(local.clone()) }]);
+    // The walk's listing is not the left pane's: the pane keeps its folder.
+    answer(
+        &mut s,
+        &f[0],
+        Ok(Reply::LocalListing(LocalListing {
+            path: local.clone(),
+            entries: vec![entry("a.jpg", false, 1), entry("Verão", true, 0)],
+            truncated: false,
+            hidden: vec![entry(".b", false, 1)],
+        })),
+    );
+    assert_eq!(s.explorer.here_dir, Some(PathBuf::from("C:/u/Downloads")));
+    let f = s.take_followups();
+    assert_eq!(
+        f,
+        vec![
+            Command::FilesSend {
+                session_id: 1,
+                local_paths: vec![local.join("a.jpg"), local.join(".b")],
+                remote_dir: Some("Fotos".into())
+            },
+            files_change(&s, RemoteChange::MakeDir { parent: "Fotos".into(), name: "Verão".into() }),
+        ],
+        "the files of a folder go once it exists, then the next folder is made"
+    );
+    // The subfolder: made (it exists already: merged into), listed, sent.
+    answer(&mut s, &f[1], Ok(Reply::ChangeResults(vec![("Verão".into(), ChangeOutcome::Exists)])));
+    let l = s.take_followups();
+    assert_eq!(l, vec![Command::LocalList { path: Some(local.join("Verão")) }]);
+    answer(
+        &mut s,
+        &l[0],
+        Ok(Reply::LocalListing(LocalListing {
+            path: local.join("Verão"),
+            entries: vec![entry("praia.jpg", false, 1)],
+            truncated: false,
+            hidden: Vec::new(),
+        })),
+    );
+    assert_eq!(
+        s.take_followups(),
+        vec![Command::FilesSend {
+            session_id: 1,
+            local_paths: vec![local.join("Verão").join("praia.jpg")],
+            remote_dir: Some("Fotos/Verão".into())
+        }]
+    );
+    assert!(s.explorer.there.walk.is_none(), "the walk is over");
+    assert!(s.explorer_transfers_open());
+}
+
+#[test]
+fn a_folder_upload_stops_when_a_folder_cannot_be_made() {
+    let mut s = opened_11();
+    s.explorer.focus_there = false;
+    let n = s.explorer_pane(false).rows.iter().position(|r| r.name == "Fotos").unwrap();
+    s.activate(ControlId::ExpRow(false, n as u16));
+    let mk = change_cmd(&s.activate(ControlId::ExpCopy));
+    answer(&mut s, &mk, Ok(Reply::ChangeResults(vec![("Fotos".into(), ChangeOutcome::NotPermitted)])));
+    assert!(s.take_followups().is_empty(), "nothing is listed or sent");
+    assert_eq!(s.explorer_pane(true).notice.as_deref(), Some("Sem permissão para mudar esse item."));
+    assert!(s.explorer.there.walk.is_none());
+}
+
+#[test]
+fn a_folder_upload_needs_control_and_a_1_1_peer() {
+    let mut s = opened_11();
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: crate::mock::MAC.into(),
+        state: SessionState::Active {
+            since_ms: 1,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View).with(Permission::Files),
+            elevation: Default::default(),
+        },
+    });
+    s.explorer.focus_there = false;
+    let n = s.explorer_pane(false).rows.iter().position(|r| r.name == "Fotos").unwrap();
+    s.activate(ControlId::ExpRow(false, n as u16));
+    let a = s.activate(ControlId::ExpCopy);
+    assert!(a.commands.is_empty());
+    assert!(s.explorer_note().is_some_and(|n| n.contains("precisa também da permissão de controlar")));
+}
+
+// ----- the scenarios -----
+
+#[test]
+fn the_other_disk_scenario_shows_the_removable_volume_and_its_neighbours() {
+    let s = Scenario::ExploradorOutroDisco.prepared_state();
+    let labels = labels(&s);
+    assert!(labels.contains(&"Backup (D:)".to_string()) && labels.contains(&"Unidade removível (E:)".to_string()));
+    let v = s.explorer_pane(true);
+    assert_eq!(v.crumbs, ["Unidade removível (E:)"]);
+    assert_eq!(v.rows.len(), 5);
+    assert!(v.free.is_some_and(|f| f.contains("livres")));
+    assert!(s.explorer_places().iter().any(|p| p.there && p.selected && p.label == "Unidade removível (E:)"));
+    assert!(!s.explorer_manage().can_delete || s.explorer_manage().delete_why.is_none());
+}

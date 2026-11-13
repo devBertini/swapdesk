@@ -48,6 +48,10 @@ fn local_places() -> Vec<LocalPlace> {
     ]
 }
 
+fn remote_entry(name: &str, kind: RemoteKind, size: u64, mtime_ms: u64) -> RemoteEntry {
+    RemoteEntry { name: name.into(), kind, size, mtime_ms, hidden: false, system: false, read_only: false }
+}
+
 fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
     NOW_MS - (15 * HOUR + 30 * MIN) + hour * HOUR + minute * MIN - back_days * DAY
 }
@@ -187,6 +191,9 @@ pub enum Step {
     ActivateRefused(ControlId, ApiCode),
     /// A key of the explorer (slice 2a).
     Key(crate::interact::explorer_manage::ExplorerKey),
+    /// Activate a control and answer each change it sent to the other computer with `ChangeOutcome` for every name,
+    /// as a 1.1 peer would (slice 2b).
+    ActivateAnswer(ControlId, ChangeOutcome),
     /// The launch requests (R-UI-6), sent and not yet answered.
     Startup,
     /// A request for `DataKind` went out and has not been answered.
@@ -242,6 +249,12 @@ pub enum Scenario {
     ExploradorExcluirParaSempre,
     /// Slice 2a: the properties card of a folder of this computer, counted.
     ExploradorPropriedades,
+    /// Slice 2b: the other computer (Windows, 1.1) shown on a removable drive, its volumes in the navigation pane.
+    ExploradorOutroDisco,
+    /// Slice 2b: the notice after a delete there was answered "no bin".
+    ExploradorSemLixeira,
+    /// Slice 2b: the card that asks before sending files to the other computer's bin.
+    ExploradorLixeiraDeLa,
     Chat,
     /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
     AreaTransferencia,
@@ -295,7 +308,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 59] = [
+    pub const ALL: [Scenario; 62] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -327,6 +340,9 @@ impl Scenario {
         Scenario::ExploradorRenomear,
         Scenario::ExploradorExcluirParaSempre,
         Scenario::ExploradorPropriedades,
+        Scenario::ExploradorOutroDisco,
+        Scenario::ExploradorSemLixeira,
+        Scenario::ExploradorLixeiraDeLa,
         Scenario::Chat,
         Scenario::AreaTransferencia,
         Scenario::Banner,
@@ -391,6 +407,9 @@ impl Scenario {
             Scenario::ExploradorRenomear => "explorador-renomear",
             Scenario::ExploradorExcluirParaSempre => "explorador-excluir-para-sempre",
             Scenario::ExploradorPropriedades => "explorador-propriedades",
+            Scenario::ExploradorOutroDisco => "explorador-outro-disco",
+            Scenario::ExploradorSemLixeira => "explorador-sem-lixeira",
+            Scenario::ExploradorLixeiraDeLa => "explorador-lixeira-de-la",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
@@ -460,6 +479,9 @@ impl Scenario {
             Scenario::ExploradorRenomear => "new: Arquivos, renaming a row in place (slice 2a)",
             Scenario::ExploradorExcluirParaSempre => "new: Arquivos, the delete-for-good card (slice 2a)",
             Scenario::ExploradorPropriedades => "new: Arquivos, a folder's properties (slice 2a)",
+            Scenario::ExploradorOutroDisco => "new: Arquivos, the other computer on a removable drive (slice 2b)",
+            Scenario::ExploradorSemLixeira => "new: Arquivos, the notice of a delete there with no bin (slice 2b)",
+            Scenario::ExploradorLixeiraDeLa => "new: Arquivos, the card before the other computer's bin (slice 2b)",
             Scenario::Chat => "10. Chat e copiar e colar",
             Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
@@ -521,6 +543,59 @@ impl Scenario {
             reply(Ok(Reply::Activity(logged))),
             // The machine's updater: 1.1.0, nothing on offer (Ajustes shows its section).
             reply(Ok(Reply::Update(update_idle()))),
+        ]
+    }
+
+    /// The explorer open on a Windows computer of minor 1: its home folder listed, its places and three volumes (C:,
+    /// a labelled D:, a removable E: with no bin) in the navigation pane.
+    fn windows_peer_explorer() -> Vec<Step> {
+        use Step::*;
+        let volume = |id, kind, label: &str, letter, total, free, has_bin| RemoteVolume {
+            id,
+            kind,
+            label: label.into(),
+            letter: Some(letter),
+            total_bytes: total,
+            free_bytes: free,
+            has_bin,
+        };
+        let place = |kind, path: &str| RemotePlace { kind, path: path.into() };
+        vec![
+            Select(DESKTOP),
+            Event(Self::viewer_session_to(DESKTOP, 18)),
+            Activate(ControlId::TbFiles),
+            Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+            Event(reply(Ok(Reply::LocalListing(LocalListing {
+                path: "C:\\Users\\ana\\Downloads".into(),
+                entries: local_entries(),
+                truncated: false,
+                hidden: Vec::new(),
+            })))),
+            Event(reply(Ok(Reply::RemoteVolumes(RemoteVolumes {
+                home: ":1/Users/ana".into(),
+                places: vec![
+                    place(PlaceName::Desktop, ":1/Users/ana/Desktop"),
+                    place(PlaceName::Documents, ":1/Users/ana/Documents"),
+                    place(PlaceName::Downloads, ":1/Users/ana/Downloads"),
+                    place(PlaceName::Received, ":1/Users/ana/Downloads/Swapdesk"),
+                ],
+                volumes: vec![
+                    volume(1, VolumeType::System, "", 'C', 512_000_000_000, 212_000_000_000, true),
+                    volume(2, VolumeType::Fixed, "Backup", 'D', 2_000_000_000_000, 1_100_000_000_000, true),
+                    volume(3, VolumeType::Removable, "", 'E', 32_000_000_000, 26_400_000_000, false),
+                ],
+            })))),
+            Event(reply(Ok(Reply::RemotePage(RemotePage {
+                path: String::new(),
+                start: 0,
+                entries: vec![
+                    remote_entry("Contratos", RemoteKind::Dir, 0, at(11, 2, 9)),
+                    remote_entry("Relatório de vendas.xlsx", RemoteKind::File, 182_000, at(9, 40, 1)),
+                    remote_entry("notas.txt", RemoteKind::File, 1_200, at(15, 20, 0)),
+                ],
+                next: None,
+                free: Some(212_000_000_000),
+            })))),
         ]
     }
 
@@ -821,6 +896,42 @@ impl Scenario {
                 ]);
                 v
             }
+            Scenario::ExploradorOutroDisco => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([
+                    // E:, the removable drive: the third volume after the home folder and its four places.
+                    Activate(ControlId::ExpPlace(true, 7)),
+                    Event(reply(Ok(Reply::RemotePage(RemotePage {
+                        path: ":3".into(),
+                        start: 0,
+                        entries: vec![
+                            remote_entry("DCIM", RemoteKind::Dir, 0, at(10, 5, 4)),
+                            remote_entry("Fotos da viagem", RemoteKind::Dir, 0, at(9, 12, 6)),
+                            remote_entry("IMG_0412.jpg", RemoteKind::File, 4_200_000, at(10, 6, 4)),
+                            remote_entry("IMG_0413.jpg", RemoteKind::File, 3_900_000, at(10, 7, 4)),
+                            remote_entry("leia-me.txt", RemoteKind::File, 640, at(8, 0, 9)),
+                        ],
+                        next: None,
+                        free: Some(26_400_000_000),
+                    })))),
+                    Activate(ControlId::ExpRow(true, 2)),
+                ]);
+                v
+            }
+            Scenario::ExploradorSemLixeira => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([
+                    Activate(ControlId::ExpRow(true, 1)),
+                    Activate(ControlId::ExpDelete),
+                    ActivateAnswer(ControlId::ExpThereTrashConfirm, ChangeOutcome::NoBin),
+                ]);
+                v
+            }
+            Scenario::ExploradorLixeiraDeLa => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([Activate(ControlId::ExpRow(true, 1)), Activate(ControlId::ExpDelete)]);
+                v
+            }
             Scenario::AreaTransferencia => vec![
                 mac(),
                 Event(Self::viewer_session(21)),
@@ -1046,6 +1157,25 @@ impl Scenario {
                 }
                 Step::ArmPlaceholders => {
                     state.arm_placeholders();
+                }
+                Step::ActivateAnswer(c, outcome) => {
+                    let a = state.activate(c);
+                    for cmd in a.commands {
+                        let names = match &cmd {
+                            Command::FilesChange { change, .. } => match change {
+                                RemoteChange::MakeDir { name, .. } | RemoteChange::Rename { name, .. } => {
+                                    vec![name.clone()]
+                                }
+                                RemoteChange::Move { names, .. } | RemoteChange::Trash { names, .. } => names.clone(),
+                            },
+                            _ => continue,
+                        };
+                        let t = Ticket(next_ticket);
+                        next_ticket += 1;
+                        state.track(t, &cmd);
+                        let results = names.into_iter().map(|n| (n, outcome)).collect();
+                        state.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::ChangeResults(results)) });
+                    }
                 }
                 Step::ActivateRefused(c, code) => {
                     let a = state.activate(c);
@@ -1432,6 +1562,10 @@ impl World {
             Command::FilesList { .. } => {
                 Ok(Reply::Listing(Listing { path: "Mesa".into(), entries: Vec::new(), truncated: false }))
             }
+            // [UI] the made-up peer runs 1.0 (slice 2b's fallbacks): it answers none of the minor 1 requests.
+            Command::FilesVolumes { .. } | Command::FilesListPage { .. } | Command::FilesChange { .. } => {
+                Err(ApiError::new(ApiCode::Invalid))
+            }
             // [UI] this computer's disk, made up: a capture never shows the real one.
             Command::LocalList { path } => Ok(Reply::LocalListing(LocalListing {
                 path: path.unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\ana\\Downloads")),
@@ -1515,6 +1649,9 @@ mod tests {
             (Scenario::ExploradorRenomear, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorExcluirParaSempre, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorPropriedades, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorOutroDisco, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorSemLixeira, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorLixeiraDeLa, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),

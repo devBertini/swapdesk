@@ -23,6 +23,7 @@ const MAX_DEVICE_NAME: usize = 64;
 
 mod explorer;
 pub mod explorer_manage;
+pub mod explorer_remote;
 mod files_panel;
 pub(crate) use explorer::Explorer;
 pub use explorer::{
@@ -183,6 +184,18 @@ pub enum ControlId {
     /// The "Excluir para sempre" card's buttons.
     ExpForeverConfirm,
     ExpForeverCancel,
+    /// Slice 2b: the right pane's own "Mostrar itens ocultos" switch.
+    ExpHiddenThere,
+    /// The card "Mandar N itens para a Lixeira do ...?" of the other computer: Cancelar, Excluir (danger).
+    ExpThereTrashCancel,
+    ExpThereTrashConfirm,
+    /// The conflict card (FILES-UI.md 5), from the left: Cancelar, Pular, Substituir (danger), Manter os dois
+    /// (primary, the default answer); and its check "Fazer o mesmo com os outros".
+    ExpConflictCancel,
+    ExpConflictSkip,
+    ExpConflictReplace,
+    ExpConflictKeepBoth,
+    ExpConflictApplyAll,
     ChatSend,
     ClipToggle,
     // host banner
@@ -1853,7 +1866,15 @@ impl UiState {
             | ControlId::ExpHidden
             | ControlId::ExpPropsClose
             | ControlId::ExpForeverConfirm
-            | ControlId::ExpForeverCancel => {
+            | ControlId::ExpForeverCancel
+            | ControlId::ExpHiddenThere
+            | ControlId::ExpThereTrashCancel
+            | ControlId::ExpThereTrashConfirm
+            | ControlId::ExpConflictCancel
+            | ControlId::ExpConflictSkip
+            | ControlId::ExpConflictReplace
+            | ControlId::ExpConflictKeepBoth
+            | ControlId::ExpConflictApplyAll => {
                 self.explorer_activate(id, &mut a);
             }
             ControlId::BannerChat => a.changed = Changed::NONE,

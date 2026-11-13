@@ -5,7 +5,8 @@
 
 use swapdesk_ui::tokens::text;
 use swapdesk_ui::{
-    ControlId, EditId, ManageView, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, TransferState,
+    CardStyle, CardView, ControlId, EditId, ManageView, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME, SORT_SIZE,
+    SORT_TYPE, TransferState, VolumeType,
 };
 
 use crate::painter::{Align, Rect};
@@ -28,6 +29,8 @@ const FILE: &str = "M6 3h8l4 4v14H6zM14 3v4h4";
 const BACK: &str = "M15 6l-6 6 6 6";
 const FORWARD: &str = "M9 6l6 6-6 6";
 const UP: &str = "M12 19V5M6 11l6-6 6 6";
+/// The mark of a volume that can go away (removable, optical, network): an eject sign.
+const EJECT: &str = "M6 14l6-7 6 7zM6 18h12";
 const REFRESH: &str = "M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6";
 const DRIVE: &str = "M3 13h18v6H3zM5 13l2-8h10l2 8M7 16h.01";
 const HOME: &str = "M4 11l8-7 8 7v9h-5v-6H9v6H4z";
@@ -69,10 +72,10 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
     let m = f.st.explorer_manage();
     let mut x = bar.right() - 16.0 - cw - 12.0;
     for (id, key, on) in [
-        (ControlId::ExpProps, MsgKey::ExplorerProps, true),
+        (ControlId::ExpProps, MsgKey::ExplorerProps, m.can_props),
         (ControlId::ExpDelete, MsgKey::ExplorerDelete, m.can_delete),
         (ControlId::ExpRename, MsgKey::ExplorerRename, m.can_rename),
-        (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, true),
+        (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, m.can_new_folder),
     ] {
         let label = f.t(key);
         let w = f.button_width(&label, Kind::Default);
@@ -109,7 +112,23 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
         f.tint(id, r, 6.0, pal.ink, 0.05, 0.09);
         let ink = if place.selected { pal.link } else { pal.ink };
         p.svg(if place.volume { DRIVE } else { HOME }, r.x + 10.0, r.y + 8.0, 16.0, 1.7, ink);
-        let l = p.label_ellipsis(&place.label, text::BODY, r.w - 44.0);
+        // A volume that can go away carries the eject mark at its end; hovered, a volume shows its space there.
+        let ejectable =
+            matches!(place.volume_kind, Some(VolumeType::Removable | VolumeType::Optical | VolumeType::Network));
+        let mut end = r.right() - 8.0;
+        if ejectable {
+            end -= 16.0;
+            p.svg(EJECT, end, r.y + 9.0, 14.0, 1.6, pal.soft);
+            end -= 4.0;
+        }
+        let hint = place.hint.as_ref().filter(|_| f.hovered(id));
+        if let Some(h) = hint {
+            let hl = p.label_ellipsis(h, text::CAPTION, (end - r.x - 34.0) * 0.6);
+            end -= hl.w;
+            p.draw(&hl, end, r.y + (PLACE_H - hl.h) / 2.0, pal.soft);
+            end -= 6.0;
+        }
+        let l = p.label_ellipsis(&place.label, text::BODY, end - r.x - 34.0);
         p.draw(&l, r.x + 34.0, r.y + (PLACE_H - l.h) / 2.0, ink);
         f.register(id, r, 6.0);
         y += PLACE_H + 2.0;
@@ -131,8 +150,10 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
         transfers(f, Rect::new(body.x, body.bottom() - tr_h, body.w, tr_h));
     }
 
-    // ----- slice 2a cards, over the view -----
-    if let Some((title, body_text)) = &m.forever {
+    // ----- the cards, over the view -----
+    if let Some(card) = m.trash_there.as_ref().or(m.conflict.as_ref()) {
+        view_card(f, body, card);
+    } else if let Some((title, body_text)) = &m.forever {
         let cancel = f.t(MsgKey::Cancel);
         let delete = f.t(MsgKey::ExplorerForeverButton);
         explorer_card(
@@ -193,6 +214,51 @@ fn explorer_card(f: &mut Frame, area: Rect, title: &str, lines: &[String], butto
     }
 }
 
+/// A card of the other computer's pane (slice 2b): the "Mandar para a Lixeira do ..." card and the conflict card, with
+/// its check box and its buttons from the left, the confirming or default one last; a button that cannot act is drawn
+/// in soft ink and the state ignores it.
+fn view_card(f: &mut Frame, area: Rect, card: &CardView) {
+    let p = f.p;
+    let w = 460.0_f32.min(area.w - 48.0);
+    let t = p.label_in(&card.title, text::NAME, w - 48.0, Align::Center);
+    let ls: Vec<_> = card.lines.iter().map(|l| p.label_in(l, text::BODY, w - 48.0, Align::Center)).collect();
+    let check_h = if card.check.is_some() { 36.0 } else { 0.0 };
+    let h = 24.0 + t.h + 10.0 + ls.iter().map(|l| l.h + 4.0).sum::<f32>() + check_h + 20.0 + 40.0 + 24.0;
+    p.fill_rect(area, f.fx.shadow_dialog);
+    let r = Rect::new(p.snap(area.x + (area.w - w) / 2.0), p.snap(area.y + (area.h - h) / 2.0), w, h);
+    f.panel(r, f.pal.surface);
+    let mut y = r.y + 24.0;
+    p.draw(&t, r.x + 24.0, y, f.pal.ink);
+    y += t.h + 10.0;
+    for l in &ls {
+        p.draw(l, r.x + 24.0, y, f.pal.soft);
+        y += l.h + 4.0;
+    }
+    if let Some((id, label, on)) = &card.check {
+        y += 8.0;
+        f.checkbox(*id, r.x + 24.0, y, w - 48.0, *on, label);
+        y += check_h - 8.0;
+    }
+    y += 20.0;
+    let kind = |s: CardStyle| match s {
+        CardStyle::Default => Kind::Default,
+        CardStyle::Primary => Kind::Primary,
+        CardStyle::Danger => Kind::Danger,
+    };
+    let widths: Vec<f32> = card.buttons.iter().map(|b| f.button_width(&b.label, kind(b.style))).collect();
+    let group = widths.iter().sum::<f32>() + 8.0 * (card.buttons.len().saturating_sub(1)) as f32;
+    let mut x = r.x + (w - group) / 2.0;
+    for (b, bw) in card.buttons.iter().zip(&widths) {
+        let br = Rect::new(x, y, *bw, 40.0);
+        if b.enabled {
+            f.button(b.id, br, kind(b.style), &b.label, false);
+        } else {
+            command_button(f, b.id, br, &b.label, false);
+        }
+        x += bw + 8.0;
+    }
+}
+
 fn icon_button(f: &mut Frame, id: ControlId, r: Rect, path: &str, enabled: bool) {
     let (p, pal) = (f.p, f.pal);
     if enabled {
@@ -222,19 +288,29 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     p.push_clip(r);
     // Header: the laptop and the title.
     f.laptop(r.x + 14.0, r.y + 12.0, 20.0, 1.6, pal.soft);
-    let title = p.label_ellipsis(&v.title, text::NAME, r.w - 60.0);
-    p.draw(&title, r.x + 42.0, r.y + (PANE_HEADER_H - title.h) / 2.0, pal.ink);
     let there = v.there;
     let m: ManageView = f.st.explorer_manage();
-    if !there {
-        // The left pane's hidden items switch (FILES-UI.md 2.5), at the right of its header.
-        let label = f.t(if m.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden });
+    let mut header_end = r.right() - 14.0;
+    if v.hidden_switch {
+        // Each pane's hidden items switch (FILES-UI.md 2.5), at the right of its header.
+        let id = if there { ControlId::ExpHiddenThere } else { ControlId::ExpHidden };
+        let label = f.t(if v.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden });
         let l = p.label_ellipsis(&label, text::CAPTION, r.w * 0.45);
-        let hr = Rect::new(r.right() - 14.0 - l.w - 12.0, r.y + 8.0, l.w + 12.0, 28.0);
-        f.tint(ControlId::ExpHidden, hr, 6.0, pal.ink, 0.05, 0.09);
+        let hr = Rect::new(header_end - l.w - 12.0, r.y + 8.0, l.w + 12.0, 28.0);
+        f.tint(id, hr, 6.0, pal.ink, 0.05, 0.09);
         p.draw(&l, hr.x + 6.0, hr.y + (28.0 - l.h) / 2.0, pal.link);
-        f.register(ControlId::ExpHidden, hr, 6.0);
+        f.register(id, hr, 6.0);
+        header_end = hr.x - 8.0;
     }
+    if let Some(free) = &v.free {
+        // The free space of the shown folder's volume, before the switch.
+        let l = p.label_ellipsis(free, text::CAPTION, r.w * 0.4);
+        p.draw(&l, header_end - l.w, r.y + (PANE_HEADER_H - l.h) / 2.0, pal.soft);
+        header_end -= l.w + 12.0;
+    }
+    // The title takes what the header has left.
+    let title = p.label_ellipsis(&v.title, text::NAME, (header_end - r.x - 42.0).max(40.0));
+    p.draw(&title, r.x + 42.0, r.y + (PANE_HEADER_H - title.h) / 2.0, pal.ink);
     // Navigation row: back, forward, up, refresh and the breadcrumb.
     let ny = r.y + PANE_HEADER_H;
     icon_button(f, ControlId::ExpBack(there), Rect::new(r.x + 8.0, ny + 4.0, 32.0, 32.0), BACK, v.can_back);
@@ -310,7 +386,7 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
             f.tint(id, rr, 4.0, pal.ink, 0.04, 0.08);
             let ink = if row.is_dir { pal.link } else { pal.soft };
             p.svg(if row.is_dir { icons::FOLDER } else { FILE }, r.x + 14.0, y + 7.0, 16.0, 1.6, ink);
-            let renaming = !there && m.renaming.as_ref().is_some_and(|(n, _)| *n == row.name);
+            let renaming = there == m.renaming_there && m.renaming.as_ref().is_some_and(|(n, _)| *n == row.name);
             if renaming {
                 // The inline rename: a native field over the name cell.
                 let cell = Rect::new(r.x + 36.0, y + 2.0, size_x - r.x - 44.0, ROW_H - 4.0);
@@ -340,11 +416,14 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     }
     let sy = r.bottom() - STATUS_H;
     p.fill_rect(Rect::new(r.x + 1.0, sy, r.w - 2.0, p.hairline()), pal.line);
-    // The left pane's status says why a change did not happen, or why a name was refused, in place of the count.
-    let why = (!there).then(|| m.renaming.as_ref().and_then(|(_, e)| e.clone()).or_else(|| m.notice.clone())).flatten();
-    let (status, ink) = match &why {
-        Some(w) => (w.as_str(), pal.danger),
-        None => (v.status.as_str(), pal.soft),
+    // The status says why a name was refused or a change did not happen, in place of the count; the right pane also
+    // carries the 1.0 note there, as information.
+    let refused = (there == m.renaming_there).then(|| m.renaming.as_ref().and_then(|(_, e)| e.clone())).flatten();
+    let why = refused.or_else(|| if there { None } else { m.notice.clone() });
+    let (status, ink) = match (&why, &v.notice) {
+        (Some(w), _) => (w.as_str(), pal.danger),
+        (None, Some(n)) if there => (n.as_str(), if v.notice_error { pal.danger } else { pal.soft }),
+        _ => (v.status.as_str(), pal.soft),
     };
     let st = p.label_ellipsis(status, text::CAPTION, r.w * 0.6);
     p.draw(&st, r.x + 14.0, sy + (STATUS_H - st.h) / 2.0, ink);

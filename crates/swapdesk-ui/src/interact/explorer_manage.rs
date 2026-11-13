@@ -65,6 +65,19 @@ pub struct ManageView {
     /// Rename and Properties act on one selected row; Delete on one or more.
     pub can_rename: bool,
     pub can_delete: bool,
+    /// Slice 2b: the commands act on the focused pane. Nova pasta needs a folder shown there; Propriedades is for
+    /// this computer's pane only.
+    pub can_new_folder: bool,
+    pub can_props: bool,
+    /// The row being renamed is in the other computer's pane (`renaming` names it).
+    pub renaming_there: bool,
+    /// Why Nova pasta, Renomear and Excluir are disabled on the other computer's pane (needs 1.1, needs control);
+    /// `delete_why` adds the volume without a bin. The description of the disabled buttons.
+    pub change_why: Option<String>,
+    pub delete_why: Option<String>,
+    /// The card "Mandar N itens para a Lixeira do ...?" of the other computer, and the conflict card; at most one.
+    pub trash_there: Option<super::explorer_remote::CardView>,
+    pub conflict: Option<super::explorer_remote::CardView>,
 }
 
 impl UiState {
@@ -110,21 +123,29 @@ impl UiState {
                 return a;
             }
             ExplorerKey::Cut => {
-                if self.manage_here() {
+                if self.explorer.focus_there {
+                    self.there_cut();
+                } else if self.manage_here() {
+                    self.explorer.there.cut = None;
                     self.explorer.manage.cut = self.here_selected();
                     self.explorer.manage.notice = None;
                 }
                 return a;
             }
             ExplorerKey::Paste => {
-                self.paste(&mut a);
+                if self.explorer.focus_there {
+                    self.there_paste(&mut a);
+                } else {
+                    self.paste(&mut a);
+                }
                 return a;
             }
             ExplorerKey::Escape => {
                 let m = &mut self.explorer.manage;
-                if m.renaming.take().is_some() || !m.forever.is_empty() || m.props.take().is_some() {
-                    m.rename_error = None;
-                    m.forever.clear();
+                let here = m.renaming.take().is_some() || !m.forever.is_empty() || m.props.take().is_some();
+                m.rename_error = None;
+                m.forever.clear();
+                if self.there_escape() || here {
                     a.changed = Changed::VIEWER;
                 }
                 return a;
@@ -155,6 +176,12 @@ impl UiState {
 
     /// The slice 2a controls of the explorer; false for any other control.
     pub(crate) fn manage_activate(&mut self, id: ControlId, a: &mut Activation) -> bool {
+        // On the other computer's pane the same gestures are changes there (slice 2b).
+        if self.explorer.focus_there
+            && matches!(id, ControlId::ExpNewFolder | ControlId::ExpRename | ControlId::ExpDelete)
+        {
+            return self.there_activate(id, a);
+        }
         match id {
             ControlId::ExpNewFolder => {
                 let Some(dir) = self.explorer.here_dir.clone().filter(|_| self.manage_here()) else { return true };
@@ -221,13 +248,17 @@ impl UiState {
                 self.refresh_here_rows();
                 a.changed = Changed::VIEWER;
             }
-            _ => return false,
+            _ => return self.remote_activate(id, a),
         }
         true
     }
 
     /// The inline rename field was committed with `text` (Enter, or a click elsewhere).
     pub(crate) fn submit_explorer_rename(&mut self, text: String, a: &mut Activation) {
+        if self.explorer.there.renaming.is_some() {
+            self.submit_there_rename(text, a);
+            return;
+        }
         let Some(old) = self.explorer.manage.renaming.clone() else { return };
         let Some(dir) = self.explorer.here_dir.clone() else { return };
         let name = text.trim_end_matches(['\r', '\n']).to_owned();
@@ -254,6 +285,8 @@ impl UiState {
             Command::LocalTrash { .. } | Command::LocalDeleteForever { .. } | Command::LocalMove { .. } => {
                 self.explorer.panes[0].selected.clear();
                 self.explorer.manage.notice = None;
+                // A replace waits for the bin to take what it replaces (FILES-UI.md 5).
+                self.held_after(command, true);
             }
             Command::LocalMakeDir { .. } => {}
             _ => return Changed::NONE,
@@ -266,6 +299,7 @@ impl UiState {
     /// A slice 2a command failed with `code`: the rename field stays open with the reason, any other change says why
     /// in the left pane's status.
     pub(crate) fn manage_failed(&mut self, command: &Command, code: ApiCode) -> Changed {
+        self.held_after(command, false);
         let reason = match (command, code) {
             (Command::LocalRename { .. }, ApiCode::Refused) => {
                 self.explorer.manage.rename_error = Some(MsgKey::ExplorerNameTaken);
@@ -325,8 +359,11 @@ impl UiState {
     /// The slice 2a state of the left pane, as the screen draws it.
     pub fn explorer_manage(&self) -> ManageView {
         let m = &self.explorer.manage;
-        let n = self.explorer.panes[0].selected.len();
+        let focus_there = self.explorer.focus_there;
+        let n = self.explorer.panes[usize::from(focus_there)].selected.len();
         let here = self.manage_here();
+        let there_ok = self.there_can_change();
+        let there = &self.explorer.there;
         let forever = (!m.forever.is_empty()).then(|| {
             let count = m.forever.len().to_string();
             (self.tm(&Msg::new(MsgKey::ExplorerForeverTitle).with(count)), self.t(MsgKey::ExplorerForeverBody))
@@ -358,14 +395,34 @@ impl UiState {
             };
             (title, lines)
         });
+        let renaming = match (&there.renaming, &m.renaming) {
+            (Some(r), _) => Some((r.clone(), there.rename_error.map(|k| self.t(k)))),
+            (None, Some(r)) => Some((r.clone(), m.rename_error.map(|k| self.t(k)))),
+            (None, None) => None,
+        };
+        let change_why = if focus_there { self.there_block_reason().map(|r| self.tm(&r)) } else { None };
+        let delete_why = if focus_there {
+            change_why
+                .clone()
+                .or_else(|| (there_ok && n > 0 && !self.there_has_bin()).then(|| self.t(MsgKey::ExplorerNoBin)))
+        } else {
+            None
+        };
         ManageView {
-            renaming: m.renaming.clone().map(|r| (r, m.rename_error.map(|k| self.t(k)))),
+            renaming,
+            renaming_there: there.renaming.is_some(),
+            can_new_folder: if focus_there { there_ok } else { true },
+            can_props: here,
+            change_why,
+            delete_why,
+            trash_there: self.there_trash_card(),
+            conflict: self.conflict_card(),
             forever,
             props,
             notice: m.notice.map(|k| self.t(k)),
             show_hidden: m.show_hidden,
-            can_rename: here && n == 1,
-            can_delete: here && n > 0,
+            can_rename: if focus_there { there_ok && n == 1 } else { here && n == 1 },
+            can_delete: if focus_there { there_ok && n > 0 && self.there_has_bin() } else { here && n > 0 },
         }
     }
 }
