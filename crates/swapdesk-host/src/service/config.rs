@@ -67,6 +67,9 @@ pub struct ServiceConfig {
     /// once at start and whether or not the account receives yet, so no other local account can take it. The guard
     /// still refuses any connection whose arrival address is not approved. `None`: one socket per approved address.
     pub wildcard: Option<WildcardBinder>,
+    /// The system's neighbour table, for the devices blocked by MAC (D65); [`crate::blocking::NoNeighbors`] until the
+    /// service gives the real one ([`ServiceConfig::with_neighbors`]).
+    pub neighbors: Arc<dyn swapdesk_platform::NeighborTable>,
 }
 
 /// Binds the session port on the wildcard address (see [`ServiceConfig::wildcard`]).
@@ -110,7 +113,15 @@ impl ServiceConfig {
             receiving: true,
             wildcard: None,
             service_actions: None,
+            neighbors: Arc::new(crate::blocking::NoNeighbors),
         }
+    }
+
+    /// The system's neighbour table, so a device blocked by its MAC is refused under any address (D65).
+    #[must_use]
+    pub fn with_neighbors(mut self, neighbors: Arc<dyn swapdesk_platform::NeighborTable>) -> Self {
+        self.neighbors = neighbors;
+        self
     }
 
     /// The runner for quick actions when no user helper is attached (see [`ServiceConfig::service_actions`]).

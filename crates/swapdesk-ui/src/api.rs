@@ -816,9 +816,16 @@ pub enum Command {
         language: Language,
         utc_offset_min: i32,
     },
+    /// Blocks the device now behind `ipv4` by its MAC (D65).
     BlockAddress {
         ipv4: String,
     },
+    /// Unblocks a MAC (`aa:bb:cc:dd:ee:ff`) of the blocked list.
+    UnblockDevice {
+        mac: String,
+    },
+    /// The devices blocked by MAC (`Reply::Blocked`).
+    ListBlocked,
     GetSettings,
     SetSettings {
         settings: Settings,
@@ -915,6 +922,8 @@ impl core::fmt::Debug for Command {
                 dbg_fields!("ActivityExport", path, language, utc_offset_min)
             }
             Self::BlockAddress { ipv4 } => dbg_fields!("BlockAddress", ipv4),
+            Self::UnblockDevice { mac } => dbg_fields!("UnblockDevice", mac),
+            Self::ListBlocked => f.write_str("ListBlocked"),
             Self::GetSettings => f.write_str("GetSettings"),
             Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),
             Self::OpenSystemSettings { target } => dbg_fields!("OpenSystemSettings", target),
@@ -962,6 +971,16 @@ pub enum Reply {
     Update(UpdateInfo),
     LocalListing(LocalListing),
     LocalPlaces(Vec<LocalPlace>),
+    Blocked(Vec<BlockedItem>),
+}
+
+/// A device blocked by its MAC (D65), as Ajustes lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedItem {
+    pub mac: String,
+    pub last_ipv4: String,
+    pub name: String,
+    pub blocked_at_ms: u64,
 }
 
 // ---------- updates (UPDATES.md 10) ----------
@@ -1136,6 +1155,7 @@ impl Command {
                 | Command::GetNetwork
                 | Command::ListDevices
                 | Command::GetSettings
+                | Command::ListBlocked
                 | Command::GetUpdate
                 | Command::UpdateSetCheck { .. }
                 | Command::ActivityList { .. }

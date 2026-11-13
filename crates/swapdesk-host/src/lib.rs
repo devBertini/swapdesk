@@ -13,6 +13,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 
 pub mod accounts;
+pub mod blocking;
 pub mod helper;
 mod helper_pty;
 pub mod netcache;

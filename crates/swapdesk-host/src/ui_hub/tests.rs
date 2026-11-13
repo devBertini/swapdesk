@@ -1533,3 +1533,37 @@ fn the_updater_answers_through_the_hub_with_its_refusals() {
     drop((ui, other));
     m.finish();
 }
+
+/// D65 (owner, 12/11): "Bloquear este dispositivo" blocks the device behind the address by its MAC, read from the
+/// neighbour table; the reply is the list as it now is; Desbloquear removes it; a device whose MAC cannot be learned
+/// is not blocked (its address would later belong to someone else).
+#[test]
+fn a_device_is_blocked_by_its_mac_and_unblocked_from_the_list() {
+    struct Table;
+    impl swapdesk_platform::NeighborTable for Table {
+        fn cached_mac(&self, peer: std::net::IpAddr) -> Option<[u8; 6]> {
+            (peer == std::net::IpAddr::from([192, 168, 0, 57])).then_some([0x02, 0x5a, 0xd0, 0, 0, 0x39])
+        }
+    }
+    let m = Machine::new("sala");
+    let mut ui = m.client(info(false));
+    assert!(matches!(ui.call(UiOp::ListBlocked), Ok(ReplyBody::Blocked(l)) if l.is_empty()));
+    let block = |ipv4: &str| UiOp::BlockDevice { ipv4: ipv4.into(), name: String::new() };
+    assert_eq!(ui.call(block("192.168.0.57")).unwrap_err(), ApiCode::NotFound, "no neighbour table: nothing known");
+
+    m.hub.set_neighbors(Arc::new(Table));
+    let Ok(ReplyBody::Blocked(list)) = ui.call(block("192.168.0.57")) else { panic!("the list after blocking") };
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].mac.as_str(), list[0].last_ipv4.as_str()), ("02:5a:d0:00:00:39", "192.168.0.57"));
+    assert!(m.trust.is_blocked_mac(&[0x02, 0x5a, 0xd0, 0, 0, 0x39]), "kept in the trust handle (blocked.bin)");
+    assert_eq!(ui.call(block("192.168.0.58")).unwrap_err(), ApiCode::NotFound, "a MAC that cannot be learned");
+    assert_eq!(ui.call(block("not an address")).unwrap_err(), ApiCode::Invalid);
+
+    let Ok(ReplyBody::Blocked(list)) = ui.call(UiOp::UnblockDevice { mac: "02:5A:D0:00:00:39".into() }) else {
+        panic!("the list after unblocking")
+    };
+    assert!(list.is_empty() && !m.trust.any_blocked_mac());
+    assert_eq!(ui.call(UiOp::UnblockDevice { mac: "02:5a:d0:00:00:39".into() }).unwrap_err(), ApiCode::NotFound);
+    drop(ui);
+    m.finish();
+}

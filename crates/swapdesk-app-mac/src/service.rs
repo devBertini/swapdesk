@@ -278,6 +278,7 @@ impl InProcessService {
             dev: dev_loopback.map(|_| swapdesk_host::ui_hub::DevOptions::default()),
         });
         config.ui = hub.host_ui();
+        hub.set_neighbors(Arc::clone(&config.neighbors));
         let core = Arc::new(ServiceCore::start(config).map_err(|e| format!("the service core did not start: {e:?}"))?);
         hub.bind_core(&core);
         hub.set_console_session(Some(UI_SESSION));

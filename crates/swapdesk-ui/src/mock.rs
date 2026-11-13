@@ -489,6 +489,7 @@ impl Scenario {
                     reply(Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private)))),
                     reply(Ok(Reply::Devices(devices()))),
                     reply(Ok(Reply::Settings(settings()))),
+                    reply(Ok(Reply::Blocked(Vec::new()))),
                 ];
             }
             _ => {}
@@ -499,6 +500,7 @@ impl Scenario {
             reply(Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private)))),
             reply(Ok(Reply::Devices(devices()))),
             reply(Ok(Reply::Settings(settings()))),
+            reply(Ok(Reply::Blocked(Vec::new()))),
             reply(Ok(Reply::Activity(logged))),
             // The machine's updater: 1.1.0, nothing on offer (Ajustes shows its section).
             reply(Ok(Reply::Update(update_idle()))),
@@ -1021,6 +1023,8 @@ impl Scenario {
 /// What the mock backend's thread remembers between commands.
 struct World {
     devices: Vec<DeviceView>,
+    /// The devices blocked by MAC (D65).
+    blocked: Vec<BlockedItem>,
     settings: Settings,
     next_session: u64,
     /// The entries the user cancelled: their scheduled news does not arrive.
@@ -1116,6 +1120,7 @@ impl MockBackend {
             shared: Arc::new(Shared { events: Mutex::new(VecDeque::new()), waker }),
             world: Arc::new(Mutex::new(World {
                 devices: devices(),
+                blocked: Vec::new(),
                 settings: settings(),
                 next_session: 10,
                 cancelled: Arc::new(Mutex::new(Vec::new())),
@@ -1195,6 +1200,29 @@ impl World {
             Command::GetNetwork => Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private))),
             Command::ListDevices => Ok(Reply::Devices(self.devices.clone())),
             Command::GetSettings => Ok(Reply::Settings(self.settings.clone())),
+            Command::ListBlocked => Ok(Reply::Blocked(self.blocked.clone())),
+            Command::BlockAddress { ipv4 } => {
+                let n = self.blocked.len() as u8;
+                self.blocked.insert(
+                    0,
+                    BlockedItem {
+                        mac: format!("02:5a:d0:00:00:{n:02x}"),
+                        last_ipv4: ipv4,
+                        name: String::new(),
+                        blocked_at_ms: 0,
+                    },
+                );
+                Ok(Reply::Blocked(self.blocked.clone()))
+            }
+            Command::UnblockDevice { mac } => {
+                let before = self.blocked.len();
+                self.blocked.retain(|b| b.mac != mac);
+                if self.blocked.len() == before {
+                    Err(ApiError::new(ApiCode::NotFound))
+                } else {
+                    Ok(Reply::Blocked(self.blocked.clone()))
+                }
+            }
             Command::GetUpdate => Ok(Reply::Update(update_idle())),
             Command::ActivityList { .. } => Ok(Reply::Activity(activity())),
             Command::SetSettings { settings } => {
@@ -1549,8 +1577,8 @@ mod tests {
         let commands = s.startup_commands();
         assert_eq!(
             commands.len(),
-            6,
-            "identity, network, devices, settings, activity and the updater are asked together"
+            7,
+            "identity, network, devices, settings, the blocked devices, activity and the updater are asked together"
         );
         // Before any answer nothing is drawn in between (R-UI-1) ...
         assert!(s.has_pending_fetch());
@@ -1620,7 +1648,7 @@ mod tests {
         let a = fresh.activate(ControlId::HomeActivityAll);
         assert_eq!(a.commands.len(), 1, "first open asks once");
         let a = fresh.activate(ControlId::NavSettings);
-        assert_eq!(a.commands, vec![Command::GetSettings]);
+        assert_eq!(a.commands, vec![Command::GetSettings, Command::ListBlocked], "Ajustes and its blocked devices");
         let again = fresh.activate(ControlId::HomeActivityAll);
         assert!(again.commands.is_empty(), "a second visit does not ask again while the first is in flight");
         // An event refreshes the cache without a request.

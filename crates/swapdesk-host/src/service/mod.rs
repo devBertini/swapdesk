@@ -439,6 +439,8 @@ impl Default for MachineShared {
 /// What the accept loops need to judge an incoming connection.
 struct Gate {
     interfaces: Arc<dyn NetInterfaces>,
+    /// For the devices blocked by MAC (D65).
+    neighbors: Arc<dyn swapdesk_platform::NeighborTable>,
     allow_loopback: bool,
     trust: Arc<TrustHandle>,
     host: HostService,
@@ -480,11 +482,11 @@ impl Gate {
         Ok(())
     }
 
-    /// The peer's address is in the trust store's `blocked` list: it gets no answer at all, before any other check
-    /// and before a handshake or a place is spent on it.
+    /// The peer's address is in the trust store's `blocked` list, or the device behind it is blocked by its MAC
+    /// (D65): it gets no answer at all, before any other check and before a handshake or a place is spent on it.
     fn is_blocked(&self, incoming: &Incoming) -> bool {
         let ip = incoming.remote_address().ip();
-        self.trust.read(|s| s.is_blocked(ip))
+        self.trust.read(|s| s.is_blocked(ip)) || crate::blocking::blocked_by_mac(&self.trust, &*self.neighbors, ip)
     }
 
     fn reserve(self: &Arc<Self>) -> Option<Slot> {
@@ -711,6 +713,7 @@ impl ServiceCore {
 
         let gate = Arc::new(Gate {
             interfaces: Arc::clone(&cfg.interfaces),
+            neighbors: Arc::clone(&cfg.neighbors),
             allow_loopback: cfg.allow_loopback_peers,
             trust: Arc::clone(&cfg.trust),
             host: host.clone(),

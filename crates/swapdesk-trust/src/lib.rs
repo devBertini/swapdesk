@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 
 pub mod audit;
+pub mod blocklist;
 pub mod clock;
 pub mod endpoint;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod tls;
 pub mod wipe;
 
 pub use audit::{AuditEntry, AuditEvent, AuditSink, DeviceRef, Direction, MemoryAudit, decode_log};
+pub use blocklist::{BLOCKED_NAME, BlockList, BlockedDevice, mac_text, parse_mac};
 pub use clock::{ClockWall, SystemWallClock, WallClock};
 pub use endpoint::{
     AdmittedHook, DEFAULT_MAX_IN_FLIGHT, Decision, IncomingFilter, PairingService, ServeOptions, accept_session,

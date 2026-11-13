@@ -1389,6 +1389,34 @@ fn settings_main(f: &mut Frame) {
             vec![SettingRow::Status { label: net_row, hint: Some(f.t(MsgKey::NetworkHint)), value: None }],
         ),
     ];
+    // D65: the devices blocked by MAC, each with "Desbloquear", and what blocking by MAC cannot promise.
+    let mut right = Vec::from(right);
+    let mut blocked: Vec<SettingRow> =
+        f.st.blocked_rows()
+            .into_iter()
+            .map(|(label, line, n)| SettingRow::Button {
+                id: ControlId::Unblock(n),
+                label,
+                hint: Some(line),
+                button: f.t(MsgKey::Unblock),
+            })
+            .collect();
+    if blocked.is_empty() {
+        blocked.push(SettingRow::Status { label: f.t(MsgKey::BlockedNone), hint: None, value: None });
+    }
+    if let Some(SettingRow::Status { hint, .. } | SettingRow::Button { hint, .. } | SettingRow::Toggle { hint, .. }) =
+        blocked.last_mut()
+    {
+        let note = f.t(MsgKey::BlockedNote);
+        *hint = Some(match hint.take() {
+            Some(h) => format!(
+                "{h}
+{note}"
+            ),
+            None => note,
+        });
+    }
+    right.push((MsgKey::GroupBlocked, blocked));
     // UPDATES.md 10.1: "Atualizações", when the service has an updater: the switch, then the version with its last
     // check and "Procurar agora".
     let mut left = Vec::from(left);

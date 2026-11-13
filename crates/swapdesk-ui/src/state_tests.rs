@@ -2896,3 +2896,36 @@ fn the_screen_button_lists_the_hosts_displays_and_a_pick_switches() {
     assert_eq!(a.commands, vec![Command::SelectDisplay { session_id: 1, display_id: 2 }]);
     assert!(s.select_options(SelectId::HostDisplay)[1].1, "the pick is checked");
 }
+
+/// D65: Ajustes lists the devices blocked by MAC, each with Desbloquear; unblocking takes the row away at once and
+/// asks the service, whose reply is the list as it then is.
+#[test]
+fn ajustes_lists_the_blocked_devices_and_unblocking_one_takes_it_away() {
+    use crate::api::BlockedItem;
+    let mut s = Scenario::Ajustes.prepared_state();
+    let item = |mac: &str, ip: &str| BlockedItem {
+        mac: mac.into(),
+        last_ipv4: ip.into(),
+        name: String::new(),
+        blocked_at_ms: 0,
+    };
+    s.apply(UiEvent::Reply {
+        ticket: crate::api::Ticket(0),
+        result: Ok(Reply::Blocked(vec![
+            item("02:00:00:00:00:01", "192.168.0.57"),
+            item("02:00:00:00:00:02", "192.168.0.9"),
+        ])),
+    });
+    let ids: Vec<ControlId> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::Unblock(0)) && ids.contains(&ControlId::Unblock(1)));
+    let rows = s.blocked_rows();
+    assert_eq!(rows[0].0, "Dispositivo sem nome");
+    assert!(rows[0].1.starts_with("02:00:00:00:00:01 · último endereço 192.168.0.57"), "{}", rows[0].1);
+
+    let a = s.activate(ControlId::Unblock(0));
+    assert_eq!(a.commands, vec![Command::UnblockDevice { mac: "02:00:00:00:00:01".into() }]);
+    assert_eq!(s.blocked_rows().len(), 1, "the row goes at once");
+    s.apply(UiEvent::Reply { ticket: crate::api::Ticket(0), result: Ok(Reply::Blocked(Vec::new())) });
+    let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    assert!(texts.contains(&"Nenhum dispositivo bloqueado.".to_owned()), "{texts:?}");
+}

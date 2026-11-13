@@ -621,6 +621,14 @@ strings! {
     TbCollapse => "Recolher a barra", "Collapse the bar";
     TipCollapse => "Recolher a barra num puxador no topo ({0} a traz de volta)", "Shrink the bar to a handle at the top ({0} brings it back)";
     TbExpand => "Mostrar a barra da sessão ({0})", "Show the session bar ({0})";
+    // Devices blocked by their MAC (B19, D65).
+    AlertBlockDevice => "Bloquear este dispositivo", "Block this device";
+    GroupBlocked => "Dispositivos bloqueados", "Blocked devices";
+    BlockedNone => "Nenhum dispositivo bloqueado.", "No blocked devices.";
+    BlockedUnnamed => "Dispositivo sem nome", "Unnamed device";
+    BlockedLine => "{0} · último endereço {1} · bloqueado em {2}", "{0} · last address {1} · blocked {2}";
+    Unblock => "Desbloquear", "Unblock";
+    BlockedNote => "O bloqueio usa o endereço físico (MAC) do dispositivo. Um dispositivo com endereço Wi-Fi privado ou rotativo pode voltar com outro.", "Blocking uses the device’s physical (MAC) address. A device with a private or rotating Wi-Fi address can come back with another one.";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

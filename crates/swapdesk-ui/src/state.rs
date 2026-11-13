@@ -633,6 +633,10 @@ pub struct UiState {
     pub(crate) rename: Option<RenameDraft>,
     pub(crate) activity: Vec<AuditView>,
     pub(crate) alert: Option<AuditView>,
+    /// The devices blocked by MAC (D65), as the service last listed them.
+    pub(crate) blocked: Vec<crate::api::BlockedItem>,
+    /// The list was asked for once (R-UI-3); the replies to blocking and unblocking keep it fresh.
+    pub(crate) blocked_asked: bool,
     pub(crate) settings: Option<Settings>,
     pub(crate) drawer: Option<DrawerTab>,
     pub(crate) chat: Vec<ChatView>,
@@ -758,6 +762,8 @@ impl UiState {
             swap: None,
             activity: Vec::new(),
             alert: None,
+            blocked: Vec::new(),
+            blocked_asked: false,
             settings: None,
             drawer: None,
             chat: Vec::new(),
@@ -1792,17 +1798,19 @@ impl UiState {
         changed
     }
 
-    /// The commands the UI asks for at launch, all at once (R-UI-6): identity, network, device list, settings and
-    /// activity. The window is drawn before any answer arrives.
+    /// The commands the UI asks for at launch, all at once (R-UI-6): identity, network, device list, settings with
+    /// the blocked devices, and activity. The window is drawn before any answer arrives.
     pub fn startup_commands(&mut self) -> Vec<Command> {
         let commands = vec![
             Command::GetThisDevice,
             Command::GetNetwork,
             Command::ListDevices,
             Command::GetSettings,
+            Command::ListBlocked,
             Command::ActivityList { before_ms: None, limit: 200 },
             Command::GetUpdate,
         ];
+        self.blocked_asked = true;
         for c in &commands {
             if let Some(k) = fetch_kind(c) {
                 self.begin_fetch(k);
@@ -2448,6 +2456,11 @@ impl UiState {
             Reply::Settings(s) => {
                 self.set_settings(s);
                 Changed::ALL
+            }
+            Reply::Blocked(list) => {
+                self.blocked = list;
+                self.blocked_asked = true;
+                Changed::MAIN
             }
             Reply::Update(u) => self.set_update(u),
             Reply::MissingPermissions(missing) => {

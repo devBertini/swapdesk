@@ -172,6 +172,16 @@ impl ApiCode {
     }
 }
 
+/// Most devices a blocked list holds.
+pub const MAX_BLOCKED: usize = 256;
+/// `aa:bb:cc:dd:ee:ff`.
+pub const MAX_MAC: usize = 17;
+
+wire_struct! {
+    /// A device blocked by its MAC (D65): the MAC, the IPv4 address and name seen when it was blocked, and when.
+    BlockedView { mac: String [MAX_MAC], last_ipv4: String [MAX_IPV4], name: String [MAX_NAME], blocked_at_ms: u64 }
+}
+
 wire_struct! {
     /// `legacy_note`: show the one-time note that pairings made before 1.1 do not carry over (D55): a 1.0 install
     /// left its data on this computer and this account has no pairing yet.

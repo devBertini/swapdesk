@@ -751,7 +751,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 ui: hub.host_ui(),
                 interfaces: Arc::clone(&interfaces),
             };
-            let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps);
+            // D65: a device blocked by its MAC is refused by the gate and the pairing filter under any address.
+            let neighbors: Arc<dyn swapdesk_platform::NeighborTable> = Arc::new(swapdesk_net_win::WindowsNeighborTable);
+            hub.set_neighbors(Arc::clone(&neighbors));
+            let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps).with_neighbors(neighbors);
             cfg.session_port = seat.session_port;
             cfg.pair_port = seat.pair_port;
             cfg.win_session = active_console_session().unwrap_or(0);

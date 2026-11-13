@@ -195,6 +195,20 @@ pub enum UiOp {
         hevc_encode: bool,
         hevc_decode: bool,
     },
+    /// Op 58: block the device behind `ipv4` by its MAC (D65); `name` is what it announced, or empty. `NotFound` when
+    /// its MAC cannot be learned (it left the network); `Busy` when the list is full. From the console's UI only. The
+    /// reply is the list as it now is (`Blocked`), so the interface never asks again in a race with the change.
+    BlockDevice {
+        ipv4: String,
+        name: String,
+    },
+    /// Op 59: unblock a MAC (`aa:bb:cc:dd:ee:ff`). `NotFound` when it was not blocked. From the console's UI only.
+    /// The reply is the list as it now is (`Blocked`).
+    UnblockDevice {
+        mac: String,
+    },
+    /// Op 60: the devices blocked by MAC, the reply `Blocked`.
+    ListBlocked,
     /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
     /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
     /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
@@ -254,12 +268,20 @@ impl UiOp {
             Self::UpdateDismiss { .. } => 55,
             Self::UpdateSetCheck { .. } => 56,
             Self::MediaCaps { .. } => 57,
+            Self::BlockDevice { .. } => 58,
+            Self::UnblockDevice { .. } => 59,
+            Self::ListBlocked => 60,
         }
     }
 
     pub(crate) fn put_body(&self, w: &mut Writer) -> CResult<()> {
         match self {
-            Self::GetThisDevice | Self::GetNetwork | Self::ListDevices | Self::GetSettings => {}
+            Self::GetThisDevice | Self::GetNetwork | Self::ListDevices | Self::GetSettings | Self::ListBlocked => {}
+            Self::BlockDevice { ipv4, name } => {
+                w.put_str(ipv4, MAX_IPV4)?;
+                w.put_str(name, MAX_NAME)?;
+            }
+            Self::UnblockDevice { mac } => w.put_str(mac, MAX_MAC)?,
             Self::AddByAddress { ipv4 } => w.put_str(ipv4, MAX_IPV4)?,
             Self::PairOpen { device_id } => device_id.put(w, MAX_NAME)?,
             Self::PairStart { pairing_id, device_id } => {
@@ -420,6 +442,9 @@ impl UiOp {
             55 => Self::UpdateDismiss { version: r.str(crate::types::MAX_VERSION)? },
             56 => Self::UpdateSetCheck { on: r.bool()? },
             57 => Self::MediaCaps { hevc_encode: r.bool()?, hevc_decode: r.bool()? },
+            58 => Self::BlockDevice { ipv4: r.str(MAX_IPV4)?, name: r.str(MAX_NAME)? },
+            59 => Self::UnblockDevice { mac: r.str(MAX_MAC)? },
+            60 => Self::ListBlocked,
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }
@@ -479,6 +504,8 @@ pub enum ReplyBody {
     TransferId(u32),
     /// The machine's updater (op 51).
     Update(crate::types::UpdateView),
+    /// The devices blocked by MAC (op 60).
+    Blocked(Vec<BlockedView>),
 }
 
 impl ReplyBody {
@@ -517,6 +544,7 @@ impl ReplyBody {
             Self::TransferIds(v) => v.put(&mut w, crate::files::MAX_PICKS)?,
             Self::TransferId(v) => w.put_u32(*v),
             Self::Update(v) => v.put(&mut w, 0)?,
+            Self::Blocked(v) => v.put(&mut w, MAX_BLOCKED)?,
         }
         Ok(w.into_bytes())
     }
@@ -552,6 +580,7 @@ impl ReplyBody {
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
             51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
+            58..=60 => Self::Blocked(<Vec<BlockedView>>::get(&mut r, MAX_BLOCKED)?),
             6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=56 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };

@@ -67,7 +67,11 @@ pub fn mac_service_config(p: MacServiceParams) -> Result<MacServiceSetup, String
         settings.pair_port = pair;
     }
     let deps = ServiceDeps { identity: Arc::clone(&identity), trust: Arc::clone(&trust), clock, trace, ui, interfaces };
-    let mut config = ServiceConfig::new(&settings.name, Os::MacOs, &os_version, deps);
+    let config = ServiceConfig::new(&settings.name, Os::MacOs, &os_version, deps);
+    // D65: devices blocked by their MAC are refused under any address (the hub is given the same table).
+    #[cfg(target_os = "macos")]
+    let config = config.with_neighbors(Arc::new(swapdesk_net_mac::MacNeighborTable));
+    let mut config = config;
     config.session_port = settings.port;
     config.pair_port = settings.pair_port;
     if let Some(addr) = dev_loopback {

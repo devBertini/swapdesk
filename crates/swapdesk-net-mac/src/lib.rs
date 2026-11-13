@@ -21,6 +21,7 @@
 //! This crate holds the `unsafe` of the feature; `swapdesk-lan` forbids it.
 
 pub mod classify;
+pub mod neighbor;
 pub mod watch;
 
 #[cfg(target_os = "macos")]
@@ -28,6 +29,7 @@ mod mac_impl;
 #[cfg(target_os = "macos")]
 mod watch_mac;
 
+pub use neighbor::{MacNeighborTable, parse_neighbor_dump};
 pub use watch::NetworkWatcher;
 
 #[cfg(target_os = "macos")]

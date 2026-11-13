@@ -257,10 +257,12 @@ impl Hub {
         let (nets, allow_loopback) = (Arc::clone(&self.pairing.nets), self.allow_loopback());
         let rate = Arc::clone(&self.pairing.rate);
         let trust = Arc::clone(&self.p.trust);
+        let neighbors = Arc::clone(&self.neighbors);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
-            // A blocked address gets no answer, before any other look.
-            if trust.read(|s| s.is_blocked(remote)) {
+            // A blocked address, or a device blocked by its MAC (D65), gets no answer, before any other look.
+            let by_mac = neighbors.get().is_some_and(|n| crate::blocking::blocked_by_mac(&trust, n.as_ref(), remote));
+            if trust.read(|s| s.is_blocked(remote)) || by_mac {
                 return Decision::Ignore;
             }
             let local = incoming.local_ip();

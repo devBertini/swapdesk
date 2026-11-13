@@ -485,10 +485,16 @@ pub trait NetInterfaces: Send + Sync {
 }
 
 /// The link-layer (MAC) address of a peer on this network, from the system's neighbour table (ARP for IPv4, Neighbour
-/// Discovery for IPv6). Every Swapdesk peer is on-link (D36), so its entry exists after it reached us; a lookup may
-/// ask the network when the entry is gone. `None`: no answer (not on-link, gone, or a loopback address) (D65).
+/// Discovery for IPv6). Every Swapdesk peer is on-link (D36), so its entry exists after it reached us. `None`: no
+/// answer (not on-link, gone, or a loopback address) (D65).
 pub trait NeighborTable: Send + Sync {
-    fn mac_of(&self, peer: core::net::IpAddr) -> Option<[u8; 6]>;
+    /// From the table as it is, with no network traffic: fast enough for an accept loop, called for each connection.
+    fn cached_mac(&self, peer: core::net::IpAddr) -> Option<[u8; 6]>;
+    /// May ask the network (ARP or Neighbour Solicitation) when the entry is gone, so it can take up to about a
+    /// second: only for a person's action (blocking a device), never on an accept path.
+    fn resolve_mac(&self, peer: core::net::IpAddr) -> Option<[u8; 6]> {
+        self.cached_mac(peer)
+    }
 }
 
 // ---------- trace log (own logger, D14) ----------

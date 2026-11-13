@@ -154,6 +154,9 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The state every connection, task and host callback shares.
 pub(crate) struct Hub {
     pub p: HubParams,
+    /// The system's neighbour table (D65): the pairing filter refuses a blocked MAC, and blocking a device resolves
+    /// its MAC from here. Unset: nobody is known by MAC.
+    neighbors: Arc<OnceLock<Arc<dyn swapdesk_platform::NeighborTable>>>,
     core: Mutex<Weak<ServiceCore>>,
     rt: OnceLock<Handle>,
     /// The SID of the account this hub serves, on a machine of several (ACCOUNTS.md 7.1); unset for the only one.
@@ -339,6 +342,7 @@ impl UiHub {
         let mode = Arc::new(PairingMode::new(Arc::clone(&params.clock)));
         let hub = Arc::new(Hub {
             p: params,
+            neighbors: Arc::new(OnceLock::new()),
             core: Mutex::new(Weak::new()),
             rt: OnceLock::new(),
             account: OnceLock::new(),
@@ -378,6 +382,11 @@ impl UiHub {
             }
         }));
         Self { hub }
+    }
+
+    /// Gives the hub the system's neighbour table, for the devices blocked by MAC (D65). Once, before the first UI.
+    pub fn set_neighbors(&self, neighbors: Arc<dyn swapdesk_platform::NeighborTable>) {
+        let _ = self.hub.neighbors.set(neighbors);
     }
 
     /// The `HostUi` for `ServiceConfig::ui`.

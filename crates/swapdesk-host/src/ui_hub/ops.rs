@@ -197,11 +197,13 @@ impl Hub {
                     | UiOp::SetGrants { .. }
                     | UiOp::ForgetDevice { .. }
                     | UiOp::RenameDevice { .. }
+                    | UiOp::BlockDevice { .. }
+                    | UiOp::UnblockDevice { .. }
             )
         {
             self.require_console(
                 conn,
-                "a pairing, grants, rename or forget request from a UI that is not the console's",
+                "a pairing, grants, rename, forget or block request from a UI that is not the console's",
             )?;
         }
         match op {
@@ -217,6 +219,19 @@ impl Hub {
                 }
                 Ok(ReplyBody::Done)
             }
+            UiOp::BlockDevice { ipv4, name } => {
+                self.block_device(&ipv4, &name)?;
+                Ok(ReplyBody::Blocked(self.blocked_views()))
+            }
+            UiOp::UnblockDevice { mac } => {
+                let mac = swapdesk_trust::parse_mac(&mac).ok_or(ApiCode::Invalid)?;
+                match self.p.trust.unblock_mac(&mac) {
+                    Ok(true) => Ok(ReplyBody::Blocked(self.blocked_views())),
+                    Ok(false) => Err(ApiCode::NotFound),
+                    Err(_) => Err(ApiCode::Internal),
+                }
+            }
+            UiOp::ListBlocked => Ok(ReplyBody::Blocked(self.blocked_views())),
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
@@ -411,6 +426,47 @@ impl Hub {
     }
 
     /// F-PAIR-04: the key and grants go, the device's sessions end, its tokens die.
+    /// D65: blocks the device now behind `ipv4` by its MAC, learned from the neighbour table (asking the network when
+    /// the entry is gone). A device whose MAC cannot be learned is not blocked (`NotFound`): blocking its address
+    /// would later refuse whoever gets that address from the router.
+    fn block_device(&self, ipv4: &str, name: &str) -> Result<(), ApiCode> {
+        let ip: std::net::Ipv4Addr = ipv4.parse().map_err(|_| ApiCode::Invalid)?;
+        let neighbors = self.neighbors.get().ok_or(ApiCode::NotFound)?;
+        let mac = neighbors.resolve_mac(std::net::IpAddr::V4(ip)).ok_or(ApiCode::NotFound)?;
+        let device = swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: ip.octets(),
+            name: name.chars().take(64).collect(),
+            blocked_at_ms: self.p.wall.unix_ms(),
+        };
+        match self.p.trust.block_mac(device) {
+            Ok(true) => {
+                self.p.trace.log(
+                    swapdesk_platform::Level::Info,
+                    "ui_hub",
+                    format_args!("blocked the device at {ip} by its MAC"),
+                );
+                Ok(())
+            }
+            Ok(false) => Err(ApiCode::Busy),
+            Err(_) => Err(ApiCode::Internal),
+        }
+    }
+
+    /// The devices blocked by MAC, newest first.
+    fn blocked_views(&self) -> Vec<swapdesk_ipc::BlockedView> {
+        let mut list = self.p.trust.blocked_devices();
+        list.sort_by_key(|d| std::cmp::Reverse(d.blocked_at_ms));
+        list.into_iter()
+            .map(|d| swapdesk_ipc::BlockedView {
+                mac: swapdesk_trust::mac_text(&d.mac),
+                last_ipv4: std::net::Ipv4Addr::from(d.last_ipv4).to_string(),
+                name: d.name,
+                blocked_at_ms: d.blocked_at_ms,
+            })
+            .collect()
+    }
+
     fn forget_device(&self, device_id: &str) -> Result<(), ApiCode> {
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let removed = self.p.trust.update(|s| s.forget(&id)).map_err(|_| ApiCode::Internal)?;

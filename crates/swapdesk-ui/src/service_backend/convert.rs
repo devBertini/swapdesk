@@ -475,6 +475,16 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
         w::ReplyBody::Listing(v) => a::Reply::Listing(super::files::listing_from_wire(v)),
         w::ReplyBody::TransferIds(v) => a::Reply::TransferIds(v),
         w::ReplyBody::TransferId(v) => a::Reply::TransferId(v),
+        w::ReplyBody::Blocked(v) => a::Reply::Blocked(
+            v.into_iter()
+                .map(|b| a::BlockedItem {
+                    mac: b.mac,
+                    last_ipv4: b.last_ipv4,
+                    name: b.name,
+                    blocked_at_ms: b.blocked_at_ms,
+                })
+                .collect(),
+        ),
     })
 }
 
@@ -700,9 +710,11 @@ pub fn route(c: &a::Command) -> Route {
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }
         | C::FilesGet { .. }
-        | C::BlockAddress { .. }
         | C::OpenSystemSettings { .. }
         | C::RequestOsPermissions => return Route::Unsupported,
+        C::BlockAddress { ipv4 } => O::BlockDevice { ipv4: ipv4.clone(), name: String::new() },
+        C::UnblockDevice { mac } => O::UnblockDevice { mac: mac.clone() },
+        C::ListBlocked => O::ListBlocked,
         C::GetUpdate => O::UpdateGet,
         C::UpdateCheckNow => O::UpdateCheckNow,
         C::UpdateInstall { version, end_sessions } => {

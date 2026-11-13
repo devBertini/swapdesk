@@ -61,6 +61,8 @@ pub enum ControlId {
     // activity
     Export,
     BlockAlert,
+    /// "Desbloquear" on row `n` of the blocked devices in Ajustes (D65).
+    Unblock(u16),
     // settings
     Edit(EditId),
     Select(SelectId),
@@ -701,7 +703,8 @@ impl UiState {
                     self.name_of(MsgKey::AlertUnknownRest)
                 ),
             );
-            s.button(ControlId::BlockAlert, self.tm(&Msg::new(MsgKey::BlockAddress).with(addr)));
+            let _ = addr;
+            s.button(ControlId::BlockAlert, self.name_of(MsgKey::AlertBlockDevice));
         }
         s.add(ControlId::Static(900), UiRole::Table, self.name_of(MsgKey::LogLabel));
         for (n, row) in self.activity.iter().enumerate() {
@@ -790,6 +793,15 @@ impl UiState {
         c.value = Some(self.select_value(SelectId::Keyboard));
         c.description = Some(self.name_of(MsgKey::SendKeysHint));
         s.switch(ControlId::SwapCtrlCmd, self.name_of(MsgKey::SwapCtrlCmd), set.swap_ctrl_cmd, None);
+        s.heading(2, self.name_of(MsgKey::GroupBlocked));
+        for (label, line, n) in self.blocked_rows() {
+            s.text(UiRole::Text, format!("{label}, {line}"));
+            s.button(ControlId::Unblock(n), self.name_of(MsgKey::Unblock));
+        }
+        if self.blocked.is_empty() {
+            s.text(UiRole::Text, self.name_of(MsgKey::BlockedNone));
+        }
+        s.text(UiRole::Text, self.name_of(MsgKey::BlockedNote));
         s.heading(2, self.name_of(MsgKey::GroupShortcuts));
         let c = s.add(ControlId::Select(SelectId::ReleaseKey), UiRole::ComboBox, self.name_of(MsgKey::ReleaseKeyLabel));
         c.value = Some(self.select_value(SelectId::ReleaseKey));
@@ -1393,6 +1405,22 @@ impl UiState {
         (who, self.tm(&Msg::new(MsgKey::BannerSince).with(format::short_minutes(self.lang, secs))))
     }
 
+    /// The rows of the blocked devices in Ajustes: the name (or "Dispositivo sem nome"), the line with the MAC, the
+    /// last address and when, and the row's index.
+    pub fn blocked_rows(&self) -> Vec<(String, String, u16)> {
+        self.blocked
+            .iter()
+            .enumerate()
+            .map(|(n, b)| {
+                let name = if b.name.is_empty() { self.name_of(MsgKey::BlockedUnnamed) } else { b.name.clone() };
+                let when = format::table_when(self.lang, b.blocked_at_ms, self.clock);
+                let line =
+                    self.tm(&Msg::new(MsgKey::BlockedLine).with(b.mac.clone()).with(b.last_ipv4.clone()).with(when));
+                (name, line, u16::try_from(n).unwrap_or(u16::MAX))
+            })
+            .collect()
+    }
+
     /// "você controla há 12 min" under the viewer's title.
     pub fn viewer_status_text(&self, s: &SessionView) -> String {
         match &s.state {
@@ -1436,6 +1464,11 @@ impl UiState {
                 if self.fetch(DataKind::Settings) == Fetch::Missing {
                     self.begin_fetch(DataKind::Settings);
                     a.commands.push(Command::GetSettings);
+                }
+                // The blocked devices are asked once; blocking and unblocking answer with the list as it then is.
+                if !self.blocked_asked {
+                    self.blocked_asked = true;
+                    a.commands.push(Command::ListBlocked);
                 }
             }
             ControlId::AddAddress => {
@@ -1509,6 +1542,14 @@ impl UiState {
                     && let Some(addr) = alert.what.args.first()
                 {
                     a.commands.push(Command::BlockAddress { ipv4: addr.clone() });
+                }
+            }
+            ControlId::Unblock(n) => {
+                // Optimistic (R-UI-2): the row goes at once; a failure shows as an error and the next visit lists again.
+                if usize::from(n) < self.blocked.len() {
+                    let item = self.blocked.remove(usize::from(n));
+                    a.commands.push(Command::UnblockDevice { mac: item.mac });
+                    a.changed = Changed::MAIN;
                 }
             }
             ControlId::Edit(e) => a.effect = Some(Effect::FocusEdit(e)),
