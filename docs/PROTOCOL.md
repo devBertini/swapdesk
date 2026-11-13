@@ -231,6 +231,7 @@ B4 (≤ 1 s) is measured from step 3 to the first presented frame.
 ### 6.4 Resume
 - `SessionGrant.resume_token` (16 random bytes) lets the same viewer device resume the same session with `Hello { resume }` without a prompt (`GrantMode::Resumed`), but only after the connection was **lost** (idle timeout or transport error), within 60 s of the loss, once.
 - The host invalidates it on `Bye` from either side, "Desconectar", a grant change (an `Elevate` is one, so after a lost link the reconnect enters again through `UNATTENDED`, unelevated, and the elevation is asked again), Forget, lock-on-end, and once used.
+- "Desconectar" by the host's user on a session that is lost (Reconectando) kills its token: until the 60 s window ends, a `Hello` from that device carrying it is answered `SessionRefused { DECLINED }`, never treated as an unknown token (which would let an `UNATTENDED` device in again or put a new prompt in front of the person); the viewer's reconnect loop stops on it. If the session resumed in the meantime it is ended with `Bye { NO_ERROR }`.
 - A resumed session gets the original session's grants ∩ the grants still stored; per-session additions of D8 survive only if still stored, otherwise they are dropped.
 - A host reboot loses every token: an unattended device reconnects through `UNATTENDED`; any other gets a fresh prompt.
 
