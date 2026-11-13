@@ -40,4 +40,6 @@ workspace = true
 features = [
     "std", "block2", "NSObject", "NSString", "NSURL", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSURLCache",
     "NSHTTPCookieStorage", "NSDate", "NSData", "NSDictionary", "NSError", "NSOperation",
+    # The volumes, places and Trash of `disk` (FILES-UI.md 7.4).
+    "NSFileManager", "NSArray", "NSValue", "NSEnumerator", "NSPathUtilities",
 ]

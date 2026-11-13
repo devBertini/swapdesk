@@ -1299,6 +1299,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "swapdesk-paint",
+ "swapdesk-sys-mac",
  "swapdesk-termview",
  "swapdesk-ui",
 ]
@@ -1311,6 +1312,7 @@ dependencies = [
  "accesskit_windows",
  "swapdesk-paint",
  "swapdesk-platform",
+ "swapdesk-sys-win",
  "swapdesk-termview",
  "swapdesk-ui",
  "windows",
@@ -1351,6 +1353,7 @@ dependencies = [
  "swapdesk-platform",
  "swapdesk-proto",
  "swapdesk-update",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

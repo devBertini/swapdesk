@@ -651,6 +651,40 @@ strings! {
     ExplorerPropsContents => "{0} {0|arquivo|arquivos} e {1} {1|pasta|pastas}, {2}", "{0} {0|file|files} and {1} {1|folder|folders}, {2}";
     ExplorerPropsMore => "A contagem parou em {0} itens.", "The count stopped at {0} items.";
     ExplorerPropsFree => "Livre neste disco: {0}", "Free on this disk: {0}";
+    // Slice 2b: the other computer's volumes and changes (FILES-UI.md 9)
+    ExplorerTrashThereTitle => "Mandar {0} {0|item|itens} para a Lixeira do {1}?", "Move {0} {0|item|items} to the Trash on {1}?";
+    ExplorerTrashThereTitleWindows => "Mandar {0} {0|item|itens} para a Lixeira do {1}?", "Move {0} {0|item|items} to the Recycle Bin on {1}?";
+    ExplorerTrashThereBody => "Eles podem ser recuperados na Lixeira do {0}.", "They can be restored from the bin on {0}.";
+    ExplorerNeeds11 => "O {0} usa o Swapdesk 1.0. Atualize o Swapdesk de lá para ver outros discos, criar, renomear, mover, apagar ou enviar pastas.", "{0} runs Swapdesk 1.0. Update Swapdesk there to see other disks, create, rename, move, delete or send folders.";
+    ExplorerHomeOnly10 => "O {0} usa o Swapdesk 1.0: só a pasta pessoal aparece.", "{0} runs Swapdesk 1.0: only the home folder is shown.";
+    ExplorerNeedsControl => "Mudar arquivos no {0} precisa também da permissão de controlar.", "Changing files on {0} also needs permission to control.";
+    ExplorerErrVolumeGone => "O disco {0} foi removido do {1}.", "The disk {0} was removed from {1}.";
+    ExplorerSystemProtected => "O Swapdesk não muda arquivos do sistema do {0}.", "Swapdesk does not change system files on {0}.";
+    ExplorerDriveLabeled => "{0} ({1})", "{0} ({1})";
+    ExplorerDriveRemovable => "Unidade removível ({0})", "Removable drive ({0})";
+    ExplorerDriveNetwork => "Unidade de rede ({0})", "Network drive ({0})";
+    ExplorerDriveOptical => "Unidade de CD/DVD ({0})", "CD/DVD drive ({0})";
+    ExplorerVolumeUnnamed => "Volume sem nome", "Untitled volume";
+    ExplorerVolumeSpace => "{0} livres de {1}", "{0} free of {1}";
+    ExplorerPlacePictures => "Imagens", "Pictures";
+    ExplorerPlaceMusic => "Música", "Music";
+    ExplorerPlaceVideos => "Vídeos", "Videos";
+    ExplorerConflictTitle => "{0} itens já existem em {1}", "{0} items already exist in {1}";
+    ExplorerConflictOneTitle => "“{0}” já existe em {1}", "“{0}” already exists in {1}";
+    ExplorerConflictApplyAll => "Fazer o mesmo com os outros", "Do the same for the others";
+    ExplorerConflictSkip => "Pular", "Skip";
+    ExplorerConflictReplace => "Substituir", "Replace";
+    ExplorerConflictKeepBoth => "Manter os dois", "Keep both";
+    ExplorerConflictReplaceNote => "O que for substituído vai para a Lixeira.", "What is replaced goes to the bin.";
+    BannerFilesSending => "Copiando arquivos: {0} de {1}", "Copying files: {0} of {1}";
+    BannerFilesReceiving => "Recebendo arquivos: {0} de {1}", "Receiving files: {0} of {1}";
+    BannerFilesRenamed => "Renomeou {0} {0|item|itens}", "Renamed {0} {0|item|items}";
+    BannerFilesMoved => "Moveu {0} {0|item|itens}", "Moved {0} {0|item|items}";
+    BannerFilesTrashed => "Mandou {0} {0|item|itens} para a Lixeira", "Moved {0} {0|item|items} to the bin";
+    BannerFilesNewFolder => "Criou uma pasta", "Created a folder";
+    BannerFilesOtherDisks => "Abrindo arquivos de outros discos", "Opening files on other disks";
+    AuditFilesChanged => "Mudou {0} {0|arquivo|arquivos} neste computador", "Changed {0} {0|file|files} on this computer";
+    AuditFilesReach => "Abriu arquivos fora da pasta pessoal", "Opened files outside the home folder";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

@@ -22,6 +22,8 @@ swapdesk-ui = { path = "../swapdesk-ui" }
 swapdesk-paint = { path = "../swapdesk-paint" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-termview = { path = "../swapdesk-termview" }
+# The bin and the volumes of this computer (`disk`), shared with the user helper.
+swapdesk-sys-win = { path = "../swapdesk-sys-win" }
 accesskit.workspace = true
 accesskit_windows.workspace = true
 

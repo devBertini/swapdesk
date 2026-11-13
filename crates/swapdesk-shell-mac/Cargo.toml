@@ -21,6 +21,8 @@ unimplemented = "warn"
 swapdesk-ui = { path = "../swapdesk-ui" }
 swapdesk-paint = { path = "../swapdesk-paint" }
 swapdesk-termview = { path = "../swapdesk-termview" }
+# The Trash and the volumes of this computer (`disk`), shared with the agent's file server.
+swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accesskit.workspace = true
