@@ -28,9 +28,11 @@ const EVENT_QUEUE: usize = 64;
 /// What a helper told the service. `Debug` shows sizes, never the pixels, audio, shell output or fault details.
 pub enum HelperEvent {
     Displays(DisplayList),
+    /// The fence (ACCOUNTS.md 5.1): the helper holds capture and input after a desktop switch of this generation.
+    CaptureHeld(u64),
     Video {
         header: swapdesk_proto::VideoHeader,
-        payload: Vec<u8>,
+        payload: bytes::Bytes,
     },
     CursorPos(CursorPosition),
     CursorShape(CursorShape),
@@ -43,6 +45,8 @@ pub enum HelperEvent {
         code: ErrorCode,
         what: String,
     },
+    /// The user helper's set of volumes changed (FILES-UI.md 7.4): the files service tells the viewers.
+    VolumesChanged,
     /// `HelperNote`: logged at INFO.
     Note {
         what: String,
@@ -72,6 +76,7 @@ impl core::fmt::Debug for HelperEvent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Displays(d) => f.debug_tuple("Displays").field(d).finish(),
+            Self::CaptureHeld(g) => f.debug_tuple("CaptureHeld").field(g).finish(),
             Self::Video { header, payload } => {
                 f.debug_struct("Video").field("header", header).field("payload", &RedactedLen(payload.len())).finish()
             }
@@ -81,6 +86,7 @@ impl core::fmt::Debug for HelperEvent {
             Self::AudioMode(m) => f.debug_tuple("AudioMode").field(m).finish(),
             Self::Desktop(d) => f.debug_tuple("Desktop").field(d).finish(),
             Self::SasRequest => f.write_str("SasRequest"),
+            Self::VolumesChanged => f.write_str("VolumesChanged"),
             Self::Fault { code, what } => {
                 f.debug_struct("Fault").field("code", code).field("what", &RedactedLen(what.len())).finish()
             }
@@ -139,6 +145,10 @@ pub struct HelperLink {
     rpc: Arc<Rpc>,
     /// The disk proxy toward this helper (C2.4 "Files"): its calls wait for the replies the reader thread routes.
     fs: Arc<PipeCaller>,
+    /// The generation of the desktop switch the helper holds after (the fence, ACCOUNTS.md 5.1); 0: none.
+    pub(crate) held: AtomicU64,
+    /// The last generation the service let go on.
+    pub(crate) resumed: AtomicU64,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -152,6 +162,11 @@ impl HelperLink {
     /// in-process helper): never the one in the helper's `Hello`, which the helper itself writes.
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The helper holds after a desktop switch the service has not let go on (the fence).
+    pub fn is_held(&self) -> bool {
+        self.held.load(Ordering::SeqCst) > self.resumed.load(Ordering::SeqCst)
     }
 
     /// False once the pipe is closed.
@@ -191,6 +206,14 @@ impl HelperLink {
     /// The same for a thread that is not on the runtime (it may block for room).
     pub fn send_blocking(&self, msg: Message) -> bool {
         self.outbox.send_control(msg)
+    }
+
+    /// The core stops: tells the helper to shut down and ends the link's writing side. What is queued still goes
+    /// out, nothing more is taken, and the writer thread then lets go of the pipe, so a helper that missed the
+    /// `Shutdown` (a full queue) reads the end of its pipe instead.
+    pub(crate) fn stop(&self) {
+        self.send_now(Message::Shutdown);
+        self.outbox.finish();
     }
 }
 
@@ -239,7 +262,17 @@ where
         .name(format!("service-helper-{kind:?}"))
         .spawn(move || read_loop(reader, &tx, &closer, &reading, &pending))
         .map_err(AttachError::Spawn)?;
-    let link = HelperLink { id, kind, pid, outbox, displays: Mutex::new(Vec::new()), rpc, fs };
+    let link = HelperLink {
+        id,
+        kind,
+        pid,
+        outbox,
+        displays: Mutex::new(Vec::new()),
+        rpc,
+        fs,
+        held: AtomicU64::new(0),
+        resumed: AtomicU64::new(0),
+    };
     Ok(Attached { link, events })
 }
 
@@ -250,11 +283,12 @@ fn read_loop<R: Read>(
     rpc: &Rpc,
     fs: &Pending,
 ) {
-    let error = loop {
+    // `Some`: the pipe ended, with its error if it had one. `None`: the pipe still works and nobody listens.
+    let ended = loop {
         let msg = match reader.read_message() {
             Ok(Some(m)) => m,
-            Ok(None) => break None,
-            Err(e) => break Some(e.to_string()),
+            Ok(None) => break Some(None),
+            Err(e) => break Some(Some(e.to_string())),
         };
         let event = match msg {
             Message::Displays(list) => HelperEvent::Displays(list),
@@ -264,6 +298,8 @@ fn read_loop<R: Read>(
             Message::AudioPacket(d) => HelperEvent::Audio(d.0),
             Message::AudioMode { mode } => HelperEvent::AudioMode(mode),
             Message::DesktopChanged(d) => HelperEvent::Desktop(d),
+            Message::FsVolumesChanged => HelperEvent::VolumesChanged,
+            Message::CaptureHeld { generation } => HelperEvent::CaptureHeld(generation),
             Message::SasRequest => HelperEvent::SasRequest,
             Message::HelperFault { code, what } => HelperEvent::Fault { code, what: what.0 },
             Message::HelperNote { what } => HelperEvent::Note { what: what.0 },
@@ -280,20 +316,26 @@ fn read_loop<R: Read>(
                 fs.complete(req, result);
                 continue;
             }
-            Message::Bye { .. } => break None,
-            other => break Some(format!("unexpected message {:#x} from a helper", other.type_code())),
+            Message::Bye { .. } => break Some(None),
+            other => break Some(Some(format!("unexpected message {:#x} from a helper", other.type_code()))),
         };
         if tx.blocking_send(event).is_err() {
             // Nobody listens any more (the core is shutting down).
             break None;
         }
     };
-    // Whatever ended the pipe, nothing can be written to it from now on either, and the disk calls in flight fail
-    // (the read handles of that helper died with it).
-    outbox.close();
+    match &ended {
+        // Whatever ended the pipe, nothing can be written to it from now on either.
+        Some(_) => outbox.close(),
+        // The pipe still works: what the core queued as it stopped (its `Shutdown`) goes out, then the writer thread
+        // ends and the helper reads the end of its pipe. Closing here would discard that `Shutdown` and leave the
+        // writer alive with the link, so a helper could wait for ever on a pipe that says nothing.
+        None => outbox.finish(),
+    }
+    // The disk calls in flight fail (the read handles of that helper died with it).
     rpc.close();
     fs.close();
-    let _ = tx.blocking_send(HelperEvent::Gone { error });
+    let _ = tx.blocking_send(HelperEvent::Gone { error: ended.flatten() });
 }
 
 #[cfg(test)]
@@ -317,8 +359,16 @@ mod debug_tests {
         }
     }
 
+    /// Byte 233 as a `Vec<u8>` prints it (`233`) or as a `bytes::Bytes` does (`\xe9`).
     fn leaks_byte(shown: &str) -> bool {
-        shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233")
+        shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233") || shown.contains("xe9")
+    }
+
+    #[test]
+    fn the_leak_check_sees_a_byte_in_both_spellings() {
+        assert!(leaks_byte(&format!("{:?}", vec![233u8; 4])));
+        assert!(leaks_byte(&format!("{:?}", bytes::Bytes::from(vec![233u8; 4]))));
+        assert!(!leaks_byte("Video { payload: <redacted 32 bytes> }"));
     }
 
     #[test]
@@ -328,7 +378,7 @@ mod debug_tests {
             rgba: vec![233; 16],
         };
         let events = [
-            HelperEvent::Video { header: video_header(), payload: vec![233; 32] },
+            HelperEvent::Video { header: video_header(), payload: vec![233; 32].into() },
             HelperEvent::Audio(vec![233; 20]),
             HelperEvent::CursorShape(shape.clone()),
             HelperEvent::PtyOutput { id: 1, bytes: vec![233; 9] },
@@ -347,7 +397,7 @@ mod debug_tests {
         assert!(format!("{:?}", events[3]).contains("<redacted 9 bytes>"));
         // The shared media relay's copy of the same events.
         let media = [
-            super::super::shared::MediaEv::Video { header: video_header(), payload: vec![233; 32] },
+            super::super::shared::MediaEv::Video { header: video_header(), payload: vec![233; 32].into() },
             super::super::shared::MediaEv::Audio(vec![233; 20]),
             super::super::shared::MediaEv::CursorShape(shape),
         ];

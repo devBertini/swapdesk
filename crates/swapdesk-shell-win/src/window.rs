@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use swapdesk_ui::a11y;
 use swapdesk_ui::debounce::{DEBOUNCE_MS, Debouncer};
-use swapdesk_ui::tokens::{layout, palette};
+use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{ControlId, EditId, Effect, WindowKind};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -32,12 +32,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::app::Shared;
-use crate::gfx::{Painter, Rect};
+use crate::gfx::{D2dPainter, Rect};
 use crate::surface::Surface;
 use crate::system::{WM_ACCESS, WM_EDIT_EVENT, WM_WAKE, edit_font, get_x, get_y, hiword, loword};
-use crate::view::{EditSlot, Frame, Interaction, Widget};
 use crate::viewer::{KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};
-use crate::{screens_main, screens_viewer, view};
+use swapdesk_paint::{EditSlot, Frame, Interaction, Widget};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS_NAME: PCWSTR = w!("SwapdeskWindow");
@@ -47,6 +46,9 @@ pub const TIMER_PLACEHOLDER: usize = 2;
 pub const TIMER_BANNER: usize = 4;
 /// One-shot: 150 ms after the last key typed in the address field (R-UI-4).
 const TIMER_ADDRESS: usize = 3;
+/// While an explorer drag runs: spring-loaded folders and auto-scroll (slice 3).
+const TIMER_DRAG: usize = 5;
+const DRAG_TICK_MS: u32 = 50;
 const EN_CHANGE: u16 = 0x0300;
 const EM_SETCUEBANNER: u32 = 0x1501;
 const EM_SETSEL: u32 = 0x00B1;
@@ -83,10 +85,21 @@ pub struct Window {
     video: Cell<Option<Rect>>,
     /// The viewer pipeline was told this window exists (and with which video rectangle and DPI).
     announced: Cell<Option<(swapdesk_platform::Rect, u32)>>,
+    /// The refresh rate of the monitor the window is on, read once per monitor (`(HMONITOR, Hz)`; reset by
+    /// `WM_DISPLAYCHANGE`, which a mode change sends).
+    refresh: Cell<(isize, u16)>,
     /// Mouse buttons (bit per `PointerButton`) whose press went to the pipeline and has not been released.
     held: Cell<u8>,
+    /// The explorer's second list (its right pane) and its largest scroll offset, for the wheel.
+    second_list: Cell<Option<(Rect, f32)>>,
+    /// The last click on a control: which and when (ms), for a double click on the explorer's rows.
+    last_click: Cell<Option<(ControlId, u64)>>,
+    /// Where the context menu opens, in screen pixels (the right click, or the focused row for the Menu key).
+    menu_at: Cell<(i32, i32)>,
+    /// The drag's timer runs.
+    drag_timer: Cell<bool>,
     edit_font: Cell<Option<windows::Win32::Graphics::Gdi::HFONT>>,
-    edit_brush: Cell<Option<(bool, HBRUSH)>>,
+    edit_brush: Cell<Option<(u32, HBRUSH)>>,
     /// A modal effect (menu, file dialog) to run after the message that asked for it has finished.
     pending_effect: RefCell<Option<Effect>>,
     /// The text of the address field while it waits for 150 ms of quiet (R-UI-4).
@@ -162,7 +175,12 @@ impl Window {
             list_area: Cell::new(None),
             video: Cell::new(None),
             announced: Cell::new(None),
+            refresh: Cell::new((0, 0)),
             held: Cell::new(0),
+            second_list: Cell::new(None),
+            last_click: Cell::new(None),
+            menu_at: Cell::new((0, 0)),
+            drag_timer: Cell::new(false),
             edit_font: Cell::new(None),
             edit_brush: Cell::new(None),
             pending_effect: RefCell::new(None),
@@ -207,6 +225,10 @@ impl Window {
                     let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
                 }
                 window.place_and_show();
+                if kind == WindowKind::Viewer {
+                    // Files dragged from Explorer (FILES-UI.md 4.2); revoked in WM_DESTROY.
+                    crate::drop_target::register(h, Rc::downgrade(&window));
+                }
                 Ok(window)
             }
             Err(e) => {
@@ -232,7 +254,7 @@ impl Window {
 
     /// The raw pointers a renderer attaches its video visual with (stage 15).
     pub fn native_surface(&self) -> Option<swapdesk_platform::NativeSurface> {
-        self.surface.borrow().as_ref().map(|s| s.native(&self.shared.gfx))
+        self.surface.borrow().as_ref().map(|s| s.native(&self.shared.gfx()))
     }
 
     /// The video rectangle in window pixels, as drawn (viewer only).
@@ -255,8 +277,11 @@ impl Window {
             if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
                 work = info.rcWork;
             }
+            let confirm = self.shared.state.borrow().elevated_confirm().is_some();
             let (dw, dh) = match self.kind {
-                WindowKind::Banner => screens_viewer::banner_size(),
+                WindowKind::Banner => swapdesk_paint::banner_size(),
+                // The elevated instance's window is the confirmation card alone.
+                _ if confirm => swapdesk_paint::confirm_size(),
                 _ => (layout::DESIGN_W, layout::DESIGN_H),
             };
             let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
@@ -280,6 +305,10 @@ impl Window {
                 let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
             }
             let _ = ShowWindow(hwnd, if self.kind == WindowKind::Banner { SW_SHOWNOACTIVATE } else { SW_SHOW });
+            if confirm {
+                // Started from the UAC prompt: the person must see it in front, not find it behind the app.
+                let _ = SetForegroundWindow(hwnd);
+            }
         }
     }
 
@@ -288,6 +317,142 @@ impl Window {
     /// The pipeline's hooks, for the viewer window only.
     fn host(&self) -> Option<&Arc<dyn ViewerHost>> {
         if self.kind == WindowKind::Viewer { self.shared.host.as_ref() } else { None }
+    }
+
+    /// Before a click's activation: the state learns Ctrl, Shift and whether it was the second click on the same control
+    /// within the system's double-click time (the explorer's rows select and open with them).
+    fn note_pointer_mods(&self, id: ControlId) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, VK_CONTROL, VK_SHIFT};
+        let now = crate::app::now_ms();
+        // SAFETY: plain reads of the keyboard state and the system's double-click time.
+        let (ctrl, shift, double) = unsafe {
+            (GetKeyState(i32::from(VK_CONTROL.0)) < 0, GetKeyState(i32::from(VK_SHIFT.0)) < 0, GetDoubleClickTime())
+        };
+        let again =
+            self.last_click.get().is_some_and(|(last, at)| last == id && now.saturating_sub(at) <= u64::from(double));
+        // A third click starts a new pair.
+        self.last_click.set(if again { None } else { Some((id, now)) });
+        self.shared.state.borrow_mut().set_pointer_mods(swapdesk_ui::PointerMods {
+            toggle: ctrl,
+            extend: shift,
+            clicks: if again { 2 } else { 1 },
+        });
+    }
+
+    /// The explorer of this viewer window is open (the picture is hidden, the rows take the mouse).
+    fn explorer_on(&self) -> bool {
+        self.kind == WindowKind::Viewer && self.shared.state.borrow().explorer_open()
+    }
+
+    /// A client point in pixels, in DIPs.
+    fn dips(&self, x: i32, y: i32) -> (f32, f32) {
+        let s = self.scale();
+        (x as f32 / s, y as f32 / s)
+    }
+
+    fn ctrl_down() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
+        // SAFETY: plain key state read.
+        unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+    }
+
+    // ----- a drag from the system's file manager (slice 4; the OLE target is `drop_target.rs`) -----
+
+    /// The control a system drag at the client pixel (`x`, `y`) is over. `None` is the picture of the Tela view; a
+    /// point of the viewer outside the picture and over no control gets a control that is no drop target.
+    fn drop_under(&self, x: i32, y: i32) -> Option<ControlId> {
+        let hit = self.hit_test(x, y);
+        if hit.is_some() || self.explorer_on() {
+            return hit;
+        }
+        match self.video_area() {
+            Some(r) if !r.contains(x as f32, y as f32) => Some(ControlId::NavHome),
+            _ => None,
+        }
+    }
+
+    /// A screen point as the client pixel of this window.
+    fn client_pixel(&self, screen: (i32, i32)) -> (i32, i32) {
+        let mut p = windows::Win32::Foundation::POINT { x: screen.0, y: screen.1 };
+        // SAFETY: our own window; plain coordinate conversion.
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd(), &mut p);
+        }
+        (p.x, p.y)
+    }
+
+    /// OLE `DragEnter`: files (or not) came over the window.
+    pub(crate) fn system_drag_enter(
+        &self,
+        data: swapdesk_ui::SystemDragData,
+        screen: (i32, i32),
+    ) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drag_enter(data, self.drop_under(x, y), self.dips(x, y), self)
+    }
+
+    /// OLE `DragOver`.
+    pub(crate) fn system_drag_over(&self, screen: (i32, i32)) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drag_over(self.drop_under(x, y), self.dips(x, y), self)
+    }
+
+    /// OLE `DragLeave`.
+    pub(crate) fn system_drag_leave(&self) {
+        self.shared.system_drag_leave();
+    }
+
+    /// OLE `Drop`.
+    pub(crate) fn system_drop(&self, screen: (i32, i32)) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drop(self.drop_under(x, y), self.dips(x, y), self)
+    }
+
+    /// The drag timer runs while a drag does: 50 ms ticks for the spring-loaded folders and the auto-scroll.
+    fn sync_drag_timer(&self) {
+        let active = self.shared.state.borrow().drag_active();
+        if active != self.drag_timer.get() {
+            self.drag_timer.set(active);
+            // SAFETY: our own window timer.
+            unsafe {
+                if active {
+                    SetTimer(Some(self.hwnd()), TIMER_DRAG, DRAG_TICK_MS, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd()), TIMER_DRAG);
+                }
+            }
+        }
+    }
+
+    /// One drag tick: the state clock, then the list under the pointer scrolls when it is in its top or bottom band.
+    fn drag_tick(&self) {
+        self.sync_drag_timer();
+        if !self.drag_timer.get() {
+            return;
+        }
+        self.shared.drag_tick(self);
+        let mut p = windows::Win32::Foundation::POINT::default();
+        // SAFETY: our window; the cursor position is read and converted to client pixels.
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd(), &mut p);
+        }
+        let (x, y) = self.dips(p.x, p.y);
+        let mut moved = false;
+        {
+            let mut ix = self.ix.borrow_mut();
+            if let Some((area, max)) = self.second_list.get().filter(|(a, _)| a.contains(x, y)) {
+                let to = (ix.drawer_scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, max);
+                moved = std::mem::replace(&mut ix.drawer_scroll, to) != to;
+            } else if let Some(area) = self.list_area.get().filter(|a| a.contains(x, y)) {
+                let to =
+                    (ix.scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, self.scroll_max.get());
+                moved = std::mem::replace(&mut ix.scroll, to) != to;
+            }
+        }
+        if moved {
+            self.invalidate();
+        }
     }
 
     /// The video rectangle in whole window pixels.
@@ -305,7 +470,19 @@ impl Window {
     /// gives the rectangle).
     fn sync_viewer_host(&self) {
         let Some(host) = self.host() else { return };
-        let (Some(area), dpi) = (self.video_px(), self.dpi.get()) else { return };
+        let Some(area) = self.video_px() else {
+            // The Arquivos view: no video rectangle. The picture moves out of the window (nothing is torn down, so
+            // going back is instant; the pointer and the keys have no video to reach meanwhile).
+            if let Some((last, dpi)) = self.announced.get()
+                && last.x > -50_000
+            {
+                let away = swapdesk_platform::Rect { x: -100_000, y: -100_000, ..last };
+                host.resized(away, self.scale());
+                self.announced.set(Some((away, dpi)));
+            }
+            return;
+        };
+        let dpi = self.dpi.get();
         let scale = self.scale();
         match self.announced.get() {
             None => {
@@ -319,6 +496,46 @@ impl Window {
                 self.announced.set(Some((area, dpi)));
             }
             Some(_) => {}
+        }
+    }
+
+    /// F-VIEW-06: tells the state the video area in physical pixels (`video_px` is already scaled by the DPI) and the
+    /// refresh rate of this window's monitor; the state sends `SetViewSize` when it changed. The Arquivos view has no
+    /// video rectangle: 0x0.
+    fn report_view_size(&self) {
+        if self.kind != WindowKind::Viewer {
+            return;
+        }
+        let (w, h) = self.video_px().map_or((0, 0), |r| (r.width, r.height));
+        let hz = self.monitor_refresh_hz();
+        let commands = self.shared.state.borrow_mut().set_view_area(w, h, hz);
+        self.shared.send_commands(commands);
+    }
+
+    /// The refresh rate in Hz of the monitor the window is on (0 when unknown).
+    fn monitor_refresh_hz(&self) -> u16 {
+        use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, MONITORINFOEXW};
+        // SAFETY: plain Win32 queries on our own window and on structs of the right size and `cbSize`.
+        unsafe {
+            let monitor = MonitorFromWindow(self.hwnd(), MONITOR_DEFAULTTONEAREST);
+            let key = monitor.0 as isize;
+            let (cached, hz) = self.refresh.get();
+            if cached == key && hz != 0 {
+                return hz;
+            }
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            if !GetMonitorInfoW(monitor, std::ptr::from_mut(&mut info).cast()).as_bool() {
+                return 0;
+            }
+            let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+            if !EnumDisplaySettingsW(PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool() {
+                return 0;
+            }
+            // 0 and 1 mean "the hardware's default" (docs: DEVMODEW.dmDisplayFrequency).
+            let hz = if mode.dmDisplayFrequency > 1 { u16::try_from(mode.dmDisplayFrequency).unwrap_or(0) } else { 0 };
+            self.refresh.set((key, hz));
+            hz
         }
     }
 
@@ -366,6 +583,10 @@ impl Window {
     /// dropped (no activation), and every button the viewer believes is down gets its button-up, so none stays
     /// stuck on the remote host.
     fn capture_lost(&self) {
+        if self.shared.state.borrow().drag_active() {
+            self.shared.drag_cancel();
+            self.sync_drag_timer();
+        }
         let held = self.held.get();
         let was_pressed = self.ix.borrow_mut().pressed.take().is_some();
         if held != 0 {
@@ -448,8 +669,8 @@ impl Window {
     /// Offers a key message to the pipeline. `Some` when it takes the key away from the UI.
     fn forward_key(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let host = self.host()?;
-        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() {
-            return None; // a toolbar control has the keyboard focus, or nobody wants the keys
+        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() || self.shared.state.borrow().explorer_open() {
+            return None; // a toolbar control has the keyboard focus, nobody wants the keys, or the explorer is open
         }
         let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
         let sys = matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP);
@@ -497,10 +718,47 @@ impl Window {
         (text, dead)
     }
 
+    /// Lets go of the drawing surface: the viewer's pipeline detaches from it first, and the next paint makes a new
+    /// one (and announces it to the pipeline again).
+    pub fn drop_surface(&self) {
+        if self.announced.take().is_some()
+            && let Some(host) = self.host()
+        {
+            host.closed();
+        }
+        *self.surface.borrow_mut() = None;
+    }
+
     pub fn invalidate(&self) {
         // SAFETY: our window; repaints the whole client area on the next WM_PAINT.
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd()), None, false);
+        }
+    }
+
+    /// The banner is as tall as its content (one line more while it has a files line, FILES-UI.md 6): its window takes
+    /// the height the state asks for, keeping its place at the top. Other windows keep the size they have.
+    pub fn fit_banner(&self) {
+        if self.kind != WindowKind::Banner {
+            return;
+        }
+        let (dw, dh) = swapdesk_paint::banner_size_for(&self.shared.state.borrow());
+        let hwnd = self.hwnd();
+        // SAFETY: plain Win32 calls on our own window.
+        unsafe {
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            let scale = dpi as f32 / 96.0;
+            let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
+            let ex = WINDOW_EX_STYLE(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32);
+            let mut want =
+                RECT { left: 0, top: 0, right: (dw * scale).round() as i32, bottom: (dh * scale).round() as i32 };
+            let _ = AdjustWindowRectExForDpi(&mut want, style, false, ex, dpi);
+            let (w, h) = (want.right - want.left, want.bottom - want.top);
+            let mut now = RECT::default();
+            if GetWindowRect(hwnd, &mut now).is_err() || (now.right - now.left == w && now.bottom - now.top == h) {
+                return;
+            }
+            let _ = SetWindowPos(hwnd, None, now.left, now.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
         }
     }
 
@@ -585,40 +843,26 @@ impl Window {
 
     fn hit_test(&self, x: i32, y: i32) -> Option<ControlId> {
         let s = self.scale();
-        let (dx, dy) = (x as f32 / s, y as f32 / s);
-        self.widgets.borrow().iter().rev().find(|w| w.rect.contains(dx, dy)).map(|w| w.id)
+        swapdesk_paint::input::hit_test(&self.widgets.borrow(), x as f32 / s, y as f32 / s)
     }
 
     /// The focusable controls that were drawn, in Tab order.
     fn tab_order(&self) -> Vec<ControlId> {
-        let drawn = self.widgets.borrow();
-        self.shared
-            .state
-            .borrow()
-            .controls(self.kind)
-            .into_iter()
-            .filter(|c| c.id.focusable() && !c.disabled && drawn.iter().any(|w| w.id == c.id))
-            .map(|c| c.id)
-            .collect()
+        swapdesk_paint::input::tab_order(&self.shared.state.borrow(), self.kind, &self.widgets.borrow())
     }
 
     fn move_focus(&self, backwards: bool) {
-        let order = self.tab_order();
-        if order.is_empty() {
-            return;
+        let current = self.ix.borrow().focus;
+        if let Some(next) = swapdesk_paint::input::next_focus(&self.tab_order(), current, backwards) {
+            self.focus_control(next, true);
         }
-        let current = self.ix.borrow().focus.and_then(|f| order.iter().position(|&i| i == f));
-        let n = order.len();
-        let next = match (current, backwards) {
-            (None, false) => 0,
-            (None, true) => n - 1,
-            (Some(i), false) => (i + 1) % n,
-            (Some(i), true) => (i + n - 1) % n,
-        };
-        self.focus_control(order[next], true);
     }
 
     pub fn focus_control(&self, id: ControlId, visible: bool) {
+        #[cfg(test)]
+        {
+            *LAST_FOCUS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id);
+        }
         {
             let mut ix = self.ix.borrow_mut();
             ix.focus = Some(id);
@@ -657,7 +901,9 @@ impl Window {
 
     fn tree(&self) -> TreeUpdate {
         let focus = self.ix.borrow().focus;
-        a11y::build_tree(&self.shared.state.borrow(), self.kind, &|id| self.bounds_of(id), focus)
+        let mut tree = a11y::build_tree(&self.shared.state.borrow(), self.kind, &|id| self.bounds_of(id), focus);
+        crate::live_region::name_live_regions(&mut tree);
+        tree
     }
 
     /// Hands the current tree to UI Automation (if a client asked for it).
@@ -754,8 +1000,10 @@ impl Window {
                 }
             };
             let handle = handles.iter_mut().find(|h| h.id == slot.id).expect("the handle was just found or pushed");
-            // The rename field opens prefilled, with its text selected and the keyboard in it.
-            let opening = slot.id == EditId::Rename && (created_now || !handle.visible);
+            // A rename field opens prefilled, with its text selected and the keyboard in it; the explorer's selects the
+            // name without its extension (FILES-UI.md 3.2).
+            let renames = matches!(slot.id, EditId::Rename | EditId::ExpRename);
+            let opening = renames && (created_now || !handle.visible);
             // SAFETY: our child windows.
             unsafe {
                 if handle.font != font.0 as isize {
@@ -770,14 +1018,11 @@ impl Window {
                 if opening {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                     let _ = SetFocus(Some(hwnd));
-                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                    let end = if slot.id == EditId::ExpRename { stem_len(&slot.value) } else { -1 };
+                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(end)));
                 }
-                // The rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
-                if slot.id != EditId::Rename
-                    && GetFocus() != hwnd
-                    && !slot.value.is_empty()
-                    && edit_text(hwnd) != slot.value
-                {
+                // A rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
+                if !renames && GetFocus() != hwnd && !slot.value.is_empty() && edit_text(hwnd) != slot.value {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                 }
             }
@@ -835,8 +1080,8 @@ impl Window {
                 if id == EditId::Chat {
                     self.clear_edit(id);
                 }
-                // The rename field keeps the focus: a refused name is corrected in place.
-                if id != EditId::Rename {
+                // A rename field keeps the focus: a refused name is corrected in place.
+                if !matches!(id, EditId::Rename | EditId::ExpRename) {
                     // SAFETY: our own window takes the focus back.
                     unsafe {
                         let _ = SetFocus(Some(self.hwnd()));
@@ -847,6 +1092,9 @@ impl Window {
             3 => {
                 if id == EditId::Rename {
                     self.shared.activate(ControlId::RenameCancel, self);
+                }
+                if id == EditId::ExpRename {
+                    self.shared.explorer_key(swapdesk_ui::ExplorerKey::Escape, self);
                 }
                 if id == EditId::Name
                     && let Some(n) = self.shared.state.borrow().settings().map(|s| s.name.clone())
@@ -873,7 +1121,7 @@ impl Window {
             return Ok(());
         }
         let (w, h) = self.client_size();
-        let s = Surface::new(&self.shared.gfx, self.hwnd(), w, h, self.kind == WindowKind::Viewer)?;
+        let s = Surface::new(&self.shared.gfx(), self.hwnd(), w, h, self.kind == WindowKind::Viewer)?;
         *self.surface.borrow_mut() = Some(s);
         Ok(())
     }
@@ -885,7 +1133,7 @@ impl Window {
         if self.ensure_surface().is_err() {
             return;
         }
-        let gfx = &self.shared.gfx;
+        let gfx = self.shared.gfx();
         // The text formats follow the interface language (their DirectWrite locale); a change drops the cached ones.
         gfx.fonts.set_language(self.shared.state.borrow().language());
         let dpi = self.dpi.get() as f32;
@@ -903,30 +1151,31 @@ impl Window {
             // SAFETY: between BeginDraw and EndDraw.
             let size = unsafe { dc.GetSize() };
             let factory = gfx.factory();
-            let Ok(painter) = Painter::new(dc, &factory, &gfx.strokes, &gfx.fonts, scale) else {
+            let Ok(painter) = D2dPainter::new(dc, &factory, &gfx.strokes, &gfx.fonts, scale) else {
                 let _ = surface.end();
                 return;
             };
             let st = self.shared.state.borrow();
             let ix = self.ix.borrow();
-            let mut frame = Frame::new(&painter, &st, &ix, (size.width, size.height), false);
-            match self.kind {
-                WindowKind::Main => screens_main::paint(&mut frame),
-                WindowKind::Viewer => screens_viewer::paint_viewer(&mut frame),
-                WindowKind::Banner => screens_viewer::paint_banner(&mut frame),
-            }
-            out = view::finish(frame, self.kind == WindowKind::Viewer);
+            let frame = Frame::new(&painter, &st, &ix, (size.width, size.height), false);
+            out = swapdesk_paint::paint(frame, self.kind);
             let grid_focused = ix.focus == Some(ControlId::TermGrid);
             drop(ix);
             drop(st);
-            // The drawer's terminal grid, over the frame (its renderer is made the first time the panel shows it).
-            terminal_commands = self.shared.terminal.borrow_mut().paint(dc, out.terminal, scale, grid_focused);
+            // The drawer's terminal grid, over the frame, through the same painter as the screens.
+            terminal_commands = self.shared.terminal.borrow_mut().paint(&painter, out.terminal, grid_focused);
             if let Err(e) = surface.end()
                 && e.code() == D2DERR_RECREATE_TARGET
             {
                 drop(surface_ref);
-                *self.surface.borrow_mut() = None;
-                self.invalidate();
+                if gfx.device_removed() {
+                    // The device itself is gone: every window and the viewer move to a new one (they repaint when
+                    // it is made; while it cannot be, the next wake or message tries again, never a busy loop).
+                    let _ = self.shared.recover_device();
+                } else {
+                    *self.surface.borrow_mut() = None;
+                    self.invalidate();
+                }
                 return;
             }
         }
@@ -934,11 +1183,17 @@ impl Window {
         self.shared.send_commands(terminal_commands);
         self.scroll_max.set(out.scroll_max);
         self.list_area.set(out.list_area);
+        self.second_list.set(out.second_list);
         self.video.set(out.video);
         self.sync_viewer_host();
-        // The wheel can leave the list scrolled past a shorter list.
+        self.report_view_size();
+        // The wheel can leave the list scrolled past a shorter list; another scrolling content starts at its top.
         {
             let mut ix = self.ix.borrow_mut();
+            if ix.scroll_key != out.scroll_key {
+                ix.scroll_key = out.scroll_key;
+                ix.scroll = 0.0;
+            }
             ix.scroll = ix.scroll.clamp(0.0, out.scroll_max);
         }
         *self.widgets.borrow_mut() = out.widgets;
@@ -994,6 +1249,12 @@ impl Window {
                 }
                 Some(LRESULT(0))
             }
+            WM_DISPLAYCHANGE => {
+                // A mode change may have changed the monitor's refresh rate.
+                self.refresh.set((0, 0));
+                self.invalidate();
+                None
+            }
             WM_SIZE => {
                 if wparam.0 as u32 != SIZE_MINIMIZED {
                     let (w, h) = (u32::from(loword(lparam.0)), u32::from(hiword(lparam.0)));
@@ -1009,7 +1270,7 @@ impl Window {
             WM_DPICHANGED => {
                 self.dpi.set(u32::from(loword(wparam.0 as isize)));
                 // The cached text layouts were made for the old scale.
-                self.shared.gfx.fonts.clear_layouts();
+                self.shared.gfx().fonts.clear_layouts();
                 if let Some(f) = self.edit_font.take() {
                     // SAFETY: the font is ours and no control uses it after the next WM_SETFONT.
                     unsafe {
@@ -1033,7 +1294,8 @@ impl Window {
                 Some(LRESULT(0))
             }
             WM_GETMINMAXINFO => {
-                if self.kind == WindowKind::Banner {
+                // The banner and the confirmation window keep the size they were given.
+                if self.kind == WindowKind::Banner || self.shared.state.borrow().elevated_confirm().is_some() {
                     return None;
                 }
                 let dpi = self.dpi.get();
@@ -1061,9 +1323,16 @@ impl Window {
                     && unsafe { PCWSTR(lparam.0 as *const u16).to_string().is_ok_and(|s| s == "ImmersiveColorSet") };
                 // Every top-level window gets the broadcast; the handler updates all the windows (palette, title bar
                 // and repaint), whichever kind received it first.
-                if is_theme {
+                // A contrast theme turned on or off arrives as SPI_SETHIGHCONTRAST.
+                let contrast = wparam.0 == windows::Win32::UI::WindowsAndMessaging::SPI_SETHIGHCONTRAST.0 as usize;
+                if is_theme || contrast {
                     self.shared.system_theme_changed();
                 }
+                None
+            }
+            // The colours of the contrast theme were edited.
+            windows::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE => {
+                self.shared.system_theme_changed();
                 None
             }
             WM_MOUSEMOVE => {
@@ -1082,6 +1351,14 @@ impl Window {
                 let previous = std::mem::replace(&mut self.ix.borrow_mut().hover, hit);
                 if previous != hit {
                     self.invalidate_controls(&[previous, hit]);
+                }
+                if self.explorer_on() && wparam.0 & 0x0001 != 0 {
+                    // MK_LBUTTON: a press on a row, moved, is the explorer drag.
+                    self.shared.drag_move(hit, self.dips(x, y), Self::ctrl_down(), self);
+                    self.sync_drag_timer();
+                    if crate::drag_out::outside_client(hwnd, x, y) {
+                        self.shared.drag_left_window(self); // slice 5: a drag of the right pane leaves
+                    }
                 }
                 self.forward_mouse(MouseKind::Move, x, y, hit);
                 Some(LRESULT(0))
@@ -1154,6 +1431,10 @@ impl Window {
                     before
                 };
                 self.forward_button(PointerButton::Left, true, lparam);
+                if self.explorer_on() {
+                    let at = self.dips(x, y);
+                    self.shared.state.borrow_mut().drag_press(hit, at);
+                }
                 if let Some(ControlId::Edit(e)) = hit {
                     self.focus_control(ControlId::Edit(e), false);
                 } else {
@@ -1171,6 +1452,13 @@ impl Window {
                 let pressed = self.ix.borrow_mut().pressed.take();
                 let hit = self.hit_test(x, y);
                 let was_hover = std::mem::replace(&mut self.ix.borrow_mut().hover, hit);
+                // Before the capture is released: that would report a lost capture and cancel the drag. A drag that
+                // ran (or was cancelled) makes this release no click on what is under the pointer.
+                let ended = self.explorer_on() && {
+                    let ended = self.shared.drag_release(hit, self.dips(x, y), Self::ctrl_down(), self);
+                    self.sync_drag_timer();
+                    ended
+                };
                 self.forward_button(PointerButton::Left, false, lparam);
                 if self.held.get() == 0 {
                     // SAFETY: balances SetCapture.
@@ -1179,14 +1467,51 @@ impl Window {
                 self.invalidate_changed(&[pressed, was_hover, hit]);
                 if let (Some(p), Some(h)) = (pressed, hit)
                     && p == h
+                    && !ended
                     && !matches!(p, ControlId::Edit(_))
                 {
+                    self.note_pointer_mods(p);
                     self.shared.activate(p, self);
                 }
                 Some(LRESULT(0))
             }
             WM_MOUSEWHEEL if self.forward_wheel(false, wparam, lparam) => Some(LRESULT(0)),
             WM_MOUSEHWHEEL if self.forward_wheel(true, wparam, lparam) => Some(LRESULT(0)),
+            // The explorer context menu (slice 3): the right button belongs to the window, not to the host.
+            WM_RBUTTONDOWN if self.explorer_on() => Some(LRESULT(0)),
+            WM_RBUTTONUP if self.explorer_on() => {
+                let (x, y) = (get_x(lparam.0), get_y(lparam.0));
+                let hit = self.hit_test(x, y);
+                let mut p = windows::Win32::Foundation::POINT { x, y };
+                // SAFETY: our window; converts a client point to screen coordinates.
+                let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p) };
+                self.menu_at.set((p.x, p.y));
+                self.shared.context_menu(hit, false, self);
+                Some(LRESULT(0))
+            }
+            // Shift+F10 and the Menu key arrive with no pointer (lParam -1): the focused row, else the focused pane.
+            windows::Win32::UI::WindowsAndMessaging::WM_CONTEXTMENU if self.explorer_on() => {
+                let (hit, anchor) = if lparam.0 == -1 {
+                    let focus = self.ix.borrow().focus;
+                    let b = focus.and_then(|f| self.bounds_of(f));
+                    let mut p = windows::Win32::Foundation::POINT {
+                        x: b.map_or(16, |b| b.0 as i32 + 16),
+                        y: b.map_or(16, |b| ((b.1 + b.3) / 2.0) as i32),
+                    };
+                    // SAFETY: our window; converts a client point to screen coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p) };
+                    (focus, (p.x, p.y))
+                } else {
+                    let mut p = windows::Win32::Foundation::POINT { x: get_x(lparam.0), y: get_y(lparam.0) };
+                    let screen = (p.x, p.y);
+                    // SAFETY: our window; converts a screen point to client coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p) };
+                    (self.hit_test(p.x, p.y), screen)
+                };
+                self.menu_at.set(anchor);
+                self.shared.context_menu(hit, lparam.0 == -1, self);
+                Some(LRESULT(0))
+            }
             WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP if self.host().is_some() => {
                 let (button, down) = match msg {
                     WM_RBUTTONDOWN => (PointerButton::Right, true),
@@ -1211,6 +1536,20 @@ impl Window {
             }
             WM_MOUSEWHEEL => {
                 let delta = i32::from(hiword(wparam.0 as isize) as i16);
+                // Over the explorer's right pane the wheel scrolls that pane (the wheel carries screen coordinates).
+                if let Some((area, max)) = self.second_list.get() {
+                    let mut pt = windows::Win32::Foundation::POINT { x: get_x(lparam.0), y: get_y(lparam.0) };
+                    // SAFETY: our window; converts a point to its client coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) };
+                    let scale = self.scale();
+                    if area.contains(pt.x as f32 / scale, pt.y as f32 / scale) {
+                        let mut ix = self.ix.borrow_mut();
+                        ix.drawer_scroll = (ix.drawer_scroll - delta as f32 / 120.0 * 50.0).clamp(0.0, max);
+                        drop(ix);
+                        self.invalidate();
+                        return Some(LRESULT(0));
+                    }
+                }
                 let max = self.scroll_max.get();
                 if max > 0.0 {
                     let mut ix = self.ix.borrow_mut();
@@ -1218,6 +1557,15 @@ impl Window {
                     drop(ix);
                     self.invalidate();
                 }
+                Some(LRESULT(0))
+            }
+            // Alt+Enter: the explorer's Propriedades (FILES-UI.md 3.2).
+            WM_SYSKEYDOWN
+                if wparam.0 as u16 == VK_RETURN.0
+                    && self.kind == WindowKind::Viewer
+                    && self.shared.state.borrow().explorer_open() =>
+            {
+                self.shared.explorer_key(swapdesk_ui::ExplorerKey::Properties, self);
                 Some(LRESULT(0))
             }
             WM_KEYDOWN => {
@@ -1235,13 +1583,27 @@ impl Window {
                     }
                     return Some(LRESULT(0));
                 }
-                if key == VK_ESCAPE.0 && self.kind != WindowKind::Main {
+                if self.kind == WindowKind::Viewer
+                    && self.shared.state.borrow().explorer_open()
+                    && let Some(k) = explorer_key_of(key)
+                {
+                    self.shared.explorer_key(k, self);
                     return Some(LRESULT(0));
+                }
+                if key == VK_ESCAPE.0 {
+                    if self.kind != WindowKind::Main || self.shared.escape(self) {
+                        return Some(LRESULT(0));
+                    }
+                    return None;
                 }
                 None
             }
             WM_SETFOCUS | WM_KILLFOCUS => {
                 let focused = msg == WM_SETFOCUS;
+                if !focused && self.shared.state.borrow().drag_active() {
+                    self.shared.drag_cancel();
+                    self.sync_drag_timer();
+                }
                 if let Some(host) = self.host() {
                     host.focus(focused);
                 }
@@ -1266,10 +1628,9 @@ impl Window {
                 result.map(Into::into)
             }
             WM_CTLCOLOREDIT => {
-                let dark = self.shared.state.borrow().dark();
-                let pal = palette(dark);
+                let pal = self.shared.state.borrow().palette();
                 let brush = match self.edit_brush.get() {
-                    Some((d, b)) if d == dark => b,
+                    Some((surface, b)) if surface == pal.surface.hex() => b,
                     old => {
                         if let Some((_, b)) = old {
                             // SAFETY: the old brush is ours and no longer selected anywhere.
@@ -1279,7 +1640,7 @@ impl Window {
                         }
                         // SAFETY: plain brush creation.
                         let b = unsafe { CreateSolidBrush(colorref(pal.surface.hex())) };
-                        self.edit_brush.set(Some((dark, b)));
+                        self.edit_brush.set(Some((pal.surface.hex(), b)));
                         b
                     }
                 };
@@ -1314,6 +1675,10 @@ impl Window {
                 self.handle_access_actions();
                 Some(LRESULT(0))
             }
+            crate::drag_out::WM_SYSDRAG => {
+                self.shared.system_drag_pump();
+                Some(LRESULT(0))
+            }
             WM_WAKE => {
                 self.shared.drain_backend();
                 Some(LRESULT(0))
@@ -1323,6 +1688,7 @@ impl Window {
                     TIMER_TICK => self.shared.tick(),
                     TIMER_PLACEHOLDER => self.shared.arm_placeholders(),
                     TIMER_BANNER => self.shared.banner_tick(),
+                    TIMER_DRAG => self.drag_tick(),
                     TIMER_ADDRESS => {
                         // SAFETY: our own window's timer.
                         unsafe {
@@ -1338,6 +1704,48 @@ impl Window {
                 }
                 Some(LRESULT(0))
             }
+            crate::system::WM_QUIT_APP if self.kind == WindowKind::Main => {
+                // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+                Some(LRESULT(0))
+            }
+            WM_CLOSE if self.kind == WindowKind::Main && self.shared.tray.get() => {
+                // D32 on both systems: the interface stays in the notification area, connected to the service.
+                // SAFETY: hides our own window.
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                Some(LRESULT(0))
+            }
+            crate::tray::WM_TRAY if self.kind == WindowKind::Main => {
+                use windows::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_RBUTTONUP};
+                let event = (lparam.0 & 0xFFFF) as u32;
+                match event {
+                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.run_tray_action(hwnd, crate::tray::TrayAction::Open),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => {
+                        let (open, quit) = {
+                            let st = self.shared.state.borrow();
+                            (st.t(swapdesk_ui::MsgKey::StatusOpen), st.t(swapdesk_ui::MsgKey::StatusQuit))
+                        };
+                        crate::tray::menu(hwnd, &open, &quit);
+                    }
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
+            // The tray menu's entries arrive as commands (menu items carry no notification code).
+            WM_COMMAND
+                if self.kind == WindowKind::Main
+                    && hiword(wparam.0 as isize) == 0
+                    && crate::tray::TrayAction::from_command(loword(wparam.0 as isize) as usize).is_some() =>
+            {
+                if let Some(action) = crate::tray::TrayAction::from_command(loword(wparam.0 as isize) as usize) {
+                    self.run_tray_action(hwnd, action);
+                }
+                Some(LRESULT(0))
+            }
             WM_CLOSE => {
                 if self.kind == WindowKind::Viewer {
                     // Closing the viewer ends the session; the window goes when the session has ended.
@@ -1347,6 +1755,9 @@ impl Window {
                 None
             }
             WM_DESTROY => {
+                if self.kind == WindowKind::Viewer {
+                    crate::drop_target::revoke(self.hwnd());
+                }
                 if self.announced.take().is_some()
                     && let Some(host) = self.host()
                 {
@@ -1362,12 +1773,32 @@ impl Window {
         }
     }
 
+    /// What the notification area icon asks of the main window: show and raise it, or end the run.
+    fn run_tray_action(&self, hwnd: HWND, action: crate::tray::TrayAction) {
+        match action {
+            // SAFETY: shows and raises our own window.
+            crate::tray::TrayAction::Open => unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+            },
+            // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
+            crate::tray::TrayAction::Quit => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
+        }
+    }
+
     pub fn take_pending_effect(&self) -> Option<Effect> {
         self.pending_effect.borrow_mut().take()
     }
 
     pub fn set_pending_effect(&self, e: Effect) {
         *self.pending_effect.borrow_mut() = Some(e);
+    }
+
+    /// Where the context menu opens, in screen pixels.
+    pub fn menu_point(&self) -> (i32, i32) {
+        self.menu_at.get()
     }
 
     pub fn screen_point_of(&self, id: ControlId) -> (i32, i32) {
@@ -1398,12 +1829,23 @@ fn colorref(rgb: u32) -> windows::Win32::Foundation::COLORREF {
     windows::Win32::Foundation::COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
 }
 
+/// The UTF-16 length of a file name without its extension (the whole name when it has none, or starts with its only
+/// dot), what the explorer's rename selects.
+fn stem_len(name: &str) -> isize {
+    let stem = match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    };
+    isize::try_from(stem.encode_utf16().count()).unwrap_or(-1)
+}
+
 fn edit_code(id: EditId) -> usize {
     match id {
         EditId::Name => 1,
         EditId::Chat => 2,
         EditId::Address => 3,
         EditId::Rename => 4,
+        EditId::ExpRename => 5,
     }
 }
 
@@ -1413,6 +1855,7 @@ fn edit_from_code(code: usize) -> Option<EditId> {
         2 => Some(EditId::Chat),
         3 => Some(EditId::Address),
         4 => Some(EditId::Rename),
+        5 => Some(EditId::ExpRename),
         _ => None,
     }
 }
@@ -1457,6 +1900,10 @@ fn guard_callback<R>(origin: &'static str, body: impl FnOnce() -> R) -> std::res
         crate::system::trace_line(&format!("swapdesk: panic caught in {origin}"));
     })
 }
+
+/// The control the shell focused last (tests read it from another thread).
+#[cfg(test)]
+pub(crate) static LAST_FOCUS: std::sync::Mutex<Option<ControlId>> = std::sync::Mutex::new(None);
 
 /// Test-only hook point: the next message with this id panics once at the start of its handling (0: none).
 #[cfg(test)]
@@ -1600,6 +2047,26 @@ fn message_name(msg: u32) -> &'static str {
         WM_DPICHANGED => "WM_DPICHANGED",
         _ => "window message",
     }
+}
+
+/// The explorer's keys on Windows (FILES-UI.md 3.2): F2, Delete, Shift+Delete, Ctrl+Shift+N, Alt+Enter, Ctrl+X, Ctrl+V
+/// and Esc. Alt+Enter arrives as WM_SYSKEYDOWN and is mapped there.
+fn explorer_key_of(key: u16) -> Option<swapdesk_ui::ExplorerKey> {
+    use swapdesk_ui::ExplorerKey as K;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_DELETE, VK_F2, VK_N, VK_V, VK_X};
+    // SAFETY: plain key state reads.
+    let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
+    let (ctrl, shift) = (down(VK_CONTROL.0), down(VK_SHIFT.0));
+    Some(match key {
+        k if k == VK_F2.0 => K::Rename,
+        k if k == VK_DELETE.0 && shift => K::DeleteForever,
+        k if k == VK_DELETE.0 => K::Delete,
+        k if k == VK_N.0 && ctrl && shift => K::NewFolder,
+        k if k == VK_X.0 && ctrl => K::Cut,
+        k if k == VK_V.0 && ctrl => K::Paste,
+        k if k == VK_ESCAPE.0 => K::Escape,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

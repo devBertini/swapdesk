@@ -1,8 +1,8 @@
 //! Helper loop tests: a service-side driver talks to `run_helper` over an in-memory duplex pipe, with the C7 fakes.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -20,10 +20,22 @@ use crate::testpipe::{PipeWriter, duplex};
 const WAIT: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_millis(400);
 
+/// The id the one display has after the monitors changed (see `Tracked::moved`).
+const MOVED_DISPLAY: u16 = 5;
+
 /// A synthetic screen that counts how many of it are alive.
 struct Tracked {
     inner: SyntheticScreen,
     live: Arc<AtomicUsize>,
+    /// Set while the test plays "a monitor was plugged in and the lid closed": display 0 is gone and the same
+    /// picture is display `MOVED_DISPLAY`, the only one and the primary.
+    moved: Option<Arc<AtomicBool>>,
+}
+
+impl Tracked {
+    fn is_moved(&self) -> bool {
+        self.moved.as_ref().is_some_and(|m| m.load(Ordering::SeqCst))
+    }
 }
 
 impl Drop for Tracked {
@@ -34,9 +46,20 @@ impl Drop for Tracked {
 
 impl ScreenSource for Tracked {
     fn displays(&mut self) -> PResult<Vec<DisplayInfo>> {
-        self.inner.displays()
+        let mut list = self.inner.displays()?;
+        if self.is_moved() {
+            for d in &mut list {
+                d.id = DisplayId(MOVED_DISPLAY);
+            }
+        }
+        Ok(list)
     }
     fn open(&mut self, display: DisplayId, config: CaptureConfig) -> PResult<()> {
+        if self.is_moved() {
+            // Only the new id exists; any other is refused as the fake refuses an unknown display.
+            let inner = if display == DisplayId(MOVED_DISPLAY) { DisplayId(0) } else { DisplayId(u16::MAX) };
+            return self.inner.open(inner, config);
+        }
         self.inner.open(display, config)
     }
     fn next_frame(&mut self, timeout: Duration) -> PResult<Option<Frame>> {
@@ -53,14 +76,28 @@ impl ScreenSource for Tracked {
     }
 }
 
+/// A size `Passthrough` refuses to configure, as a hardware encoder may refuse one (F-VIEW-06).
+pub(crate) const REFUSED_SIZE: (u32, u32) = (20, 14);
+
 /// Emits a 4-byte marker (the encode counter) as the payload; keyframe on the first and on forced frames.
 pub(crate) struct Passthrough {
     pub(crate) n: u32,
+    /// The size `configure` was given: the frames come out at it, as a real encoder's do (F-VIEW-06).
+    pub(crate) size: Option<(u32, u32)>,
 }
 
 impl VideoEncoder for Passthrough {
-    fn configure(&mut self, _config: &EncoderConfig) -> PResult<EncoderInfo> {
+    fn configure(&mut self, config: &EncoderConfig) -> PResult<EncoderInfo> {
+        if (config.width, config.height) == REFUSED_SIZE {
+            return Err(PlatformError {
+                kind: swapdesk_platform::ErrorKind::Unavailable,
+                op: "configure",
+                os_code: None,
+                detail: "size refused".into(),
+            });
+        }
         self.n = 0;
+        self.size = Some((config.width, config.height));
         Ok(EncoderInfo {
             name: "passthrough".into(),
             hardware: false,
@@ -78,8 +115,8 @@ impl VideoEncoder for Passthrough {
             encode_us: 7,
             keyframe: first || force_keyframe,
             config_change: first,
-            width: u16::try_from(frame.width).unwrap(),
-            height: u16::try_from(frame.height).unwrap(),
+            width: u16::try_from(self.size.map_or(frame.width, |s| s.0)).unwrap(),
+            height: u16::try_from(self.size.map_or(frame.height, |s| s.1)).unwrap(),
             annex_b: marker,
         }])
     }
@@ -99,11 +136,20 @@ pub(crate) struct Rig {
     helper: Option<JoinHandle<Result<HelperStats, HelperError>>>,
     input: RecordingInputSink,
     live: Arc<AtomicUsize>,
+    /// The helper's clock: a test that waits out the resize debounce moves it.
+    clock: Arc<FakeClock>,
 }
 
-fn deps(lost_at: Option<u32>, input: &RecordingInputSink, live: &Arc<AtomicUsize>) -> Deps {
+/// The helper's parts over the fakes; with `moved`, the screens follow that flag (see `Tracked::moved`).
+fn deps_moving(
+    lost_at: Option<u32>,
+    input: &RecordingInputSink,
+    live: &Arc<AtomicUsize>,
+    moved: Option<Arc<AtomicBool>>,
+    clock: &Arc<FakeClock>,
+) -> Deps {
     let screens = Arc::clone(live);
-    let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
+    let clock = Arc::clone(clock);
     let audio_clock = Arc::clone(&clock);
     HelperDeps::new(
         move |_| {
@@ -112,9 +158,9 @@ fn deps(lost_at: Option<u32>, input: &RecordingInputSink, live: &Arc<AtomicUsize
                 inner.script_access_lost_at(n);
             }
             screens.fetch_add(1, Ordering::SeqCst);
-            Ok(Tracked { inner, live: Arc::clone(&screens) })
+            Ok(Tracked { inner, live: Arc::clone(&screens), moved: moved.clone() })
         },
-        |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+        |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
         {
             let input = input.clone();
             move || Ok(input.clone())
@@ -131,10 +177,41 @@ fn rig(lost_at: Option<u32>) -> Rig {
 
 /// As `rig`, the helper serving `fs` (the user's disk) when it is given.
 pub(crate) fn rig_with(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsServer>>) -> Rig {
+    rig_moving(lost_at, fs, None)
+}
+
+/// As `rig_with`; with `moved`, the screens follow that flag (see `Tracked::moved`).
+fn rig_moving(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsServer>>, moved: Option<Arc<AtomicBool>>) -> Rig {
+    rig_full(lost_at, fs, moved, false)
+}
+
+fn rig_full(
+    lost_at: Option<u32>,
+    fs: Option<Arc<swapdesk_files::FsServer>>,
+    moved: Option<Arc<AtomicBool>>,
+    fence: bool,
+) -> Rig {
+    rig_probed(lost_at, fs, moved, fence, None)
+}
+
+/// `desktop`: what the helper's probe of the input desktop answers (the test changes it as the OS would).
+fn rig_probed(
+    lost_at: Option<u32>,
+    fs: Option<Arc<swapdesk_files::FsServer>>,
+    moved: Option<Arc<AtomicBool>>,
+    fence: bool,
+    desktop: Option<Arc<Mutex<swapdesk_proto::Desktop>>>,
+) -> Rig {
     let input = RecordingInputSink::new();
     let live = Arc::new(AtomicUsize::new(0));
     let (helper_end, service_end) = duplex();
-    let d = deps(lost_at, &input, &live);
+    let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
+    let d = deps_moving(lost_at, &input, &live, moved, &clock);
+    let d = if fence { d.with_fence() } else { d };
+    let d = match desktop {
+        Some(cell) => d.with_desktop_probe(move || *cell.lock().unwrap()),
+        None => d,
+    };
     let d = match fs {
         Some(server) => d.with_fs(server),
         None => d,
@@ -154,7 +231,7 @@ pub(crate) fn rig_with(lost_at: Option<u32>, fs: Option<Arc<swapdesk_files::FsSe
             }
         }
     });
-    Rig { writer: Some(writer), inbox, helper: Some(helper), input, live }
+    Rig { writer: Some(writer), inbox, helper: Some(helper), input, live, clock }
 }
 
 impl Rig {
@@ -169,6 +246,7 @@ impl Rig {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         });
     }
 
@@ -190,7 +268,7 @@ impl Rig {
 
     fn next_frame(&self) -> (VideoHeader, Vec<u8>) {
         self.wait(|m| match m {
-            Message::VideoFrame { header, payload } => Some((*header, payload.0.clone())),
+            Message::VideoFrame { header, payload } => Some((*header, payload.0.to_vec())),
             _ => None,
         })
     }
@@ -256,6 +334,92 @@ fn start_video_streams_frames_and_stop_video_ends_them() {
     rig.finish().expect("clean end");
 }
 
+/// The helper runs for hours; meanwhile a monitor is plugged in and the lid closed, so the display it listed at the
+/// start is gone and another id is the only one. The service still asks for the old display: the helper must list
+/// again, tell the service the displays that exist, and stream the new one when asked. (Before the fix the old list
+/// stayed, the capture of the vanished display failed, and the session had sound and no picture.)
+#[test]
+fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_streams_the_new_display() {
+    let moved = Arc::new(AtomicBool::new(false));
+    let mut rig = rig_moving(None, None, Some(Arc::clone(&moved)));
+    let ids = |m: &Message| match m {
+        Message::Displays(list) => Some(list.displays.iter().map(|d| d.id).collect::<Vec<_>>()),
+        _ => None,
+    };
+    assert_eq!(rig.wait(ids), [0], "the list of the start");
+
+    moved.store(true, Ordering::SeqCst);
+    rig.start_video(); // display 0: what the service still believes
+    assert_eq!(rig.wait(ids), [MOVED_DISPLAY], "the service learns the displays of now");
+
+    rig.send(&Message::StartVideo {
+        display: MOVED_DISPLAY,
+        fps: 100,
+        kbps: 1000,
+        quality: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_proto::Codec::H264,
+    });
+    let (first, _) = rig.next_frame();
+    assert_eq!(first.display_id, MOVED_DISPLAY, "the picture of the display that exists");
+    assert!(first.keyframe && first.config);
+
+    // An unchanged list is not sent again: a second start of the same display only streams.
+    rig.send(&Message::StopVideo { display: MOVED_DISPLAY });
+    rig.drain_until_quiet();
+    rig.send(&Message::StartVideo {
+        display: MOVED_DISPLAY,
+        fps: 100,
+        kbps: 1000,
+        quality: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_proto::Codec::H264,
+    });
+    let end = Instant::now() + WAIT;
+    loop {
+        match rig.inbox.recv_timeout(end.saturating_duration_since(Instant::now())).expect("a frame") {
+            Message::VideoFrame { .. } => break,
+            Message::Displays(_) => panic!("the list did not change: it must not be sent again"),
+            _ => {}
+        }
+    }
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+/// Owner, 12/11 (the Mac controlling the installed Windows service): the clicks landed below the pointer, y x 1.111.
+/// The helper that injected never captured, so it kept the display list of its start while the display had changed
+/// mode under the same id. The media helper's list, relayed by the service, reaches the sink before the next pointer,
+/// and the helper lists nothing itself on the pointer's path.
+#[test]
+fn the_displays_the_service_relays_reach_the_sink_before_the_next_pointer() {
+    let mut rig = rig(None);
+    let listed = |m: &Message| match m {
+        Message::Displays(list) => Some(list.clone()),
+        _ => None,
+    };
+    let mut relayed = rig.wait(listed);
+    for d in &mut relayed.displays {
+        d.height += 160;
+    }
+    let tall = relayed.displays[0].height;
+    let pointer = InputEvent::Pointer { display: 0, x: 100, y: 200 };
+    rig.send(&Message::Displays(relayed));
+    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+    let sent: Vec<Message> = rig.inbox.try_iter().collect();
+    assert!(!sent.iter().any(|m| matches!(m, Message::Displays(_))), "no listing on the pointer's path: {sent:?}");
+
+    let records = rig.input.records();
+    let changed = records
+        .iter()
+        .position(|r| matches!(&r.what, InputRecord::DisplaysChanged(l) if l[0].bounds.height == tall))
+        .expect("the sink got the relayed list");
+    let applied = records.iter().position(|r| r.what == InputRecord::Event(pointer.clone())).expect("the pointer");
+    assert!(changed < applied, "the sink maps over the new size before the pointer is applied");
+}
+
 #[test]
 fn force_keyframe_yields_a_keyframe() {
     let mut rig = rig(None);
@@ -289,6 +453,98 @@ fn access_lost_reacquires_and_the_next_frame_is_a_discontinuity_keyframe() {
     let after = frames[3];
     assert!(after.keyframe && after.discontinuity, "frame after reacquire: {after:?}");
     assert_eq!(after.frame_id, 3);
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+/// ACCOUNTS.md 5.1, the fence: after a desktop switch the helper tells the service first, then captures nothing and
+/// injects nothing until the service lets that switch's generation go on; then the next frame is a fresh keyframe.
+#[test]
+fn a_desktop_switch_holds_frames_and_input_until_the_service_resumes() {
+    let mut rig = rig_full(Some(3), None, None, true);
+    rig.start_video();
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    // The switch: `CaptureHeld` comes, and before any frame of the new desktop.
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before the service let it"),
+        _ => None,
+    });
+    assert_eq!(generation, 1);
+    // Input sent while held is dropped, and no frame comes.
+    rig.send(&Message::Input { events: Events(vec![InputEvent::Text("nunca".into())]) });
+    let quiet = Instant::now() + Duration::from_millis(400);
+    while let Some(left) = quiet.checked_duration_since(Instant::now()) {
+        if let Ok(m) = rig.inbox.recv_timeout(left) {
+            assert!(!matches!(m, Message::VideoFrame { .. }), "a frame while held");
+        }
+    }
+    assert!(rig.input.events().is_empty(), "nothing injected while held");
+    // The service lets it go on: a fresh keyframe, and input reaches the sink again.
+    rig.send(&Message::ResumeCapture { generation });
+    let (after, _) = rig.next_frame();
+    assert!(after.keyframe && after.discontinuity, "{after:?}");
+    rig.send(&Message::Input { events: Events(vec![InputEvent::Text("sim".into())]) });
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+    assert_eq!(rig.input.events(), vec![InputEvent::Text("sim".into())]);
+}
+
+/// F-UNAT-01: the helper names the input desktop to the service when a capture starts and after every switch, and
+/// the name of a switch comes before any picture of the new desktop (the service pauses the sessions that may not
+/// see it from that message on).
+#[test]
+fn the_helper_names_the_input_desktop_at_the_start_and_before_the_pictures_of_a_switch() {
+    use swapdesk_proto::Desktop;
+    let desktop = Arc::new(Mutex::new(Desktop::Default));
+    let mut rig = rig_probed(Some(3), None, None, true, Some(Arc::clone(&desktop)));
+    rig.start_video();
+    // The first thing a capture says is where it is, before its first frame.
+    let first = rig.wait(|m| match m {
+        Message::DesktopChanged(d) => Some(*d),
+        Message::VideoFrame { .. } => panic!("a frame came before the desktop was named"),
+        _ => None,
+    });
+    assert_eq!(first, Desktop::Default);
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    // The desktop changes under the capture (the scripted source loses its duplication after 3 frames).
+    *desktop.lock().unwrap() = Desktop::Secure;
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before the service let it"),
+        _ => None,
+    });
+    let named = rig.wait(|m| match m {
+        Message::DesktopChanged(d) => Some(*d),
+        Message::VideoFrame { .. } => panic!("a frame of the new desktop came before it was named"),
+        _ => None,
+    });
+    assert_eq!(named, Desktop::Secure);
+    rig.send(&Message::ResumeCapture { generation });
+    rig.next_frame();
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+/// Without a probe (a development console, the macOS daemon's shape) the helper says nothing about desktops.
+#[test]
+fn a_helper_without_a_probe_never_names_a_desktop() {
+    let mut rig = rig_full(Some(3), None, None, true);
+    rig.start_video();
+    for _ in 0..3 {
+        rig.next_frame();
+    }
+    let generation = rig.wait(|m| match m {
+        Message::CaptureHeld { generation } => Some(*generation),
+        Message::DesktopChanged(_) => panic!("a helper without a probe named a desktop"),
+        _ => None,
+    });
+    rig.send(&Message::ResumeCapture { generation });
+    rig.next_frame();
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
 }
@@ -400,6 +656,7 @@ fn a_failing_encoder_factory_is_a_fault_and_the_loop_goes_on() {
             Ok(Tracked {
                 inner: SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime),
                 live: Arc::clone(&screens),
+                moved: None,
             })
         },
         |_, _, _| {
@@ -434,6 +691,7 @@ fn a_failing_encoder_factory_is_a_fault_and_the_loop_goes_on() {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         })
         .unwrap();
     let Some(Message::HelperFault { code, what }) = reader.read_message().unwrap() else { panic!("expected a fault") };
@@ -465,9 +723,10 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
             Ok(Tracked {
                 inner: SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime),
                 live: Arc::clone(&screens),
+                moved: None,
             })
         },
-        |_, _, _| Ok(Passthrough { n: 0 }),
+        |_, _, _| Ok(Passthrough { n: 0, size: None }),
         || {
             Err(PlatformError {
                 kind: swapdesk_platform::ErrorKind::Unavailable,
@@ -503,6 +762,7 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
             kbps: 1000,
             quality: Preset::Auto,
             backend: VideoBackend::Auto,
+            codec: swapdesk_proto::Codec::H264,
         })
         .unwrap();
     loop {
@@ -519,4 +779,86 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
     assert!(saw_fault, "the factory failure is reported");
     writer.write_message(&Message::Shutdown).unwrap();
     helper.join().unwrap().expect("the loop went on and ended cleanly");
+}
+
+/// F-VIEW-06: a smaller size from the viewer rebuilds the encoder once per debounce period, and the frames come out at
+/// the size that was configured.
+#[test]
+fn a_set_scale_rebuilds_the_encoder_once_per_debounce_period_and_frames_follow_the_target() {
+    let mut rig = rig(None);
+    rig.start_video();
+    let (first, _) = rig.next_frame();
+    assert_eq!((first.width, first.height, first.config), (64, 48, true), "native until the viewer says otherwise");
+
+    // Two sizes inside one debounce period: the clock has not moved, so neither is applied yet.
+    rig.send(&Message::SetScale { display: 0, width: 32, height: 24 });
+    rig.send(&Message::SetScale { display: 0, width: 16, height: 12 });
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (64, 48, false), "held back by the debounce");
+    }
+
+    // Past the period, the latest size is applied: one rebuild (a keyframe with config) at the target size.
+    rig.clock.advance(Duration::from_millis(600));
+    let rebuilt = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((rebuilt.width, rebuilt.height, rebuilt.keyframe), (16, 12, true));
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (16, 12, false), "no second rebuild without a new size");
+    }
+
+    // 0x0 is native again, after the next period.
+    rig.send(&Message::SetScale { display: 0, width: 0, height: 0 });
+    rig.clock.advance(Duration::from_millis(600));
+    let back = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((back.width, back.height), (64, 48));
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+#[test]
+fn a_set_scale_not_smaller_than_the_capture_stays_native() {
+    assert_eq!(crate::helper::wanted_size((64, 48), (0, 0)), (64, 48));
+    assert_eq!(crate::helper::wanted_size((64, 48), (32, 24)), (32, 24));
+    assert_eq!(crate::helper::wanted_size((64, 48), (64, 48)), (64, 48), "equal is native");
+    assert_eq!(crate::helper::wanted_size((64, 48), (100, 80)), (64, 48), "the display shrank below the target");
+    assert_eq!(crate::helper::wanted_size((64, 48), (33, 25)), (32, 24), "even sizes only");
+}
+
+/// F-VIEW-06: a scaled size the encoder refuses leaves the picture native, without retrying that size every frame,
+/// and a later size the encoder takes is applied.
+#[test]
+fn a_scaled_size_the_encoder_refuses_falls_back_to_native() {
+    let mut rig = rig(None);
+    rig.start_video();
+    let (first, _) = rig.next_frame();
+    assert_eq!((first.width, first.height), (64, 48));
+
+    rig.send(&Message::SetScale { display: 0, width: 20, height: 14 });
+    rig.clock.advance(Duration::from_millis(600));
+    let back = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((back.width, back.height), (64, 48), "native after the refusal");
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (64, 48, false), "the refused size is not tried again");
+    }
+
+    rig.send(&Message::SetScale { display: 0, width: 32, height: 24 });
+    rig.clock.advance(Duration::from_millis(600));
+    let scaled = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((scaled.width, scaled.height), (32, 24));
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
 }

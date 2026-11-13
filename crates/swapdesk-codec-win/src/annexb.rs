@@ -1,5 +1,7 @@
 //! Annex B helpers: NAL unit scan, parameter-set extraction, SPS fields. Pure code, no OS calls.
 
+use swapdesk_proto::Codec;
+
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;
 pub const NAL_SEI: u8 = 6;
@@ -15,8 +17,13 @@ pub struct Nal {
     pub kind: u8,
 }
 
-/// Splits an Annex B buffer at its 3- and 4-byte start codes.
+/// Splits an Annex B buffer at its 3- and 4-byte start codes (H.264 NAL types: the low 5 bits of the header byte).
 pub fn scan(data: &[u8]) -> Vec<Nal> {
+    scan_with(data, |header| header & 0x1F)
+}
+
+/// `scan` with the NAL type read by `kind` from the first header byte.
+fn scan_with(data: &[u8], kind: fn(u8) -> u8) -> Vec<Nal> {
     let mut found: Vec<(usize, usize)> = Vec::new(); // (start code offset, payload offset)
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -36,9 +43,70 @@ pub fn scan(data: &[u8]) -> Vec<Nal> {
             end -= 1;
         }
         let Some(&header) = data.get(payload) else { continue };
-        out.push(Nal { start, payload, end, kind: header & 0x1F });
+        out.push(Nal { start, payload, end, kind: kind(header) });
     }
     out
+}
+
+/// HEVC (H.265) Annex B: the NAL type is bits 1 to 6 of the first header byte (ITU-T H.265, 7.3.1.2, `nal_unit_type`
+/// is `u(6)` right after `forbidden_zero_bit`); the type numbers below are Table 7-1 of the same document.
+pub mod hevc {
+    use super::{Nal, scan_with};
+
+    /// `IDR_W_RADL` and `IDR_N_LP`: the two types that start a new coded video sequence without a leading picture.
+    pub const NAL_IDR_W_RADL: u8 = 19;
+    pub const NAL_IDR_N_LP: u8 = 20;
+    pub const NAL_VPS: u8 = 32;
+    pub const NAL_SPS: u8 = 33;
+    pub const NAL_PPS: u8 = 34;
+
+    /// Splits an HEVC Annex B buffer; `Nal::kind` is the HEVC `nal_unit_type`.
+    pub fn scan(data: &[u8]) -> Vec<Nal> {
+        scan_with(data, |header| (header >> 1) & 0x3F)
+    }
+
+    pub fn contains(data: &[u8], kind: u8) -> bool {
+        scan(data).iter().any(|n| n.kind == kind)
+    }
+
+    /// The VPS, SPS and PPS NAL units of `data` (with their start codes), in stream order.
+    pub fn parameter_sets(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for nal in scan(data) {
+            if matches!(nal.kind, NAL_VPS | NAL_SPS | NAL_PPS) {
+                out.extend_from_slice(&data[nal.start..nal.end]);
+            }
+        }
+        out
+    }
+
+    pub fn is_idr(data: &[u8]) -> bool {
+        scan(data).iter().any(|n| n.kind == NAL_IDR_W_RADL || n.kind == NAL_IDR_N_LP)
+    }
+}
+
+/// Whether the access unit holds the sequence parameter set of `codec`.
+pub fn has_sps(codec: Codec, data: &[u8]) -> bool {
+    match codec {
+        Codec::Hevc => hevc::contains(data, hevc::NAL_SPS),
+        Codec::H264 => contains(data, NAL_SPS),
+    }
+}
+
+/// The parameter-set NAL units (H.264: SPS, PPS; HEVC: VPS, SPS, PPS) of `data`.
+pub fn parameter_sets_of(codec: Codec, data: &[u8]) -> Vec<u8> {
+    match codec {
+        Codec::Hevc => hevc::parameter_sets(data),
+        Codec::H264 => parameter_sets(data),
+    }
+}
+
+/// Whether the access unit holds an IDR picture of `codec`.
+pub fn is_idr_of(codec: Codec, data: &[u8]) -> bool {
+    match codec {
+        Codec::Hevc => hevc::is_idr(data),
+        Codec::H264 => is_idr(data),
+    }
 }
 
 /// True when any NAL unit has this type.
@@ -173,7 +241,13 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
                     let (mut last, mut next) = (8i32, 8i32);
                     for _ in 0..size {
                         if next != 0 {
-                            next = (last + b.se()? + 256) % 256;
+                            // delta_scale is -128 to 127 (H.264 7.4.2.1.1.1); a larger one is a broken SPS and would
+                            // overflow the sum (found by fuzzing).
+                            let delta = b.se()?;
+                            if !(-128..=127).contains(&delta) {
+                                return None;
+                            }
+                            next = (last + delta + 256) % 256;
                         }
                         if next != 0 {
                             last = next;
@@ -191,15 +265,19 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
         b.bit()?;
         b.se()?;
         b.se()?;
+        // num_ref_frames_in_pic_order_cnt_cycle is 0 to 255 (7.4.2.1.1): a larger count is a broken SPS.
         let n = b.ue()?;
+        if n > 255 {
+            return None;
+        }
         for _ in 0..n {
             b.se()?;
         }
     }
     b.ue()?; // max_num_ref_frames
     b.bit()?; // gaps allowed
-    let mbs_w = b.ue()? + 1;
-    let map_h = b.ue()? + 1;
+    let mbs_w = b.ue()?.checked_add(1)?;
+    let map_h = b.ue()?.checked_add(1)?;
     let frame_mbs_only = b.bit()?;
     if frame_mbs_only == 0 {
         b.bit()?;
@@ -219,8 +297,12 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
         _ => (1, 1),
     };
     let crop_unit_y = sub_h * (2 - frame_mbs_only);
-    let width = mbs_w * 16 - (cl + cr) * sub_w;
-    let height = (2 - frame_mbs_only) * map_h * 16 - (ct + cb) * crop_unit_y;
+    // A crop as large as the picture, or sizes past the integer range, are a broken SPS: refused (found by fuzzing).
+    let width = mbs_w.checked_mul(16)?.checked_sub(cl.checked_add(cr)?.checked_mul(sub_w)?)?;
+    let height = (2 - frame_mbs_only)
+        .checked_mul(map_h)?
+        .checked_mul(16)?
+        .checked_sub(ct.checked_add(cb)?.checked_mul(crop_unit_y)?)?;
     let mut num_reorder_frames = None;
     let mut color = None;
     if b.bit()? == 1 {
@@ -272,7 +354,12 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
 }
 
 fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
-    let cpb = b.ue()? + 1;
+    // cpb_cnt_minus1 is 0 to 31 (E.2.2): a larger count is a broken SPS.
+    let cpb = b.ue()?;
+    if cpb > 31 {
+        return None;
+    }
+    let cpb = cpb + 1;
     b.bits(8)?;
     for _ in 0..cpb {
         b.ue()?;
@@ -286,6 +373,53 @@ fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The input the annex_b fuzz target crashed on: an SPS whose scaling list carries a delta past the i32 sum.
+    #[test]
+    fn a_scaling_list_delta_out_of_range_is_a_broken_sps_not_a_crash() {
+        let data = [
+            0, 0, 0, 1, 199, 128, 0, 45, 49, 45, 37, 64, 64, 64, 64, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 0, 0, 0, 0, 255, 255, 255, 64, 64, 37,
+            37, 179, 37, 37, 70, 37, 37, 37, 0, 53, 43,
+        ];
+        let _ = scan(&data);
+        let _ = parameter_sets(&data);
+        let _ = is_idr(&data);
+        let _ = sps_profile_level(&data);
+        let _ = parse_sps(&data);
+    }
+
+    /// HEVC NAL headers are two bytes with the type in bits 1 to 6 of the first: VPS 0x40, SPS 0x42, PPS 0x44, IDR_W_RADL 0x26.
+    #[test]
+    fn hevc_nal_types_are_read_from_the_first_header_byte() {
+        let au = [
+            &[0, 0, 0, 1, 0x40, 0x01, 0xAA][..],
+            &[0, 0, 0, 1, 0x42, 0x01, 0xBB][..],
+            &[0, 0, 0, 1, 0x44, 0x01, 0xCC][..],
+            &[0, 0, 1, 0x26, 0x01, 0xDD, 0xEE][..],
+        ]
+        .concat();
+        let kinds: Vec<u8> = hevc::scan(&au).iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, [hevc::NAL_VPS, hevc::NAL_SPS, hevc::NAL_PPS, hevc::NAL_IDR_W_RADL]);
+        assert!(has_sps(Codec::Hevc, &au));
+        assert!(is_idr_of(Codec::Hevc, &au));
+        assert_eq!(parameter_sets_of(Codec::Hevc, &au), au[..au.len() - 7]);
+        // Read as H.264 the same bytes are not an IDR picture (0x26 & 0x1F = 6, an SEI).
+        assert!(!is_idr_of(Codec::H264, &au));
+        assert!(!hevc::is_idr(&au[..au.len() - 7]));
+    }
+
+    /// Found by the fuzz target `annex_b` (stage 13): a short SPS whose fields run past its end must be refused, not
+    /// panic.
+    #[test]
+    fn a_truncated_sps_from_the_fuzzer_is_refused_without_a_panic() {
+        let data = [0x00, 0x00, 0x01, 0x27, 0x2b, 0x01, 0x00, 0xef, 0xff, 0x01, 0xff];
+        let _ = scan(&data);
+        let _ = parameter_sets(&data);
+        let _ = is_idr(&data);
+        let _ = sps_profile_level(&data);
+        let _ = parse_sps(&data);
+    }
 
     struct BitWriter {
         bytes: Vec<u8>,

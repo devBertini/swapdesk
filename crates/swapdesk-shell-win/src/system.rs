@@ -14,6 +14,9 @@ use windows::core::{HSTRING, w};
 pub const WM_WAKE: u32 = WM_APP;
 /// A screen reader asked for an action (UI Automation `Invoke`, focus).
 pub const WM_ACCESS: u32 = WM_APP + 1;
+/// Ends the run (an update about to be installed, a test that is done): the main window is destroyed as a close
+/// without the notification area does. A person's close (`WM_CLOSE`) only hides it while the icon is up.
+pub const WM_QUIT_APP: u32 = WM_APP + 42;
 /// A native text input says something (Enter, Tab, Escape, focus lost): wParam is the input's id, lParam the event.
 pub const WM_EDIT_EVENT: u32 = WM_APP + 2;
 
@@ -97,6 +100,48 @@ pub fn system_language() -> swapdesk_ui::Language {
     if id & 0x3FF == 0x16 { Language::PtBr } else { Language::En }
 }
 
+/// Whether a contrast theme is on (`SPI_GETHIGHCONTRAST`, `HCF_HIGHCONTRASTON`) and, if so, its colours
+/// (`GetSysColor`), learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getsyscolor.
+pub fn system_contrast() -> swapdesk_ui::tokens::Contrast {
+    use windows::Win32::Graphics::Gdi::{
+        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_HOTLIGHT,
+        COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+    };
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut hc = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    // SAFETY: `hc` outlives the call and its size is in `cbSize` and in the second argument.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some(std::ptr::from_mut(&mut hc).cast::<c_void>()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    if read.is_err() || !hc.dwFlags.contains(HCF_HIGHCONTRASTON) {
+        return swapdesk_ui::tokens::Contrast::Standard;
+    }
+    // A COLORREF is 0x00BBGGRR; the palette takes 0xRRGGBB.
+    let rgb = |index: SYS_COLOR_INDEX| {
+        // SAFETY: a plain query.
+        let c = unsafe { GetSysColor(index) };
+        ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+    };
+    swapdesk_ui::tokens::Contrast::Theme(swapdesk_ui::tokens::SystemColors {
+        window: rgb(COLOR_WINDOW),
+        window_text: rgb(COLOR_WINDOWTEXT),
+        hotlight: rgb(COLOR_HOTLIGHT),
+        gray_text: rgb(COLOR_GRAYTEXT),
+        highlight: rgb(COLOR_HIGHLIGHT),
+        highlight_text: rgb(COLOR_HIGHLIGHTTEXT),
+        button_face: rgb(COLOR_BTNFACE),
+        button_text: rgb(COLOR_BTNTEXT),
+    })
+}
+
 /// `AppsUseLightTheme` under HKCU (0 means dark); `SWAPDESK_THEME=dark|light` overrides it in development.
 pub fn system_dark() -> bool {
     match std::env::var("SWAPDESK_THEME").as_deref() {
@@ -147,6 +192,45 @@ pub fn open_logs_folder() -> bool {
     let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(dir.as_os_str()), None, None, SW_SHOWNORMAL) };
     // ShellExecuteW succeeds with a value above 32.
     result.0 as isize > 32
+}
+
+/// Opens an `https://` page in the default browser (the release page of an update). Anything else is refused.
+pub fn open_web_page(url: &str) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    if !swapdesk_ui::state::openable_page(url) {
+        return false;
+    }
+    // SAFETY: the strings outlive the call; no window is the parent.
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    result.0 as isize > 32
+}
+
+/// Opens a file of this computer with the app the system has for it (the explorer's left pane). Only an existing
+/// regular file: a folder opens in the explorer itself, and nothing else is ever started.
+pub fn open_local_file(path: &std::path::Path) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    if !path.is_file() {
+        return false;
+    }
+    // SAFETY: the strings outlive the call; no window is the parent; "open" is the file's default verb.
+    let result =
+        unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL) };
+    result.0 as isize > 32
+}
+
+/// Shows an item of this computer selected in File Explorer (`explorer.exe /select,`). A folder opens itself.
+pub fn reveal_local_item(path: &std::path::Path) -> bool {
+    let arg = if path.is_dir() {
+        std::ffi::OsString::from(path.as_os_str())
+    } else {
+        let mut a = std::ffi::OsString::from("/select,");
+        a.push(path.as_os_str());
+        a
+    };
+    // No shell string is built: the path is one argument of the program.
+    std::process::Command::new("explorer.exe").arg(arg).spawn().is_ok()
 }
 
 pub fn loword(v: isize) -> u16 {

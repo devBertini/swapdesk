@@ -3,8 +3,9 @@
 //! to it ([`UiHub::serve`], one blocking call per connection, after the server handshake).
 //!
 //! * Requests: every stage-18 `UiOp` (1 to 21) is dispatched here, with the checks of C2.3 (`grants` validated as
-//!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL` and `Connect { unattended }`
-//!   only on an administrator connection; no request carries a path).
+//!   PROTOCOL.md 6.1 says before any use; granting `UNATTENDED` or `ADMIN_TERMINAL`
+//!   only on an administrator connection, or after an administrator confirmed exactly that change, see
+//!   `elevation.rs`; no request carries a path).
 //! * Notifications: devices, network, pairing, incoming requests, sessions, displays, stats, alerts and settings go
 //!   to the connections that should see them (host-side items to the console session's UI only).
 //! * Media: a viewer session opened here keeps its `ViewerHandle` on the connection; its video, audio and cursor
@@ -16,15 +17,20 @@
 //! [`UiHub::bind_core`]. The hub holds the core weakly, so the owner's `Arc<ServiceCore>` alone keeps it alive.
 
 mod clip_actions;
+mod elevation;
 mod extras;
 mod files;
+mod grants_sync;
 mod host_ui;
 mod ops;
 mod pairing;
+mod peer_minor;
 pub mod presence;
 mod queue;
 pub mod store;
+mod sync_dial;
 mod terminal;
+pub mod update;
 mod views;
 
 #[cfg(test)]
@@ -34,6 +40,7 @@ use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Duration;
 
 use swapdesk_files::{Pending, PipeCaller};
 use swapdesk_ipc::{ApiCode, FrameReader, FrameWriter, IpcError, Message as Ipc, Notify};
@@ -44,7 +51,7 @@ use swapdesk_trust::{DeviceId, Identity, PairingMode, TrustHandle, UserRef, Wall
 use tokio::runtime::Handle;
 
 use crate::service::{ServiceCore, ViewerHandle};
-use extras::{HubExtras, PendingSwap, WakeRun, WakeSetup};
+use extras::{Entry, HubExtras, PendingSwap, WakeSetup};
 use host_ui::HubHostUi;
 pub use presence::{DnsSdPresence, FakePresence, NoPresence, Presence, PresencePeer};
 use queue::UiQueue;
@@ -54,8 +61,15 @@ pub use store::{AuditLog, FileAuditLog, MachineSettings, load_settings, store_se
 pub trait SystemHooks: Send + Sync {
     /// A session is live (or none is) and the "keep awake" setting is on: hold off sleep.
     fn keep_awake(&self, _on: bool) {}
-    /// "Bloquear ao terminar" (F-SESS-03): lock the workstation.
-    fn lock_screen(&self) {}
+    /// "Bloquear ao terminar" (F-SESS-03): a hosted session ended with the setting on; lock the screen of the
+    /// console session `console_session`, the one the session's account is signed in at. Called once, for the end
+    /// itself (never for a lost link the core keeps resumable), and never when another account owns the console or
+    /// nobody is at it: there is nothing of this account to lock. It may block briefly; it must not panic.
+    fn lock_screen(&self, _console_session: u32) {}
+    /// How many sessions this machine hosts now, called at each start and end (0 once the last has ended). Unlike
+    /// [`Self::keep_awake`] it does not depend on the "keep awake" setting: a host whose display sleeps must still
+    /// deliver the session (a Mac's display, kept on while any session lasts).
+    fn hosted_sessions(&self, _live: usize) {}
     /// The "service" switch of Ajustes changed.
     fn service_enabled(&self, _on: bool) {}
 }
@@ -103,6 +117,9 @@ pub struct ConnInfo {
     pub user: UserRef,
     /// The impersonation token is elevated with Administrators enabled (C2.3).
     pub admin: bool,
+    /// The connection's user is an administrator account (its token holds the Administrators group, enabled or
+    /// deny-only): it may ask for an administrator confirmation (`ElevationBegin`) without being elevated itself.
+    pub can_elevate: bool,
 }
 
 /// One connected UI.
@@ -118,6 +135,11 @@ pub(crate) struct Conn {
     pub terms: Mutex<HashMap<u32, u64>>,
     /// The disk of this UI (C2.4 "Files"): the service's calls to it wait for the `FsReply` the reader routes back.
     pub fs: Arc<PipeCaller>,
+    /// What an administrator confirmed for this connection and it has not used yet (see `elevation.rs`).
+    pub passes: Mutex<Vec<elevation::Pass>>,
+    /// The device whose permissions an administrator approved on this connection lately, by whom and until when:
+    /// further changes of that device's permissions need no new approval meanwhile (D62, see `elevation.rs`).
+    pub grace: Mutex<Option<elevation::Grace>>,
 }
 
 /// A viewer session on a connection.
@@ -128,6 +150,37 @@ pub(crate) struct Viewer {
     pub view_only: bool,
     /// The host's display list as last relayed (`Notify::Displays`); what `ListDisplays` answers.
     pub displays: Vec<swapdesk_ipc::DisplayView>,
+    /// What the UI last chose for this session's video: `VideoSettings` carries everything at once, so a change of
+    /// the preset keeps the view size and a change of the view size keeps the preset (F-VIEW-06).
+    pub video: VideoPrefs,
+}
+
+/// The viewer's video choices as the host last heard them (F-VIEW-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VideoPrefs {
+    pub preset: swapdesk_proto::Preset,
+    pub max_fps: u16,
+    /// The video area in physical pixels; 0x0 is native.
+    pub view: (u16, u16),
+}
+
+impl Default for VideoPrefs {
+    fn default() -> Self {
+        Self { preset: swapdesk_proto::Preset::Auto, max_fps: 60, view: (0, 0) }
+    }
+}
+
+impl VideoPrefs {
+    /// The one `VideoSettings` message that carries every choice (no bitrate ceiling of its own).
+    pub fn settings(&self) -> swapdesk_proto::VideoSettings {
+        swapdesk_proto::VideoSettings {
+            preset: self.preset,
+            max_fps: self.max_fps,
+            max_kbps: 0,
+            view_width: self.view.0,
+            view_height: self.view.1,
+        }
+    }
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -137,13 +190,29 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The state every connection, task and host callback shares.
 pub(crate) struct Hub {
     pub p: HubParams,
+    /// The system's neighbour table (D65): the pairing filter refuses a blocked MAC, and blocking a device resolves
+    /// its MAC from here. Unset: nobody is known by MAC.
+    neighbors: Arc<OnceLock<Arc<dyn swapdesk_platform::NeighborTable>>>,
     core: Mutex<Weak<ServiceCore>>,
     rt: OnceLock<Handle>,
+    /// The SID of the account this hub serves, on a machine of several (ACCOUNTS.md 7.1); unset for the only one.
+    account: OnceLock<String>,
+    /// The SID of the user at the console (`None`: the sign-in screen), for the console rule of ACCOUNTS.md 5.1.
+    console_user: Mutex<Option<String>>,
     settings: Mutex<MachineSettings>,
     conns: Mutex<Vec<Arc<Conn>>>,
     next_conn: AtomicU64,
     console: Mutex<Option<u32>>,
+    /// Starts this account's window in the console session (Windows service: `Swapdesk.exe` as that user), so a
+    /// session never runs with no banner (F-SESS-03). Unset where the window is not the service's to start (the Mac:
+    /// quitting the app stops hosting; tests; development): then no window is required.
+    window_launcher: OnceLock<WindowLauncher>,
+    /// When the window was last asked for, so a burst of entries starts it once.
+    last_window_launch: Mutex<Option<std::time::Instant>>,
     desktop: Mutex<Desktop>,
+    /// What the media helper's probe of the input desktop says (`Default` or `Secure`): a UAC prompt or the secure
+    /// desktop is no event the session watcher sees (F-UNAT-01).
+    helper_desktop: Mutex<Desktop>,
     pub mode: Arc<PairingMode>,
     pairing: pairing::PairState,
     incoming: Mutex<HashMap<u32, host_ui::Pending>>,
@@ -152,22 +221,152 @@ pub(crate) struct Hub {
     manual: Mutex<Vec<views::Manual>>,
     /// Where the devices paired through a typed address answer (session endpoint), remembered while we run.
     learned: Mutex<HashMap<DeviceId, SocketAddrV4>>,
+    /// The protocol minor each paired device said it speaks, beside the hint of its discovery record.
+    minors: Mutex<peer_minor::PeerMinors>,
+    /// The writes of what each paired device reported it allows here (`grants_there`), at most one a second.
+    peer_writes: Mutex<grants_sync::PeerWrites>,
+    /// The window a lost hosted session may be resumed in (the core's own, 60 s; a test shortens it).
+    resume_window: Mutex<Duration>,
+    /// Hosted sessions the core keeps resumable after a lost link: the UI shows them reconnecting until they resume
+    /// or the window ends.
+    lost: Mutex<HashMap<u64, host_ui::LostSession>>,
+    /// Numbers each loss, so a window never ends a later loss of the same session.
+    lost_gen: AtomicU64,
+    /// The grants sync outside a session, per paired device (GRANTS-SYNC.md 4.3).
+    sync: Mutex<sync_dial::SyncState>,
+    /// The session port each paired device was last seen on (`peers.bin`, ACCOUNTS.md 5.2), and when it was written.
+    peer_ports: Mutex<(store::PeerPorts, HashMap<DeviceId, std::time::Instant>)>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
+    /// Sessions of this machine as the host (a subset of `live_sessions`).
+    hosted_live: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
     swaps: Mutex<HashMap<u32, PendingSwap>>,
-    /// Wake-on-LAN attempts in flight, by the id of their waking entry.
-    wakes: Mutex<HashMap<u64, WakeRun>>,
+    /// Connect attempts in flight (a wake, a connect waiting for the host), by the id of their entry.
+    entries: Mutex<HashMap<u64, Entry>>,
     /// File transfers and listings in flight, for the files ops and notifications.
     files: Mutex<files::FilesTable>,
     wake: Mutex<WakeSetup>,
+    /// The open administrator confirmations (tickets) and the lifetimes they run on.
+    elevation: Mutex<elevation::Elevation>,
     /// Host sessions: when they started (Unix ms) and what they hold, for the durations of the audit log and the
     /// `Active` states.
     started: Mutex<HashMap<u64, (u64, swapdesk_proto::PermissionSet)>>,
+    /// The device (hex) of each session in `started`, so a window that connects while the session runs is told of it
+    /// (`send_pending`).
+    hosted: Mutex<HashMap<u64, String>>,
     shutting: AtomicBool,
+    /// A 1.0 install left its data on this computer (D55).
+    had_1_0: AtomicBool,
+    /// The machine's updater (UPDATES.md 13), shared by the account hubs; none in a development instance.
+    updater: std::sync::OnceLock<Arc<update::Updater>>,
+    /// Which folder the system refuses this process for receiving, when it does (macOS "Files and Folders", F-FILE-03).
+    receive_probe: Mutex<Option<ReceiveProbe>>,
+    /// The folder the UIs were last told about, so a change is pushed once.
+    receive_told: Mutex<Option<String>>,
+    /// The Mac's own grants and login item, read when the network status is built (docs/PARITY.md, the macOS notices).
+    mac_probe: Mutex<Option<MacProbe>>,
+    /// What the UIs were last told about them, so a change is pushed once.
+    mac_told: Mutex<MacState>,
 }
 
+/// What the Mac says about its own grants and login item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MacState {
+    /// The grants the host needs and macOS has not given (Screen Recording, Accessibility, Input Monitoring).
+    pub missing: Vec<swapdesk_ipc::OsPermission>,
+    /// The login item waits for the person's approval in System Settings > Login Items (`requiresApproval`).
+    pub login_item_needs_approval: bool,
+}
+
+/// Asks the Mac for its [`MacState`] ([`UiHub::set_mac_probe`]); it must be cheap and not prompt.
+pub type MacProbe = Arc<dyn Fn() -> MacState + Send + Sync>;
+
+/// Starts this account's interface window in the given console session; the error says why it could not.
+pub type WindowLauncher = Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>;
+
+/// How soon the window may be asked for again.
+const WINDOW_LAUNCH_SPACING: Duration = Duration::from_secs(5);
+
+/// Asks the platform which receiving folder it refuses ([`UiHub::set_receive_folder_probe`]).
+pub type ReceiveProbe = Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>;
+
 impl Hub {
+    /// Who owns the console, seen from this account (ACCOUNTS.md 5.1).
+    pub fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        use swapdesk_session::ConsoleOwner;
+        let Some(account) = self.account.get() else { return ConsoleOwner::This };
+        match lock(&self.console_user).as_deref() {
+            None => ConsoleOwner::Nobody,
+            Some(u) if u.eq_ignore_ascii_case(account) => ConsoleOwner::This,
+            Some(_) => ConsoleOwner::Other,
+        }
+    }
+
+    /// The desktop this account's sessions are on: `AccountAway` while another account owns the console; the
+    /// sign-in screen (nobody at the console) counts as `Locked`, so only a session that entered without a prompt
+    /// goes on there (ACCOUNTS.md 5.1); else the console's.
+    pub fn effective_desktop(&self) -> Desktop {
+        let (session, helper) = (*lock(&self.desktop), *lock(&self.helper_desktop));
+        crate::service::effective_desktop(session, helper, self.console_owner())
+    }
+
+    /// F-SESS-03: whether the banner can be shown to this account's user now. Where no launcher is set, always. Else it
+    /// can unless the account is at the console on its interactive desktop with no window of it connected from the
+    /// console session. A locked screen, a secure desktop and the sign-in screen (nobody signed in) show no banner to
+    /// anyone, so a session there goes on (ACCOUNTS.md 5.1); the window is required again the moment the user's own
+    /// desktop is back.
+    pub fn banner_ready(&self) -> bool {
+        self.window_launcher.get().is_none()
+            || self.effective_desktop() != Desktop::Default
+            || !self.console_conns().is_empty()
+    }
+
+    /// Starts the account's window in the console session, at most once in [`WINDOW_LAUNCH_SPACING`].
+    pub fn start_window(&self) {
+        let Some(launcher) = self.window_launcher.get() else { return };
+        let Some(session) = *lock(&self.console) else {
+            self.log(Level::Warn, format_args!("the window cannot be started: no console session"));
+            return;
+        };
+        {
+            let mut last = lock(&self.last_window_launch);
+            let now = std::time::Instant::now();
+            if last.is_some_and(|t| now.saturating_duration_since(t) < WINDOW_LAUNCH_SPACING) {
+                return;
+            }
+            *last = Some(now);
+        }
+        match launcher(session) {
+            Ok(()) => self.log(Level::Info, format_args!("the window was started in session {session}")),
+            Err(e) => self.log(Level::Warn, format_args!("the window did not start in session {session}: {e}")),
+        }
+    }
+
+    /// Tells this account's sessions the desktop they are on ([`Hub::effective_desktop`]).
+    pub fn push_desktop(&self) {
+        let desktop = self.effective_desktop();
+        if let Some(core) = self.core() {
+            core.host().set_desktop(desktop);
+        }
+    }
+
+    /// Whether this account receives connections: while its pairing mode is open, or with a pairing and its
+    /// "Receber conexões" on (ACCOUNTS.md 6 and 7.2). Its endpoint listens and its record is announced exactly then.
+    pub fn wants_to_receive(&self) -> bool {
+        self.mode.is_open() || (lock(&self.settings).service_enabled && self.p.trust.read(|s| !s.devices.is_empty()))
+    }
+
+    /// Applies [`Hub::wants_to_receive`] to the core and the announcement. Called when the core is bound, after a
+    /// pairing, a forget, and when pairing mode opens or closes.
+    pub fn update_receiving(&self) {
+        let on = self.wants_to_receive();
+        if let Some(core) = self.core() {
+            core.set_receiving(on);
+        }
+        self.p.presence.set_announced(on);
+    }
+
     pub fn log(&self, level: Level, what: core::fmt::Arguments<'_>) {
         self.p.trace.log(level, "ui-hub", what);
     }
@@ -239,6 +438,20 @@ impl Hub {
         self.p.hooks.keep_awake(before > 1 && self.settings().keep_awake);
     }
 
+    /// A session of this machine as the host began: tell the hooks how many there are now.
+    pub fn hosted_began(&self) {
+        let n = self.hosted_live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.p.hooks.hosted_sessions(n);
+    }
+
+    /// A session of this machine as the host ended (a lost link the core keeps resumable counts as ended: it
+    /// begins again on the resume).
+    pub fn hosted_ended(&self) {
+        let before =
+            self.hosted_live.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1))).unwrap_or(0);
+        self.p.hooks.hosted_sessions(before.saturating_sub(1));
+    }
+
     pub fn api_error(&self, code: ApiCode, what: &str) -> ApiCode {
         self.log(Level::Debug, format_args!("refused: {what} ({code:?})"));
         code
@@ -253,38 +466,67 @@ pub struct UiHub {
 
 impl UiHub {
     pub fn new(params: HubParams) -> Self {
+        let params_secrets = Arc::clone(&params.secrets);
         let settings = params.settings.clone();
         let mode = Arc::new(PairingMode::new(Arc::clone(&params.clock)));
         let hub = Arc::new(Hub {
             p: params,
+            neighbors: Arc::new(OnceLock::new()),
             core: Mutex::new(Weak::new()),
             rt: OnceLock::new(),
+            account: OnceLock::new(),
+            console_user: Mutex::new(None),
             settings: Mutex::new(settings),
             conns: Mutex::new(Vec::new()),
             next_conn: AtomicU64::new(1),
             console: Mutex::new(None),
+            window_launcher: OnceLock::new(),
+            last_window_launch: Mutex::new(None),
             desktop: Mutex::new(Desktop::Default),
+            helper_desktop: Mutex::new(Desktop::Default),
             mode,
             pairing: pairing::PairState::default(),
             incoming: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
             manual: Mutex::new(Vec::new()),
             learned: Mutex::new(HashMap::new()),
+            minors: Mutex::new(peer_minor::PeerMinors::default()),
+            peer_writes: Mutex::new(grants_sync::PeerWrites::default()),
+            resume_window: Mutex::new(swapdesk_session::RESUME_WINDOW),
+            lost: Mutex::new(HashMap::new()),
+            lost_gen: AtomicU64::new(0),
+            sync: Mutex::new(sync_dial::SyncState::default()),
+            peer_ports: Mutex::new((store::load_peer_ports(&*params_secrets), HashMap::new())),
             live_sessions: AtomicUsize::new(0),
+            hosted_live: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
-            wakes: Mutex::new(HashMap::new()),
+            entries: Mutex::new(HashMap::new()),
             files: Mutex::new(files::FilesTable::default()),
             wake: Mutex::new(WakeSetup::default()),
+            elevation: Mutex::new(elevation::Elevation::default()),
             started: Mutex::new(HashMap::new()),
+            hosted: Mutex::new(HashMap::new()),
             shutting: AtomicBool::new(false),
+            had_1_0: AtomicBool::new(false),
+            updater: std::sync::OnceLock::new(),
+            receive_probe: Mutex::new(None),
+            receive_told: Mutex::new(None),
+            mac_probe: Mutex::new(None),
+            mac_told: Mutex::new(MacState::default()),
         });
         let weak = Arc::downgrade(&hub);
         hub.p.presence.set_listener(Arc::new(move || {
             if let Some(h) = weak.upgrade() {
                 h.devices_changed();
+                h.sync_presence_changed();
             }
         }));
         Self { hub }
+    }
+
+    /// Gives the hub the system's neighbour table, for the devices blocked by MAC (D65). Once, before the first UI.
+    pub fn set_neighbors(&self, neighbors: Arc<dyn swapdesk_platform::NeighborTable>) {
+        let _ = self.hub.neighbors.set(neighbors);
     }
 
     /// The `HostUi` for `ServiceConfig::ui`.
@@ -297,6 +539,18 @@ impl UiHub {
         Arc::new(views::HubAudit { hub: Arc::downgrade(&self.hub) })
     }
 
+    /// The account this hub serves (its user's SID), on a machine of several accounts: a connection of that user from
+    /// a session that is not the console's may still narrow the account's reach (ACCOUNTS.md 5.6).
+    pub fn set_account(&self, sid: &str) {
+        let _ = self.hub.account.set(sid.to_string());
+    }
+
+    /// A test shortens the window a lost hosted session stays reconnecting in the UI.
+    #[cfg(test)]
+    pub fn set_resume_window(&self, window: Duration) {
+        *lock(&self.hub.resume_window) = window;
+    }
+
     /// Hands the started core to the hub (weakly) and takes its runtime. Call it once, right after
     /// `ServiceCore::start`.
     pub fn bind_core(&self, core: &Arc<ServiceCore>) {
@@ -304,8 +558,21 @@ impl UiHub {
         let _ = self.hub.rt.set(core.runtime().clone());
         // Swap questions, the new session of a swap and chat reach the UI through the hub.
         core.set_extras(Arc::new(HubExtras { hub: Arc::downgrade(&self.hub) }));
+        // What the media helper says about the input desktop goes through the hub, which knows who is at the console.
+        core.set_desktop_sink({
+            let hub = Arc::downgrade(&self.hub);
+            Arc::new(move |desktop| {
+                if let Some(hub) = hub.upgrade() {
+                    *lock(&hub.helper_desktop) = desktop;
+                    hub.push_desktop();
+                }
+            })
+        });
         // The viewer role's clipboard, the clipboard notices and the audit of quick actions.
         core.set_clip_actions(Arc::new(clip_actions::HubClipActions { hub: Arc::downgrade(&self.hub) }));
+        // The core is up: what is on the network now is synced (GRANTS-SYNC.md 4.4).
+        self.hub.sync_presence_changed();
+        self.hub.update_receiving();
     }
 
     /// Wake-on-LAN: how the socket of an attempt is made and how long it runs. The default is a UDP socket bound to
@@ -317,6 +584,12 @@ impl UiHub {
     /// The machine settings as they are now.
     pub fn settings(&self) -> MachineSettings {
         self.hub.settings()
+    }
+
+    /// How this account's window is started when a session finds it missing (F-SESS-03). Once, by the service, on a
+    /// machine whose service owns the user's interface; without it no window is required.
+    pub fn set_window_launcher(&self, launcher: WindowLauncher) {
+        let _ = self.hub.window_launcher.set(launcher);
     }
 
     /// The session whose UI is the host's user (the console session); `None` when nobody is at the machine.
@@ -332,8 +605,79 @@ impl UiHub {
     }
 
     /// The host's desktop state (a lock or a UAC prompt is not "somebody present", PROTOCOL.md 6.2).
+    /// The desktop of the console changed: kept for the interface, and told to this account's sessions, which see
+    /// `AccountAway` instead while another account owns the console (ACCOUNTS.md 5.1).
     pub fn set_desktop(&self, desktop: Desktop) {
         *lock(&self.hub.desktop) = desktop;
+        self.hub.push_desktop();
+    }
+
+    /// The machine's updater: this account's interfaces reach it (ops 51 to 56) and hear of its changes.
+    pub fn set_updater(&self, updater: Arc<update::Updater>) {
+        updater.subscribe(&self.hub);
+        let _ = self.hub.updater.set(updater);
+    }
+
+    /// The Mac's way to learn which receiving folder macOS refused (F-FILE-03). The network status carries the notice
+    /// while the probe names a folder; the UIs are told again after each transfer that ends, so the notice comes
+    /// right after a refused receive and goes once access works.
+    pub fn set_receive_folder_probe(&self, probe: ReceiveProbe) {
+        *lock(&self.hub.receive_probe) = Some(probe);
+    }
+
+    /// The Mac's way to say which grants are missing and whether the login item waits for approval. The network status
+    /// carries `MacPermissionsMissing` and `ServiceNeedsApproval` while the probe says so; the app calls
+    /// [`UiHub::mac_status_changed`] when the answer may have changed (at start, when the app becomes active again).
+    pub fn set_mac_probe(&self, probe: MacProbe) {
+        *lock(&self.hub.mac_probe) = Some(probe);
+    }
+
+    /// Reads the Mac probe again and tells the UIs the network status when its answer changed since they last heard.
+    pub fn mac_status_changed(&self) {
+        self.hub.mac_status_changed();
+    }
+
+    /// A 1.0 install left its data on this computer (ACCOUNTS.md 10.2): this account's empty Pareados list shows the
+    /// one-time note of D55.
+    pub fn set_had_1_0(&self, had: bool) {
+        self.hub.had_1_0.store(had, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The Mac app's session became active or inactive (ACCOUNTS.md 12.2, `NSWorkspace` session notices): while
+    /// inactive another user owns the screen, so entries are refused with `ACCOUNT_AWAY` and live sessions pause
+    /// (and end after the minute) as on Windows (5.1). `user` is this app's user (the uid).
+    pub fn set_session_active(&self, user: &str, active: bool) {
+        self.set_account(user);
+        self.set_console_user(Some(if active { user.to_string() } else { format!("{user}:inactive") }));
+    }
+
+    /// Whether this hub serves the machine's only account (no account SID was set: a machine of one account, the Mac).
+    pub fn single_account(&self) -> bool {
+        self.hub.account.get().is_none()
+    }
+
+    /// Live sessions of this account, hosted or viewed (the updater's confirmation, UPDATES.md 10.3).
+    pub fn live_sessions(&self) -> usize {
+        self.hub.live_sessions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Who owns the console, seen from this hub's account (ACCOUNTS.md 5.1).
+    pub fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        self.hub.console_owner()
+    }
+
+    /// The user at the console changed (`None`: the sign-in screen). Sessions of this account pause while another
+    /// account owns the console and end after a minute; they go on when it comes back.
+    pub fn set_console_user(&self, sid: Option<String>) {
+        *lock(&self.hub.console_user) = sid;
+        self.hub.push_desktop();
+    }
+
+    /// The media helper reported the input desktop (`Default` or `Secure`; F-UNAT-01): kept, and told to this
+    /// account's sessions as [`Hub::effective_desktop`] works it out.
+    pub fn set_helper_desktop(&self, desktop: Desktop) {
+        *lock(&self.hub.helper_desktop) = desktop;
+        self.hub.push_desktop();
     }
 
     /// The network changed: the session endpoint follows the approved addresses, the presence re-reads the
@@ -429,6 +773,8 @@ impl UiHub {
             viewers: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
             fs,
+            passes: Mutex::new(Vec::new()),
+            grace: Mutex::new(None),
         });
         lock(&hub.conns).push(Arc::clone(&conn));
         hub.log(
@@ -456,12 +802,16 @@ impl UiHub {
                 Err(e) => break Err(e),
             }
         };
+        // Its open ticket and the passes it still held die with it, before it leaves the list: nobody sees a gone
+        // connection whose ticket is still open.
+        hub.drop_elevation_of(&conn);
         lock(&hub.conns).retain(|c| c.id != conn.id);
         // Whoever waits for this UI's clipboard stops waiting.
         conn.clip.close();
         // The calls waiting for this UI's disk fail now (its read handles died with it).
         conn.fs.pending().close();
-        // The UI is gone: its viewer sessions go with it (nobody is left to decode them).
+        // The UI is gone: its connect attempts stop and its viewer sessions go with it (nobody is left to decode them).
+        hub.abort_entries_of(&conn);
         let viewers: Vec<Viewer> = lock(&conn.viewers).drain().map(|(_, v)| v).collect();
         for v in &viewers {
             v.handle.disconnect();
@@ -480,5 +830,26 @@ impl UiHub {
             ),
         );
         end
+    }
+}
+
+#[cfg(test)]
+mod video_prefs_tests {
+    use super::*;
+    use swapdesk_proto::Preset;
+
+    /// One `VideoSettings` carries everything (F-VIEW-06): a new preset keeps the view and rate, a new view keeps the
+    /// preset.
+    #[test]
+    fn the_preset_and_the_view_size_each_keep_the_other() {
+        let mut v = VideoPrefs::default();
+        assert_eq!((v.settings().view_width, v.settings().view_height, v.settings().max_fps), (0, 0, 60));
+        v.view = (960, 540);
+        v.max_fps = 144;
+        v.preset = Preset::Motion;
+        let s = v.settings();
+        assert_eq!((s.preset, s.max_fps, s.view_width, s.view_height), (Preset::Motion, 144, 960, 540));
+        v.view = (0, 0);
+        assert_eq!(v.settings().preset, Preset::Motion);
     }
 }

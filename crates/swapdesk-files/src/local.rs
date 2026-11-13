@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, UNIX_EPOCH};
 
+use swapdesk_ipc::FsPage;
 use swapdesk_proto::ErrorCode;
 
-use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
+use crate::access::AccessState;
+use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, Moved, ReadHandle};
 use crate::fsutil::{Create, is_reparse, open_rw_nofollow};
 use crate::name::{META_SUFFIX, PART_SUFFIX, validate_name};
 
@@ -20,15 +22,32 @@ const MAX_OPEN: usize = 256;
 /// Most bytes `meta_read` returns.
 const META_READ_MAX: usize = 1024;
 
+/// Free bytes of the volume holding a folder (`swapdesk-sys-win` / `swapdesk-sys-mac` `free_bytes`), `None` when the
+/// system cannot say. A plain function so this crate needs no platform crate.
+pub type FreeSpaceFn = fn(&Path) -> Option<u64>;
+
 #[derive(Default)]
 pub struct LocalFs {
     next: AtomicU64,
     open: Mutex<HashMap<u64, Arc<Mutex<File>>>>,
+    free_space: Option<FreeSpaceFn>,
+    access: AccessState,
 }
 
 impl LocalFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The folder the system last refused this process in (macOS: no "Files and Folders" grant), until an operation
+    /// there works again. See [`crate::access`].
+    pub fn access_denied(&self) -> Option<PathBuf> {
+        self.access.denied()
+    }
+
+    /// A `LocalFs` that answers `Fs::free_space` with `probe`.
+    pub fn with_free_space(probe: FreeSpaceFn) -> Self {
+        Self { free_space: Some(probe), ..Self::default() }
     }
 }
 
@@ -36,8 +55,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-fn io_failed(_: io::Error) -> ErrorCode {
-    ErrorCode::IoFailed
+/// A full volume or an exhausted quota is `NoSpace`; anything else `IoFailed`.
+fn io_failed(e: io::Error) -> ErrorCode {
+    match e.kind() {
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => ErrorCode::NoSpace,
+        _ => ErrorCode::IoFailed,
+    }
 }
 
 fn mtime_of(meta: &Metadata) -> u64 {
@@ -101,8 +124,11 @@ impl LocalFs {
 
 impl Fs for LocalFs {
     fn list_dir(&self, path: &Path, max_entries: u32) -> Result<DirRead, ErrorCode> {
-        let read = std::fs::read_dir(path)
-            .map_err(|e| if e.kind() == io::ErrorKind::NotFound { ErrorCode::NotFound } else { ErrorCode::IoFailed })?;
+        let read = std::fs::read_dir(path).map_err(|e| {
+            self.access.note_error(path, &e);
+            if e.kind() == io::ErrorKind::NotFound { ErrorCode::NotFound } else { ErrorCode::IoFailed }
+        })?;
+        self.access.note_ok(path);
         let mut all: Vec<FsEntry> = Vec::new();
         for item in read.flatten() {
             let Some(name) = item.file_name().to_str().map(str::to_string) else { continue };
@@ -128,6 +154,10 @@ impl Fs for LocalFs {
         let truncated = all.len() > max;
         all.truncate(max);
         Ok(DirRead { entries: all, truncated })
+    }
+
+    fn free_space(&self, path: &Path) -> Result<Option<u64>, ErrorCode> {
+        Ok(self.free_space.and_then(|probe| probe(path)))
     }
 
     fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode> {
@@ -173,7 +203,12 @@ impl Fs for LocalFs {
     }
 
     fn part_create(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
-        open_rw_nofollow(&file_path(dir, name, Kind::Part)?, Create::New).map(drop).map_err(io_failed)
+        let made = open_rw_nofollow(&file_path(dir, name, Kind::Part)?, Create::New);
+        match &made {
+            Ok(_) => self.access.note_ok(dir),
+            Err(e) => self.access.note_error(dir, e),
+        }
+        made.map(drop).map_err(io_failed)
     }
 
     fn part_truncate(&self, dir: &Path, name: &str, len: u64) -> Result<(), ErrorCode> {
@@ -216,12 +251,10 @@ impl Fs for LocalFs {
         let from = file_path(dir, name, Kind::Part)?;
         validate_name(target_name)?;
         let to = dir.join(target_name);
-        // Never over a file. Windows refuses an existing target by itself (no replace flag); elsewhere `rename`
-        // replaces, so the check comes first.
-        if std::fs::symlink_metadata(&to).is_ok() {
-            return Err(ErrorCode::IoFailed);
-        }
-        std::fs::rename(from, to).map_err(io_failed)
+        // Never over a file: the system's no-replace rename, which makes the check and the move one step (the
+        // standard `rename` replaces an existing file on Windows and anything on Unix, so a look first would leave a
+        // gap in which two receivers finishing under one name both succeed and the second replaces the first).
+        crate::plat::rename_noreplace(&from, &to).map_err(io_failed)
     }
 
     fn remove_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<(), ErrorCode> {
@@ -238,6 +271,25 @@ impl Fs for LocalFs {
         let mut buf = Vec::new();
         f.take(META_READ_MAX as u64).read_to_end(&mut buf).map_err(io_failed)?;
         Ok(Some(buf))
+    }
+
+    fn list_page(&self, path: &Path, start: u32, max: u16) -> Result<FsPage, ErrorCode> {
+        let mut page = crate::fsops::list_page(path, start, max)?;
+        self.access.note_ok(path);
+        page.free = self.free_space.and_then(|probe| probe(path));
+        Ok(page)
+    }
+
+    fn make_dir(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+        crate::fsops::make_dir(dir, name)
+    }
+
+    fn rename(&self, dir: &Path, name: &str, new_name: &str) -> Result<(), ErrorCode> {
+        crate::fsops::rename(dir, name, new_name)
+    }
+
+    fn move_into(&self, from_dir: &Path, name: &str, to_dir: &Path) -> Result<Moved, ErrorCode> {
+        crate::fsops::move_into(from_dir, name, to_dir)
     }
 
     fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode> {
@@ -299,6 +351,41 @@ mod tests {
         assert_eq!(fs.part_read(&d, "a.bin", 1, 10), Ok(b"bc".to_vec()));
         fs.part_rename(&d, "a.bin", "b.bin").unwrap();
         assert_eq!(std::fs::read(d.join("b.bin")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // The no-replace guarantee is the system's (Windows, the Mac); the `std` fallback elsewhere has the gap plat.rs says.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn concurrent_part_renames_to_one_name_never_replace_each_other() {
+        // Several received files finish under one name at the same moment (the upload's last step): one gets the name,
+        // the others fail and keep their partial file; nothing already there is replaced.
+        let d = dir("part-race");
+        let fs = LocalFs::new();
+        let n = 8;
+        for round in 0..150 {
+            for i in 0..n {
+                fs.part_create(&d, &format!("p{round}-{i}")).unwrap();
+                fs.part_append(&d, &format!("p{round}-{i}"), 0, format!("from {i}").as_bytes()).unwrap();
+            }
+            let barrier = std::sync::Barrier::new(n);
+            let target = format!("final-{round}");
+            let oks: Vec<(usize, bool)> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|i| {
+                        let (fs, barrier, d, target) = (&fs, &barrier, &d, &target);
+                        s.spawn(move || {
+                            barrier.wait();
+                            (i, fs.part_rename(d, &format!("p{round}-{i}"), target).is_ok())
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let winners: Vec<usize> = oks.iter().filter(|(_, ok)| *ok).map(|(i, _)| *i).collect();
+            assert_eq!(winners.len(), 1, "round {round}: a rename replaced the file another one had just made");
+            assert_eq!(std::fs::read_to_string(d.join(&target)).unwrap(), format!("from {}", winners[0]));
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

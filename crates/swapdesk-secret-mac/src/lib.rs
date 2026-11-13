@@ -32,4 +32,4 @@ pub use location::{FOLDER_NAME, FolderOwner, KeychainLocation, SERVICE_NAME, Sec
 #[cfg(target_os = "macos")]
 pub use folder::ensure_folder;
 #[cfg(target_os = "macos")]
-pub use store::{MacSecretStore, create_keychain_file, delete_keychain_file};
+pub use store::{MacSecretStore, create_keychain_file, delete_keychain_file, lock_keychain_file};

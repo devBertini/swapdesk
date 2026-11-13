@@ -8,8 +8,8 @@ use swapdesk_platform::{ErrorKind, PlatformError};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSID, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenElevationType, TokenGroups, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSID, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenElevationType, TokenGroups, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -117,6 +117,31 @@ pub fn normalize_sid(text: &str) -> Result<String> {
     sid_to_string(Sid::parse(text)?.as_ptr())
 }
 
+/// The account name ("alex") of a SID on this machine, as Windows shows it (ACCOUNTS.md 6, D55: the default name
+/// a peer sees is "<computer> · <account>").
+pub fn account_name_of_sid(sid: &str) -> Result<String> {
+    let sid = Sid::parse(sid)?;
+    let mut name = [0u16; 256];
+    let mut domain = [0u16; 256];
+    let (mut name_len, mut domain_len, mut kind) = (256u32, 256u32, 0i32);
+    // SAFETY: the SID lives for the call; both buffers hold the lengths passed; a null system name is this machine.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid.as_ptr(),
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error("LookupAccountSidW"));
+    }
+    Ok(String::from_utf16_lossy(&name[..name_len as usize]))
+}
+
 /// Opens the current process token.
 pub fn open_process_token(access: u32) -> Result<OwnedHandle> {
     let mut token: HANDLE = null_mut();
@@ -187,6 +212,15 @@ pub fn token_elevation_type(token: HANDLE) -> Result<u32> {
     let info = token_info(token, TokenElevationType)?;
     // SAFETY: the buffer holds a TOKEN_ELEVATION_TYPE (an i32 enum) written by the call above.
     Ok(unsafe { *info.as_ptr().cast::<i32>() } as u32)
+}
+
+/// Whether this process's account is an administrator account: Administrators is in its token, enabled or
+/// deny-only (a filtered token). Windows then asks for consent; a standard account is asked for an administrator's
+/// name and password (D56).
+pub fn current_account_is_administrator() -> Result<bool> {
+    let token = open_process_token(TOKEN_QUERY)?;
+    let groups = token_groups(token.0)?;
+    Ok(crate::pipe::administrators_present(&groups))
 }
 
 /// The SID of the user this process runs as, as `S-1-5-21-...`.

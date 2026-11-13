@@ -41,17 +41,37 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Keeps one `Pointer` record per run of consecutive ones (the newest), so a fast mouse does not flood the pipe;
-/// every other record keeps its place and order.
+/// One wheel notch in wire units.
+const NOTCH: i16 = 120;
+
+/// Keeps one `Pointer` record per run of consecutive ones (the newest), so a fast mouse does not flood the pipe, and
+/// adds up consecutive `Wheel` records (a trackpad's small steps) while each axis stays within one notch of one sign: an
+/// app that counts a notch per wheel message whatever its size (Windows Terminal in VT mouse mode) must not lose the
+/// notches a bigger sum would hide. Every other record keeps its place and order.
 pub fn coalesce(events: Vec<InputEvent>) -> Vec<InputEvent> {
     let mut out: Vec<InputEvent> = Vec::with_capacity(events.len());
     for e in events {
         if matches!(e, InputEvent::Pointer { .. }) && matches!(out.last(), Some(InputEvent::Pointer { .. })) {
             out.pop();
         }
+        if let (InputEvent::Wheel { dx, dy }, Some(InputEvent::Wheel { dx: px, dy: py })) = (&e, out.last_mut())
+            && let (Some(x), Some(y)) = (within_notch(*px, *dx), within_notch(*py, *dy))
+        {
+            (*px, *py) = (x, y);
+            continue;
+        }
         out.push(e);
     }
     out
+}
+
+/// The sum of two wheel deltas of one axis when it stays within one notch and neither turns the other around.
+fn within_notch(a: i16, b: i16) -> Option<i16> {
+    if a != 0 && b != 0 && (a > 0) != (b > 0) {
+        return None;
+    }
+    let sum = a.checked_add(b)?;
+    (sum.unsigned_abs() <= NOTCH.unsigned_abs()).then_some(sum)
 }
 
 /// The body of the input thread: takes records from `rx`, gathers a batch for [`INPUT_WINDOW`], and sends it to
@@ -109,6 +129,32 @@ mod tests {
 
     fn pointer(x: u16) -> InputEvent {
         InputEvent::Pointer { display: 0, x, y: 0 }
+    }
+
+    fn wheel(dx: i16, dy: i16) -> InputEvent {
+        InputEvent::Wheel { dx, dy }
+    }
+
+    #[test]
+    fn small_wheel_steps_add_up_within_one_notch_and_nothing_else_moves() {
+        // A trackpad's steps in one batch: summed while the sum stays within a notch, then a new record.
+        let got = coalesce(vec![wheel(0, -18), wheel(0, -15), wheel(0, -12), wheel(0, -90), wheel(0, -9)]);
+        assert_eq!(got, vec![wheel(0, -45), wheel(0, -99)]);
+        // Every unit is still there.
+        let sum: i32 = got.iter().map(|e| if let InputEvent::Wheel { dy, .. } = e { i32::from(*dy) } else { 0 }).sum();
+        assert_eq!(sum, -144);
+        // A whole notch, a turn around, a big record or a record between: never merged.
+        assert_eq!(coalesce(vec![wheel(0, 120), wheel(0, 3)]), vec![wheel(0, 120), wheel(0, 3)]);
+        assert_eq!(coalesce(vec![wheel(0, 6), wheel(0, -3)]), vec![wheel(0, 6), wheel(0, -3)]);
+        assert_eq!(coalesce(vec![wheel(-240, 0), wheel(0, 0)]), vec![wheel(-240, 0), wheel(0, 0)]);
+        assert_eq!(
+            coalesce(vec![wheel(0, 6), pointer(1), wheel(0, 6)]),
+            vec![wheel(0, 6), pointer(1), wheel(0, 6)],
+            "a wheel scrolls where the pointer is"
+        );
+        // Both axes of a diagonal add up together.
+        assert_eq!(coalesce(vec![wheel(-12, 9), wheel(-12, 9)]), vec![wheel(-24, 18)]);
+        assert_eq!(coalesce(vec![wheel(i16::MIN, 0), wheel(i16::MIN, 0)]).len(), 2);
     }
 
     #[test]

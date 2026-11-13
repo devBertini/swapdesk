@@ -21,16 +21,18 @@ mod types;
 pub use clip::{ClipData, ClipFail, ClipReplyBody, MAX_CLIP_MESSAGE};
 pub use error::{IpcError, Result};
 pub use files::{
-    FileEntry, FileListing, FilePick, FilesNote, FilesOp, FsAnswer, FsCall, FsEntryView, FsHandleView, FsKind,
-    FsStatView, MAX_FS_IO, MAX_FS_LIST, MAX_FS_MESSAGE, MAX_FS_META, MAX_FS_NAME, MAX_FS_PATH, MAX_PICKS, TransferWire,
+    FileEntry, FileListing, FileListing2, FilePick, FilesNote, FilesOp, FsAnswer, FsCall, FsChange, FsEntry2View,
+    FsEntryView, FsHandleView, FsKind, FsNameView, FsPage, FsStatView, MAX_FS_IO, MAX_FS_LIST, MAX_FS_MESSAGE,
+    MAX_FS_META, MAX_FS_NAME, MAX_FS_PATH, MAX_OP_NAMES, MAX_PICKS, MAX_PLACES, MAX_VOLUME_LABEL, MAX_VOLUMES,
+    OpResultView, PlaceView, TransferWire, VolumeView, VolumesView,
 };
 pub use frame::{FrameReader, FrameWriter};
 pub use handshake::{ClientHello, Handshake, ServerHello};
 pub use message::{
     IPC_VERSION, MAX_AUDIO_DATAGRAM, MAX_FAULT_TEXT, MAX_INPUT_MESSAGE, MAX_OTHER_MESSAGE, MAX_VIDEO_MESSAGE, Message,
-    decode_message, encode_message, limit_of,
+    decode_message, encode_into, encode_message, limit_of,
 };
 pub use ops::{Notify, ReplyBody, STATUS_OK, UiOp, status_code};
-pub use redact::{Bytes, Events, Shape, Text};
+pub use redact::{Bytes, ElevationTicket, Events, Payload, Shape, Text};
 pub use term::{MAX_SESSION_USER, MAX_TERM_ACCOUNT, MAX_TERM_CHUNK, TermOutcome};
 pub use types::*;

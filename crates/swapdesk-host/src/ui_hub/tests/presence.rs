@@ -38,9 +38,7 @@ fn a_device_with_a_live_session_is_on_the_network_on_both_sides_without_any_dns_
     host_ui
         .call(UiOp::AnswerIncoming { request_id: incoming, decision: Decision::Accept, grants: ALL.bits() })
         .expect("accepted");
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     host_ui.notify("Active on the host", |n| match n {
         Notify::Session { session_id: id, state: SessionState::Active { .. }, .. } if *id == session_id => Some(()),
         _ => None,
@@ -134,9 +132,7 @@ fn after_an_address_change_the_session_endpoint_listens_on_the_new_address_and_k
     host_ui
         .call(UiOp::AnswerIncoming { request_id: incoming, decision: Decision::Accept, grants: ALL.bits() })
         .expect("accepted");
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     wait_for("the host session", || (host.core.host().sessions().len() == 1).then_some(()));
 
     // The machine's Wi-Fi gets an address: the next network notice makes the endpoint listen there too.
@@ -215,6 +211,7 @@ fn a_paired_device_typed_by_address_or_seen_by_dns_sd_is_one_entry_on_the_networ
             addrs: vec![addr],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         }])
     };
     announce(Ipv4Addr::new(192, 168, 1, 3));
@@ -239,4 +236,107 @@ fn a_paired_device_typed_by_address_or_seen_by_dns_sd_is_one_entry_on_the_networ
 
     drop(ui);
     m.finish();
+}
+
+fn record(id: u8, ip: [u8; 4], port: u16) -> PresencePeer {
+    PresencePeer {
+        device_id: [id; 16],
+        name: format!("pc-{id}"),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::from(ip)],
+        session_port: port,
+        pair_port: port + 1,
+        proto_minor: 1,
+    }
+}
+
+/// ACCOUNTS.md 5.2 (guard, green before): two accounts of one computer announce at one address with different ports;
+/// a browser keeps both.
+#[test]
+fn two_records_of_one_address_with_different_ports_both_stay_listed() {
+    let mut book = super::super::presence::PeerBook::default();
+    assert!(book.found(record(1, [192, 168, 1, 9], 47820)));
+    assert!(book.found(record(2, [192, 168, 1, 9], 47822)));
+    assert_eq!(book.list().len(), 2, "both accounts stay listed");
+    // A record at the same address and port is another machine taking the place: the old one goes (1.0 rule).
+    assert!(book.found(record(3, [192, 168, 1, 9], 47820)));
+    assert_eq!(book.list().len(), 2);
+    assert!(!book.list().iter().any(|p| p.device_id == [1; 16]));
+}
+
+/// ACCOUNTS.md 6: the records of this machine's other accounts are not listed as devices.
+#[test]
+fn this_machines_other_accounts_are_not_listed() {
+    let raw = FakePresence::new();
+    let own = Arc::new(Mutex::new(vec![[2u8; 16]]));
+    use super::super::presence::Presence as _;
+    let filtered = super::super::presence::FilteredPresence::new(raw.clone(), Arc::clone(&own));
+    raw.set(vec![record(1, [192, 168, 1, 9], 47820), record(2, [192, 168, 1, 7], 47822)]);
+    let seen: Vec<_> = filtered.peers().iter().map(|p| p.device_id).collect();
+    assert_eq!(seen, vec![[1u8; 16]], "the other account of this machine is not a peer");
+    // An account that appears later is filtered from then on.
+    own.lock().unwrap().push([1; 16]);
+    assert!(filtered.peers().is_empty());
+}
+
+fn ids(book: &super::super::presence::PeerBook) -> Vec<u8> {
+    let mut v: Vec<u8> = book.list().iter().map(|p| p.device_id[0]).collect();
+    v.sort_unstable();
+    v
+}
+
+fn at(ip: [u8; 4], port: u16) -> std::net::SocketAddrV4 {
+    std::net::SocketAddrV4::new(Ipv4Addr::from(ip), port)
+}
+
+/// F6: a record of another fingerprint at the address and port of a device a contact proved does not remove it.
+#[test]
+fn a_forged_record_at_the_real_devices_address_does_not_evict_it_after_an_authenticated_contact() {
+    let mut book = super::super::presence::PeerBook::default();
+    assert!(book.found(record(1, [192, 168, 1, 3], 47820)));
+    book.authenticate([1; 16], at([192, 168, 1, 3], 47820));
+    // Anyone on the LAN announces another fingerprint at that address and port.
+    book.found(record(66, [192, 168, 1, 3], 47820));
+    assert!(ids(&book).contains(&1), "the proven device stays listed: {:?}", ids(&book));
+    // Without a proof the old rule holds: a new key at the address replaces the record there.
+    let mut plain = super::super::presence::PeerBook::default();
+    plain.found(record(1, [192, 168, 1, 3], 47820));
+    plain.found(record(66, [192, 168, 1, 3], 47820));
+    assert_eq!(ids(&plain), vec![66]);
+}
+
+/// F6: the newest record of a fingerprint does not move a proven device to the address it names; the device's own
+/// record going away ends the proof, and the record that waited takes its place.
+#[test]
+fn a_forged_record_of_a_proven_device_at_another_address_does_not_redirect_it() {
+    let mut book = super::super::presence::PeerBook::default();
+    book.found(record(1, [192, 168, 1, 3], 47820));
+    book.authenticate([1; 16], at([192, 168, 1, 3], 47820));
+    // The same fingerprint at the attacker's address.
+    assert!(!book.found(record(1, [192, 168, 1, 66], 47820)), "nothing the user sees changed");
+    let now = book.list();
+    assert_eq!(now.len(), 1);
+    assert_eq!(now[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 3)], "still where the key was proven");
+    // The record at the proven address again (a refresh) is taken.
+    assert!(book.found(PresencePeer { name: "renamed".into(), ..record(1, [192, 168, 1, 3], 47820) }));
+    // The device really moved: its old record goes away, the waiting one stands.
+    book.found(record(1, [192, 168, 1, 77], 47820));
+    assert!(book.lost(&[1; 16]));
+    assert_eq!(book.list()[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 77)]);
+    // With the proof gone, a record elsewhere replaces it as before.
+    book.found(record(1, [192, 168, 1, 88], 47820));
+    assert_eq!(book.list()[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 88)]);
+}
+
+/// A proof only counts for the record listed at that address and port.
+#[test]
+fn a_contact_from_an_address_the_list_does_not_hold_proves_nothing() {
+    let mut book = super::super::presence::PeerBook::default();
+    book.found(record(1, [192, 168, 1, 3], 47820));
+    assert!(!book.authenticate([1; 16], at([192, 168, 1, 4], 47820)));
+    assert!(!book.authenticate([1; 16], at([192, 168, 1, 3], 50000)));
+    assert!(!book.authenticate([2; 16], at([192, 168, 1, 3], 47820)));
+    book.found(record(66, [192, 168, 1, 3], 47820));
+    assert_eq!(ids(&book), vec![66], "no proof was taken, the new record replaces");
 }

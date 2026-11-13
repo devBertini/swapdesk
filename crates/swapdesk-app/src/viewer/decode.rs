@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use swapdesk_codec_win::{DecoderOptions, DecoderOutput, MfH264Decoder};
 use swapdesk_platform::{ErrorKind, NativeSurface, Rect, Renderer, ScaleMode, VideoDecoder};
-use swapdesk_render_win::{RendererOptions, WinRenderer};
+use swapdesk_render_win::{Probe, RendererOptions, WinRenderer};
 
 use super::ViewerOut;
 use super::cursor::CursorTracker;
@@ -39,9 +39,26 @@ pub struct PresentEvent {
     pub decode_us: u32,
     /// Arrival in the viewer to the end of `present`.
     pub lag_us: u32,
+    /// The machine's monotonic clock right after `Present` returned.
+    pub presented_at_us: u64,
+    /// Inside `present`: the wait for the swap chain's frame-latency object, recording the blit, the `Present` call.
+    pub wait_us: u32,
+    pub blt_us: u32,
+    pub present_us: u32,
 }
 
 pub type PresentObserver = Arc<dyn Fn(&PresentEvent) + Send + Sync>;
+pub type ProbeObserver = Arc<dyn Fn(&PresentEvent, &Probe) + Send + Sync>;
+
+/// Measurements only: a rectangle of the swap chain (in its pixels) copied from every picture just before it is
+/// presented, handed to `on_probe` on the decode thread once the GPU has finished the copy. The wait for that copy
+/// comes after the picture's present time was taken; it delays the next frame's decode, which a measurement accepts
+/// and a session never pays (the default is no tap).
+#[derive(Clone)]
+pub struct ProbeTap {
+    pub rect: (u32, u32, u32, u32),
+    pub on_probe: ProbeObserver,
+}
 
 /// What the decode thread shares with the rest of the pipeline.
 #[derive(Default)]
@@ -53,6 +70,9 @@ pub struct Shared {
     pub lost: AtomicU64,
     pub keyframe_requests: AtomicU64,
     pub decode_errors: AtomicU64,
+    /// Pictures decoded and not shown because a newer frame was already waiting (the screen was slower than the
+    /// stream).
+    pub skipped: AtomicU64,
     /// The renderer is attached.
     pub attached: AtomicBool,
     /// The remote cursor is drawn (its shape is known and the viewer does not control).
@@ -65,6 +85,11 @@ pub struct Shared {
     /// The last renderer or decoder failure, for the trace (never content).
     pub last_error: Mutex<Option<String>>,
     pub audio_underruns: Arc<std::sync::atomic::AtomicU32>,
+    /// The shell's graphics device is gone (F-VIEW-08): nothing can be drawn on the surface the window gave, so the
+    /// shell must build its device again and hand a new surface (`ViewerHost::opened`). Cleared by that attach.
+    pub device_lost: AtomicBool,
+    /// Who is woken when `device_lost` is set (the shell's waker, the same as the shortcuts').
+    pub waker: Mutex<Option<Arc<dyn swapdesk_ui::UiWaker>>>,
 }
 
 impl Shared {
@@ -78,6 +103,7 @@ pub struct Worker {
     out: Arc<Mutex<Option<Arc<dyn ViewerOut>>>>,
     shared: Arc<Shared>,
     observer: Option<PresentObserver>,
+    probe: Option<ProbeTap>,
     renderer: Option<WinRenderer>,
     decoder: Option<MfH264Decoder>,
     surface: Option<(NativeSurface, Rect)>,
@@ -89,13 +115,26 @@ pub struct Worker {
     cursor: CursorTracker,
     /// Polls left for the picture the decoder owes, and the arrival of the frame that fed it.
     owed: Option<(u32, Instant)>,
+    /// Pictures skipped in a row because a newer frame was waiting.
+    skips: u32,
+    /// Tests only: each present takes at least this long.
+    present_delay: Option<Duration>,
 }
+
+/// Most pictures skipped in a row: a stream the decoder cannot keep up with still shows one picture in six.
+const MAX_SKIPS: u32 = 5;
+/// Frames waiting behind a picture that mean the screen is falling behind the stream. One waiting frame is the
+/// ordinary jitter of a stream that is on time (it arrived while the last present waited for the display), and its
+/// picture is shown as before; two are a present that takes longer than a frame lasts.
+const BEHIND: usize = 2;
 
 pub fn spawn(
     mailbox: Arc<Mailbox>,
     out: Arc<Mutex<Option<Arc<dyn ViewerOut>>>>,
     shared: Arc<Shared>,
     observer: Option<PresentObserver>,
+    probe: Option<ProbeTap>,
+    present_delay: Option<Duration>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("swapdesk-viewer-decode".into()).spawn(move || {
         let mut w = Worker {
@@ -103,6 +142,7 @@ pub fn spawn(
             out,
             shared,
             observer,
+            probe,
             renderer: None,
             decoder: None,
             surface: None,
@@ -113,6 +153,8 @@ pub fn spawn(
             feedback: Feedback::new(Instant::now()),
             cursor: CursorTracker::new(),
             owed: None,
+            skips: 0,
+            present_delay,
         };
         w.run();
     })
@@ -174,6 +216,7 @@ impl Worker {
     fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Attach { surface, area, scale } => {
+                self.shared.device_lost.store(false, Ordering::SeqCst);
                 self.scale = scale;
                 self.surface = Some((surface, area));
                 self.attach();
@@ -218,6 +261,9 @@ impl Worker {
             self.shared.error("attach", e);
             return;
         }
+        if let Some(tap) = &self.probe {
+            renderer.set_probe(Some(tap.rect));
+        }
         self.decoder = Some(MfH264Decoder::new(DecoderOptions {
             output: DecoderOutput::Gpu,
             device: renderer.device(),
@@ -243,6 +289,23 @@ impl Worker {
 
     fn detach(&mut self) {
         self.detach_renderer();
+    }
+
+    /// The graphics device was lost (F-VIEW-08): a picture failed to present or decode on it. The renderer and the
+    /// decoder are built again on the same surface, which heals a fault the shell's device survived, and the next
+    /// keyframe brings the picture back. When the shell's device itself is gone, nothing more is drawn until the
+    /// shell hands a new surface: it is told through `device_lost` and woken. The session goes on meanwhile.
+    fn device_gone(&mut self) {
+        self.owed = None;
+        self.attach();
+        if self.renderer.as_ref().is_none_or(WinRenderer::device_lost) {
+            self.detach_renderer();
+            self.shared.device_lost.store(true, Ordering::SeqCst);
+            let waker = self.shared.waker.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
     }
 
     fn publish_map(&self) {
@@ -281,14 +344,56 @@ impl Worker {
         }
     }
 
+    /// Shows a decoded picture, unless a newer frame is already waiting.
+    ///
+    /// A present can take longer than a frame lasts: a desktop may hold a window's pictures back (Windows shows a
+    /// window that is not in front at 30 a second, and `Present` then waits 33 ms). Every frame must still be
+    /// decoded, each depends on the one before, so the wait must not be paid for each of them: the frames would
+    /// pile up in the mailbox, which then drops them all, resets the decoder and asks the host for a keyframe,
+    /// again and again. So a picture that comes out while the stream is already two frames ahead is not shown: the
+    /// next one is decoded at once and the screen stays within a frame of the newest. Nothing is lost and nothing is
+    /// asked of the host.
+    fn show_newest(&mut self, picture: swapdesk_platform::DecodedFrame, arrived: Instant) {
+        if self.mailbox.queued_frames() >= BEHIND && self.skips < MAX_SKIPS {
+            self.skips += 1;
+            self.shared.skipped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.skips = 0;
+        self.show(picture, arrived);
+    }
+
     /// Presents a decoded picture and publishes what the pointer and the feedback need.
     fn show(&mut self, picture: swapdesk_platform::DecodedFrame, arrived: Instant) {
         let (Some(decoder), Some(renderer)) = (self.decoder.as_ref(), self.renderer.as_mut()) else { return };
         let decode_us = decoder.last_decode_us();
         let (width, height, frame_id, display) = (picture.width, picture.height, picture.frame_id, picture.display.0);
+        if let Some(delay) = self.present_delay {
+            std::thread::sleep(delay);
+        }
         match renderer.present(picture, self.scale) {
-            Ok(_) => {
+            Ok(stats) => {
                 let lag_us = u32::try_from(arrived.elapsed().as_micros()).unwrap_or(u32::MAX);
+                let timing = renderer.timing();
+                let event = PresentEvent {
+                    frame_id,
+                    display,
+                    width,
+                    height,
+                    decode_us,
+                    lag_us,
+                    presented_at_us: stats.presented_at.0,
+                    wait_us: timing.wait_us,
+                    blt_us: timing.blt_us,
+                    present_us: timing.present_us,
+                };
+                if let Some(tap) = &self.probe {
+                    match renderer.take_probe() {
+                        Ok(Some(pixels)) => (tap.on_probe)(&event, &pixels),
+                        Ok(None) => {}
+                        Err(e) => self.shared.error("probe", e),
+                    }
+                }
                 self.feedback.on_presented(frame_id, decode_us, lag_us);
                 self.shared.presented.fetch_add(1, Ordering::Relaxed);
                 self.shared.last_frame_id.store(u64::from(frame_id), Ordering::Relaxed);
@@ -301,7 +406,7 @@ impl Worker {
                     self.apply_cursor(update);
                 }
                 if let Some(obs) = &self.observer {
-                    obs(&PresentEvent { frame_id, display, width, height, decode_us, lag_us });
+                    obs(&event);
                 }
             }
             Err(e) => {
@@ -309,8 +414,7 @@ impl Worker {
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
                 self.shared.error("present", &e);
                 if e.kind == ErrorKind::Unavailable {
-                    // A lost device: attach again on the same surface, then wait for a keyframe.
-                    self.attach();
+                    self.device_gone();
                 }
             }
         }
@@ -326,11 +430,17 @@ impl Worker {
         match decoder.poll() {
             Ok(Some(picture)) => {
                 self.owed = None;
-                self.show(picture, arrived);
+                self.show_newest(picture, arrived);
             }
             Ok(None) => self.owed = if left > 1 { Some((left - 1, arrived)) } else { None },
             Err(e) => {
                 self.owed = None;
+                if self.renderer.as_ref().is_some_and(WinRenderer::device_lost) {
+                    self.shared.error("decode", e);
+                    self.device_gone();
+                    return;
+                }
+                let Some(decoder) = self.decoder.as_mut() else { return };
                 decoder.reset();
                 self.feedback.on_lost(1);
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
@@ -351,13 +461,19 @@ impl Worker {
         let owes = decoder.owes_picture();
         self.owed = if owes { Some((OWED_POLLS, f.arrived)) } else { None };
         match result {
-            Ok(Some(picture)) => self.show(picture, f.arrived),
+            Ok(Some(picture)) => self.show_newest(picture, f.arrived),
             Ok(None) => {
                 if decoder.waiting_for_keyframe() {
                     self.request_keyframe(false);
                 }
             }
             Err(e) => {
+                if self.renderer.as_ref().is_some_and(WinRenderer::device_lost) {
+                    self.shared.error("decode", e);
+                    self.device_gone();
+                    return;
+                }
+                let Some(decoder) = self.decoder.as_mut() else { return };
                 decoder.reset();
                 self.feedback.on_lost(1);
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);

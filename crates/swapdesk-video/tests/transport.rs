@@ -126,7 +126,7 @@ fn a_payload_over_8_mib_is_refused_before_a_stream_opens() {
         let rig = rig(&pair, SenderConfig::default(), ReceiverConfig::default()).await;
         let mut enc = TestEncoder::new(Arc::new(MonotonicClock::new()));
         let mut f = enc.next(&rig.sender);
-        f.payload = vec![0; 8 * 1024 * 1024 + 1];
+        f.payload = vec![0; 8 * 1024 * 1024 + 1].into();
         assert_eq!(rig.sender.send(f).await, SendOutcome::TooLarge);
         assert_eq!(rig.sender.stats().sent, 0);
     });
@@ -205,7 +205,7 @@ fn a_backlog_over_100_ms_resets_everything_wants_a_keyframe_and_cuts_the_bitrate
         assert!(rig.sender.target_kbps() < before, "the bitrate was cut: {} -> {}", before, rig.sender.target_kbps());
         assert_eq!(*rig.bitrates.lock().unwrap().last().unwrap(), rig.sender.target_kbps(), "the encoder was told");
         // An encoder that has not yet heard that a keyframe is wanted: its P-frames are dropped, not sent.
-        let stale_p = swapdesk_video::Frame { header: header(100, false, 0), payload: payload_of(100, 1000) };
+        let stale_p = swapdesk_video::Frame { header: header(100, false, 0), payload: payload_of(100, 1000).into() };
         assert_eq!(rig.sender.send(stale_p).await, SendOutcome::DroppedAwaitingKeyframe);
         link.set_link_up(true);
         let f = enc.next(&rig.sender);

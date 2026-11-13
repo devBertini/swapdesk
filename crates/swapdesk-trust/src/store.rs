@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use swapdesk_platform::{ErrorKind, PlatformError, SecretStore};
 use swapdesk_proto::Wire;
 
+use crate::blocklist::{BLOCKED_NAME, BlockList, BlockedDevice};
 use crate::error::{Result, TrustError};
 use crate::ids::DeviceId;
 use crate::records::{TRUST_NAME, TrustStore};
@@ -25,6 +26,8 @@ pub struct TrustHandle {
     writer: Mutex<()>,
     secrets: Arc<dyn SecretStore>,
     pairing: AtomicBool,
+    /// The devices blocked by MAC (D65), persisted in `blocked.bin`; changes are written under `writer` too.
+    blocks: Mutex<BlockList>,
 }
 
 /// The one "pairing in progress" slot of this machine, shared by the initiator and the responder role. Held for
@@ -51,11 +54,16 @@ impl TrustHandle {
             Some(bytes) => TrustStore::decode(&bytes)?,
             None => TrustStore::default(),
         };
+        // A `blocked.bin` that cannot be read starts an empty list (the next block writes a good one): losing the
+        // list costs a device's block, while refusing to start would cost every pairing and every session.
+        let blocks =
+            secrets.load(BLOCKED_NAME).ok().flatten().and_then(|b| BlockList::decode(&b).ok()).unwrap_or_default();
         Ok(Arc::new(Self {
             store: Mutex::new(store),
             writer: Mutex::new(()),
             secrets,
             pairing: AtomicBool::new(false),
+            blocks: Mutex::new(blocks),
         }))
     }
 
@@ -106,6 +114,41 @@ impl TrustHandle {
         })
     }
 
+    /// The devices blocked by MAC, as they are now.
+    pub fn blocked_devices(&self) -> Vec<BlockedDevice> {
+        guard(&self.blocks).devices.clone()
+    }
+
+    /// Whether any device is blocked by MAC: a connection is looked up in the neighbour table only then.
+    pub fn any_blocked_mac(&self) -> bool {
+        !guard(&self.blocks).devices.is_empty()
+    }
+
+    pub fn is_blocked_mac(&self, mac: &[u8; 6]) -> bool {
+        guard(&self.blocks).contains(mac)
+    }
+
+    /// Blocks a device by its MAC and writes `blocked.bin`; false when the list is full. A failed write changes
+    /// nothing.
+    pub fn block_mac(&self, device: BlockedDevice) -> Result<bool> {
+        self.change_blocks(|b| b.block(device))
+    }
+
+    /// Unblocks a MAC and writes `blocked.bin`; true if it was blocked.
+    pub fn unblock_mac(&self, mac: &[u8; 6]) -> Result<bool> {
+        self.change_blocks(|b| b.unblock(mac))
+    }
+
+    fn change_blocks(&self, f: impl FnOnce(&mut BlockList) -> bool) -> Result<bool> {
+        let _writing = guard(&self.writer);
+        let mut next = guard(&self.blocks).clone();
+        let out = f(&mut next);
+        let bytes = next.encode().map_err(TrustError::Codec)?;
+        self.secrets.store(BLOCKED_NAME, &bytes).map_err(TrustError::Secret)?;
+        *guard(&self.blocks) = next;
+        Ok(out)
+    }
+
     pub fn snapshot(&self) -> TrustStore {
         self.read(Clone::clone)
     }
@@ -148,6 +191,28 @@ mod tests {
         assert!(h.pinned(&spki_from_public_key(&[1; 32])).is_some());
         let again = TrustHandle::open(secrets).unwrap();
         assert_eq!(again.snapshot(), h.snapshot());
+    }
+
+    /// D65: the blocked MACs live in `blocked.bin`, apart from `trust.bin` (an older build restored by the updater
+    /// reads `trust.bin` strictly), and survive a restart; an unreadable `blocked.bin` starts empty.
+    #[test]
+    fn blocked_macs_persist_in_their_own_file() {
+        let secrets = Arc::new(MemorySecretStore::new());
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        let trust_before = secrets.load(TRUST_NAME).unwrap();
+        let d =
+            BlockedDevice { mac: [2, 0, 0, 0, 0, 9], last_ipv4: [192, 168, 0, 9], name: "x".into(), blocked_at_ms: 5 };
+        assert!(h.block_mac(d.clone()).unwrap());
+        assert_eq!(secrets.load(TRUST_NAME).unwrap(), trust_before, "trust.bin is not touched");
+        let again = TrustHandle::open(secrets.clone()).unwrap();
+        assert!(again.is_blocked_mac(&d.mac) && again.any_blocked_mac());
+        assert_eq!(again.blocked_devices(), vec![d.clone()]);
+        assert!(again.unblock_mac(&d.mac).unwrap());
+        assert!(!TrustHandle::open(secrets.clone()).unwrap().any_blocked_mac());
+
+        secrets.store(BLOCKED_NAME, &[9, 9]).unwrap();
+        let h = TrustHandle::open(secrets).expect("an unreadable blocked.bin never stops the service");
+        assert!(!h.any_blocked_mac());
     }
 
     #[test]

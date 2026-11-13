@@ -89,7 +89,7 @@ macro_rules! need_nvidia {
 
 fn config(w: u32, adapter: AdapterId, preset: Preset, fps: u16, kbps: u32) -> EncoderConfig {
     let (width, height) = size(w);
-    EncoderConfig { width, height, fps, kbps, preset, adapter }
+    EncoderConfig { width, height, fps, kbps, preset, adapter, codec: swapdesk_platform::Codec::H264 }
 }
 
 fn nvenc_on(uploader: &TextureUploader) -> NvencEncoder {
@@ -462,11 +462,13 @@ fn the_encoder_refuses_bad_configurations_and_unconfigured_use() {
     assert_eq!(fresh.encode(&cpu_frame(1920, 0), false).expect_err("not configured").kind, ErrorKind::Closed);
     assert_eq!(fresh.set_rate(1000, 30).expect_err("not configured").kind, ErrorKind::Closed);
     assert!(fresh.flush().expect("flush of nothing").is_empty());
-    // A display size change restarts the session: new SPS/PPS and an IDR with config_change.
+    // A new encoded size (the caller's `configure`; a frame of another size is scaled, F-VIEW-06) restarts the
+    // session: new SPS/PPS and an IDR with config_change.
     let uploader = TextureUploader::new(nv.id).expect("uploader");
     let mut enc = nvenc_on(&uploader);
     enc.configure(&config(1920, nv.id, Preset::Auto, 60, 20_000)).expect("configure");
     enc.encode(&uploader.upload(&cpu_frame(1920, 0)).expect("upload"), false).expect("first size");
+    enc.configure(&config(2560, nv.id, Preset::Auto, 60, 20_000)).expect("configure at the new size");
     let out = enc.encode(&uploader.upload(&cpu_frame(2560, 0)).expect("upload"), false).expect("second size");
     assert!(out[0].keyframe && out[0].config_change);
     assert_eq!((out[0].width, out[0].height), (2560, 1440));
@@ -501,8 +503,16 @@ fn thirty_seconds_of_real_capture_of_the_nvidia_display_encode_at_60_fps() {
         mf: EncoderOptions { device: Some(device), ..Default::default() },
         ..Default::default()
     });
-    enc.configure(&EncoderConfig { width: w, height: h, fps: 60, kbps: 30_000, preset: Preset::Auto, adapter: nv.id })
-        .expect("configure on the capture device");
+    enc.configure(&EncoderConfig {
+        width: w,
+        height: h,
+        fps: 60,
+        kbps: 30_000,
+        preset: Preset::Auto,
+        adapter: nv.id,
+        codec: swapdesk_platform::Codec::H264,
+    })
+    .expect("configure on the capture device");
     assert_eq!(enc.backend(), Some(ChosenBackend::Nvenc), "{:?}", enc.fallback_reason());
 
     let mut current = first;

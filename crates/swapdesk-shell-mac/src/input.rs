@@ -58,10 +58,19 @@ pub enum MouseKind {
         button: PointerButton,
     },
     /// `precise` is true for trackpads (pixel deltas); a wheel gives lines. Positive `dy` scrolls content up (away).
+    /// `starts` marks the start of a touch gesture (`NSEvent.phase` is `MayBegin` or `Began`); the momentum events
+    /// after it and a plain wheel's events have it false.
     Scroll {
         dx: f64,
         dy: f64,
         precise: bool,
+        starts: bool,
+    },
+    /// A trackpad pinch (`magnifyWithEvent:`): `amount` is `NSEvent.magnification` (positive spreads the fingers,
+    /// zoom in); `ends` marks the gesture's last event (`NSEvent.phase` is `Ended` or `Cancelled`).
+    Magnify {
+        amount: f64,
+        ends: bool,
     },
 }
 
@@ -71,6 +80,37 @@ pub struct MouseMsg {
     pub x: f64,
     pub y: f64,
     pub modifiers: Modifiers,
+}
+
+/// Whether the video view has the keyboard, and what the input lane was last told about it.
+///
+/// The view has the keyboard while its window is the key window and the view is that window's first responder. AppKit
+/// reports the two halves through different calls: the view becoming or resigning first responder, and the window
+/// becoming or resigning key (another window of the app, another app after Command+Tab, Spotlight, a system panel), and
+/// the input lane may be attached after the view already became first responder (the viewer window makes it first
+/// responder before the shell hands it the input). Every one of those calls feeds this latch; the input lane hears
+/// each change once: `focus(false)` makes it release every key and button on the host, so no modifier is left held
+/// there when the keys' releases go to another window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FocusLatch {
+    told: bool,
+}
+
+impl FocusLatch {
+    /// The new state of the view; `Some(focused)` when the input lane must be told.
+    pub fn update(&mut self, key_window: bool, first_responder: bool) -> Option<bool> {
+        let now = key_window && first_responder;
+        (std::mem::replace(&mut self.told, now) != now).then_some(now)
+    }
+
+    /// The input lane is detached: `Some(false)` when it was told it had the keyboard (tell it it lost it).
+    pub fn detach(&mut self) -> Option<bool> {
+        std::mem::take(&mut self.told).then_some(false)
+    }
+
+    pub fn focused(&self) -> bool {
+        self.told
+    }
 }
 
 /// Implemented by the input lane. All methods have conservative defaults so a partial implementation compiles.
@@ -109,6 +149,37 @@ mod tests {
         assert!(m.contains(Modifiers::SHIFT) && m.contains(Modifiers::COMMAND));
         assert!(!m.contains(Modifiers::OPTION));
         assert!(m.contains(Modifiers::default()));
+    }
+
+    #[test]
+    fn the_input_attached_after_the_view_became_first_responder_hears_the_focus() {
+        // The viewer window makes the video view first responder, then the shell hands it the input: the input
+        // starts unfocused and must be told now (it never was before: no focus, no release on focus loss).
+        let mut latch = FocusLatch::default();
+        assert_eq!(latch.update(true, true), Some(true));
+        assert!(latch.focused());
+        assert_eq!(latch.update(true, true), None, "told once");
+    }
+
+    #[test]
+    fn the_window_resigning_key_with_the_view_still_first_responder_takes_the_keyboard_away() {
+        // Command+Tab to another app: the video view stays its window's first responder, the window resigns key.
+        let mut latch = FocusLatch::default();
+        latch.update(true, true);
+        assert_eq!(latch.update(false, true), Some(false), "the input releases every key on the host");
+        assert_eq!(latch.update(true, true), Some(true), "back with Command+Tab");
+        assert_eq!(latch.update(true, false), Some(false), "a text field of the drawer took the keyboard");
+        assert_eq!(latch.update(false, false), None);
+    }
+
+    #[test]
+    fn detaching_tells_a_focused_input_it_lost_the_keyboard_once() {
+        let mut latch = FocusLatch::default();
+        assert_eq!(latch.detach(), None, "never focused: nothing to release");
+        latch.update(true, true);
+        assert_eq!(latch.detach(), Some(false));
+        assert_eq!(latch.detach(), None);
+        assert_eq!(latch.update(true, true), Some(true), "a new input hears the focus again");
     }
 
     struct Nothing;

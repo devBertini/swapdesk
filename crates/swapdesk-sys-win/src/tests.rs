@@ -26,7 +26,7 @@ use crate::sys::{open_process_token, token_is_elevated, wide};
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn me() -> String {
+pub(crate) fn me() -> String {
     current_user_sid().unwrap()
 }
 
@@ -40,10 +40,10 @@ fn unique(prefix: &str) -> String {
 }
 
 /// A fresh temp folder, removed at the end.
-struct Temp(PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 
 impl Temp {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let p = std::env::temp_dir().join(unique("swapdesk-sys-win"));
         fs::create_dir_all(&p).unwrap();
         Self(p)
@@ -216,6 +216,78 @@ fn impersonation_reports_the_current_user_and_the_elevation_of_this_token() {
     }
 }
 
+/// The Administrators group as `token_groups` reports it, with the given attribute bits.
+fn administrators(attrs: u32) -> (String, u32) {
+    (crate::pipe::ADMINISTRATORS_SID.to_string(), attrs)
+}
+
+fn other_group(attrs: u32) -> (String, u32) {
+    ("S-1-5-32-545".to_string(), attrs)
+}
+
+const ENABLED: u32 = 0x4;
+const DENY_ONLY: u32 = 0x10;
+
+#[test]
+fn administrators_in_a_group_list_is_present_with_any_attributes_and_enabled_only_when_not_deny_only() {
+    use crate::pipe::{administrators_enabled, administrators_present};
+
+    // An elevated administrator's token: the group is on.
+    let on = [other_group(ENABLED), administrators(ENABLED | 0x2 | 0x1)];
+    assert!(administrators_present(&on));
+    assert!(administrators_enabled(&on));
+
+    // A filtered administrator's token: the group is there for denial only, and is not enabled.
+    let filtered = [other_group(ENABLED), administrators(DENY_ONLY)];
+    assert!(administrators_present(&filtered), "deny-only still means the account is an administrator");
+    assert!(!administrators_enabled(&filtered));
+
+    // Defensive: both bits set is never an enabled group.
+    let both = [administrators(ENABLED | DENY_ONLY)];
+    assert!(administrators_present(&both));
+    assert!(!administrators_enabled(&both));
+
+    // The group is in the token but switched off (neither bit).
+    let off = [administrators(0)];
+    assert!(administrators_present(&off));
+    assert!(!administrators_enabled(&off));
+
+    // A standard account's token, and an empty list: no Administrators at all.
+    let standard = [other_group(ENABLED), other_group(DENY_ONLY), ("S-1-5-32-544-1".to_string(), ENABLED)];
+    assert!(!administrators_present(&standard), "another SID, even one that starts like it, is not the group");
+    assert!(!administrators_enabled(&standard));
+    assert!(!administrators_present(&[]));
+    assert!(!administrators_enabled(&[]));
+}
+
+#[test]
+fn identify_client_reports_administrators_present_for_a_filtered_administrator() {
+    let (mut server, mut client) = connect_pair(&unique("t-adm"));
+    client.write_all(b"hello").unwrap();
+    let mut b = [0u8; 5];
+    server.read_exact(&mut b).unwrap();
+    let id = server.identify_client().unwrap();
+
+    let token = open_process_token(TOKEN_QUERY).unwrap();
+    let own_groups = crate::sys::token_groups(token.0).unwrap();
+    let in_group = own_groups.iter().any(|(sid, _)| sid == crate::pipe::ADMINISTRATORS_SID);
+    // What the pipe reports is what this process's own token says, for any kind of account.
+    assert_eq!(id.administrators_present, in_group, "{id:?}");
+    // Limited: an administrator's filtered token, which exists only with UAC on.
+    let limited = crate::sys::token_elevation_type(token.0).unwrap() == 3;
+    if limited && in_group {
+        assert!(id.administrators_present, "a filtered administrator holds the group deny-only: {id:?}");
+        assert!(!id.administrators_enabled, "and not enabled: {id:?}");
+        assert!(!id.elevated && !id.is_admin(), "so it is not an administrator connection (C2.3): {id:?}");
+    } else {
+        eprintln!(
+            "identify_client_reports_administrators_present_for_a_filtered_administrator: this test's user is not an \
+             administrator with UAC on (elevation type limited: {limited}, Administrators in the token: {in_group}); \
+             nothing about a filtered administrator was asserted"
+        );
+    }
+}
+
 #[test]
 fn accept_times_out_and_the_listener_stays_usable() {
     let name = unique("t-accept");
@@ -366,7 +438,7 @@ fn dev_launch_of_a_missing_exe_fails() {
     assert!(launch_helper_dev(Path::new("C:\\no\\such\\swapdesk-helper.exe"), &[]).is_err());
 }
 
-fn create_dir_with_sddl(path: &Path, sddl: &str) {
+pub(crate) fn create_dir_with_sddl(path: &Path, sddl: &str) {
     let w = wide(path.as_os_str()).unwrap();
     let s = wide(std::ffi::OsStr::new(sddl)).unwrap();
     let mut sd: PSECURITY_DESCRIPTOR = null_mut();

@@ -9,7 +9,7 @@ use swapdesk_ui::tokens::{DARK, LIGHT};
 use swapdesk_ui::{ControlId, WindowKind};
 
 use crate::offscreen::{design_size, render};
-use crate::view::Interaction;
+use swapdesk_paint::Interaction;
 
 fn shots_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-results/stage11-shots");
@@ -37,6 +37,12 @@ fn every_scenario_renders_to_a_png_and_every_control_has_a_place() {
             assert!(r.distinct_colors() > 3, "{} {kind:?} looks blank", sc.name());
             let name = format!("{}{}.png", sc.name(), suffix(kind));
             r.save_png(&dir.join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            // The layout the Mac painter must reproduce (stage 28 compares its own dump with this one).
+            std::fs::write(
+                dir.join(format!("{}{}.layout.txt", sc.name(), suffix(kind))),
+                swapdesk_paint::layout_dump(&r.output),
+            )
+            .expect("layout dump");
             written.push(name);
 
             let missing: Vec<_> = state
@@ -302,7 +308,7 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     let id = |r: &crate::offscreen::Rendered, c| r.output.widgets.iter().any(|x| x.id == c);
     assert!(id(&window, ControlId::TbKeys), "the bar shows in a window");
     let video = window.output.video.expect("video rectangle");
-    assert!(video.y >= swapdesk_ui::tokens::layout::VIEWER_BAR_H && video.w < w);
+    assert!(video.y > 0.0 && video.w < w, "a mock run keeps the design's framed picture");
 
     state.run_shortcut(ViewerAction::FullScreen);
     let full = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
@@ -311,8 +317,8 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     let v = full.output.video.expect("video rectangle");
     assert!((v.x - (w - v.w) / 2.0).abs() < 0.5 && (v.y - (h - v.h) / 2.0).abs() < 0.5, "centred: {v:?}");
     assert!(v.w == w || v.h == h, "the 16:10 picture touches two edges of the window: {v:?}");
-    // The viewer's top bar is gone too: its pixel is not the bar's surface colour any more.
-    assert_ne!(full.rgb_at(2, 2), window.rgb_at(2, 2));
+    // No top bar, in a window or in full screen (owner, 12/11): the corner pixel is the column's colour in both.
+    assert_eq!(full.rgb_at(2, 2), window.rgb_at(2, 2));
     let missing: Vec<_> =
         state.controls(WindowKind::Viewer).into_iter().filter(|c| c.id.focusable() && !id(&full, c.id)).collect();
     assert!(missing.is_empty(), "controls listed but not drawn in full screen: {missing:?}");
@@ -327,20 +333,77 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     assert!(missing.is_empty(), "controls listed but not drawn with the bar shown: {missing:?}");
 }
 
+/// The buttons of the session bar, in the order they are drawn.
+const BAR_BUTTONS: [ControlId; 11] = [
+    ControlId::TbScreen,
+    ControlId::TbFit,
+    ControlId::TbAudio,
+    ControlId::TbGrab,
+    ControlId::TbKeys,
+    ControlId::TbTerminal,
+    ControlId::TbFiles,
+    ControlId::TbChat,
+    ControlId::TbSwap,
+    ControlId::TbDisconnect,
+    ControlId::TbCollapse,
+];
+
 #[test]
-fn the_toolbar_tooltip_draws_the_shortcut_list_under_the_bar_and_only_while_hovered() {
+fn hovering_a_button_of_the_session_bar_shows_what_that_button_does_and_never_the_shortcut_list() {
+    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
     let (w, h) = design_size(WindowKind::Viewer);
-    let state = Scenario::Visualizador.prepared_state();
+    // A session toward a machine of this system: its bar has every button, "Inverter" included.
+    let mut state = Scenario::Visualizador.prepared_state();
+    state.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: swapdesk_ui::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
+        },
+    });
     let plain = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
-    let ix = Interaction { hover: Some(ControlId::TbKeys), ..Interaction::default() };
-    let hovered = render(&state, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
-    hovered.save_png(&shots68().join("visualizador-dica-atalhos.png")).unwrap();
-    let bar = hovered.output.widgets.iter().find(|x| x.id == ControlId::TbKeys).unwrap().rect;
-    // A pixel inside the tooltip card (under the bar, at its right side) is the dark card colour only when it shows.
-    let (px, py) = ((w / 2.0 + 150.0) as u32, (bar.bottom() + 60.0) as u32);
-    assert_ne!(hovered.rgb_at(px, py), plain.rgb_at(px, py), "the card darkens the picture under it");
-    // Away from the card both frames are the same picture.
-    assert_eq!(hovered.rgb_at(w as u32 - 40, py), plain.rgb_at(w as u32 - 40, py));
+    assert!(plain.output.hint.is_none(), "no hint while the pointer is off the bar");
+    let mut cards = Vec::new();
+    for id in BAR_BUTTONS {
+        let button = plain.output.widgets.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id:?}")).rect;
+        let ix = Interaction { hover: Some(id), ..Interaction::default() };
+        let hovered = render(&state, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
+        if id == ControlId::TbAudio {
+            // The capture for the design canvas: the scenario as it is, with the pointer on the audio button.
+            let scenario = Scenario::Visualizador.prepared_state();
+            let shot = render(&scenario, WindowKind::Viewer, (w, h), 1.0, &ix).unwrap();
+            shot.save_png(&shots68().join("visualizador-dica-botao.png")).unwrap();
+        }
+        // The hint is about the button under the pointer: one line in a small card right under the bar, over or
+        // beside its button and inside the window.
+        let (of, card) = hovered.output.hint.unwrap_or_else(|| panic!("{id:?}: no hint"));
+        assert_eq!(of, id);
+        assert!(card.h <= 30.0, "{id:?}: one line, {card:?}");
+        let gap = card.y - button.bottom();
+        assert!((0.0..=16.0).contains(&gap), "{id:?}: {gap} under its button");
+        assert!(card.x >= 8.0 && card.right() <= w - 8.0, "{id:?}: inside the window, {card:?}");
+        assert!(card.x < button.right() && button.x < card.right(), "{id:?}: {card:?} is not under {button:?}");
+        let (cx, cy) = card.center();
+        assert_ne!(
+            hovered.rgb_at(cx as u32, (cy + card.h / 2.0 - 3.0) as u32),
+            plain.rgb_at(cx as u32, (cy + card.h / 2.0 - 3.0) as u32),
+            "{id:?}: the card is drawn"
+        );
+        cards.push(card.w);
+        // The shortcut list was a card 340 wide and some 150 tall in the middle of the window, whatever the button:
+        // 70 under the bar nothing is drawn any more.
+        let far = (button.bottom() + 76.0) as u32;
+        for x in [w / 2.0 - 150.0, w / 2.0, w / 2.0 + 150.0] {
+            assert_eq!(hovered.rgb_at(x as u32, far), plain.rgb_at(x as u32, far), "{id:?}: a card far under the bar");
+        }
+    }
+    // Each card is as wide as its own text: the buttons do not share one hint.
+    cards.sort_by(f32::total_cmp);
+    cards.dedup();
+    assert!(cards.len() >= 8, "{} different widths in ten hints", cards.len());
 }
 
 #[test]
@@ -361,7 +424,7 @@ fn settings_list_the_shortcuts_inside_the_window() {
 fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
     use swapdesk_ui::tokens::layout;
     use swapdesk_ui::{EditId, UiState};
-    let overlap = |a: &crate::gfx::Rect, b: &crate::gfx::Rect| {
+    let overlap = |a: &swapdesk_paint::Rect, b: &swapdesk_paint::Rect| {
         a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     };
     let at = |state: &UiState, size: (f32, f32)| {
@@ -379,14 +442,18 @@ fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
         assert!(!overlap(&rename, &control) && !overlap(&rename, &view), "{size:?}: rename clear of the buttons");
         assert!(rename.right() <= control.x, "{size:?}: inside the title block");
 
-        // Renaming: the field is prefilled, "Salvar" and "Cancelar" follow it, nothing overlaps the connect buttons.
+        // Renaming: the field is prefilled, "Cancelar" then "Salvar" follow it (negative first, owner 09/11), nothing
+        // overlaps the connect buttons.
         state.activate(ControlId::RenameDevice);
         let r = at(&state, size);
         let slot = r.output.edits.iter().find(|e| e.id == EditId::Rename).expect("the rename field");
         assert_eq!(slot.value, "MacBook do escritório");
         let (save, cancel) = (widget(&r, ControlId::RenameSave), widget(&r, ControlId::RenameCancel));
         let (control, view) = (widget(&r, ControlId::Control), widget(&r, ControlId::ViewOnly));
-        assert!(slot.rect.right() <= save.x && save.right() <= cancel.x, "{size:?}: field, Salvar, Cancelar in order");
+        assert!(
+            slot.rect.right() <= cancel.x && cancel.right() <= save.x,
+            "{size:?}: field, Cancelar, Salvar in order"
+        );
         for part in [&save, &cancel, &widget(&r, ControlId::Edit(EditId::Rename))] {
             assert!(!overlap(part, &control) && !overlap(part, &view), "{size:?}: clear of the connect buttons");
         }
@@ -401,22 +468,18 @@ fn the_rename_action_and_the_rename_field_fit_the_header_at_every_size() {
 }
 
 #[test]
-fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
+fn the_banner_offers_swap_toward_either_os() {
     use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
     use swapdesk_ui::mock::MAC;
     let widget =
         |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
     let size = design_size(WindowKind::Banner);
-    // A Windows peer: chat, swap and disconnect, in that order, 14 apart.
+    // A Windows peer, then a Mac peer (1.1, F-XSWAP-01): chat, swap and disconnect, in that order, the same places.
     let state = Scenario::Banner.prepared_state();
     let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
-    let (chat, swap, disc) = (
-        widget(&r, ControlId::BannerChat).unwrap(),
-        widget(&r, ControlId::BannerSwap).expect("swap toward the same OS"),
-        widget(&r, ControlId::BannerDisconnect).unwrap(),
-    );
-    assert!(chat.right() < swap.x && swap.right() < disc.x);
-    // A Mac peer: no swap, and chat takes its place next to disconnect.
+    let ids = [ControlId::BannerChat, ControlId::BannerSwap, ControlId::BannerDisconnect];
+    let win: Vec<_> = ids.iter().map(|id| widget(&r, *id).expect("drawn")).collect();
+    assert!(win[0].right() < win[1].x && win[1].right() < win[2].x);
     let mut state = Scenario::Banner.prepared_state();
     state.apply(UiEvent::Session {
         session_id: 2,
@@ -425,46 +488,25 @@ fn the_banner_has_no_swap_toward_another_os_and_closes_the_gap() {
             since_ms: 0,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     let r = render(&state, WindowKind::Banner, size, 1.0, &Interaction::default()).unwrap();
-    assert!(widget(&r, ControlId::BannerSwap).is_none(), "no swap toward another OS");
-    let (chat2, disc2) = (widget(&r, ControlId::BannerChat).unwrap(), widget(&r, ControlId::BannerDisconnect).unwrap());
-    assert_eq!(disc2.x, disc.x, "disconnect keeps its place");
-    assert!((disc2.x - chat2.right() - 14.0).abs() < 0.6, "no gap where swap was: {} {}", chat2.right(), disc2.x);
+    let mac: Vec<_> = ids.iter().map(|id| widget(&r, *id).expect("drawn toward a Mac too")).collect();
+    assert_eq!(mac[2].x, win[2].x, "disconnect keeps its place");
 }
 
 #[test]
-fn the_viewer_toolbar_has_no_swap_toward_another_os() {
+fn the_viewer_toolbar_offers_swap_toward_a_mac() {
     let widget =
         |r: &crate::offscreen::Rendered, id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect);
     let size = design_size(WindowKind::Viewer);
-    // The Mac peer of the Visualizador scenario: no swap, the separator moves to "Desconectar".
+    // The Mac peer of the Visualizador scenario (1.1, F-XSWAP-01): swap between the chat button and "Desconectar".
     let state = Scenario::Visualizador.prepared_state();
-    let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
-    assert!(widget(&r, ControlId::TbSwap).is_none());
-    let (chat, disc) = (widget(&r, ControlId::TbChat).unwrap(), widget(&r, ControlId::TbDisconnect).unwrap());
-    assert!(
-        disc.x - chat.right() > 12.0 && disc.x - chat.right() < 24.0,
-        "one separator, no gap: {}",
-        disc.x - chat.right()
-    );
-    // A Windows peer keeps the swap button, between the chat button and "Desconectar".
-    use swapdesk_ui::api::{Permission, Permissions, Role, SessionState, UiEvent};
-    let mut state = Scenario::Visualizador.prepared_state();
-    state.apply(UiEvent::Session {
-        session_id: 1,
-        device_id: swapdesk_ui::mock::DESKTOP.into(),
-        state: SessionState::Active {
-            since_ms: 0,
-            role: Role::Viewer,
-            granted: Permissions::NONE.with(Permission::View),
-        },
-    });
     let r = render(&state, WindowKind::Viewer, size, 1.0, &Interaction::default()).unwrap();
     let (chat, swap, disc) = (
         widget(&r, ControlId::TbChat).unwrap(),
-        widget(&r, ControlId::TbSwap).expect("swap toward the same OS"),
+        widget(&r, ControlId::TbSwap).expect("swap toward a Mac"),
         widget(&r, ControlId::TbDisconnect).unwrap(),
     );
     assert!(chat.right() < swap.x && swap.right() < disc.x);
@@ -518,7 +560,7 @@ fn the_palette_follows_the_theme_setting_and_sistema_follows_the_os() {
     let canvas = |state: &swapdesk_ui::UiState| {
         render(state, WindowKind::Main, design_size(WindowKind::Main), 1.0, &Interaction::default())
             .unwrap()
-            .rgb_at(600, 745)
+            .rgb_at(252, 745)
     };
     let mut s = Scenario::Ajustes.prepared_state();
     assert_eq!(s.theme(), Theme::System);
@@ -536,4 +578,35 @@ fn the_palette_follows_the_theme_setting_and_sistema_follows_the_os() {
     assert_eq!(canvas(&s), DARK.canvas.hex());
     s.apply(UiEvent::ThemeChanged { dark: false });
     assert_eq!(canvas(&s), LIGHT.canvas.hex());
+}
+
+#[test]
+fn the_elevated_window_shows_the_action_from_the_service_and_two_buttons_in_order() {
+    let line = "Permitir que o MacBook do escritório entre sem perguntar";
+    let state = swapdesk_ui::UiState::for_elevated_confirm(swapdesk_ui::Language::PtBr, false, line.into(), 90);
+    let size = swapdesk_paint::confirm_size();
+    let r = render(&state, WindowKind::Main, size, 1.0, &Interaction::default()).unwrap();
+    // Nothing of the app is in the window: the two buttons only, the negative on the left and the positive on the right.
+    let ids: Vec<ControlId> = r.output.widgets.iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let rect = |id: ControlId| r.output.widgets.iter().find(|w| w.id == id).map(|w| w.rect).unwrap();
+    let (cancel, confirm) = (rect(ControlId::DialogSecondary), rect(ControlId::DialogPrimary));
+    assert!(cancel.right() < confirm.x, "Cancelar {cancel:?} is left of Confirmar {confirm:?}");
+    for b in [cancel, confirm] {
+        assert!(b.x >= 0.0 && b.right() <= size.0 && b.y >= 0.0 && b.bottom() <= size.1 - 16.0, "{b:?} is inside");
+        assert!((b.h - 40.0).abs() < 0.01);
+    }
+    // What a screen reader gets: the heading, the action as the service described it, what to do, the two buttons.
+    let labels: Vec<String> = state.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    for want in [
+        "Confirmação de administrador",
+        line,
+        "Confirme como administrador para aplicar esta mudança.",
+        "Cancelar",
+        "Confirmar",
+    ] {
+        assert!(labels.iter().any(|l| l == want), "{want:?} is missing from {labels:?}");
+    }
+    assert_eq!(labels.len(), 5, "{labels:?}");
+    r.save_png(&shots_dir().join("confirmacao-elevada.png")).unwrap();
 }

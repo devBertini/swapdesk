@@ -86,6 +86,7 @@ mod run {
                 kbps: KBPS,
                 preset: Preset::Auto,
                 adapter: nv.id,
+                codec: swapdesk_platform::Codec::H264,
             };
             enc.configure(&cfg).expect("configure");
             let input: Vec<Frame> = cpu_frames.iter().map(|f| uploader.upload(f).expect("upload")).collect();

@@ -20,4 +20,4 @@ mod sys;
 #[cfg(windows)]
 pub use renderer::{Counters, Probe, RendererOptions, Timing, WinRenderer};
 #[cfg(windows)]
-pub use sys::{device_luid, now};
+pub use sys::{device_luid, now, simulate_device_removed};

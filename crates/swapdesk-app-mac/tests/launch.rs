@@ -25,9 +25,8 @@ fn value<'a>(report: &'a str, key: &str) -> Option<&'a str> {
     report.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
 }
 
-#[test]
-#[ignore = "interactive: opens the app"]
-fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_window_and_service() {
+/// Opens the bundle with `before` and `--selftest <file>`, waits for it to quit and returns the report it wrote.
+fn selftest_report(before: &[&str]) -> String {
     let app = bundle();
     assert!(
         app.join("Contents/MacOS/Swapdesk").exists(),
@@ -42,7 +41,9 @@ fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_windo
     let mut open = Command::new("open")
         .args(["-n", "-W", "-a"])
         .arg(&app)
-        .args(["--args", "--selftest"])
+        .arg("--args")
+        .args(before)
+        .arg("--selftest")
         .arg(&file)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -69,6 +70,24 @@ fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_windo
         std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("no selftest file ({e}); `open` said: {stderr}"));
     let _ = std::fs::remove_file(&file);
     assert_eq!(value(&report, "selftest"), Some("ok"), "{report}");
+    report
+}
+
+#[test]
+#[ignore = "interactive: opens the app"]
+fn interactive_launch_on_the_mock_backend_takes_a_click_typing_and_return_in_the_rename_field() {
+    let report = selftest_report(&["--mock", "dispositivos"]);
+    assert_eq!(value(&report, "mode"), Some("mock"), "{report}");
+    assert_eq!(value(&report, "click.activated"), Some("true"), "a click on the sidebar changes the screen: {report}");
+    assert_eq!(value(&report, "field.typed"), Some("true"), "the rename field takes the typed name: {report}");
+    assert_eq!(value(&report, "rename.ok"), Some("true"), "Return renames the device and closes the field: {report}");
+    assert_eq!(value(&report, "repaint.ok"), Some("true"), "a state change repaints the window by itself: {report}");
+}
+
+#[test]
+#[ignore = "interactive: opens the app"]
+fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_window_and_service() {
+    let report = selftest_report(&[]);
     let windows: usize = value(&report, "windows").and_then(|v| v.parse().ok()).unwrap_or(0);
     assert!(windows >= 1, "no window: {report}");
     assert!(
@@ -76,6 +95,7 @@ fn interactive_launch_opens_the_bundle_with_open_and_the_selftest_sees_its_windo
         "the main window is not on screen: {report}"
     );
     assert!(value(&report, "service_addrs").is_some_and(|a| a.contains(':')), "the service does not listen: {report}");
+    assert_eq!(value(&report, "click.activated"), Some("true"), "a click on the sidebar changes the screen: {report}");
     assert_eq!(value(&report, "pipeline.attached"), Some("false"), "no session, no video view: {report}");
     assert_eq!(value(&report, "pipeline.input_session"), Some("0"), "{report}");
 

@@ -85,6 +85,106 @@ fn after_a_loss_the_same_device_resumes_without_a_prompt_and_gets_a_new_token() 
 }
 
 #[test]
+fn the_hosts_user_ending_a_lost_session_kills_its_token() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 1, "the lost session waits for a resume");
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "the token died with the host's user's end");
+        f.decline_from_now();
+        assert_not_resumed(f.resume(&f.who, &info, CF).await);
+    });
+}
+
+const CU: PermissionSet = PermissionSet::CONTROL.union(PermissionSet::UNATTENDED);
+
+/// F1 of the review of 13/11: the host's user ends a lost session of a device that holds `UNATTENDED`. The viewer
+/// redials with the same request and the old token for 60 s; the token must be refused for good (DECLINED, which the
+/// reconnect loop reads as final), not treated as unknown and let through `UNATTENDED` into a fresh session.
+#[test]
+fn a_killed_token_of_an_unattended_device_is_declined_not_let_through_unattended() {
+    run_paused(async {
+        let f = fx(PermissionSet::EMPTY, CU);
+        let s = f.session(CU).await;
+        assert_eq!(s.grant().mode, GrantMode::Unattended);
+        let info = s.grant().clone();
+        f.lose(s).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 1, "the lost session waits for a resume");
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "a killed token is no resumable session");
+        // The viewer redials every 0.5 s for the window: every try is declined and none starts a session.
+        let t0 = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(
+                f.resume(&f.who, &info, CU).await.err(),
+                Some(OpenError::Refused(ErrorCode::Declined)),
+                "a redial with the killed token"
+            );
+            assert!(f.mem.host.sessions().is_empty(), "no session started, so no banner");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(f.ui.prompt_count(), 0);
+        assert!(t0.elapsed() < Duration::from_secs(60));
+        // Past the window the entry is gone: an unknown token goes the normal way again.
+        tokio::time::sleep(Duration::from_secs(56)).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 0);
+        let r = f.resume(&f.who, &info, CU).await;
+        assert!(r.is_ok(), "past the window the token is unknown, and an unattended device enters on its own");
+    });
+}
+
+/// The same for a device without `UNATTENDED`: no new prompt card in front of the person who just ended it.
+#[test]
+fn a_killed_token_does_not_raise_a_new_prompt() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.ui.prompt_count(), 1);
+        for _ in 0..4 {
+            assert_eq!(f.resume(&f.who, &info, CF).await.err(), Some(OpenError::Refused(ErrorCode::Declined)));
+        }
+        assert_eq!(f.ui.prompt_count(), 1, "the person was asked once, at the first entry");
+        // Another device's guess at the token learns nothing: it falls through as any wrong token does.
+        let other = Who::new();
+        pin(&f.mem.trust, &other, CF);
+        f.decline_from_now();
+        assert_not_resumed(f.resume(&other, &info, CF).await);
+    });
+}
+
+/// The race of F1: the hub saw the session lost, but the viewer resumed before `drop_resume` ran. The session is
+/// live again, so the host's user's "Desconectar" ends it, under the lock that found it live.
+#[test]
+fn drop_resume_on_a_session_that_is_live_again_ends_it() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        let mut resumed = f.resume(&f.who, &info, CF).await.unwrap();
+        assert_eq!(resumed.grant().mode, GrantMode::Resumed);
+        f.mem.host.drop_resume(info.session_id);
+        let e =
+            wait_event(&mut resumed, Duration::from_secs(1), "the end", |e| matches!(e, ViewerEvent::Ended(_))).await;
+        assert_eq!(
+            e,
+            ViewerEvent::Ended(swapdesk_session::SessionEnd { kind: EndKind::PeerBye, code: ErrorCode::NoError })
+        );
+        eventually(Duration::from_secs(1), "the host to end", || f.mem.host.sessions().is_empty()).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "no token is left to resume it");
+        f.decline_from_now();
+        let fresh = resumed.grant().clone();
+        assert_not_resumed(f.resume(&f.who, &fresh, CF).await);
+    });
+}
+
+#[test]
 fn a_token_is_single_use() {
     run_paused(async {
         let f = fx(CF, CF);
@@ -261,6 +361,23 @@ fn lock_on_end_kills_the_token_and_locks_the_host() {
     });
 }
 
+/// F-SESS-03: the screen locks when a session ends, only with the setting on, and once per end: a final end (the
+/// host's "Desconectar" here) locks with it on and does not with it off.
+#[test]
+fn a_final_end_locks_the_host_once_with_the_setting_on_and_never_with_it_off() {
+    run_paused(async {
+        for (on, locks) in [(true, 1), (false, 0)] {
+            let f = fx(CF, CF);
+            f.ui.set_lock_on_end(on);
+            let mut s = f.session(CF).await;
+            assert!(f.mem.host.disconnect(s.grant().session_id));
+            wait_event(&mut s, Duration::from_secs(1), "the end", |e| matches!(e, ViewerEvent::Ended(_))).await;
+            eventually(Duration::from_secs(1), "the host to end", || f.mem.host.sessions().is_empty()).await;
+            assert_eq!(f.ui.locks.load(std::sync::atomic::Ordering::SeqCst), locks, "setting {on}");
+        }
+    });
+}
+
 #[test]
 fn a_token_lasts_60_seconds_from_the_loss() {
     run_paused(async {
@@ -312,14 +429,64 @@ fn a_resumed_session_gets_the_original_grants_intersected_with_what_is_still_sto
 fn an_unattended_session_resumes_with_unattended_while_it_is_still_stored() {
     run_paused(async {
         let all = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
-        let f = fx(PermissionSet::EMPTY, all);
-        let s = f.session(all).await;
-        assert_eq!(s.grant().mode, GrantMode::Unattended);
+        // A 1.0 viewer holds the bit from its entry; a viewer of minor 1 entered without it. Each resumes with what
+        // it had.
+        for (minor, held) in [(0u16, all), (swapdesk_proto::PROTO_MINOR, PermissionSet::CONTROL)] {
+            let f = fx(PermissionSet::EMPTY, all);
+            let mut cfg = viewer_config(all);
+            cfg.proto_minor = minor;
+            let s = f.mem.open(&f.who, cfg.clone()).await.0.expect("the session should open");
+            assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, held), "minor {minor}");
+            let info = s.grant().clone();
+            f.lose(s).await;
+            cfg.resume = Some(info.resume.clone());
+            let r = f.mem.open(&f.who, cfg).await.0.unwrap();
+            assert_eq!((r.grant().mode, r.grant().granted), (GrantMode::Resumed, held), "minor {minor}");
+            assert_eq!(f.ui.prompt_count(), 0);
+        }
+    });
+}
+
+/// A resume of a session that entered without a prompt is still such a session for the host (what D13 asks about),
+/// although a viewer of minor 1 holds no `UNATTENDED` bit that would say so.
+#[test]
+fn a_resumed_unattended_entry_is_still_an_unattended_entry() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(CF);
+        let mem = Mem::new(ui.clone(), registry_one(rec.clone()));
+        let all = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+        let (unattended, prompted) = (Who::new(), Who::new());
+        pin(&mem.trust, &unattended, all);
+        pin(&mem.trust, &prompted, CF);
+        let lose = |s: ViewerSession| async {
+            s.abandon();
+            eventually(Duration::from_secs(1), "the loss", || mem.host.sessions().is_empty()).await;
+        };
+
+        let s = mem.open(&unattended, viewer_config(all)).await.0.unwrap();
+        assert!(lock(&rec.sessions).last().unwrap().entered_unattended());
         let info = s.grant().clone();
-        f.lose(s).await;
-        let r = f.resume(&f.who, &info, all).await.unwrap();
-        assert_eq!((r.grant().mode, r.grant().granted), (GrantMode::Resumed, all));
-        assert_eq!(f.ui.prompt_count(), 0);
+        lose(s).await;
+        let mut cfg = viewer_config(all);
+        cfg.resume = Some(info.resume.clone());
+        let r = mem.open(&unattended, cfg).await.0.unwrap();
+        assert_eq!(r.grant().mode, GrantMode::Resumed);
+        assert!(lock(&rec.sessions).last().unwrap().entered_unattended(), "the resumed session keeps how it entered");
+        r.disconnect().await;
+        eventually(Duration::from_secs(1), "the end", || mem.host.sessions().is_empty()).await;
+
+        // A session somebody accepted, and its resume, are not.
+        let s = mem.open(&prompted, viewer_config(CF)).await.0.unwrap();
+        assert_eq!(s.grant().mode, GrantMode::Prompted);
+        assert!(!lock(&rec.sessions).last().unwrap().entered_unattended());
+        let info = s.grant().clone();
+        lose(s).await;
+        let mut cfg = viewer_config(CF);
+        cfg.resume = Some(info.resume.clone());
+        let r = mem.open(&prompted, cfg).await.0.unwrap();
+        assert_eq!(r.grant().mode, GrantMode::Resumed);
+        assert!(!lock(&rec.sessions).last().unwrap().entered_unattended());
     });
 }
 
@@ -360,8 +527,8 @@ fn a_host_reboot_loses_every_token_unattended_devices_reconnect_through_unattend
         let r = r.unwrap();
         assert_eq!(
             (r.grant().mode, r.grant().granted),
-            (GrantMode::Unattended, all),
-            "through UNATTENDED, not through the stale token"
+            (GrantMode::Unattended, PermissionSet::CONTROL),
+            "through UNATTENDED, not through the stale token (a viewer of minor 1 enters without the bit)"
         );
         assert_eq!(ui.prompt_count(), prompts);
         r.abandon();

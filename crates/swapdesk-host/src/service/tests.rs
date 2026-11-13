@@ -2,9 +2,10 @@
 //! writing each other into the trust stores, the host with real `run_helper` loops over in-memory pipes (the C7
 //! synthetic sources) behind a spy that records what the service sent them.
 
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -25,12 +26,14 @@ use super::{
 };
 use crate::helper::{HelperDeps, run_helper};
 use crate::helper_tests::Passthrough;
-use crate::testpipe::{End, duplex_blocking};
+use crate::testpipe::{End, PipeWriter, duplex_blocking};
 
 mod clip_actions;
 mod extras;
 mod files;
+mod handshakes;
 mod terminal;
+mod unattended;
 
 const WAIT: Duration = Duration::from_secs(10);
 const ALL: PermissionSet = PermissionSet::CONTROL.union(PermissionSet::AUDIO);
@@ -62,11 +65,17 @@ struct AutoUi {
     /// What the user answers a D13 consent question (`None`: nobody answers), and how many were asked.
     consent_answer: Mutex<Option<bool>>,
     consents: AtomicUsize,
+    /// Who owns the console (ACCOUNTS.md 5.1).
+    owner: Mutex<swapdesk_session::ConsoleOwner>,
 }
 
 impl HostUi for AutoUi {
     fn somebody_present(&self) -> bool {
         true
+    }
+
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        *self.owner.lock().unwrap()
     }
 
     fn prompt(&self, _request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
@@ -130,6 +139,7 @@ impl Machine {
             prompts: AtomicUsize::new(0),
             consent_answer: Mutex::new(Some(true)),
             consents: AtomicUsize::new(0),
+            owner: Mutex::new(swapdesk_session::ConsoleOwner::This),
         });
         let deps = ServiceDeps {
             identity: Arc::clone(&identity),
@@ -197,6 +207,8 @@ struct TestHelper {
     sink: RecordingInputSink,
     from_service: Arc<Mutex<Vec<Ipc>>>,
     thread: Option<JoinHandle<()>>,
+    /// The height of the helper's one display: a test that changes it plays a mode change under the same id.
+    height: Arc<AtomicU32>,
 }
 
 impl TestHelper {
@@ -206,7 +218,23 @@ impl TestHelper {
 
     /// As `spawn`, with `tune` given the helper's dependencies first (the terminal proxy's spawner, for instance).
     fn spawn_with(core: &ServiceCore, role: IpcRole, tune: impl FnOnce(TestDeps) -> TestDeps) -> Self {
+        Self::spawn_inner(core, role, tune, None)
+    }
+
+    /// As `spawn`, with everything the helper says after its `Hello` (its display list first) kept from the service
+    /// while `held` is shut.
+    fn spawn_held(core: &ServiceCore, role: IpcRole, held: Arc<Gate>) -> Self {
+        Self::spawn_inner(core, role, |deps| deps, Some(held))
+    }
+
+    fn spawn_inner(
+        core: &ServiceCore,
+        role: IpcRole,
+        tune: impl FnOnce(TestDeps) -> TestDeps,
+        held: Option<Arc<Gate>>,
+    ) -> Self {
         let sink = RecordingInputSink::new();
+        let height = Arc::new(AtomicU32::new(48));
         let (core_end, spy_core): (End, End) = duplex_blocking();
         let (spy_helper, helper_end): (End, End) = duplex_blocking();
         let from_service = Arc::new(Mutex::new(Vec::new()));
@@ -226,11 +254,16 @@ impl TestHelper {
                 }
             });
         }
-        // helper -> service, untouched.
+        // helper -> service, untouched (after the `Hello`, only once `held` lets it through).
         {
             let (mut reader, mut writer) = (FrameReader::new(spy_helper.reader), FrameWriter::new(spy_core.writer));
             std::thread::spawn(move || {
+                let mut hello = true;
                 while let Ok(Some(msg)) = reader.read_message() {
+                    if let Some(gate) = held.as_ref().filter(|_| !hello) {
+                        gate.pass();
+                    }
+                    hello = false;
                     if writer.write_message(&msg).is_err() {
                         break;
                     }
@@ -240,9 +273,10 @@ impl TestHelper {
         let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
         let audio_clock = Arc::clone(&clock);
         let input = sink.clone();
+        let rows = Arc::clone(&height);
         let deps = tune(HelperDeps::new(
-            |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
-            |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+            move |_| Ok(SyntheticScreen::new(64, rows.load(Ordering::SeqCst), 100).with_pacing(Pacing::Realtime)),
+            |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
             move || Ok(input.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
             clock,
@@ -252,7 +286,7 @@ impl TestHelper {
         });
         let kind = core.attach_helper(role, core_end.reader, core_end.writer).expect("attach");
         assert_eq!(Some(kind), HelperKind::of_role(role));
-        Self { sink, from_service, thread: Some(thread) }
+        Self { sink, from_service, thread: Some(thread), height }
     }
 
     fn sent(&self) -> Vec<Ipc> {
@@ -356,6 +390,15 @@ impl Rig {
         Machine::pair(&host, &viewer, ALL);
         let system = TestHelper::spawn(&host.core, IpcRole::HelperSystem);
         let user = TestHelper::spawn(&host.core, IpcRole::HelperUser);
+        // A helper says its display list right after its handshake, and the service registers it on another thread:
+        // a session opened in between starts with an empty list (the test below forces that order). The rig's
+        // sessions open on helpers that are settled, as a machine's do.
+        wait_for("the helpers' display lists", || {
+            [HelperKind::System, HelperKind::User]
+                .into_iter()
+                .all(|kind| host.core.helper(kind).is_some_and(|h| !h.displays().is_empty()))
+                .then_some(())
+        });
         Self { host, viewer, system, user }
     }
 
@@ -371,6 +414,41 @@ impl Rig {
         self.system.join();
         self.user.join();
     }
+}
+
+/// Owner, 12/11: with the Mac controlling the installed service, the clicks landed below the pointer (y x 1.111). The
+/// user's helper injected over the display list of its own start while the media helper's display had changed mode
+/// under the same id. Now the injector gets the media helper's displays before the session's first input, and again
+/// whenever they change while the session runs (D64).
+#[test]
+fn the_injecting_helper_maps_the_pointer_onto_the_media_helpers_displays_of_now() {
+    let rig = Rig::new();
+    let (handle, mut seen) = rig.connect();
+    seen.video();
+    let pointer = vec![InputEvent::Pointer { display: 0, x: 100, y: 200 }];
+    handle.send_input(pointer.clone()).expect("input accepted");
+    wait_for("the pointer at the user helper's sink", || (!rig.user.sink.events().is_empty()).then_some(()));
+    let sent = rig.user.sent();
+    let listed = sent.iter().position(|m| matches!(m, Ipc::Displays(_))).expect("the media list reached the injector");
+    let input = sent.iter().position(|m| matches!(m, Ipc::Input { .. })).expect("the input");
+    assert!(listed < input, "the displays come before the first input: {sent:?}");
+    assert_eq!(rig.system.count(|m| matches!(m, Ipc::Displays(_))), 0, "the media helper lists its own");
+
+    // The media display changes mode under its id while the session runs: the injector maps over the new size.
+    rig.system.height.store(64, Ordering::SeqCst);
+    let tall = |r: &swapdesk_fakes::Recorded| match &r.what {
+        InputRecord::DisplaysChanged(list) => list.first().is_some_and(|d| d.bounds.height == 64),
+        _ => false,
+    };
+    wait_for("the new size at the user helper's sink", || rig.user.sink.records().iter().any(tall).then_some(()));
+    handle.send_input(pointer).expect("input accepted");
+    wait_for("the second pointer", || (rig.user.sink.events().len() == 2).then_some(()));
+    let records = rig.user.sink.records();
+    let changed = records.iter().position(tall).expect("the new size");
+    let last = records.iter().rposition(|r| matches!(r.what, InputRecord::Event(_))).expect("the pointer");
+    assert!(changed < last, "the second pointer is mapped over the new size");
+    drop(handle);
+    rig.finish();
 }
 
 #[test]
@@ -506,6 +584,40 @@ fn two_cores_relay_video_input_and_audio_and_end_cleanly() {
     rig.finish();
 }
 
+/// Stage 54: a session can open before the media helper's display list is registered (the helper has just attached).
+/// Its first `DisplayList` is then empty and no video is asked for; the list and the video follow once the helper's
+/// list arrives.
+#[test]
+fn a_session_opened_before_the_media_helpers_display_list_gets_the_list_and_the_video_once_it_comes() {
+    let host = Machine::new("host-pc", true, false);
+    let viewer = Machine::new("viewer-pc", true, false);
+    Machine::pair(&host, &viewer, ALL);
+    let held = Gate::new(false);
+    let mut system = TestHelper::spawn_held(&host.core, IpcRole::HelperSystem, Arc::clone(&held));
+    let mut user = TestHelper::spawn(&host.core, IpcRole::HelperUser);
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    let mut seen = Seen::new(msgs);
+    let displays = |o: &ViewerOut| match o {
+        ViewerOut::Displays { list, .. } => Some(list.displays.len()),
+        _ => None,
+    };
+
+    assert_eq!(seen.next("the session's first DisplayList", displays), 0, "the helper's list is not there yet");
+    assert!(!seen.any_within(Duration::from_millis(300), is_video), "no display, no video");
+    assert_eq!(system.count(|m| matches!(m, Ipc::StartVideo { .. })), 0);
+
+    held.set(true);
+    assert_eq!(seen.next("the helper's DisplayList", displays), 1, "the list reaches the viewer once it comes");
+    let (first, _) = seen.video();
+    assert!(first.keyframe && first.config, "the video starts with a keyframe: {first:?}");
+    assert_eq!(system.count(|m| matches!(m, Ipc::StartVideo { display: 0, .. })), 1);
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+    system.join();
+    user.join();
+}
+
 #[test]
 fn revoking_view_pauses_and_stops_video_and_restoring_it_resumes_with_a_keyframe() {
     let rig = Rig::new();
@@ -525,6 +637,48 @@ fn revoking_view_pauses_and_stops_video_and_restoring_it_resumes_with_a_keyframe
     wait_for("a second StartVideo", || (rig.system.count(|m| matches!(m, Ipc::StartVideo { .. })) >= 2).then_some(()));
     let (resumed, _) = seen.video();
     assert!(resumed.keyframe, "the stream resumes with a keyframe: {resumed:?}");
+    drop(handle);
+    rig.finish();
+}
+
+/// F-VIEW-06: a `VideoSettings` with a view turns into `SetScale` with `target_size`'s answer; Texto nitido and an
+/// unreported area stay native, and the size follows a new view.
+#[test]
+fn a_video_settings_with_a_view_becomes_a_set_scale_with_the_target_size() {
+    use swapdesk_proto::{Preset, VideoSettings};
+    let rig = Rig::new();
+    let (handle, mut seen) = rig.connect();
+    seen.video();
+    let scales = || -> Vec<(u16, u16)> {
+        rig.system
+            .sent()
+            .iter()
+            .filter_map(|m| match m {
+                Ipc::SetScale { display: 0, width, height } => Some((*width, *height)),
+                _ => None,
+            })
+            .collect()
+    };
+    let settings = |preset, w, h| VideoSettings { preset, max_fps: 60, max_kbps: 0, view_width: w, view_height: h };
+    assert!(scales().is_empty(), "native until the viewer reports an area");
+
+    // The display is 64x48; an area of 33x30 fits at 32x24 (the aspect kept, even sizes).
+    handle.set_video_settings(settings(Preset::Auto, 33, 30)).expect("sent");
+    wait_for("a SetScale", || (!scales().is_empty()).then_some(()));
+    assert_eq!(scales(), [(32, 24)]);
+
+    // Texto nitido stays native: the preset change restarts the video (a helper run starts native), and no size follows.
+    let starts = || rig.system.count(|m| matches!(m, Ipc::StartVideo { .. }));
+    let before = starts();
+    handle.set_video_settings(settings(Preset::Text, 33, 30)).expect("sent");
+    wait_for("the restart for Texto nitido", || (starts() > before).then_some(()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(scales(), [(32, 24)], "nothing sent for Texto nitido");
+
+    // Back to Automatica at another area: its own answer.
+    handle.set_video_settings(settings(Preset::Auto, 16, 40)).expect("sent");
+    wait_for("the new size", || (scales().last() == Some(&(16, 12))).then_some(()));
+    assert_eq!(scales(), [(32, 24), (16, 12)]);
     drop(handle);
     rig.finish();
 }
@@ -556,6 +710,104 @@ fn a_helper_that_disappears_is_reported_and_can_be_replaced() {
     assert!(host.core.helper(HelperKind::User).is_some());
     host.core.shutdown();
     again.join();
+}
+
+/// A place a thread waits at while the test keeps it shut.
+struct Gate {
+    open: Mutex<bool>,
+    changed: Condvar,
+    waiting: AtomicUsize,
+}
+
+impl Gate {
+    fn new(open: bool) -> Arc<Self> {
+        Arc::new(Self { open: Mutex::new(open), changed: Condvar::new(), waiting: AtomicUsize::new(0) })
+    }
+
+    fn pass(&self) {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let mut open = lock(&self.open);
+        while !*open {
+            open = self.changed.wait(open).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        drop(open);
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn set(&self, open: bool) {
+        *lock(&self.open) = open;
+        self.changed.notify_all();
+    }
+
+    fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+}
+
+/// The service's write half of a helper pipe that takes no byte while its gate is shut, as a pipe whose other end
+/// does not read.
+struct HeldWriter {
+    inner: PipeWriter,
+    gate: Arc<Gate>,
+}
+
+impl Write for HeldWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.gate.pass();
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Stage 54: the core's `Shutdown` waited in the queue behind a message the pipe was slow to take; the runtime went
+/// away; the helper then said something, the service's reader thread found nobody listening and closed the queue,
+/// which discarded the `Shutdown`. The writer thread lived on with the link, so the helper read neither `Shutdown` nor
+/// the end of its pipe and never ended.
+#[test]
+fn a_core_that_stops_while_a_helpers_pipe_is_slow_still_tells_that_helper_to_stop() {
+    let host = Machine::new("host-pc", true, false);
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let gate = Gate::new(true);
+    let (speak_tx, speak_rx) = std::sync::mpsc::channel::<()>();
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperUser, 1).expect("client handshake");
+        // A helper may speak at any moment: this one does when the test says so.
+        let _ = speak_rx.recv();
+        let _ = writer.write_message(&Ipc::SasRequest);
+        let how = loop {
+            match reader.read_message() {
+                Ok(Some(Ipc::Shutdown)) => break "Shutdown",
+                Ok(Some(_)) => {}
+                Ok(None) => break "the end of its pipe",
+                Err(_) => break "a broken pipe",
+            }
+        };
+        let _ = ended_tx.send(how);
+    });
+    let writer = HeldWriter { inner: core_end.writer, gate: Arc::clone(&gate) };
+    let kind = host.core.attach_helper(IpcRole::HelperUser, core_end.reader, writer).expect("attach");
+    let link = host.core.helper(kind).expect("attached");
+
+    // The pipe stops taking bytes: the service's writer thread waits in the middle of a message.
+    gate.set(false);
+    assert!(link.send_now(Ipc::ReleaseAll));
+    wait_for("the writer thread to wait on the pipe", || (gate.waiting() > 0).then_some(()));
+    // The core stops: its `Shutdown` is queued behind the message the pipe holds, and the runtime goes away.
+    host.core.shutdown();
+    // The helper speaks to a core that no longer listens: the service's reader thread ends on it.
+    speak_tx.send(()).expect("the helper waits to speak");
+    wait_for("the link to stop taking messages", || (!link.is_alive()).then_some(()));
+    drop(link);
+
+    gate.set(true);
+    let how = ended_rx.recv_timeout(WAIT).expect("the helper reads `Shutdown` or the end of its pipe");
+    assert_eq!(how, "Shutdown", "what the core queued before it stopped still reaches the helper");
 }
 
 #[test]
@@ -626,17 +878,20 @@ fn the_guard_keeps_refusing_loopback_unless_the_development_option_is_on() {
     let a = Machine::new("a", false, true);
     let b = Machine::new("b", true, false);
     Machine::pair(&a, &b, ALL);
+    // F5 (security review 13/11): a peer the guard would refuse gets no answer at all, not a refusal: the socket
+    // drops its datagrams before quinn parses them (not even Version Negotiation).
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a loopback peer without the development option got an answer"
+    );
     let r = b.core.connect(a.addr(), a.device(), Intent::Control);
-    assert!(matches!(r, Err(ConnectError::Open(_))), "the host refused the connection");
+    assert!(r.is_err(), "the host let the peer in");
     assert!(a.core.host().sessions().is_empty());
     assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a refused peer");
-    wait_for("the refusal in A's trace", || {
-        a.trace
-            .lines()
-            .iter()
-            .any(|l| l.level == Level::Warn && l.text.contains("refused a connection") && l.text.contains("loopback"))
-            .then_some(())
-    });
+    assert!(
+        !a.trace.lines().iter().any(|l| l.text.contains("refused a connection")),
+        "the datagrams never reached the accept loop, so it refused nothing"
+    );
 
     // C has no development option: it will not even dial a loopback address.
     let c = Machine::new("c", false, false);
@@ -655,14 +910,57 @@ fn a_peer_at_a_blocked_address_is_dropped_before_the_handshake_and_costs_no_prom
     let a = Machine::new("a", true, false);
     let b = Machine::new("b", true, false);
     Machine::pair(&a, &b, ALL);
+    // Control: before the block the same datagram is answered (Version Negotiation), so the silence below is the
+    // block's doing.
+    assert!(answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_secs(3)));
     a.trust.update(|s| s.blocked.push([127, 0, 0, 1])).expect("host store");
+    // F5 (security review 13/11): the blocked address gets no answer at all, not even Version Negotiation, because the
+    // datagrams are dropped before quinn parses them.
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a blocked address got an answer"
+    );
     let r = b.core.connect(a.addr(), a.device(), Intent::Control);
     assert!(r.is_err(), "the blocked peer got a session");
     assert!(a.core.host().sessions().is_empty());
     assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked peer");
-    wait_for("the ignored connection in A's trace", || {
-        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
-    });
+}
+
+/// A neighbour table that gives one MAC to every address (every peer here dials from loopback).
+struct OneMac([u8; 6]);
+
+impl swapdesk_platform::NeighborTable for OneMac {
+    fn cached_mac(&self, _peer: std::net::IpAddr) -> Option<[u8; 6]> {
+        Some(self.0)
+    }
+}
+
+/// F-SEC-02, the MAC path: the blocked device is listed by its MAC and an old address (not the one it dials from now),
+/// the neighbour table says the connection comes from that MAC, and the host drops it before the handshake.
+#[test]
+fn a_peer_with_a_blocked_mac_under_another_address_is_dropped_before_the_handshake_and_costs_no_prompt() {
+    let mac = [0x02, 0x5a, 0xd0, 0, 0, 0x39];
+    let a = Machine::build("a", true, false, ALL, |cfg| cfg.with_neighbors(Arc::new(OneMac(mac))));
+    let b = Machine::new("b", true, false);
+    Machine::pair(&a, &b, ALL);
+    a.trust
+        .block_mac(swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: [192, 168, 0, 57],
+            name: String::new(),
+            blocked_at_ms: 0,
+        })
+        .expect("host store");
+    assert!(a.trust.read(|s| s.blocked.is_empty()), "no address is blocked, only the MAC");
+    // F5: no answer at all to the blocked device's datagrams, whatever address they come from.
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a blocked MAC got an answer"
+    );
+    let r = b.core.connect(a.addr(), a.device(), Intent::Control);
+    assert!(r.is_err(), "the blocked MAC got a session");
+    assert!(a.core.host().sessions().is_empty());
+    assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked MAC");
 }
 
 #[test]
@@ -767,4 +1065,133 @@ fn a_ui_that_does_not_read_holds_bounded_video_and_gets_a_keyframe_after_the_gap
         "the host's helper was asked for the keyframe"
     );
     rig.finish();
+}
+
+/// ACCOUNTS.md 5.1, the fence, the service's side: a helper that holds after a desktop switch is let go on only while
+/// this account may host, by the cached console owner and by a fresh read of the console. Another account at the
+/// console, a stale cache that a fresh read contradicts, and a logged-in user who cannot be read all keep it held (the
+/// service also drops what a held helper sends); once the account is back it goes on, and the newest of switches
+/// reported out of order is the one resumed.
+#[test]
+fn a_sign_in_at_the_sign_in_screen_never_routes_a_frame_or_an_input_of_the_new_account() {
+    use crate::service::ConsoleRead;
+    const A: &str = "S-1-5-21-1-2-3-1001";
+    let host = Machine::new("host-pc", true, false);
+    host.core.set_account(A);
+    let console = Arc::new(Mutex::new(ConsoleRead::User(A.into())));
+    host.core.set_console_probe({
+        let console = Arc::clone(&console);
+        Arc::new(move || console.lock().unwrap().clone())
+    });
+    *host.ui.owner.lock().unwrap() = swapdesk_session::ConsoleOwner::Other;
+    let (core_end, helper_end): (End, End) = duplex_blocking();
+    let (to_test, from_core) = std::sync::mpsc::channel::<Ipc>();
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+    let helper = std::thread::spawn(move || {
+        let mut reader = FrameReader::new(helper_end.reader);
+        let mut writer = FrameWriter::new(helper_end.writer);
+        Handshake::client(&mut reader, &mut writer, IpcRole::HelperSystem, 1).expect("client handshake");
+        // The switch: the helper holds and says so.
+        writer.write_message(&Ipc::CaptureHeld { generation: 1 }).unwrap();
+        writer_tx.send(writer).unwrap();
+        while let Ok(Some(m)) = reader.read_message() {
+            if to_test.send(m).is_err() {
+                break;
+            }
+        }
+    });
+    let kind = host.core.attach_helper(IpcRole::HelperSystem, core_end.reader, core_end.writer).expect("attach");
+    let mut writer = writer_rx.recv_timeout(Duration::from_secs(5)).expect("the helper's writer");
+    let resumed = |within: Duration| {
+        let end = Instant::now() + within;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            match from_core.recv_timeout(left) {
+                Ok(Ipc::ResumeCapture { generation }) => return Some(generation),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    };
+    assert_eq!(resumed(Duration::from_millis(600)), None, "another account at the console: the helper stays held");
+    let link = host.core.helper(kind).expect("attached");
+    assert_eq!(link.held.load(Ordering::SeqCst), 1);
+    assert!(link.is_held());
+    // The cache still says this account, but the console already has another user (the logon not yet heard of).
+    *console.lock().unwrap() = ConsoleRead::User("S-1-5-21-1-2-3-1002".into());
+    *host.ui.owner.lock().unwrap() = swapdesk_session::ConsoleOwner::This;
+    assert_eq!(resumed(Duration::from_millis(600)), None, "a fresh read of another user keeps it held");
+    // Someone is logged in and who cannot be read: closed.
+    *console.lock().unwrap() = ConsoleRead::Unreadable;
+    assert_eq!(resumed(Duration::from_millis(600)), None, "an unreadable user keeps it held");
+    // The account is at the console by both reads: the helper goes on.
+    *console.lock().unwrap() = ConsoleRead::User(A.into());
+    assert_eq!(resumed(Duration::from_secs(2)), Some(1));
+    // Two displays report two switches out of order: the newest is resumed and nothing stays held.
+    writer.write_message(&Ipc::CaptureHeld { generation: 3 }).unwrap();
+    writer.write_message(&Ipc::CaptureHeld { generation: 2 }).unwrap();
+    assert_eq!(resumed(Duration::from_secs(2)), Some(3));
+    let end = Instant::now() + Duration::from_secs(2);
+    while link.is_held() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!link.is_held(), "the newest switch was let go on");
+    assert_eq!(link.held.load(Ordering::SeqCst), 3);
+    host.core.shutdown();
+    drop(writer);
+    helper.join().expect("helper thread");
+}
+
+/// A QUIC Initial as a LAN probe sends it: a long header of version 1, 8-byte connection ids, padded to 1200 bytes.
+fn probe_initial() -> Vec<u8> {
+    let mut p = vec![0xC0, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 0];
+    // Length (2-byte varint) covering the rest, then a packet number and padding.
+    let rest = 1200 - p.len() - 2;
+    p.extend([0x40 | ((rest >> 8) as u8), rest as u8]);
+    p.resize(1200, 0);
+    p
+}
+
+/// The same with a version nobody speaks: a QUIC server answers it with Version Negotiation.
+fn probe_unknown_version() -> Vec<u8> {
+    let mut p = probe_initial();
+    p[1..5].copy_from_slice(&[0x0a, 0x1a, 0x2a, 0x3a]);
+    p
+}
+
+/// Whether anything answers `probe` sent to `port` on loopback within `limit`.
+fn answers_a_probe(port: u16, probe: &[u8], limit: Duration) -> bool {
+    let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.set_read_timeout(Some(limit)).unwrap();
+    s.send_to(probe, (std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    let mut buf = [0u8; 2048];
+    s.recv_from(&mut buf).is_ok()
+}
+
+/// Review of S3/S4, L7 (ACCOUNTS.md 6): an account that receives nothing keeps its slot's port held but answers no
+/// datagram on it, so a LAN probe cannot count the accounts; receiving again, the endpoint takes the port back.
+#[test]
+fn a_slot_that_receives_nothing_answers_no_datagram() {
+    let port = {
+        let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        s.local_addr().unwrap().port()
+    };
+    let host = Machine::build("host-pc", false, false, ALL, |mut cfg| {
+        cfg.session_port = port;
+        cfg.receiving = false;
+        cfg.wildcard = Some(Arc::new(|p| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, p))));
+        cfg
+    });
+    assert!(
+        !answers_a_probe(port, &probe_initial(), Duration::from_millis(800)),
+        "a slot that receives nothing is silent"
+    );
+    assert!(!answers_a_probe(port, &probe_unknown_version(), Duration::from_millis(500)));
+    assert!(std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err(), "and its port stays held");
+    host.core.set_receiving(true);
+    assert!(
+        answers_a_probe(port, &probe_unknown_version(), Duration::from_secs(2)),
+        "receiving: the endpoint reads the port again (Version Negotiation)"
+    );
+    host.core.shutdown();
 }

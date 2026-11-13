@@ -1,4 +1,4 @@
-//! `VideoEncoder` over a VideoToolbox `VTCompressionSession` (H.264).
+//! `VideoEncoder` over a VideoToolbox `VTCompressionSession` (H.264, and HEVC when `EncoderConfig.codec` says so).
 //!
 //! What the session is told, and why (it mirrors `swapdesk-codec-win`, `preset.rs` and `encoder.rs`):
 //! - Hardware encoder required through the encoder specification (`RequireHardwareAcceleratedVideoEncoder`), with
@@ -50,6 +50,15 @@
 //!   (<https://developer.apple.com/documentation/coremedia/kcmsampleattachmentkey_notsync>); the parameter sets come from
 //!   `CMVideoFormatDescriptionGetH264ParameterSetAtIndex`
 //!   (<https://developer.apple.com/documentation/coremedia/cmvideoformatdescriptiongeth264parametersetatindex(_:parametersetindex:parametersetpointerout:parametersetsizeout:parametersetcountout:nalunitheaderlengthout:)>).
+//!
+//! HEVC (F-VIEW-07, stage B11): `EncoderConfig.codec == Codec::Hevc` makes a session of `kCMVideoCodecType_HEVC` whose
+//! hardware encoder is required (`RequireHardwareAcceleratedVideoEncoder`, with and then without low-latency rate
+//! control; never the software encoder), profile `kVTProfileLevel_HEVC_Main_AutoLevel`, real time, no reordering. Output
+//! is Annex B with VPS, SPS and PPS (from `CMVideoFormatDescriptionGetHEVCParameterSetAtIndex`, NAL types 32 to 34) before
+//! every key frame, as the H.264 path does with SPS and PPS. `configure` answers `ErrorKind::Unsupported` when no session
+//! can be made (no hardware HEVC encoder). [`hevc_support`] probes once per process what this Mac can encode and decode
+//! in hardware. `EncoderInfo.profile` is `Main` (HEVC Main) and `EncoderInfo.level` the HEVC `general_level_idc`
+//! ([`hevc_level_idc`], 30 times the level number).
 //!
 //! The pure part (preset plan, level, rate numbers, timestamps) is in this file's top half and is tested on every host.
 
@@ -103,6 +112,31 @@ pub fn level_idc(width: u32, height: u32, fps: u32) -> u32 {
         (62, 139_264, 16_711_680),
     ];
     LEVELS.iter().find(|&&(_, fs, mbps)| mbs <= fs && rate <= mbps).map_or(62, |&(l, _, _)| l)
+}
+
+/// HEVC `general_level_idc` (30 times the level number) of the smallest Main tier level that fits a picture size and
+/// frame rate. GUESS: the table (MaxLumaPs, MaxLumaSr of ITU-T H.265 Table A.8) is from memory, not re-read; it only
+/// fills `EncoderInfo.level`, the encoder itself runs on `kVTProfileLevel_HEVC_Main_AutoLevel`.
+pub fn hevc_level_idc(width: u32, height: u32, fps: u32) -> u32 {
+    let luma_ps = u64::from(width) * u64::from(height);
+    let luma_sr = luma_ps * u64::from(fps);
+    // (general_level_idc, MaxLumaPs, MaxLumaSr)
+    const LEVELS: [(u32, u64, u64); 13] = [
+        (30, 36_864, 552_960),
+        (60, 122_880, 3_686_400),
+        (63, 245_760, 7_372_800),
+        (90, 552_960, 16_588_800),
+        (93, 983_040, 33_177_600),
+        (120, 2_228_224, 66_846_720),
+        (123, 2_228_224, 133_693_440),
+        (150, 8_912_896, 267_386_880),
+        (153, 8_912_896, 534_773_760),
+        (156, 8_912_896, 1_069_547_520),
+        (180, 35_651_584, 1_069_547_520),
+        (183, 35_651_584, 2_139_095_040),
+        (186, 35_651_584, 4_278_190_080),
+    ];
+    LEVELS.iter().find(|&&(_, ps, sr)| luma_ps <= ps && luma_sr <= sr).map_or(186, |&(l, _, _)| l)
 }
 
 /// `DataRateLimits` for a mean bitrate: bytes allowed in a one second window, 1.5x the mean.
@@ -175,6 +209,15 @@ mod plan_tests {
     }
 
     #[test]
+    fn hevc_levels_for_common_sizes() {
+        assert_eq!(hevc_level_idc(1920, 1080, 30), 120);
+        assert_eq!(hevc_level_idc(1920, 1080, 60), 123);
+        assert_eq!(hevc_level_idc(3840, 2160, 30), 150);
+        assert_eq!(hevc_level_idc(3840, 2160, 60), 153);
+        assert_eq!(hevc_level_idc(1280, 720, 30), 93);
+    }
+
+    #[test]
     fn levels_for_common_sizes() {
         assert_eq!(level_idc(1920, 1080, 30), 40);
         assert_eq!(level_idc(1920, 1080, 60), 42);
@@ -216,20 +259,21 @@ mod plan_tests {
 }
 
 #[cfg(target_os = "macos")]
-pub use vt::{DEFAULT_WAIT, OutputWait, VtH264Encoder};
+pub use vt::{DEFAULT_WAIT, OutputWait, VtH264Encoder, hevc_support};
 
 #[cfg(target_os = "macos")]
 mod vt {
     use std::collections::VecDeque;
     use std::ffi::{c_int, c_void};
     use std::ptr::{self, NonNull};
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::time::Duration;
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_core_media::{
-        CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeIndefinite,
-        kCMVideoCodecType_H264,
+        CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeIndefinite, kCMVideoCodecType_H264,
+        kCMVideoCodecType_HEVC,
     };
     use objc2_core_video::{
         CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -239,13 +283,14 @@ mod vt {
         kCVPixelFormatType_32BGRA, kCVReturnSuccess,
     };
     use objc2_video_toolbox::{
-        VTCompressionSession, VTEncodeInfoFlags, VTSessionCopyProperty, VTSessionSetProperty,
-        kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-        kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
-        kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-        kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-        kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kVTEncodeFrameOptionKey_ForceKeyFrame,
-        kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel,
+        VTCompressionSession, VTEncodeInfoFlags, VTIsHardwareDecodeSupported, VTPixelTransferSession,
+        VTSessionCopyProperty, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
+        kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+        kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+        kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kVTCompressionPropertyKey_ProfileLevel,
+        kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+        kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+        kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
         kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
@@ -254,10 +299,11 @@ mod vt {
         Clock, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, PlatformError, Result,
         VideoEncoder,
     };
-    use swapdesk_proto::H264Profile;
+    use swapdesk_proto::{Codec, H264Profile};
 
     use super::{
-        Effective, data_rate_limit_bytes, effective, level_idc, next_pts, session_gone, skip_frame, skip_interval_us,
+        Effective, data_rate_limit_bytes, effective, hevc_level_idc, level_idc, next_pts, session_gone, skip_frame,
+        skip_interval_us,
     };
     use crate::annexb;
     use crate::sys::{err, status_err};
@@ -278,6 +324,10 @@ mod vt {
 
     /// The mode in use unless [`VtH264Encoder::set_output_wait`] says otherwise: see the module documentation.
     pub const DEFAULT_WAIT: OutputWait = OutputWait::CompleteFrames;
+
+    /// The average bit rate of the key frame of a refinement is the normal one times eight, within these limits, kbps.
+    const REFINE_MIN_KBPS: u32 = 20_000;
+    const REFINE_MAX_KBPS: u32 = 200_000;
 
     enum Landed {
         Frame {
@@ -308,12 +358,14 @@ mod vt {
     /// What the output callback shares with `encode`.
     struct Shared {
         clock: Arc<dyn Clock>,
+        /// The codec of the session: how a sample's parameter sets are read.
+        codec: Codec,
         outs: Mutex<Vec<Out>>,
         signal: Condvar,
     }
 
     /// Reads one encoded sample: the key frame flag and the Annex B bytes (parameter sets first on a key frame).
-    fn extract(sample: &CMSampleBuffer) -> std::result::Result<(bool, Vec<u8>), (i32, &'static str)> {
+    fn extract(sample: &CMSampleBuffer, codec: Codec) -> std::result::Result<(bool, Vec<u8>), (i32, &'static str)> {
         // SAFETY: `sample` is live for the call; the calls only read it and return retained or borrowed CF objects.
         let keyframe = unsafe { is_sync_sample(sample) };
         // SAFETY: as above.
@@ -332,9 +384,15 @@ mod vt {
         // The length field size is a property of the format description, which every sample carries.
         // SAFETY: as above.
         let format = unsafe { sample.format_description() }.ok_or((-1, "sample without format description"))?;
-        let (count, length_size) = parameter_set_info(&format)?;
-        let sets = if keyframe { Some(parameter_sets(&format, count)?) } else { None };
-        let prefix: Vec<&[u8]> = sets.iter().flatten().map(Vec::as_slice).collect();
+        let (count, length_size) = parameter_set_info(&format, codec)?;
+        let sets = if keyframe { Some(parameter_sets(&format, count, codec)?) } else { None };
+        // HEVC: only VPS, SPS and PPS go in front (the description may also hold SEI NAL units).
+        let prefix: Vec<&[u8]> = sets
+            .iter()
+            .flatten()
+            .map(Vec::as_slice)
+            .filter(|set| codec == Codec::H264 || annexb::is_hevc_parameter_set(set))
+            .collect();
         let annex_b = annexb::avcc_to_annexb(&prefix, &avcc, length_size).ok_or((-1, "corrupt AVCC sample"))?;
         Ok((keyframe, annex_b))
     }
@@ -363,12 +421,14 @@ mod vt {
     /// samples (`NALUnitHeaderLengthOut`, 1 to 4 bytes).
     fn parameter_set_info(
         format: &objc2_core_media::CMFormatDescription,
+        codec: Codec,
     ) -> std::result::Result<(usize, usize), (i32, &'static str)> {
         let mut count = 0usize;
         let mut header_length: c_int = 0;
         // SAFETY: only the count and the header length are asked for; the other out pointers may be null.
         let status = unsafe {
-            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            get_parameter_set(
+                codec,
                 format,
                 0,
                 ptr::null_mut(),
@@ -378,16 +438,60 @@ mod vt {
             )
         };
         if status != 0 {
-            return Err((status, "CMVideoFormatDescriptionGetH264ParameterSetAtIndex"));
+            return Err((status, parameter_set_op(codec)));
         }
         let length_size = usize::try_from(header_length).ok().filter(|n| (1..=4).contains(n));
         Ok((count, length_size.ok_or((-1, "unsupported NAL unit header length"))?))
     }
 
-    /// SPS then PPS of the sample's format description (`count` of them), each without start code.
+    fn parameter_set_op(codec: Codec) -> &'static str {
+        match codec {
+            Codec::H264 => "CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
+            Codec::Hevc => "CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
+        }
+    }
+
+    /// `CMVideoFormatDescriptionGet{H264,HEVC}ParameterSetAtIndex`: both take the same arguments.
+    ///
+    /// # Safety
+    /// The out pointers are valid or null, as the framework documents.
+    unsafe fn get_parameter_set(
+        codec: Codec,
+        format: &objc2_core_media::CMFormatDescription,
+        index: usize,
+        pointer_out: *mut *const u8,
+        size_out: *mut usize,
+        count_out: *mut usize,
+        header_length_out: *mut c_int,
+    ) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe {
+            match codec {
+                Codec::H264 => CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    format,
+                    index,
+                    pointer_out,
+                    size_out,
+                    count_out,
+                    header_length_out,
+                ),
+                Codec::Hevc => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    format,
+                    index,
+                    pointer_out,
+                    size_out,
+                    count_out,
+                    header_length_out,
+                ),
+            }
+        }
+    }
+
+    /// The parameter sets of the sample's format description (SPS, PPS; VPS, SPS, PPS for HEVC) (`count` of them), each without start code.
     fn parameter_sets(
         format: &objc2_core_media::CMFormatDescription,
         count: usize,
+        codec: Codec,
     ) -> std::result::Result<Vec<Vec<u8>>, (i32, &'static str)> {
         let mut sets = Vec::with_capacity(count);
         for i in 0..count {
@@ -395,17 +499,10 @@ mod vt {
             let mut size = 0usize;
             // SAFETY: valid out pointers; the returned memory belongs to `format`, which outlives the copy below.
             let status = unsafe {
-                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    format,
-                    i,
-                    &raw mut p,
-                    &raw mut size,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
+                get_parameter_set(codec, format, i, &raw mut p, &raw mut size, ptr::null_mut(), ptr::null_mut())
             };
             if status != 0 || p.is_null() {
-                return Err((status, "CMVideoFormatDescriptionGetH264ParameterSetAtIndex"));
+                return Err((status, parameter_set_op(codec)));
             }
             // SAFETY: `p` points to `size` readable bytes owned by `format`.
             sets.push(unsafe { std::slice::from_raw_parts(p, size) }.to_vec());
@@ -438,7 +535,7 @@ mod vt {
             // SAFETY: see the function's contract.
             match unsafe { sample.as_ref() } {
                 None => Landed::Dropped,
-                Some(s) => match extract(s) {
+                Some(s) => match extract(s, shared.codec) {
                     Ok((keyframe, annex_b)) => Landed::Frame { keyframe, annex_b },
                     Err((status, what)) => Landed::Unreadable { status, what },
                 },
@@ -535,6 +632,35 @@ mod vt {
         /// Why the last unreadable sample was dropped.
         last_unreadable: Option<PlatformError>,
         dropped: u64,
+        /// Scales a frame larger than the configured size (F-VIEW-06); made at the first such frame.
+        scaler: Option<PixelTransfer>,
+    }
+
+    /// A `VTPixelTransferSession`, invalidated when dropped.
+    struct PixelTransfer(CFRetained<VTPixelTransferSession>);
+
+    impl PixelTransfer {
+        fn new() -> Result<Self> {
+            let mut out: *mut VTPixelTransferSession = ptr::null_mut();
+            // SAFETY: a valid out pointer; the session comes back retained (`VTPixelTransferSessionCreate` returns it
+            // +1, `CM_RETURNS_RETAINED_PARAMETER`).
+            let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut out)) };
+            if status != 0 {
+                return Err(status_err("VTPixelTransferSessionCreate", status));
+            }
+            let p = NonNull::new(out)
+                .ok_or_else(|| err(ErrorKind::Os, "VTPixelTransferSessionCreate", "no session returned"))?;
+            // SAFETY: Create rule.
+            Ok(Self(unsafe { CFRetained::from_raw(p) }))
+        }
+    }
+
+    impl Drop for PixelTransfer {
+        fn drop(&mut self) {
+            // SAFETY: a live session, torn down before its last reference goes (deterministic teardown, as the header
+            // asks).
+            unsafe { self.0.invalidate() };
+        }
     }
 
     impl VtH264Encoder {
@@ -553,6 +679,7 @@ mod vt {
                 force_key: false,
                 last_unreadable: None,
                 dropped: 0,
+                scaler: None,
             }
         }
 
@@ -585,15 +712,15 @@ mod vt {
             }
             let eff = effective(cfg.preset, cfg.kbps, cfg.fps);
             let session = make_session(cfg, &eff, self.clock.clone())?;
+            let (codec_name, level) = match cfg.codec {
+                Codec::H264 => ("H.264", level_idc(cfg.width, cfg.height, eff.output_fps)),
+                Codec::Hevc => ("HEVC", hevc_level_idc(cfg.width, cfg.height, eff.output_fps)),
+            };
             let info = EncoderInfo {
-                name: if session.hardware {
-                    "VideoToolbox H.264 (hardware)".to_owned()
-                } else {
-                    "VideoToolbox H.264 (software)".to_owned()
-                },
+                name: format!("VideoToolbox {codec_name} ({})", if session.hardware { "hardware" } else { "software" }),
                 hardware: session.hardware,
                 profile: session.profile,
-                level: level_idc(cfg.width, cfg.height, eff.output_fps) as u8,
+                level: level as u8,
                 low_latency: session.low_latency,
             };
             self.session = Some(session);
@@ -680,7 +807,34 @@ mod vt {
             self.drain()
         }
 
-        fn source_buffer(&self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
+        /// The buffer to hand the session: the frame's own when it has the configured size, else the frame scaled to
+        /// it by a `VTPixelTransferSession` into a buffer of the session's pool (F-VIEW-06: the configured size is the
+        /// size encoded, the capture may be larger). Apple, VideoToolbox `VTPixelTransferSession.h` (macOS SDK, read
+        /// 2026-11-12): `VTPixelTransferSessionTransferImage` scales the full width and height of the source buffer to
+        /// the full width and height of the destination buffer by default.
+        fn source_buffer(&mut self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
+            let source = self.frame_buffer(frame)?;
+            let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "encode", "not configured"))?;
+            let (w, h) = (session.width, session.height);
+            if (frame.width, frame.height) == (w, h) {
+                return Ok(source);
+            }
+            let dst = new_bgra_buffer(session, w as usize, h as usize)?;
+            let transfer = match self.scaler.take() {
+                Some(t) => t,
+                None => PixelTransfer::new()?,
+            };
+            // SAFETY: a live transfer session and two live BGRA pixel buffers.
+            let status = unsafe { transfer.0.transfer_image(&source, &dst) };
+            self.scaler = Some(transfer);
+            if status != 0 {
+                return Err(status_err("VTPixelTransferSessionTransferImage", status));
+            }
+            Ok(dst)
+        }
+
+        /// The frame as a pixel buffer of its own size (a CPU frame is copied in).
+        fn frame_buffer(&self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
             let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "encode", "not configured"))?;
             match &frame.pixels {
                 Pixels::Gpu(surface) => {
@@ -727,17 +881,9 @@ mod vt {
             }
             let mut out = Vec::new();
             let mut force = force_keyframe || self.force_key;
-            if (frame.width, frame.height) != (cfg.width, cfg.height) {
-                // A display size change: a new session, new SPS/PPS, the first frame a keyframe with `config_change`.
-                // A session that is already gone has nothing left to flush.
-                out = match self.flush() {
-                    Ok(frames) => frames,
-                    Err(e) if is_session_gone(&e) => Vec::new(),
-                    Err(e) => return Err(e),
-                };
-                self.build(&EncoderConfig { width: frame.width, height: frame.height, ..cfg })?;
-                force = true;
-            } else if self.session.is_none() {
+            // A frame of another size than the configured one is scaled in `source_buffer` (F-VIEW-06); a new encoded
+            // size is a new `configure` (new session, new SPS/PPS, a key frame with `config_change`), the caller's call.
+            if self.session.is_none() {
                 // An earlier rebuild failed (or `set_rate` found the session gone): try again with the stored
                 // configuration; the new session starts with a key frame.
                 self.build(&cfg)?;
@@ -782,6 +928,41 @@ mod vt {
             self.eff = eff;
             self.skip_interval = skip_interval_us(&eff);
             Ok(())
+        }
+
+        /// Still-screen refinement (F-VIEW-05, B7): the picture is encoded once as a forced key frame while the
+        /// session's average bit rate is raised for that one frame, then the normal rate is put back, in the same
+        /// session (no rebuild, no new SPS/PPS: the next `encode` continues with a P-frame). Properties used:
+        /// `kVTEncodeFrameOptionKey_ForceKeyFrame` per frame and `kVTCompressionPropertyKey_AverageBitRate` /
+        /// `DataRateLimits` through `apply_rate` (the same calls as `set_rate`). Not proven on the Mac yet: how much
+        /// of the raised rate the hardware encoder spends on one frame
+        /// (`tests/encode.rs::refinement_raises_the_psnr_of_a_still_frame`).
+        fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
+            let cfg = self.cfg.ok_or_else(|| err(ErrorKind::Closed, "refine", "not configured"))?;
+            if self.session.is_none() {
+                return Ok(Vec::new()); // no session: nothing to refine (a frame of another size is scaled like any)
+            }
+            let boosted =
+                effective(cfg.preset, cfg.kbps.saturating_mul(8).clamp(REFINE_MIN_KBPS, REFINE_MAX_KBPS), cfg.fps);
+            let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "refine", "not configured"))?;
+            apply_rate(&session.session, &boosted, true)?;
+            let mut result = self.submit(frame, true);
+            if matches!(&result, Ok(frames) if frames.is_empty()) {
+                // The output of one large key frame may not be out yet: wait for it.
+                result = self.flush();
+            }
+            // The normal rate goes back whatever happened above (a gone session is rebuilt by the next `encode`).
+            if let Some(session) = self.session.as_ref()
+                && let Err(e) = apply_rate(&session.session, &self.eff, true)
+            {
+                if is_session_gone(&e) {
+                    self.session = None;
+                    self.pending.clear();
+                } else if result.is_ok() {
+                    result = Err(e);
+                }
+            }
+            result
         }
 
         fn flush(&mut self) -> Result<Vec<EncodedFrame>> {
@@ -927,13 +1108,25 @@ mod vt {
 
     fn make_session(cfg: &EncoderConfig, eff: &Effective, clock: Arc<dyn Clock>) -> Result<Session> {
         let attrs = source_attributes(cfg.width, cfg.height);
-        // (require hardware, enable hardware, low latency): the strictest first.
-        let attempts = [(true, true, true), (false, true, true), (false, true, false), (false, false, false)];
+        // (require hardware, enable hardware, low latency): the strictest first. HEVC never runs in software here: the
+        // viewer was promised hardware (`Capabilities::pick_codec`), so only the two hardware-required attempts exist.
+        let attempts: &[(bool, bool, bool)] = match cfg.codec {
+            Codec::H264 => &[(true, true, true), (false, true, true), (false, true, false), (false, false, false)],
+            Codec::Hevc => &[(true, true, true), (true, true, false)],
+        };
+        let codec_type = match cfg.codec {
+            Codec::H264 => kCMVideoCodecType_H264,
+            Codec::Hevc => kCMVideoCodecType_HEVC,
+        };
         let mut last = err(ErrorKind::Unavailable, "VTCompressionSessionCreate", "no attempt ran");
-        for (require, hardware, low_latency) in attempts {
+        for &(require, hardware, low_latency) in attempts {
             let spec = encoder_specification(require, hardware, low_latency);
-            let shared =
-                SharedCell::new(Shared { clock: clock.clone(), outs: Mutex::new(Vec::new()), signal: Condvar::new() });
+            let shared = SharedCell::new(Shared {
+                clock: clock.clone(),
+                codec: cfg.codec,
+                outs: Mutex::new(Vec::new()),
+                signal: Condvar::new(),
+            });
             let mut out: *mut VTCompressionSession = ptr::null_mut();
             // SAFETY: the dictionaries are live; the refcon is the address of the cell's own heap allocation, which
             // never moves and which the returned `Session` frees only after `invalidate` (a failed create never calls
@@ -944,7 +1137,7 @@ mod vt {
                     None,
                     cfg.width as i32,
                     cfg.height as i32,
-                    kCMVideoCodecType_H264,
+                    codec_type,
                     Some(&spec),
                     Some(&attrs),
                     None,
@@ -971,7 +1164,7 @@ mod vt {
                 height: cfg.height,
                 hardware: hardware_used,
                 low_latency,
-                profile: H264Profile::High,
+                profile: if cfg.codec == Codec::Hevc { H264Profile::Main } else { H264Profile::High },
             };
             match configure_properties(&built.session, cfg, eff) {
                 Ok(profile) => {
@@ -982,7 +1175,46 @@ mod vt {
                 Err(e) => last = e,
             }
         }
+        if cfg.codec == Codec::Hevc {
+            // No hardware HEVC encoder (or none that takes this size): the caller falls back to H.264.
+            let detail = format!("no hardware HEVC encoder ({} failed)", last.op);
+            return Err(PlatformError {
+                kind: ErrorKind::Unsupported,
+                op: "VTCompressionSessionCreate",
+                detail,
+                ..last
+            });
+        }
         Err(last)
+    }
+
+    /// What this Mac does in hardware for HEVC, probed once per process: `(encode_hw, decode_hw)`.
+    /// Decode: `VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)`. Encode: a 1280x720 HEVC compression session with
+    /// the hardware encoder required is created, prepared and torn down (the same session `configure` builds).
+    pub fn hevc_support() -> (bool, bool) {
+        static SUPPORT: OnceLock<(bool, bool)> = OnceLock::new();
+        *SUPPORT.get_or_init(|| {
+            struct ProbeClock(Instant);
+            impl Clock for ProbeClock {
+                fn now(&self) -> MonoMicros {
+                    MonoMicros(self.0.elapsed().as_micros() as u64)
+                }
+            }
+            let cfg = EncoderConfig {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                kbps: 4000,
+                preset: swapdesk_proto::Preset::Auto,
+                adapter: swapdesk_platform::AdapterId(0),
+                codec: Codec::Hevc,
+            };
+            let eff = effective(cfg.preset, cfg.kbps, cfg.fps);
+            let encode = make_session(&cfg, &eff, Arc::new(ProbeClock(Instant::now()))).is_ok();
+            // SAFETY: a plain query of the framework with a codec constant.
+            let decode = unsafe { VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) };
+            (encode, decode)
+        })
     }
 
     /// Reads `kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder`.
@@ -1017,7 +1249,16 @@ mod vt {
         let reorder = unsafe { kVTCompressionPropertyKey_AllowFrameReordering };
         set_required(session, "VTSessionSetProperty(AllowFrameReordering)", reorder, CFBoolean::new(false).as_ref())?;
         let level_key = unsafe { kVTCompressionPropertyKey_ProfileLevel };
-        let profile = if set_prop(session, level_key, unsafe { kVTProfileLevel_H264_High_AutoLevel }.as_ref()) == 0 {
+        let profile = if cfg.codec == Codec::Hevc {
+            // HEVC Main (8 bit 4:2:0), automatic level.
+            set_required(
+                session,
+                "VTSessionSetProperty(ProfileLevel)",
+                level_key,
+                unsafe { kVTProfileLevel_HEVC_Main_AutoLevel }.as_ref(),
+            )?;
+            H264Profile::Main
+        } else if set_prop(session, level_key, unsafe { kVTProfileLevel_H264_High_AutoLevel }.as_ref()) == 0 {
             H264Profile::High
         } else {
             set_required(
@@ -1051,8 +1292,11 @@ mod vt {
     /// A BGRA buffer from the session's pool (the pool exists once the session does), else a plain one.
     fn new_bgra_buffer(session: &Session, w: usize, h: usize) -> Result<CFRetained<CVPixelBuffer>> {
         let mut out: *mut CVPixelBuffer = ptr::null_mut();
+        // The pool makes buffers of the session's size only.
         // SAFETY: a live session.
-        if let Some(pool) = unsafe { session.session.pixel_buffer_pool() } {
+        if (w as u32, h as u32) == (session.width, session.height)
+            && let Some(pool) = unsafe { session.session.pixel_buffer_pool() }
+        {
             // SAFETY: a live pool; `out` is a valid out pointer and receives a +1 buffer.
             let status = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out)) };
             if status == kCVReturnSuccess
@@ -1132,6 +1376,7 @@ mod vt {
                 kbps: 2000,
                 preset: Preset::Auto,
                 adapter: AdapterId(0),
+                codec: swapdesk_platform::Codec::H264,
             };
             enc.configure(&cfg).expect("configure");
             enc
@@ -1260,9 +1505,9 @@ mod vt {
                 assert_eq!(status, 0, "format description with a {length} byte length field");
                 // SAFETY: Create rule.
                 let format = unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).expect("a description")) };
-                let (count, size) = parameter_set_info(&format).expect("parameter set info");
+                let (count, size) = parameter_set_info(&format, Codec::H264).expect("parameter set info");
                 assert_eq!((count, size), (sets.sps.len() + sets.pps.len(), length as usize));
-                let read = parameter_sets(&format, count).expect("parameter sets");
+                let read = parameter_sets(&format, count, Codec::H264).expect("parameter sets");
                 assert_eq!(read.concat(), sets.all().collect::<Vec<_>>().concat());
             }
         }
@@ -1271,12 +1516,18 @@ mod vt {
         fn a_failed_rebuild_leaves_the_encoder_able_to_build_again() {
             let mut enc = encoder();
             enc.encode(&frame(0), false).expect("frame 0");
-            // A size the encoder cannot build: the rebuild for the new size fails, the error comes back and no session
-            // is left.
-            let mut huge = frame(1);
-            huge.width = 20_000;
-            huge.height = 20_000;
-            assert!(enc.encode(&huge, false).is_err());
+            // A size the encoder cannot build: the configure for it fails, the error comes back and no session is
+            // left.
+            let huge = EncoderConfig {
+                width: 20_000,
+                height: 20_000,
+                fps: 30,
+                kbps: 2000,
+                preset: Preset::Auto,
+                adapter: AdapterId(0),
+                codec: swapdesk_platform::Codec::H264,
+            };
+            assert!(enc.configure(&huge).is_err());
             // The stored configuration is untouched, and the next normal frame builds a session again.
             let out = enc.encode(&frame(2), false).expect("the encoder builds a session again");
             assert!(out[0].keyframe && out[0].config_change);

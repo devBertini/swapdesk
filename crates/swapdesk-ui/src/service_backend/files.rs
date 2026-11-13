@@ -94,8 +94,172 @@ pub(crate) fn op_of(c: &Command) -> Option<w::UiOp> {
         Command::TransferPause { transfer_id } => FilesOp::Pause { transfer_id: *transfer_id },
         Command::TransferResume { transfer_id } => FilesOp::Resume { transfer_id: *transfer_id },
         Command::TransferCancel { transfer_id } => FilesOp::Cancel { transfer_id: *transfer_id },
+        Command::FilesListPage { session_id, path, start } => {
+            FilesOp::ListPage { session_id: *session_id, path: Text(path.clone()), start: *start }
+        }
+        Command::FilesChange { session_id, change } => {
+            FilesOp::Change { session_id: *session_id, change: change_to_wire(change) }
+        }
+        Command::FilesVolumes { session_id } => FilesOp::Volumes { session_id: *session_id },
         _ => return None,
     }))
+}
+
+fn names_to_wire(names: &[String]) -> Vec<w::FsNameView> {
+    names.iter().map(|n| w::FsNameView { name: Text(n.clone()) }).collect()
+}
+
+/// A change as the wire carries it.
+pub fn change_to_wire(c: &a::RemoteChange) -> w::FsChange {
+    match c {
+        a::RemoteChange::MakeDir { parent, name } => {
+            w::FsChange::MakeDir { parent: Text(parent.clone()), name: Text(name.clone()) }
+        }
+        a::RemoteChange::Rename { dir, name, new_name } => {
+            w::FsChange::Rename { dir: Text(dir.clone()), name: Text(name.clone()), new_name: Text(new_name.clone()) }
+        }
+        a::RemoteChange::Move { from_dir, names, to_dir } => w::FsChange::Move {
+            from_dir: Text(from_dir.clone()),
+            names: names_to_wire(names),
+            to_dir: Text(to_dir.clone()),
+        },
+        a::RemoteChange::Trash { dir, names } => {
+            w::FsChange::Trash { dir: Text(dir.clone()), names: names_to_wire(names) }
+        }
+    }
+}
+
+/// What one name's code means to the explorer.
+pub fn outcome_from_wire(code: swapdesk_proto::ErrorCode) -> a::ChangeOutcome {
+    use swapdesk_proto::ErrorCode as E;
+    match code {
+        E::NoError => a::ChangeOutcome::Done,
+        E::Exists => a::ChangeOutcome::Exists,
+        E::NoBin => a::ChangeOutcome::NoBin,
+        E::VolumeGone => a::ChangeOutcome::VolumeGone,
+        E::InvalidName => a::ChangeOutcome::InvalidName,
+        E::NotPermitted => a::ChangeOutcome::NotPermitted,
+        E::NotFound => a::ChangeOutcome::NotFound,
+        E::NoSpace => a::ChangeOutcome::NoSpace,
+        _ => a::ChangeOutcome::Failed,
+    }
+}
+
+/// A page of the other computer's folder.
+pub fn page_from_wire(l: w::FileListing2) -> a::RemotePage {
+    use swapdesk_proto::{ENTRY_HIDDEN, ENTRY_READ_ONLY, ENTRY_SYSTEM, EntryKind};
+    a::RemotePage {
+        path: l.path.0,
+        start: l.start,
+        entries: l
+            .page
+            .entries
+            .into_iter()
+            .map(|e| a::RemoteEntry {
+                name: e.name.0,
+                kind: match e.kind {
+                    EntryKind::File => a::RemoteKind::File,
+                    EntryKind::Dir => a::RemoteKind::Dir,
+                    EntryKind::Link => a::RemoteKind::Link,
+                },
+                size: e.size,
+                mtime_ms: e.mtime_ms,
+                hidden: e.flags & ENTRY_HIDDEN != 0,
+                system: e.flags & ENTRY_SYSTEM != 0,
+                read_only: e.flags & ENTRY_READ_ONLY != 0,
+            })
+            .collect(),
+        next: l.page.next,
+        free: l.page.free,
+    }
+}
+
+/// The other computer's home folder, places and volumes.
+pub fn volumes_from_wire(v: w::VolumesView) -> a::RemoteVolumes {
+    use swapdesk_proto::{PlaceKind as P, VolumeKind as V};
+    a::RemoteVolumes {
+        home: v.home.0,
+        places: v
+            .places
+            .into_iter()
+            .map(|p| a::RemotePlace {
+                kind: match p.kind {
+                    P::Desktop => a::PlaceName::Desktop,
+                    P::Documents => a::PlaceName::Documents,
+                    P::Downloads => a::PlaceName::Downloads,
+                    P::Pictures => a::PlaceName::Pictures,
+                    P::Music => a::PlaceName::Music,
+                    P::Videos => a::PlaceName::Videos,
+                    P::Received => a::PlaceName::Received,
+                },
+                path: p.path.0,
+            })
+            .collect(),
+        volumes: v
+            .volumes
+            .into_iter()
+            .map(|d| a::RemoteVolume {
+                id: d.id,
+                kind: match d.kind {
+                    V::System => a::VolumeType::System,
+                    V::Fixed => a::VolumeType::Fixed,
+                    V::Removable => a::VolumeType::Removable,
+                    V::Network => a::VolumeType::Network,
+                    V::Optical => a::VolumeType::Optical,
+                    V::Image => a::VolumeType::Image,
+                },
+                label: d.label.0,
+                letter: d.letter.filter(u8::is_ascii_uppercase).map(char::from),
+                total_bytes: d.total_bytes,
+                free_bytes: d.free_bytes,
+                has_bin: d.has_bin,
+            })
+            .collect(),
+    }
+}
+
+/// The wire form of the other computer's volumes (tests and mocks that play the service).
+pub fn volumes_to_wire(v: &a::RemoteVolumes) -> w::VolumesView {
+    use swapdesk_proto::{PlaceKind as P, VolumeKind as V};
+    w::VolumesView {
+        home: Text(v.home.clone()),
+        places: v
+            .places
+            .iter()
+            .map(|p| w::PlaceView {
+                kind: match p.kind {
+                    a::PlaceName::Desktop => P::Desktop,
+                    a::PlaceName::Documents => P::Documents,
+                    a::PlaceName::Downloads => P::Downloads,
+                    a::PlaceName::Pictures => P::Pictures,
+                    a::PlaceName::Music => P::Music,
+                    a::PlaceName::Videos => P::Videos,
+                    a::PlaceName::Received => P::Received,
+                },
+                path: Text(p.path.clone()),
+            })
+            .collect(),
+        volumes: v
+            .volumes
+            .iter()
+            .map(|d| w::VolumeView {
+                id: d.id,
+                kind: match d.kind {
+                    a::VolumeType::System => V::System,
+                    a::VolumeType::Fixed => V::Fixed,
+                    a::VolumeType::Removable => V::Removable,
+                    a::VolumeType::Network => V::Network,
+                    a::VolumeType::Optical => V::Optical,
+                    a::VolumeType::Image => V::Image,
+                },
+                label: Text(d.label.clone()),
+                letter: d.letter.and_then(|c| u8::try_from(c).ok()),
+                total_bytes: d.total_bytes,
+                free_bytes: d.free_bytes,
+                has_bin: d.has_bin,
+            })
+            .collect(),
+    }
 }
 
 pub fn listing_from_wire(l: w::FileListing) -> a::Listing {
@@ -161,6 +325,11 @@ pub fn note_to_event(n: FilesNote) -> a::UiEvent {
         FilesNote::SavedAs { session_id, transfer_id, name } => {
             a::UiEvent::TransferSavedAs { transfer_id, session_id, name: name.0 }
         }
+        FilesNote::Volumes { session_id, volumes } => {
+            a::UiEvent::RemoteVolumes { session_id, volumes: volumes_from_wire(volumes) }
+        }
+        FilesNote::Changed { session_id, op, count } => a::UiEvent::HostFilesChanged { session_id, op, count },
+        FilesNote::Reach { session_id } => a::UiEvent::HostFilesReach { session_id },
     }
 }
 
@@ -177,6 +346,13 @@ pub fn event_to_note(e: &a::UiEvent) -> Option<FilesNote> {
         a::UiEvent::TransferSavedAs { transfer_id, session_id, name } => {
             FilesNote::SavedAs { session_id: *session_id, transfer_id: *transfer_id, name: Text(name.clone()) }
         }
+        a::UiEvent::RemoteVolumes { session_id, volumes } => {
+            FilesNote::Volumes { session_id: *session_id, volumes: volumes_to_wire(volumes) }
+        }
+        a::UiEvent::HostFilesChanged { session_id, op, count } => {
+            FilesNote::Changed { session_id: *session_id, op: *op, count: *count }
+        }
+        a::UiEvent::HostFilesReach { session_id } => FilesNote::Reach { session_id: *session_id },
         _ => return None,
     })
 }

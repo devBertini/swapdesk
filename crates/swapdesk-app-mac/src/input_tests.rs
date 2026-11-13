@@ -57,6 +57,9 @@ impl Rig {
         let area = Rect { x: 0, y: 0, width: 800, height: 600 };
         let layout = Layout::compute((160, 96), (800, 600), ScaleMode::Fit).expect("layout");
         viewer.layout().set(Some(PointerLayout { area, frame: (160, 96), layout }));
+        // "Teclas físicas": the key records below are physical keys. In "Automático" toward a Windows host a letter goes
+        // as text, which the viewer now reads from this Mac's own keyboard layout, not from the message's characters.
+        viewer.set_user_prefs(swapdesk_ui::KeyboardMode::Physical, false);
         let inner = Arc::new(Scripted::default());
         let backend = ObservingBackend::new(inner.clone(), Arc::clone(&viewer));
         Self { viewer, rec, inner, backend }
@@ -72,7 +75,12 @@ impl Rig {
     }
 
     fn active(&self, granted: Permissions) {
-        self.session_event(SessionState::Active { since_ms: 0, role: Role::Viewer, granted });
+        self.session_event(SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted,
+            elevation: Default::default(),
+        });
     }
 
     fn recorded(&self) -> Vec<(u64, InputEvent)> {

@@ -7,19 +7,22 @@
 //! `--service-pid` (development). The handshake runs on a helper thread with a deadline, so a service that accepts
 //! and never answers cannot keep the window from opening.
 //!
-//! When the service cannot be reached the caller uses [`DownBackend`]: every command is answered `ServiceDown` at
-//! once, which is the state the UI already knows how to show. There is no reconnection: a service that comes up
-//! later is found by the next start of `Swapdesk.exe`.
+//! [`connect`] is one try. The interface calls it through [`crate::reconnect::Reconnecting`], which tries again every
+//! second for 30 s at launch and after a break, and answers `ServiceDown` past that (the state the UI already knows
+//! how to show).
 
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use swapdesk_sys_win::pipe::{PipeConn, connect as connect_pipe, session_of_pid, ui_pipe_name};
+use swapdesk_sys_win::pipe::{
+    PipeConn, PipeError, connect as connect_pipe, elev_pipe_name, session_of_pid, ui_pipe_name,
+};
 use swapdesk_sys_win::service_pid;
 use swapdesk_ui::UiWaker;
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
 
 use crate::cli::Options;
+use crate::elevate::WinElevator;
 
 /// The name the SCM knows the service by.
 pub const SERVICE_NAME: &str = "SwapdeskService";
@@ -36,6 +39,8 @@ pub enum ConnectError {
     Session(String),
     /// The pipe could not be opened or its server is not the expected process.
     Pipe(String),
+    /// The system refused this process the pipe (access denied): its security descriptor does not list it.
+    Refused(String),
     /// The handshake failed or timed out.
     Handshake(String),
 }
@@ -46,6 +51,7 @@ impl core::fmt::Display for ConnectError {
             ConnectError::NoService(e) => write!(f, "service: {e}"),
             ConnectError::Session(e) => write!(f, "session: {e}"),
             ConnectError::Pipe(e) => write!(f, "pipe: {e}"),
+            ConnectError::Refused(e) => write!(f, "pipe refused: {e}"),
             ConnectError::Handshake(e) => write!(f, "handshake: {e}"),
         }
     }
@@ -56,6 +62,26 @@ pub fn pipe_name(session_id: u32, instance: Option<u32>) -> String {
     match instance {
         Some(n) => format!("{}-{n}", ui_pipe_name(session_id)),
         None => ui_pipe_name(session_id),
+    }
+}
+
+/// `elev-<session>` (`-<n>` with `--instance`): where the elevated instance confirms a ticket, whatever its user
+/// (ACCOUNTS.md S7).
+pub fn elevator_pipe_name(session_id: u32, instance: Option<u32>) -> String {
+    match instance {
+        Some(n) => format!("{}-{n}", elev_pipe_name(session_id)),
+        None => elev_pipe_name(session_id),
+    }
+}
+
+/// The elevated instance's pipe: `elev-<session>`; the UI pipe when that one cannot be opened (the elevated instance
+/// of the session's own user is served there too).
+pub fn open_elevator_pipe(options: &Options) -> Result<PipeConn, ConnectError> {
+    let pid = expected_server_pid(options)?;
+    let session = session_of_pid(std::process::id()).map_err(|e| ConnectError::Session(e.to_string()))?;
+    match connect_pipe(&elevator_pipe_name(session, options.instance), pid, PIPE_TIMEOUT) {
+        Ok(c) => Ok(c),
+        Err(_) => open_pipe(options),
     }
 }
 
@@ -71,9 +97,14 @@ pub fn expected_server_pid(options: &Options) -> Result<u32, ConnectError> {
 pub fn open_pipe(options: &Options) -> Result<PipeConn, ConnectError> {
     let pid = expected_server_pid(options)?;
     let session = session_of_pid(std::process::id()).map_err(|e| ConnectError::Session(e.to_string()))?;
-    connect_pipe(&pipe_name(session, options.instance), pid, PIPE_TIMEOUT)
-        .map_err(|e| ConnectError::Pipe(e.to_string()))
+    connect_pipe(&pipe_name(session, options.instance), pid, PIPE_TIMEOUT).map_err(|e| match &e {
+        PipeError::Os(os) if os.os_code == Some(ERROR_ACCESS_DENIED) => ConnectError::Refused(e.to_string()),
+        _ => ConnectError::Pipe(e.to_string()),
+    })
 }
+
+/// `ERROR_ACCESS_DENIED`, which `CreateFileW` reports for a pipe whose descriptor does not list the caller.
+const ERROR_ACCESS_DENIED: i64 = 5;
 
 /// Opens the pipe, runs the handshake and starts the backend, with `sink` receiving the viewer media.
 pub fn connect(
@@ -95,6 +126,8 @@ pub fn connect(
         Ok(Ok(backend)) => {
             // The clipboard sync of the viewer role reads and writes this user's clipboard (C2.4 0x60 to 0x62).
             backend.set_clipboard(swapdesk_input_win::clipboard::WinClipboard::new());
+            // "Continuar" of the administrator confirmation starts the elevated instance through UAC (ELEVATION.md 3.5).
+            backend.set_elevator(Arc::new(WinElevator::new(options)));
             Ok(Arc::new(backend))
         }
         Ok(Err(e)) => Err(ConnectError::Handshake(e.to_string())),
@@ -112,6 +145,8 @@ mod tests {
     fn pipe_names_follow_the_contract_and_the_service_lane() {
         assert_eq!(pipe_name(2, None), "ui-2");
         assert_eq!(pipe_name(2, Some(7)), "ui-2-7");
+        assert_eq!(elevator_pipe_name(2, None), "elev-2");
+        assert_eq!(elevator_pipe_name(2, Some(7)), "elev-2-7");
     }
 
     #[test]

@@ -5,22 +5,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use swapdesk_ipc::{
-    ApiCode, Bytes, DisplayView, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK, SessionState, SettingsUpdate,
-    SpecialKeys, UiOp,
+    ApiCode, Bytes, ConnectWhy, DisplayView, ElevAction, IpcError, Message as Ipc, Notify, ReplyBody, STATUS_OK,
+    SessionState, SettingsUpdate, SpecialKeys, UiOp,
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
-use swapdesk_proto::{
-    DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special, VideoSettings,
-};
+use swapdesk_proto::{DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special};
 use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
 use tokio::time::Instant;
 
+use super::extras::{ENTRY_ID_BIT, Entry};
 use super::store::{store_settings, valid_name};
-use super::views::{Manual, api_of, parse_device_id};
-use super::{Conn, Hub, Viewer, lock};
+use super::views::{Manual, parse_device_id};
+use super::{Conn, Hub, VideoPrefs, Viewer, lock};
 use crate::service::{
-    ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut,
+    ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut, WaitHook,
 };
 
 /// Typed addresses kept at once; the oldest goes first.
@@ -30,7 +29,8 @@ const KEYBOARD_PAGE: u16 = 0x07;
 
 type OpResult = Result<ReplyBody, ApiCode>;
 
-pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
+/// The `UiReply` that answers request `req` with `result`.
+pub(super) fn reply_message(req: u32, result: OpResult) -> Ipc {
     let (status, body) = match result {
         Ok(b) => match b.encode() {
             Ok(bytes) => (STATUS_OK, bytes),
@@ -38,7 +38,11 @@ pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
         },
         Err(code) => (code.status(), Vec::new()),
     };
-    conn.queue.control(Ipc::UiReply { req, status, body: Bytes(body) });
+    Ipc::UiReply { req, status, body: Bytes(body) }
+}
+
+pub(super) fn reply(conn: &Conn, req: u32, result: OpResult) {
+    conn.queue.control(reply_message(req, result));
 }
 
 fn done(r: Result<(), ApiCode>) -> OpResult {
@@ -55,16 +59,24 @@ fn apply_code(e: ApplyError) -> ApiCode {
     }
 }
 
-fn connect_code(e: &ConnectError) -> ApiCode {
+/// What the interface is told when a connect did not open: who refused, or what did not answer.
+fn connect_why(e: &ConnectError) -> ConnectWhy {
     use swapdesk_session::OpenError;
     match e {
-        ConnectError::Refused(_) => ApiCode::Refused,
-        ConnectError::NotIpv4 => ApiCode::Invalid,
-        ConnectError::UnknownDevice => ApiCode::NotFound,
-        ConnectError::Socket(_) => ApiCode::Internal,
-        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => api_of(*c),
-        ConnectError::Open(OpenError::Protocol(_)) => ApiCode::Internal,
-        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ApiCode::Timeout,
+        // The LAN guard turned the address away: nothing to reach.
+        ConnectError::Refused(_) => ConnectWhy::Unreachable,
+        ConnectError::NotIpv4 | ConnectError::UnknownDevice | ConnectError::Socket(_) => ConnectWhy::Failed,
+        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => match c {
+            ErrorCode::Declined => ConnectWhy::Declined,
+            ErrorCode::Timeout => ConnectWhy::TimedOut,
+            ErrorCode::NobodyPresent => ConnectWhy::NobodyPresent,
+            ErrorCode::Busy => ConnectWhy::Busy,
+            ErrorCode::UnknownDevice | ErrorCode::Forgotten => ConnectWhy::Forgotten,
+            ErrorCode::UnsupportedVersion => ConnectWhy::Failed,
+            _ => ConnectWhy::NotPermitted,
+        },
+        ConnectError::Open(OpenError::Protocol(_)) => ConnectWhy::Failed,
+        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ConnectWhy::Unreachable,
     }
 }
 
@@ -129,27 +141,20 @@ impl Hub {
                 self.term_open(conn, req, session_id, cols, rows, admin)
             }
             UiOp::Files(op) => self.files_op(conn, req, op),
+            UiOp::ElevateSession { session_id } => self.elevate_session(conn, req, session_id),
             op => self.request_other(conn, req, op),
         }
     }
 
     fn request_other(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, op: UiOp) {
-        if let UiOp::Connect { device_id, intent, unattended } = op {
+        // `unattended` of the op is not read: whether the viewer asks for entry without a prompt follows what it
+        // knows of the host and of the account that connects (`open_viewer`), and the host decides the rest.
+        if let UiOp::Connect { device_id, intent, .. } = op {
             if let Err(code) = self.require_console(conn, "a connect from a UI that is not the console's") {
                 return reply(conn, req, Err(code));
             }
-            // Entry without a prompt needs an administrator connection (D10); the host decides the rest.
-            if unattended && !conn.info.admin {
-                return reply(conn, req, Err(ApiCode::NeedsAdmin));
-            }
-            let (me, conn) = (Arc::clone(self), Arc::clone(conn));
-            // The call waits for the host's user (up to 20 s): not on the reader thread, not on the runtime.
-            if let Err(e) = std::thread::Builder::new().name("ui-hub-connect".into()).spawn(move || {
-                let r = me.connect(&conn, &device_id, intent, unattended);
-                reply(&conn, req, r);
-            }) {
-                self.log(Level::Warn, format_args!("cannot start a connect thread: {e}"));
-            }
+            // Answers with the entry at once; the attempt (up to the host's 20 s) goes on as a task.
+            self.connect(conn, req, &device_id, intent);
             return;
         }
         reply(conn, req, self.op(conn, op));
@@ -167,23 +172,64 @@ impl Hub {
     }
 
     fn op(self: &Arc<Self>, conn: &Arc<Conn>, op: UiOp) -> OpResult {
-        // Before any argument is looked at, so a refused UI learns nothing about the device list.
-        if matches!(
-            op,
-            UiOp::PairOpen { .. }
-                | UiOp::PairStart { .. }
-                | UiOp::PairConfirm { .. }
-                | UiOp::PairCancel { .. }
-                | UiOp::SetGrants { .. }
-                | UiOp::ForgetDevice { .. }
-                | UiOp::RenameDevice { .. }
-        ) {
+        // Before any argument is looked at, so a refused UI learns nothing about the device list. What only narrows this
+        // account's own reach (forgetting a device, taking permissions away) is open to any interactive session of the
+        // account's own user, which is every connection that reaches this hub (ACCOUNTS.md 5.6): a user switched away
+        // from the console can still cut a device off.
+        let own_user = self.account.get().is_some_and(|a| a.eq_ignore_ascii_case(&conn.info.user.id));
+        let narrows = own_user
+            && match &op {
+                UiOp::ForgetDevice { .. } => true,
+                UiOp::SetGrants { device_id, grants } => parse_device_id(device_id).is_some_and(|id| {
+                    self.p.trust.read(|s| s.find_by_id(&id).is_some_and(|d| grants & !d.grants_here.bits() == 0))
+                }),
+                _ => false,
+            };
+        if !narrows
+            && matches!(
+                op,
+                UiOp::PairOpen { .. }
+                    | UiOp::PairStart { .. }
+                    | UiOp::PairConfirm { .. }
+                    | UiOp::PairCancel { .. }
+                    | UiOp::SetGrants { .. }
+                    | UiOp::ForgetDevice { .. }
+                    | UiOp::RenameDevice { .. }
+                    | UiOp::BlockDevice { .. }
+                    | UiOp::UnblockDevice { .. }
+            )
+        {
             self.require_console(
                 conn,
-                "a pairing, grants, rename or forget request from a UI that is not the console's",
+                "a pairing, grants, rename, forget or block request from a UI that is not the console's",
             )?;
         }
         match op {
+            UiOp::UpdateGet
+            | UiOp::UpdateCheckNow
+            | UiOp::UpdateInstall { .. }
+            | UiOp::UpdateCancel
+            | UiOp::UpdateDismiss { .. }
+            | UiOp::UpdateSetCheck { .. } => self.update_op(conn, &op),
+            UiOp::MediaCaps { hevc_encode, hevc_decode } => {
+                if let Some(core) = self.core() {
+                    core.set_media_caps(hevc_encode, hevc_decode);
+                }
+                Ok(ReplyBody::Done)
+            }
+            UiOp::BlockDevice { ipv4, name } => {
+                self.block_device(&ipv4, &name)?;
+                Ok(ReplyBody::Blocked(self.blocked_views()))
+            }
+            UiOp::UnblockDevice { mac } => {
+                let mac = swapdesk_trust::parse_mac(&mac).ok_or(ApiCode::Invalid)?;
+                match self.p.trust.unblock_mac(&mac) {
+                    Ok(true) => Ok(ReplyBody::Blocked(self.blocked_views())),
+                    Ok(false) => Err(ApiCode::NotFound),
+                    Err(_) => Err(ApiCode::Internal),
+                }
+            }
+            UiOp::ListBlocked => Ok(ReplyBody::Blocked(self.blocked_views())),
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
@@ -195,6 +241,10 @@ impl Hub {
             UiOp::SetGrants { device_id, grants } => done(self.set_grants(conn, &device_id, grants)),
             UiOp::ForgetDevice { device_id } => done(self.forget_device(&device_id)),
             UiOp::RenameDevice { device_id, name } => done(self.rename_device(&device_id, &name)),
+            UiOp::RefreshGrants { device_id } => {
+                let id = parse_device_id(&device_id).ok_or(ApiCode::Invalid)?;
+                done(self.refresh_grants(id))
+            }
             UiOp::Connect { .. } => Err(ApiCode::Internal),
             UiOp::Disconnect { session_id } => done(self.disconnect(conn, session_id)),
             UiOp::AnswerIncoming { request_id, decision, grants } => {
@@ -211,11 +261,16 @@ impl Hub {
             UiOp::ListDisplays { session_id } => {
                 self.with_viewer(conn, session_id, |v| Ok(v.displays.clone())).map(ReplyBody::Displays)
             }
-            UiOp::SetQuality { session_id, quality } => {
-                let settings =
-                    VideoSettings { preset: quality, max_fps: 60, max_kbps: 0, view_width: 0, view_height: 0 };
-                done(self.with_viewer(conn, session_id, |v| v.handle.set_video_settings(settings).map_err(apply_code)))
-            }
+            UiOp::SetQuality { session_id, quality } => done(self.with_viewer(conn, session_id, |v| {
+                v.video.preset = quality;
+                v.handle.set_video_settings(v.video.settings()).map_err(apply_code)
+            })),
+            // F-VIEW-06: the viewer's video area and its monitor's refresh; the preset stays as last chosen.
+            UiOp::SetViewSize { session_id, width, height, max_fps } => done(self.with_viewer(conn, session_id, |v| {
+                v.video.view = (width, height);
+                v.video.max_fps = max_fps;
+                v.handle.set_video_settings(v.video.settings()).map_err(apply_code)
+            })),
             UiOp::SetAudio { session_id, on } => {
                 done(self.with_viewer(conn, session_id, |v| v.handle.set_audio(on).map_err(apply_code)))
             }
@@ -237,7 +292,15 @@ impl Hub {
             | UiOp::Wake { .. }
             | UiOp::RunAction { .. }
             | UiOp::TermOpen { .. }
+            | UiOp::ElevateSession { .. }
             | UiOp::Files(_) => Err(ApiCode::Internal),
+            UiOp::ElevationBegin { action } => self.elevation_begin(conn, action),
+            UiOp::ElevationEnd { ticket } => Ok(ReplyBody::ElevationOutcome(self.elevation_end(conn, &ticket))),
+            // Only the restricted loop of an elevated instance (`serve_elevator`) answers these two: a UI
+            // connection is never the approver of its own ticket.
+            UiOp::ElevationDescribe { .. } | UiOp::ElevationConfirm { .. } => {
+                Err(self.api_error(ApiCode::NotPermitted, "an elevation approval on a UI connection"))
+            }
         }
     }
 
@@ -253,13 +316,14 @@ impl Hub {
 
     // ---------- devices ----------
 
-    /// F-FIND-03: an IPv4 literal on-link; off-link, loopback and this machine's own addresses are refused. In
-    /// development mode `a.b.c.d:port` also names another instance on this PC (its session port).
+    /// F-FIND-03: an IPv4 literal on-link; off-link, loopback and this machine's own addresses are refused.
+    /// `a.b.c.d:port` names a Swapdesk that listens on another session port (its pairing port is the next one); in
+    /// development mode that can also be another instance on this PC.
     fn add_by_address(&self, text: &str) -> Result<swapdesk_ipc::DeviceView, ApiCode> {
         let text = text.trim();
         let (ip_text, port) = match text.split_once(':') {
-            Some((ip, port)) if self.allow_loopback() => (ip, Some(port.parse::<u16>().map_err(|_| ApiCode::Invalid)?)),
-            Some(_) => return Err(ApiCode::Invalid),
+            // Any port of 1 to 65535: an account on a slot other than 0 (ACCOUNTS.md 5.2).
+            Some((ip, port)) => (ip, Some(port.parse::<u16>().ok().filter(|p| *p != 0).ok_or(ApiCode::Invalid)?)),
             None => (text, None),
         };
         let ip: Ipv4Addr = ip_text.parse().map_err(|_| ApiCode::Invalid)?;
@@ -299,8 +363,9 @@ impl Hub {
 
     /// `SetGrants`: `grants` validated, `UNATTENDED` and `ADMIN_TERMINAL` only added from an administrator
     /// connection (C2.3, D7), and so is any bit added while the device has `UNATTENDED` (it would widen entry without
-    /// a prompt); taking bits away is open to any console connection (it narrows).
-    fn set_grants(&self, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
+    /// a prompt); taking bits away is open to any console connection (it narrows). A connection that is not elevated
+    /// may make that one change after an administrator confirmed exactly it (a pass, `elevation.rs`).
+    fn set_grants(self: &Arc<Self>, conn: &Conn, device_id: &str, bits: u16) -> Result<(), ApiCode> {
         let new = PermissionSet::from_bits(bits).ok_or(ApiCode::Invalid)?;
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let old = self.p.trust.read(|s| s.find_by_id(&id).map(|d| d.grants_here)).ok_or(ApiCode::NotFound)?;
@@ -309,13 +374,22 @@ impl Hub {
         // Adding UNATTENDED or ADMIN_TERMINAL, or adding anything to a device that holds (or is given) UNATTENDED:
         // the added bits are then entry without a prompt.
         let unattended_involved = (old.bits() | new.bits()) & PermissionSet::BIT_UNATTENDED != 0;
+        // Short-circuit order matters: a pass is looked at, and used up, only for a change that needs one.
+        let mut approver = None;
         if (added & admin_only != 0 || (unattended_involved && added != 0)) && !conn.info.admin {
-            return Err(self.api_error(
-                ApiCode::NeedsAdmin,
-                "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
-            ));
+            approver =
+                self.take_pass_by(conn, &ElevAction::SetGrants { device_id: device_id_hex(&id), grants: new.bits() });
+            if approver.is_none() {
+                return Err(self.api_error(
+                    ApiCode::NeedsAdmin,
+                    "widening unattended access (or granting ADMIN_TERMINAL) from a connection that is not elevated",
+                ));
+            }
         }
         let user = conn.info.user.clone();
+        // ACCOUNTS.md 8.2: the log names who approved (an administrator over a standard account's shoulder), the
+        // grant stays the asking account's.
+        let by = approver.unwrap_or_else(|| user.clone());
         self.p
             .trust
             .update(|s| {
@@ -336,17 +410,66 @@ impl Hub {
         self.p.audit.append(AuditEntry {
             time_ms: self.p.wall.unix_ms(),
             device: DeviceRef::Known(id),
-            event: AuditEvent::GrantsChanged { from: old, to: new, by: user },
+            event: AuditEvent::GrantsChanged { from: old, to: new, by },
             duration_s: None,
         });
         if let Some(core) = self.core() {
             core.host().stored_grants_changed(&id);
+        }
+        // Outside a session the device hears it from a grants sync, 1 s after the last change (GRANTS-SYNC.md 4.4).
+        self.sync_after_change(id);
+        // This machine's viewer sessions with the device tell it too (GRANTS-SYNC.md 3.2).
+        for conn in lock(&self.conns).iter() {
+            for v in lock(&conn.viewers).values().filter(|v| v.device == id) {
+                v.handle.ctx().set_own_stored(new);
+            }
         }
         self.devices_changed();
         Ok(())
     }
 
     /// F-PAIR-04: the key and grants go, the device's sessions end, its tokens die.
+    /// D65: blocks the device now behind `ipv4` by its MAC, learned from the neighbour table (asking the network when
+    /// the entry is gone). A device whose MAC cannot be learned is not blocked (`NotFound`): blocking its address
+    /// would later refuse whoever gets that address from the router.
+    fn block_device(&self, ipv4: &str, name: &str) -> Result<(), ApiCode> {
+        let ip: std::net::Ipv4Addr = ipv4.parse().map_err(|_| ApiCode::Invalid)?;
+        let neighbors = self.neighbors.get().ok_or(ApiCode::NotFound)?;
+        let mac = neighbors.resolve_mac(std::net::IpAddr::V4(ip)).ok_or(ApiCode::NotFound)?;
+        let device = swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: ip.octets(),
+            name: name.chars().take(64).collect(),
+            blocked_at_ms: self.p.wall.unix_ms(),
+        };
+        match self.p.trust.block_mac(device) {
+            Ok(true) => {
+                self.p.trace.log(
+                    swapdesk_platform::Level::Info,
+                    "ui_hub",
+                    format_args!("blocked the device at {ip} by its MAC"),
+                );
+                Ok(())
+            }
+            Ok(false) => Err(ApiCode::Busy),
+            Err(_) => Err(ApiCode::Internal),
+        }
+    }
+
+    /// The devices blocked by MAC, newest first.
+    fn blocked_views(&self) -> Vec<swapdesk_ipc::BlockedView> {
+        let mut list = self.p.trust.blocked_devices();
+        list.sort_by_key(|d| std::cmp::Reverse(d.blocked_at_ms));
+        list.into_iter()
+            .map(|d| swapdesk_ipc::BlockedView {
+                mac: swapdesk_trust::mac_text(&d.mac),
+                last_ipv4: std::net::Ipv4Addr::from(d.last_ipv4).to_string(),
+                name: d.name,
+                blocked_at_ms: d.blocked_at_ms,
+            })
+            .collect()
+    }
+
     fn forget_device(&self, device_id: &str) -> Result<(), ApiCode> {
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
         let removed = self.p.trust.update(|s| s.forget(&id)).map_err(|_| ApiCode::Internal)?;
@@ -362,6 +485,7 @@ impl Hub {
         if let Some(core) = self.core() {
             core.host().forget_device(&id);
         }
+        self.end_lost_of(&device_id_hex(&id));
         // Sessions this machine runs as a viewer to that device end too.
         for c in self.conns_of_device(&id) {
             for v in lock(&c.viewers).values().filter(|v| v.device == id) {
@@ -369,6 +493,11 @@ impl Hub {
             }
         }
         lock(&self.learned).remove(&id);
+        lock(&self.minors).forget(&id);
+        lock(&self.peer_writes).forget(&id);
+        self.forget_peer_port(&id);
+        // The last pairing gone: this account stops listening and announcing.
+        self.update_receiving();
         self.devices_changed();
         Ok(())
     }
@@ -411,8 +540,8 @@ impl Hub {
 
     /// `Disconnect`: a viewer session of this connection, or (console UI only) a session of this machine as host.
     fn disconnect(&self, conn: &Conn, session_id: u64) -> Result<(), ApiCode> {
-        // The waking entry of "Acordar" is not a session: cancelling it stops the attempt.
-        if self.cancel_wake(conn, session_id) {
+        // An entry (a waking or connecting card) is not a session: cancelling it stops the attempt.
+        if self.cancel_entry(conn, session_id) {
             return Ok(());
         }
         if let Some(v) = lock(&conn.viewers).get(&session_id) {
@@ -421,6 +550,15 @@ impl Hub {
         }
         if !self.is_console(conn) {
             return Err(ApiCode::NotFound);
+        }
+        // A hosted session whose link was lost: the core holds no connection to close, only the resume token, which
+        // dies with the host's user's "Desconectar" as it does with a live session's.
+        if self.is_lost(session_id) {
+            if let Some(core) = self.core() {
+                core.host().drop_resume(session_id);
+            }
+            self.end_lost(session_id, None);
+            return Ok(());
         }
         match self.core() {
             Some(core) if core.host().disconnect(session_id) => Ok(()),
@@ -459,6 +597,10 @@ impl Hub {
             if !granted.contains(PermissionSet::UNATTENDED) {
                 return Err(self.api_error(ApiCode::NotPermitted, "SAS without an UNATTENDED session"));
             }
+            // D56: held until this machine confirms "Elevar controle".
+            if v.handle.machine_level_held() {
+                return Err(self.api_error(ApiCode::NeedsAdmin, "SAS in a session this machine has not elevated"));
+            }
             return v
                 .handle
                 .ctx()
@@ -473,48 +615,134 @@ impl Hub {
         v.handle.send_input(events).map_err(apply_code)
     }
 
-    /// `Connect`: opens a viewer session and starts relaying it. Blocks until the host decided.
-    pub(super) fn connect(
+    /// `Connect`: answers with the id of an entry at once, then runs the attempt as a task. The entry reports
+    /// `Connecting` and `Prompted` while the host decides; it ends with the session's first `Active` (then the entry's
+    /// `Ended`) or with `NotOpened` and why. Only what is wrong with the request itself is a reply's error.
+    pub(super) fn connect(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, device_id: &str, intent: Intent) {
+        let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
+        // The user acted on the device: a key it refused may be pinned again.
+        self.sync_user_acted(&id);
+        if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
+            return reply(conn, req, Err(ApiCode::NotFound));
+        }
+        if self.core().is_none() {
+            return reply(conn, req, Err(ApiCode::ServiceDown));
+        }
+        let Some(rt) = self.rt() else { return reply(conn, req, Err(ApiCode::ServiceDown)) };
+        let entry_id = ENTRY_ID_BIT | u64::from(self.fresh_id());
+        reply(conn, req, Ok(ReplyBody::SessionId(entry_id)));
+        let (me, c) = (Arc::clone(self), Arc::clone(conn));
+        // The entry is registered under the lock the task ends with, so a fast end cannot leave a stale one.
+        let mut entries = lock(&self.entries);
+        let task = rt.spawn(async move { me.run_connect(c, entry_id, id, intent).await });
+        entries.insert(entry_id, Entry { abort: task.abort_handle(), conn: conn.id, device_hex: device_id_hex(&id) });
+    }
+
+    /// One connect attempt under the entry `entry_id` (a connect's own, or the one of a wake): the session goes to its
+    /// relay, which ends the entry after the session's first `Active`; or the entry ends here with why it did not open.
+    pub(super) async fn run_connect(self: Arc<Self>, conn: Arc<Conn>, entry_id: u64, id: DeviceId, intent: Intent) {
+        let Err(why) = self.open_viewer(&conn, entry_id, id, intent).await else { return };
+        // A cancel took the entry first: its end was told.
+        if lock(&self.entries).remove(&entry_id).is_some() {
+            conn.queue.control(Ipc::UiNotify(Notify::Session {
+                session_id: entry_id,
+                device_id: device_id_hex(&id),
+                state: SessionState::NotOpened { why },
+            }));
+        }
+    }
+
+    /// Opens the viewer session of an entry and starts relaying it.
+    async fn open_viewer(
         self: &Arc<Self>,
         conn: &Arc<Conn>,
-        device_id: &str,
+        entry_id: u64,
+        id: DeviceId,
         intent: Intent,
-        unattended: bool,
-    ) -> OpResult {
-        let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
-        if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
-            return Err(ApiCode::NotFound);
-        }
-        let addr = self.address_of(&id).ok_or(ApiCode::NotFound)?;
-        let core = self.core().ok_or(ApiCode::ServiceDown)?;
-        let rt = self.rt().ok_or(ApiCode::ServiceDown)?.clone();
-        // An unattended entry grants only what was asked for: a viewer that may use the terminal asks for it (D13 then decides
-        // at the host), and an administrator connection also asks for the administrator terminal (D10).
+    ) -> Result<(), ConnectWhy> {
+        let device_hex = device_id_hex(&id);
+        let addr = self.address_of(&id).ok_or(ConnectWhy::Unreachable)?;
+        let core = self.core().ok_or(ConnectWhy::Failed)?;
+        let rt = self.rt().ok_or(ConnectWhy::Failed)?.clone();
+        // Entry without a prompt is asked for whenever the host is known to be of minor 1 or newer: such a host
+        // lets a device that holds `UNATTENDED` in without a question and without the machine-level bits, and
+        // prompts every other. A 1.0 host is never asked: it would let the device in at once with machine-level
+        // input, which its own interface never asked for.
+        //
+        // Every account asks (D45, ACCOUNTS.md 9.3): each account has its own key (D44), so the other machine's
+        // grant belongs to this account alone. What reaches the machine level (`Elevate`, the administrator terminal)
+        // asks for the system's confirmation on this machine when it is used, not here.
+        let hint = self.minor_hint(&id);
+        let toward_minor_1 = self.known_minor(&id, hint) >= 1;
+        let unattended = toward_minor_1;
+        // An unattended entry grants only what was asked for: the terminal (D13 then decides at the host), and toward
+        // a host of minor 1 the administrator terminal, which this machine then opens only after its confirmation.
         let mut extra = if unattended { PermissionSet::TERMINAL } else { PermissionSet::EMPTY };
-        if conn.info.admin {
+        if toward_minor_1 || conn.info.admin {
             extra = extra.union(PermissionSet::ADMIN_TERMINAL);
         }
-        let (handle, messages) =
-            core.connect_asking(SocketAddr::V4(addr), id, intent, unattended, extra).map_err(|e| {
-                self.log(Level::Info, format_args!("connect to {}: {e}", device_id_hex(&id)));
-                connect_code(&e)
+        // What the attempt reports while the host decides. A state that comes after the entry ended (a cancel, the host's
+        // last message in flight) is not sent: the interface has forgotten the entry.
+        let waiting: WaitHook = {
+            let (hub, queue, hex) = (Arc::downgrade(self), conn.queue.clone(), device_hex.clone());
+            Arc::new(move |state| {
+                if hub.upgrade().is_some_and(|h| lock(&h.entries).contains_key(&entry_id)) {
+                    queue.control(Ipc::UiNotify(Notify::Session {
+                        session_id: entry_id,
+                        device_id: hex.clone(),
+                        state,
+                    }));
+                }
+            })
+        };
+        let (handle, messages) = core
+            .connect_asking_async(SocketAddr::V4(addr), id, intent, unattended, extra, Some(waiting))
+            .await
+            .map_err(|e| {
+                self.log(Level::Info, format_args!("connect to {device_hex}: {e}"));
+                connect_why(&e)
             })?;
+        drop(core);
         if conn.queue.is_closed() {
             // The UI went away while the host was deciding: nobody is left to decode this session.
             handle.disconnect();
-            return Err(ApiCode::ServiceDown);
+            return Err(ConnectWhy::Failed);
         }
         let session_id = handle.session_id();
-        let mode = if unattended { swapdesk_proto::GrantMode::Unattended } else { swapdesk_proto::GrantMode::Prompted };
+        // The host answered over a connection its pinned key authenticated: it answers at `addr`.
+        self.p.presence.authenticated(id, addr);
+        // What the host said it speaks, over the connection its pinned key authenticated.
+        let said = handle.ctx().peer_minor();
+        if lock(&self.minors).said(id, said, hint) {
+            self.log(
+                Level::Info,
+                format_args!(
+                    "{device_hex} answered protocol minor {said} under a record of minor {hint:?}: it counts as {said}"
+                ),
+            );
+        }
+        let mode = handle.mode();
         handle.files().bind(conn.fs.clone());
-        lock(&conn.viewers)
-            .insert(session_id, Viewer { handle: handle.clone(), device: id, view_only: false, displays: Vec::new() });
+        lock(&conn.viewers).insert(
+            session_id,
+            Viewer {
+                handle: handle.clone(),
+                device: id,
+                view_only: false,
+                displays: Vec::new(),
+                video: VideoPrefs::default(),
+            },
+        );
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
-        rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode).await });
-        Ok(ReplyBody::SessionId(session_id))
+        rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode, Some(entry_id)).await });
+        Ok(())
     }
 
     /// Relays one viewer session to its UI: media out, states and displays as notifications, a `Stats` each second.
+    /// `entry` is the connect entry that asked for the session: after the session's first `Active` reached the UI, the
+    /// entry ends with a normal `Ended`, so the viewer exists in the interface before the card goes. An entry that was
+    /// cancelled meanwhile ends the session instead of showing it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn pump_viewer(
         self: Arc<Self>,
         conn: Arc<Conn>,
@@ -523,10 +751,14 @@ impl Hub {
         handle: ViewerHandle,
         mut messages: ViewerMessages,
         mode: swapdesk_proto::GrantMode,
+        mut entry: Option<u64>,
     ) {
         let device_hex = device_id_hex(&device);
+        let mut cancelled = false;
         let started = self.p.wall.unix_ms();
         let (mut frames, mut bytes) = (0u32, 0u64);
+        // The codec of the last picture relayed, for the latency panel (F-VIEW-07).
+        let mut hevc = false;
         let mut next_tick = Instant::now() + Duration::from_secs(1);
         let mut began = false;
         let mut reconnecting = false;
@@ -544,6 +776,7 @@ impl Hub {
                         latency_ms,
                         fps: u16::try_from(frames).unwrap_or(u16::MAX),
                         kbps,
+                        hevc,
                     }));
                     (frames, bytes) = (0, 0);
                     next_tick += Duration::from_secs(1);
@@ -555,6 +788,7 @@ impl Hub {
                     Ipc::ViewerVideo { header, payload, .. } => {
                         let (key, display, id) =
                             (header.keyframe || header.discontinuity, header.display_id, header.frame_id);
+                        let is_hevc = header.codec == swapdesk_proto::Codec::Hevc;
                         let len = payload.0.len() as u64;
                         // The UI's pipe is behind: video is dropped, not waited for (a wait would hold back the audio
                         // and the terminal behind it), up to the next keyframe, which is asked for.
@@ -567,6 +801,7 @@ impl Hub {
                                 skipping_video = false;
                                 last_good = id;
                                 frames = frames.saturating_add(1);
+                                hevc = is_hevc;
                                 bytes = bytes.saturating_add(len);
                             }
                             Some(_) if conn.queue.is_closed() => break,
@@ -582,6 +817,16 @@ impl Hub {
                         conn.queue.realtime(m);
                     }
                 },
+                ViewerOut::PeerGrants(grants) => self.apply_peer_grants(device, grants),
+                // The host asks its user: the panel of the feature says so, with the time left (WAITING.md 4, rows
+                // 11 and 12).
+                ViewerOut::Consent { feature, timeout_s } => {
+                    conn.queue.control(Ipc::UiNotify(Notify::ConsentPending {
+                        session_id,
+                        feature,
+                        remaining_s: timeout_s,
+                    }));
+                }
                 ViewerOut::Displays { session_id: sid, list } => {
                     let views = display_views(&list);
                     // Kept for `ListDisplays`, which a UI sends once per session and may send after this arrived.
@@ -602,11 +847,21 @@ impl Hub {
                     }
                 }
                 ViewerOut::State(change) => {
-                    // Before the host grants there is no session id to show; the reply to `Connect` is the news.
-                    if change.session_id == 0 {
-                        continue;
-                    }
                     let ended = matches!(change.state, SessionState::Ended { .. });
+                    // The first `Active` ends the connect entry, after the session itself was told to the UI (below).
+                    // An entry the UI cancelled (it is gone from the map) wanted no session: this one ends unseen.
+                    let mut ends_entry = None;
+                    if matches!(change.state, SessionState::Active { .. })
+                        && let Some(e) = entry.take()
+                    {
+                        if lock(&self.entries).remove(&e).is_some() {
+                            ends_entry = Some(e);
+                        } else {
+                            cancelled = true;
+                            handle.disconnect();
+                            break;
+                        }
+                    }
                     match change.state {
                         SessionState::Reconnecting { .. } => reconnecting = true,
                         // The connection is back: what was in flight is offered again and continues (F-FILE-01).
@@ -637,6 +892,13 @@ impl Hub {
                         device_id: device_hex.clone(),
                         state: change.state,
                     }));
+                    if let Some(e) = ends_entry {
+                        conn.queue.control(Ipc::UiNotify(Notify::Session {
+                            session_id: e,
+                            device_id: device_hex.clone(),
+                            state: SessionState::Ended { reason: None },
+                        }));
+                    }
                     if ended {
                         end_code = change.end.map_or(ErrorCode::NoError, |e| e.code);
                         break;
@@ -645,13 +907,21 @@ impl Hub {
             }
         }
         self.files_session_ended(session_id);
-        if lock(&conn.viewers).remove(&session_id).is_some() && !began {
+        if lock(&conn.viewers).remove(&session_id).is_some() && !began && !cancelled {
             // Ended without ever going active (the connection broke at once).
             conn.queue.control(Ipc::UiNotify(Notify::Session {
                 session_id,
                 device_id: device_hex.clone(),
                 state: SessionState::Ended { reason: Some(ApiCode::Timeout) },
             }));
+            // Its entry, if it still waits, ends with it.
+            if let Some(e) = entry.filter(|e| lock(&self.entries).remove(e).is_some()) {
+                conn.queue.control(Ipc::UiNotify(Notify::Session {
+                    session_id: e,
+                    device_id: device_hex.clone(),
+                    state: SessionState::NotOpened { why: ConnectWhy::Unreachable },
+                }));
+            }
         }
         if began {
             let now = self.p.wall.unix_ms();
@@ -687,6 +957,8 @@ impl Hub {
         };
         if before.service_enabled != after.service_enabled {
             self.p.hooks.service_enabled(after.service_enabled);
+            // "Receber conexões": this account's endpoint closes or opens, and its record goes or comes back.
+            self.update_receiving();
         }
         if before.keep_awake != after.keep_awake {
             self.p

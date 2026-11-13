@@ -56,6 +56,11 @@ pub const NVENC_INFINITE_GOPLENGTH: u32 = 0xffff_ffff;
 // GUIDs.
 pub const NV_ENC_CODEC_H264_GUID: GUID =
     GUID::from_values(0x6bc82762, 0x4e63, 0x4ca4, [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf]);
+/// `NV_ENC_CODEC_HEVC_GUID` and `NV_ENC_HEVC_PROFILE_MAIN_GUID`, copied from the header named above (lines 148 and 202).
+pub const NV_ENC_CODEC_HEVC_GUID: GUID =
+    GUID::from_values(0x790cdc88, 0x4522, 0x4d7b, [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03]);
+pub const NV_ENC_HEVC_PROFILE_MAIN_GUID: GUID =
+    GUID::from_values(0xb514c39a, 0xb55b, 0x40fa, [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec]);
 pub const NV_ENC_H264_PROFILE_HIGH_GUID: GUID =
     GUID::from_values(0xe7cbc309, 0x4f7a, 0x4b89, [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10]);
 pub const NV_ENC_PRESET_P1_GUID: GUID =
@@ -251,6 +256,54 @@ pub struct NV_ENC_CONFIG_H264 {
     pub tfLevel: u32,
     pub reserved1: [u32; 264],
     pub reserved2: [*mut c_void; 64],
+}
+
+/// The first fields of `NV_ENC_CONFIG_HEVC` (header n13.1.15.0, `struct _NV_ENC_CONFIG_HEVC`), up to and including
+/// `hevcVUIParameters`, which is all this crate sets. The structure is a member of the `NV_ENC_CODEC_CONFIG` union that
+/// `NV_ENC_CONFIG::h264Config` stands for, so it overlays the same bytes (see [`NV_ENC_CONFIG::hevc`]). Field order and
+/// offsets follow the header; `hevc_head_follows_the_header` checks them. `NV_ENC_CONFIG_HEVC_VUI_PARAMETERS` is a typedef
+/// of the H.264 VUI structure in the header.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NV_ENC_CONFIG_HEVC_HEAD {
+    pub level: u32,
+    pub tier: u32,
+    pub minCUSize: u32,
+    pub maxCUSize: u32,
+    /// The bit-field word: useConstrainedIntraPred (bit 0) ... repeatSPSPPS (bit 7), enableIntraRefresh (bit 8),
+    /// chromaFormatIDC (bits 9 and 10), and the rest.
+    pub bits: u32,
+    pub idrPeriod: u32,
+    pub intraRefreshPeriod: u32,
+    pub intraRefreshCnt: u32,
+    pub maxNumRefFramesInDPB: u32,
+    pub ltrNumFrames: u32,
+    pub vpsId: u32,
+    pub spsId: u32,
+    pub ppsId: u32,
+    pub sliceMode: u32,
+    pub sliceModeData: u32,
+    pub maxTemporalLayersMinus1: u32,
+    pub hevcVUIParameters: NV_ENC_CONFIG_H264_VUI_PARAMETERS,
+}
+
+/// HEVC `repeatSPSPPS` (bit 7 of the word): VPS, SPS and PPS on every IDR picture.
+pub const HEVC_REPEAT_SPSPPS: u32 = 1 << 7;
+/// HEVC `enableIntraRefresh` (bit 8).
+pub const HEVC_ENABLE_INTRA_REFRESH: u32 = 1 << 8;
+/// HEVC `chromaFormatIDC` (bits 9 and 10) set to 1: 4:2:0.
+pub const HEVC_CHROMA_420: u32 = 1 << 9;
+/// Mask of the two `chromaFormatIDC` bits.
+pub const HEVC_CHROMA_MASK: u32 = 0b11 << 9;
+
+impl NV_ENC_CONFIG {
+    /// The codec union read as the HEVC configuration.
+    pub fn hevc(&mut self) -> &mut NV_ENC_CONFIG_HEVC_HEAD {
+        // SAFETY: `h264Config` is the first (and largest) member of the codec union at offset 168; the HEVC structure
+        // overlays the same bytes, `NV_ENC_CONFIG_HEVC_HEAD` is a prefix of it and is no larger than the union, and its
+        // alignment (4) divides the union's (8).
+        unsafe { &mut *std::ptr::from_mut(&mut self.h264Config).cast::<NV_ENC_CONFIG_HEVC_HEAD>() }
+    }
 }
 
 /// `NV_ENC_CONFIG`; the codec union is as large as its H.264 member, so the H.264 config stands for it.
@@ -651,6 +704,18 @@ mod layout {
         assert_eq!(size_of::<NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS>(), 1552);
         assert_eq!(size_of::<NV_ENC_SEQUENCE_PARAM_PAYLOAD>(), 1544);
         assert_eq!(size_of::<NV_ENCODE_API_FUNCTION_LIST>(), 2552);
+    }
+
+    /// Offsets computed by hand from `struct _NV_ENC_CONFIG_HEVC` (every field a 4-byte word before the VUI block).
+    #[test]
+    fn hevc_head_follows_the_header() {
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, level), 0);
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, bits), 16);
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, idrPeriod), 20);
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, intraRefreshCnt), 28);
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, sliceModeData), 56);
+        assert_eq!(offset_of!(NV_ENC_CONFIG_HEVC_HEAD, hevcVUIParameters), 64);
+        assert!(size_of::<NV_ENC_CONFIG_HEVC_HEAD>() <= size_of::<NV_ENC_CONFIG_H264>());
     }
 
     #[test]

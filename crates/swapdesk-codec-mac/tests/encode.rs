@@ -39,7 +39,15 @@ fn encoder() -> VtH264Encoder {
 }
 
 fn config(width: u32, height: u32, kbps: u32) -> EncoderConfig {
-    EncoderConfig { width, height, fps: 30, kbps, preset: Preset::Auto, adapter: AdapterId(0) }
+    EncoderConfig {
+        width,
+        height,
+        fps: 30,
+        kbps,
+        preset: Preset::Auto,
+        adapter: AdapterId(0),
+        codec: swapdesk_platform::Codec::H264,
+    }
 }
 
 /// A gray moving gradient (R = G = B, so the colour matrix does not matter for the luma comparison).
@@ -201,6 +209,47 @@ fn sixty_frames_start_with_a_keyframe_and_decode_back_to_the_source() {
     assert!(worst < 6.0, "worst mean absolute luma difference {worst}");
 }
 
+/// B7 (F-VIEW-05): after a busy stretch at a low rate, refining the still picture gives one key frame that decodes
+/// closer to the source than the last normal frame did, and the stream goes on from the same session with a P-frame.
+#[test]
+fn refinement_raises_the_psnr_of_a_still_frame() {
+    let (w, h) = (1280usize, 720usize);
+    let mut enc = encoder();
+    enc.configure(&config(w as u32, h as u32, 1500)).expect("configure");
+    let mut stream = encode_sequence(&mut enc, w, h, 0..30, noise);
+    let still = noise(w, h, 29);
+    let mut dec = VtH264Decoder::new(DecoderOptions { output: DecoderOutput::CpuBgra });
+    let mut last_diff = f64::MAX;
+    for (i, f) in stream.iter().enumerate() {
+        let frame = dec.decode(&header(i as u32, f), &f.annex_b).expect("decode").expect("a picture");
+        let Pixels::Cpu { data, .. } = &frame.pixels else { panic!("CPU pixels") };
+        last_diff = mean_abs_luma_diff(&still, data);
+    }
+    let refined = enc.refine(&cpu_frame(w, h, 29, still.clone())).expect("refine");
+    assert_eq!(refined.len(), 1, "exactly one refinement frame");
+    assert!(refined[0].keyframe && annexb::is_idr(&refined[0].annex_b), "the refinement frame is an IDR");
+    stream.extend(refined);
+    let f = stream.last().expect("the refinement frame");
+    let frame = dec.decode(&header(stream.len() as u32 - 1, f), &f.annex_b).expect("decode").expect("a picture");
+    let Pixels::Cpu { data, .. } = &frame.pixels else { panic!("CPU pixels") };
+    let refined_diff = mean_abs_luma_diff(&still, data);
+    println!("refinement: mean abs luma diff {last_diff:.2} -> {refined_diff:.2}, {} bytes", f.annex_b.len());
+    assert!(refined_diff < last_diff * 0.7, "the refined picture is not closer: {last_diff} -> {refined_diff}");
+
+    // The session is the same: the next changed picture is a P-frame with no new parameter sets.
+    let next = enc.encode(&cpu_frame(w, h, 30, noise(w, h, 30)), false).expect("encode after refine");
+    assert_eq!(next.len(), 1);
+    assert!(!next[0].keyframe && !next[0].config_change, "the session was rebuilt by the refinement");
+    // The normal rate is back: once the buffer the boost left is spent (the first frames after it may use it), the
+    // frames are as large as before the refinement, not as large as the refinement frame.
+    let before: usize = stream[20..30].iter().map(|f| f.annex_b.len()).sum::<usize>() / 10;
+    let after_frames = encode_sequence(&mut enc, w, h, 31..46, noise);
+    let after: usize = after_frames[5..].iter().map(|f| f.annex_b.len()).sum::<usize>() / (after_frames.len() - 5);
+    println!("normal frames: {before} bytes before the refinement, {after} after");
+    assert!(after < before * 2, "the rate control is not back to normal: {before} -> {after} bytes a frame");
+    assert!(after < f.annex_b.len() / 2, "the frames after are refinement-sized: {after}");
+}
+
 #[test]
 fn set_rate_moves_the_output_size_the_right_way() {
     let (w, h) = (1280usize, 720usize);
@@ -233,6 +282,8 @@ fn a_new_size_rebuilds_the_session_and_flags_the_config_change() {
     assert_eq!(first.len(), 5);
     assert!(first[0].config_change && !first[1].config_change);
 
+    // A new encoded size is the caller's `configure` (a frame of another size is scaled, F-VIEW-06).
+    enc.configure(&config(640, 360, 6000)).expect("configure at the new size");
     let small = enc.encode(&cpu_frame(640, 360, 5, gradient(640, 360, 5)), false).expect("encode at a new size");
     assert_eq!(small.len(), 1);
     assert!(small[0].keyframe && small[0].config_change);
@@ -379,4 +430,63 @@ fn wait_modes_compared() {
             );
         }
     }
+}
+
+/// F-VIEW-06: a 1920x1080 frame goes in, the session is configured for 960x540, and what comes out decodes at
+/// 960x540 and matches the source shrunk by hand (the transfer session scaled it). CPU frames and `Pixels::Gpu` frames.
+#[test]
+fn a_1920x1080_frame_is_scaled_to_the_configured_960x540() {
+    let (w, h, ow, oh) = (1920usize, 1080usize, 960usize, 540usize);
+    let mut enc = encoder();
+    enc.configure(&config(ow as u32, oh as u32, 6000)).expect("configure at the target size");
+    let mut sources = Vec::new();
+    let mut outputs = Vec::new();
+    for n in 0..30 {
+        let data = gradient(w, h, n);
+        // The source shrunk by averaging 2x2 blocks: what a correct scale of this gradient looks like.
+        let mut small = vec![255u8; ow * oh * 4];
+        for y in 0..oh {
+            for x in 0..ow {
+                let mut sum = 0u32;
+                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    sum += u32::from(data[((2 * y + dy) * w + 2 * x + dx) * 4]);
+                }
+                let o = (y * ow + x) * 4;
+                small[o..o + 3].fill((sum / 4) as u8);
+            }
+        }
+        sources.push(small);
+        outputs.extend(enc.encode(&cpu_frame(w, h, n, data), false).expect("encode"));
+    }
+    outputs.extend(enc.flush().expect("flush"));
+    assert!(!outputs.is_empty());
+    assert!(outputs.iter().all(|f| (f.width, f.height) == (ow as u16, oh as u16)), "every frame reports 960x540");
+    assert!(outputs[0].keyframe && outputs[0].config_change);
+    assert_eq!(outputs.iter().filter(|f| f.config_change).count(), 1, "no rebuild while the size holds");
+
+    let mut dec = VtH264Decoder::new(DecoderOptions { output: DecoderOutput::CpuBgra });
+    let mut worst = 0.0f64;
+    for (i, f) in outputs.iter().enumerate() {
+        let pic = dec.decode(&header(i as u32, f), &f.annex_b).expect("decode").expect("a picture");
+        assert_eq!((pic.width, pic.height), (ow as u32, oh as u32));
+        let Pixels::Cpu { data, .. } = &pic.pixels else { panic!("CPU pixels") };
+        let idx = ((f.captured_at.0 - START_US) / FRAME_US) as usize;
+        worst = worst.max(mean_abs_luma_diff(&sources[idx], data));
+    }
+    println!("scaled luma mean abs diff, worst frame {worst:.2}");
+    assert!(worst < 8.0, "worst mean absolute luma difference {worst} against the shrunk source");
+
+    // A native-size GPU frame (an NV12 pixel buffer as the screen lane delivers) scales through the same session.
+    let gpu = Frame {
+        display: DisplayId(0),
+        captured_at: MonoMicros(START_US + 40 * FRAME_US),
+        width: w as u32,
+        height: h as u32,
+        pixels: Pixels::Gpu(GpuSurface(Box::new(nv12_buffer(w, h, 0)))),
+        dirty: Vec::new(),
+        content_changed: true,
+    };
+    let mut out = enc.encode(&gpu, true).expect("encode a large GPU frame");
+    out.extend(enc.flush().expect("flush"));
+    assert!(!out.is_empty() && out.iter().all(|f| (f.width, f.height) == (ow as u16, oh as u16)));
 }

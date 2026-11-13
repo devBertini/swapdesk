@@ -3,7 +3,6 @@
 //! `SWAPDESK_INTERACTIVE=1` is set, so they stay out of the default gate (`interactive: opens windows`). Each check
 //! closes every window it opens.
 
-use objc2_app_kit::NSAccessibility;
 use swapdesk_ui::mock::{MockBackend, Scenario};
 
 use super::*;
@@ -16,79 +15,135 @@ macro_rules! ensure {
     };
 }
 
-fn labels(view: &NSView, out: &mut Vec<String>) {
-    for sub in view.subviews().to_vec() {
-        if let Some(l) = sub.accessibilityLabel() {
-            out.push(l.to_string());
-        }
-        labels(&sub, out);
-    }
-}
-
-fn found(window: &NSWindow) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(v) = window.contentView() {
-        labels(&v, &mut out);
-    }
-    out
-}
-
-fn open(mtm: MainThreadMarker, sc: Scenario, hooks: ViewerHooks) -> Rc<Shell> {
+pub(super) fn open(mtm: MainThreadMarker, sc: Scenario, hooks: ViewerHooks) -> Rc<Shell> {
     let state = sc.prepared_state();
     let waker = Arc::new(Waker::new());
     let backend = Arc::new(MockBackend::new(waker.clone()));
     start(mtm, state, backend, waker, Vec::new(), hooks)
 }
 
-fn close(shell: &Rc<Shell>) {
+pub(super) fn close(shell: &Rc<Shell>) {
     if let Some(v) = shell.viewer.borrow_mut().take() {
         v.window.setDelegate(None);
         v.window.close();
+    }
+    if let Some(b) = shell.banner.borrow_mut().take() {
+        b.close();
     }
     shell.main.window.setDelegate(None);
     shell.main.window.close();
     clear_shell();
 }
 
-/// Every scenario of the mock backend builds its windows, every control of the model carries its accessible name, and
-/// a viewer window exists exactly while a viewer session does.
-fn scenarios_build_with_accessible_names(mtm: MainThreadMarker) -> Result<(), String> {
+/// Every control the state lists for window `kind` was painted by `canvas`.
+fn painted_all(shell: &Shell, canvas: &CanvasView, kind: WindowKind, scenario: &str) -> Result<(), String> {
+    let widgets = canvas.widgets();
+    for c in shell.state.borrow().controls(kind) {
+        ensure!(
+            !c.id.focusable() || widgets.iter().any(|w| w.id == c.id),
+            "{scenario}: {:?} '{}' was not painted in the {kind:?} window",
+            c.id,
+            c.label
+        );
+    }
+    Ok(())
+}
+
+/// Every scenario of the mock backend builds its windows: each canvas (main, viewer, banner) paints every control
+/// the state lists for it; a viewer window exists exactly while a viewer session does, with its video view under the
+/// canvas on the frame's video rectangle; a banner exists exactly while this Mac is hosted.
+fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
-        let expected_main = main_model(&state).control_labels();
-        let expected_viewer = viewer_model(&state);
+        let expected_viewer = viewer_title(&state);
         let shell = open(mtm, sc, ViewerHooks::default());
 
-        let names = found(&shell.main.window);
-        for (id, label) in &expected_main {
-            ensure!(
-                names.contains(label),
-                "{}: {id:?} '{label}' has no accessible element in the main window ({names:?})",
-                sc.name()
-            );
-        }
+        ensure!(shell.main.canvas.paint_now(), "{}: the main window's canvas did not paint", sc.name());
+        // The shell says which system the viewer runs on: its shortcuts are written with the Mac's keys.
+        let keys = shell.state.borrow().shortcut_keys(swapdesk_ui::ViewerAction::ToggleBar);
+        ensure!(keys == "Control+Option+B", "{}: the session bar shortcut is written {keys}", sc.name());
+        painted_all(&shell, &shell.main.canvas, WindowKind::Main, sc.name())?;
         match expected_viewer {
-            Some(m) => {
+            Some(_) => {
                 let v = shell.viewer.borrow();
                 let Some(v) = v.as_ref() else { return Err(format!("{}: a viewer window should exist", sc.name())) };
-                let names = found(&v.window);
-                for t in &m.tools {
-                    let label = match t {
-                        Tool::Screen { label, .. }
-                        | Tool::Quality { label, .. }
-                        | Tool::Switch { label, .. }
-                        | Tool::Keys { label, .. }
-                        | Tool::Disconnect { label } => label,
-                        Tool::Swap { .. } => continue, // hidden unless `show_swap`
-                    };
-                    ensure!(names.contains(label), "{}: tool '{label}' missing ({names:?})", sc.name());
-                }
+                ensure!(v.canvas.paint_now(), "{}: the viewer's canvas did not paint", sc.name());
+                painted_all(&shell, &v.canvas, WindowKind::Viewer, sc.name())?;
                 ensure!(v.surface().is_some(), "{}: the video view has a layer", sc.name());
+                // The video view sits under the canvas, on the rectangle the frame left for it.
+                v.place_video();
+                let (video, hole) = (v.video.frame(), v.canvas.video_rect());
+                if shell.state.borrow().explorer_open() {
+                    // The Arquivos view: no video rectangle; the video view hides and gives up the keyboard (to the
+                    // canvas, or to a field of the explorer), so no key reaches the other computer meanwhile.
+                    ensure!(hole.is_none(), "{}: the explorer leaves no video rectangle", sc.name());
+                    ensure!(v.video.isHidden(), "{}: the video view hides under the explorer", sc.name());
+                    let video_has_keys = v.window.firstResponder().is_some_and(|f| {
+                        std::ptr::eq(
+                            objc2::rc::Retained::as_ptr(&f).cast::<()>(),
+                            objc2::rc::Retained::as_ptr(&v.video).cast::<()>(),
+                        )
+                    });
+                    ensure!(!video_has_keys, "{}: the video view keeps the keyboard under the explorer", sc.name());
+                } else {
+                    let hole =
+                        hole.ok_or_else(|| format!("{}: the viewer's frame has no video rectangle", sc.name()))?;
+                    ensure!(
+                        (video.origin.x - f64::from(hole.x)).abs() < 1.0
+                            && (video.origin.y - f64::from(hole.y)).abs() < 1.0
+                            && (video.size.width - f64::from(hole.w)).abs() < 1.0
+                            && (video.size.height - f64::from(hole.h)).abs() < 1.0,
+                        "{}: the video view is at {video:?}, the frame's rectangle is {hole:?}",
+                        sc.name()
+                    );
+                }
             }
             None => ensure!(shell.viewer.borrow().is_none(), "{}: no viewer window without a session", sc.name()),
         }
+        let banner = shell.banner.borrow().as_ref().map(|b| b.canvas.clone());
+        ensure!(
+            banner.is_some() == shell.state.borrow().host_session().is_some(),
+            "{}: a banner exists exactly while this Mac is hosted",
+            sc.name()
+        );
+        if let Some(canvas) = banner {
+            ensure!(canvas.paint_now(), "{}: the banner's canvas did not paint", sc.name());
+            painted_all(&shell, &canvas, WindowKind::Banner, sc.name())?;
+            // The banner's line moves on by itself: a timer is armed for its next minute or the end of a files note.
+            shell.sync_timers();
+            ensure!(shell.banner_timer.borrow().is_some(), "{}: no timer moves the banner's line on", sc.name());
+        }
         close(&shell);
     }
+    Ok(())
+}
+
+/// The address field takes real key presses; what was typed and the keyboard in the field survive a state change and
+/// a repaint (the device list changed while the person types); Tab then moves the focus to the next control of the
+/// frame's order.
+fn typing_survives_a_repaint_and_tab_moves_on(mtm: MainThreadMarker) -> Result<(), String> {
+    let shell = open(mtm, Scenario::Inicio, ViewerHooks::default());
+    let canvas = &shell.main.canvas;
+    let address = ControlId::Edit(EditId::Address);
+    ensure!(canvas.paint_now(), "the canvas did not paint");
+    canvas.focus_control(address, true);
+    ensure!(canvas.editing() == Some(EditId::Address), "the address field did not take the keyboard");
+    ensure!(canvas.send_keys("192.168.1."), "the keys were not sent");
+    let typed = canvas.edit_text(EditId::Address);
+    ensure!(typed.as_deref() == Some("192.168.1."), "the field holds {typed:?}");
+
+    shell.refresh(Changed::ALL);
+    ensure!(canvas.paint_now(), "the canvas did not paint again");
+    let kept = canvas.edit_text(EditId::Address);
+    ensure!(kept.as_deref() == Some("192.168.1."), "the typed text was lost: {kept:?}");
+    ensure!(canvas.editing() == Some(EditId::Address), "the keyboard left the field");
+
+    let order = swapdesk_paint::input::tab_order(&shell.state.borrow(), WindowKind::Main, &canvas.widgets());
+    let next = swapdesk_paint::input::next_focus(&order, Some(address), false);
+    ensure!(next.is_some() && next != Some(address), "nothing follows the address field in {order:?}");
+    ensure!(canvas.send_keys("\t"), "Tab was not sent");
+    ensure!(canvas.focus() == next, "Tab moved the focus to {:?}, not {next:?}", canvas.focus());
+    close(&shell);
     Ok(())
 }
 
@@ -125,41 +180,153 @@ fn render_slot_lifecycle(mtm: MainThreadMarker) -> Result<(), String> {
     Ok(())
 }
 
-/// A rebuild while the person types in the address field (the device list changed): AppKit ends the old field's
-/// editing inside `setContentView` and sends its action; the shell must neither panic on its own borrows nor act on
-/// it, and the typed text and the focus survive.
-fn rebuild_while_typing_in_the_address_field(mtm: MainThreadMarker) -> Result<(), String> {
-    for sc in Scenario::ALL {
-        let shell = open(mtm, sc, ViewerHooks::default());
-        let field = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
-        let Some(field) = field else {
-            close(&shell);
-            continue;
-        };
-        shell.main.window.makeKeyAndOrderFront(None);
-        field.setStringValue(&ns("192.168.1."));
-        shell.main.window.makeFirstResponder(Some(&field));
-        ensure!(field.currentEditor().is_some(), "{sc:?}: the address field did not take the focus");
-        *shell.main.last.borrow_mut() = None;
-        shell.rebuild_main();
-        let after = shell.main.fields.borrow().iter().find(|(e, _)| *e == EditId::Address).map(|(_, f)| f.clone());
-        let after = after.ok_or_else(|| format!("{sc:?}: no address field after the rebuild"))?;
-        ensure!(
-            after.stringValue().to_string() == "192.168.1.",
-            "{sc:?}: the typed text was lost: {:?}",
-            after.stringValue().to_string()
-        );
-        ensure!(after.currentEditor().is_some(), "{sc:?}: the focus was lost");
-        close(&shell);
-        return Ok(());
+/// Lets the run loop turn for up to two seconds until the main window's miniaturized state is `want`.
+fn settles_miniaturized(shell: &Shell, want: bool) -> bool {
+    for _ in 0..20 {
+        if shell.main.window.isMiniaturized() == want {
+            return true;
+        }
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.1));
     }
-    Err("no scenario shows the address field".into())
+    shell.main.window.isMiniaturized() == want
+}
+
+/// A session coming up minimizes the main window to the Dock in a real run (one with the video slot) and in neither
+/// a mock run nor a second state of the same session; a new session minimizes it again.
+fn a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm: MainThreadMarker) -> Result<(), String> {
+    use swapdesk_ui::{Role, SessionState, UiEvent};
+
+    struct Slot;
+    impl VideoSlot for Slot {
+        fn attached(&self, _s: &crate::video::VideoSurface) {}
+        fn resized(&self, _a: VideoArea) {}
+        fn detached(&self) {}
+    }
+    let session = |id: u64, state: SessionState| UiEvent::Session { session_id: id, device_id: String::new(), state };
+    let active = |role: Role| SessionState::Active {
+        since_ms: 0,
+        role,
+        granted: swapdesk_ui::Permissions::NONE,
+        elevation: Default::default(),
+    };
+
+    // A mock run: the scenario holds an Active host session and the window stays.
+    let shell = open(mtm, Scenario::Banner, ViewerHooks::default());
+    ensure!(!settles_miniaturized(&shell, true), "a mock run minimized the main window");
+    close(&shell);
+
+    // A real run: the first Active state of the scenario's session minimizes it.
+    let hooks = ViewerHooks { video: Some(Arc::new(Slot)), ..ViewerHooks::default() };
+    let shell = open(mtm, Scenario::Banner, hooks);
+    ensure!(settles_miniaturized(&shell, true), "the main window was not minimized when the session started");
+
+    // Brought back by the person, the same session never minimizes it again.
+    shell.main.window.deminiaturize(None);
+    ensure!(settles_miniaturized(&shell, false), "the main window did not come back");
+    let host_id = shell.state.borrow().host_session().map(|s| s.id).ok_or("no host session")?;
+    let paused = SessionState::Paused { desktop: swapdesk_ui::DesktopKind::Locked };
+    shell.state.borrow_mut().apply(session(host_id, paused));
+    shell.state.borrow_mut().apply(session(host_id, active(Role::Host)));
+    shell.minimize_main_for_session();
+    ensure!(!settles_miniaturized(&shell, true), "the same session minimized the main window twice");
+
+    // A new session does.
+    shell.state.borrow_mut().apply(session(host_id + 100, active(Role::Host)));
+    shell.minimize_main_for_session();
+    ensure!(settles_miniaturized(&shell, true), "a new session did not minimize the main window");
+
+    // Owner, 11/11: the computer that was controlled keeps its window minimized when the sessions end (D60).
+    shell.state.borrow_mut().apply(session(host_id + 100, SessionState::Ended { reason: None }));
+    shell.state.borrow_mut().apply(session(host_id, SessionState::Ended { reason: None }));
+    shell.restore_main_after_session();
+    ensure!(settles_miniaturized(&shell, true), "the controlled computer brought its main window back");
+    // A session this Mac controls brings it back when it ends.
+    shell.state.borrow_mut().apply(session(host_id + 200, active(Role::Viewer)));
+    shell.minimize_main_for_session();
+    shell.state.borrow_mut().apply(session(host_id + 200, SessionState::Ended { reason: None }));
+    shell.restore_main_after_session();
+    ensure!(
+        settles_miniaturized(&shell, false),
+        "the main window did not come back when the controlling session ended"
+    );
+    close(&shell);
+    Ok(())
+}
+
+/// The mock backend, keeping every command the shell sends.
+struct Recording {
+    inner: Arc<MockBackend>,
+    sent: std::sync::Mutex<Vec<Command>>,
+}
+
+impl UiBackend for Recording {
+    fn send(&self, command: Command) -> swapdesk_ui::Ticket {
+        self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(command.clone());
+        self.inner.send(command)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        self.inner.drain()
+    }
+}
+
+/// A shell on `scenario` over a recording backend.
+fn open_recording(mtm: MainThreadMarker, scenario: Scenario) -> (Rc<Shell>, Arc<Recording>) {
+    let waker = Arc::new(Waker::new());
+    let backend =
+        Arc::new(Recording { inner: Arc::new(MockBackend::new(waker.clone())), sent: std::sync::Mutex::default() });
+    let shell = start(mtm, scenario.prepared_state(), backend.clone(), waker, Vec::new(), ViewerHooks::default());
+    (shell, backend)
+}
+
+fn disconnects(backend: &Recording) -> usize {
+    let sent = backend.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    sent.iter().filter(|c| matches!(c, Command::Disconnect { .. })).count()
+}
+
+/// A connect card of the main window and the keyboard: Esc cancels a waiting card and closes an ended one (a key
+/// event through the window, as a person gives it), a dialog over the window keeps Esc for itself, and a service
+/// event that ends a connect in failure moves the focus to the card's Fechar.
+fn escape_and_focus_serve_the_connect_card(mtm: MainThreadMarker) -> Result<(), String> {
+    use swapdesk_ui::mock::{ENTRY, MAC};
+    use swapdesk_ui::{ConnectWhy, SessionState, UiEvent};
+    let entry = |state: SessionState| UiEvent::Session { session_id: ENTRY, device_id: MAC.into(), state };
+
+    let (shell, backend) = open_recording(mtm, Scenario::Dispositivos);
+    let canvas = shell.main.canvas.clone();
+    shell.state.borrow_mut().apply(entry(SessionState::Prompted { remaining_s: 15 }));
+    shell.drain_backend();
+    ensure!(canvas.paint_now(), "the main window did not paint");
+    ensure!(disconnects(&backend) == 0, "a Disconnect was sent before Esc");
+    ensure!(canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(disconnects(&backend) == 1, "Esc on a waiting card sent {} cancels", disconnects(&backend));
+
+    shell.state.borrow_mut().apply(entry(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    shell.drain_backend();
+    ensure!(canvas.focus() == Some(ControlId::ConnectClose), "focus after the failure is {:?}", canvas.focus());
+    ensure!(canvas.paint_now(), "the main window did not paint the end card");
+    ensure!(canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(shell.state.borrow().wait_card(MAC).is_none(), "Esc did not close the ended card");
+    ensure!(disconnects(&backend) == 1, "closing an ended card sent a command");
+    ensure!(canvas.focus() == Some(ControlId::Control), "focus after Fechar is {:?}", canvas.focus());
+    close(&shell);
+
+    let (shell, backend) = open_recording(mtm, Scenario::PedidoConexao);
+    shell.state.borrow_mut().apply(entry(SessionState::Prompted { remaining_s: 15 }));
+    ensure!(shell.main.canvas.paint_now(), "the main window did not paint the dialog");
+    ensure!(shell.main.canvas.send_keys("\u{1b}"), "the Esc key event was not sent");
+    ensure!(disconnects(&backend) == 0, "Esc over a dialog cancelled the wait");
+    close(&shell);
+    Ok(())
 }
 
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
-    scenarios_build_with_accessible_names(mtm)?;
-    rebuild_while_typing_in_the_address_field(mtm)?;
-    render_slot_lifecycle(mtm)
+    escape_and_focus_serve_the_connect_card(mtm)?;
+    scenarios_build_their_windows(mtm)?;
+    typing_survives_a_repaint_and_tab_moves_on(mtm)?;
+    render_slot_lifecycle(mtm)?;
+    a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm)?;
+    super::ax_checks::run(mtm)
 }

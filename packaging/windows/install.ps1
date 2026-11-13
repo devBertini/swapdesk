@@ -8,20 +8,25 @@
     2. creates %ProgramFiles%\Swapdesk and sets its ACL to the shape InstallPolicy::production demands: owner
        Administrators, inheritance off, full control only for SYSTEM, Administrators and TrustedInstaller, read and
        execute for Users;
-    3. copies Swapdesk.exe, swapdesk-service.exe and swapdesk-helper.exe (and the licences) there and checks each
+    3. copies Swapdesk.exe, swapdesk-service.exe, swapdesk-helper.exe, uninstall.cmd and uninstall.ps1 (and the licences) there and checks each
        copy against the SHA-256 in SHA256SUMS (the file the build wrote beside this script; read before the UAC
        prompt). A mismatch or a missing entry aborts and removes what was copied. An existing install folder that
        holds files that are not ours (not in SHA256SUMS) is refused;
     4. registers the service SwapdeskService (display name Swapdesk, LocalSystem, automatic start, recovery: restart
        after 1 s, 5 s and 30 s, counter reset after one day, also for non-crash failures) and the Event Log source
        Swapdesk in the Application log (one event, id 1000, at the end);
-    5. adds inbound UDP firewall rules for swapdesk-service.exe: 47820 and 47821 (session and pairing) and 5353
+    5. adds inbound UDP firewall rules for swapdesk-service.exe: 47820 to 47883 (the session and pairing ports of each
+       account's slot, ACCOUNTS.md 5.5) and 5353
        (mDNS discovery), only on the Private and Domain profiles and only from the local subnet;
     6. only with -EnableSas: saves the old SoftwareSASGeneration policy value and sets it to 1 (Services), so the
        service may simulate Ctrl+Alt+Del for UNATTENDED sessions; uninstall restores the saved value, and only when
        this install recorded that it set it. Without -EnableSas the value is not touched;
     7. creates the all-users Start menu shortcut Swapdesk.lnk to Swapdesk.exe;
-    8. starts the service and checks it.
+    8. adds the entry of the installed apps list (Settings > Apps): HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Swapdesk
+       with DisplayName, DisplayVersion (the VERSION file of the package, checked against SHA256SUMS), Publisher,
+       InstallLocation, DisplayIcon, UninstallString and QuietUninstallString (the uninstall.cmd copied into the
+       install folder in step 3), NoModify, NoRepair and EstimatedSize;
+    9. starts the service and checks it.
   Run it again to upgrade: the service is stopped, the files are replaced, everything else is made equal again.
 
 .PARAMETER Source
@@ -70,7 +75,7 @@ $ServiceText    = 'Swapdesk remote desktop service (LAN only): trust store, sess
 $FirewallGroup  = 'Swapdesk'
 $RuleSession    = 'Swapdesk-UDP-Session-Pairing'
 $RuleMdns       = 'Swapdesk-UDP-mDNS'
-$PortsSession   = @(47820, 47821)
+$PortsSession   = '47820-47883'      # ACCOUNTS.md 5.5: 32 accounts, a session and a pairing port each
 $PortMdns       = 5353
 $ShortcutName   = 'Swapdesk.lnk'
 $SasKey         = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -81,7 +86,10 @@ $Sid_System     = 'S-1-5-18'
 $Sid_Admins     = 'S-1-5-32-544'
 $Sid_Users      = 'S-1-5-32-545'
 $Sid_TrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
-$Required       = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe')
+$Required       = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe', 'uninstall.cmd', 'uninstall.ps1')
+$VersionName    = 'VERSION'              # in the package and in SHA256SUMS, read for DisplayVersion, never installed
+$UninstallKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Swapdesk'   # the installed apps list (64-bit view)
+$Publisher      = 'devBertini'
 $Optional       = @('LICENSE-MIT', 'LICENSE-APACHE')
 $ProcessNames   = @('Swapdesk', 'swapdesk-helper', 'swapdesk-service')
 $EventSource    = 'Swapdesk'
@@ -195,6 +203,25 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
 
 function Get-Svc { Get-Service -Name $ServiceName -ErrorAction SilentlyContinue }
 
+# The values of the installed apps entry: name -> @{ Kind; Value }. Pure (no registry, no disk), so a test can run it.
+function New-UninstallEntry([string]$Dir, [string]$Version, [int]$SizeKb, [string]$Date, [string]$PublisherName) {
+    $uninstallCmd = Join-Path $Dir 'uninstall.cmd'
+    $entry = [ordered]@{
+        DisplayName          = @{ Kind = 'String'; Value = 'Swapdesk' }
+        DisplayVersion       = @{ Kind = 'String'; Value = $Version }
+        Publisher            = @{ Kind = 'String'; Value = $PublisherName }
+        InstallLocation      = @{ Kind = 'String'; Value = $Dir }
+        DisplayIcon          = @{ Kind = 'String'; Value = ('{0},0' -f (Join-Path $Dir 'Swapdesk.exe')) }
+        UninstallString      = @{ Kind = 'String'; Value = ('"{0}"' -f $uninstallCmd) }
+        QuietUninstallString = @{ Kind = 'String'; Value = ('"{0}" -Quiet' -f $uninstallCmd) }
+        InstallDate          = @{ Kind = 'String'; Value = $Date }
+        NoModify             = @{ Kind = 'DWord'; Value = 1 }
+        NoRepair             = @{ Kind = 'DWord'; Value = 1 }
+        EstimatedSize        = @{ Kind = 'DWord'; Value = $SizeKb }
+    }
+    return $entry
+}
+
 function Get-InstallProcesses {
     $found = @()
     foreach ($p in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $ProcessNames -contains $_.ProcessName })) {
@@ -269,6 +296,30 @@ try {
         if ($noEntry.Count -gt 0) {
             $msg = ('{0} has no entry for: {1}' -f $SumsName, ($noEntry -join ', '))
             if ($DryRun) { Say ('[dry-run] WARNING: ' + $msg + '; the real install would stop here') } else { throw $msg }
+        }
+    }
+
+    # ---- DisplayVersion: the VERSION file, accepted only when SHA256SUMS vouches for it
+    $Version = $null
+    $versionPath = Join-Path $Source $VersionName
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+        $msg = ('{0} is not in the source folder (run build-release.cmd again)' -f $VersionName)
+        if ($DryRun) { Say ('[dry-run] WARNING: ' + $msg + '; the real install would stop here') } else { throw $msg }
+    } elseif ($Sums -and -not $Sums.ContainsKey($VersionName)) {
+        $msg = ('{0} has no entry for {1}' -f $SumsName, $VersionName)
+        if ($DryRun) { Say ('[dry-run] WARNING: ' + $msg + '; the real install would stop here') } else { throw $msg }
+    } else {
+        $versionText = [System.IO.File]::ReadAllText($versionPath, [System.Text.Encoding]::UTF8).Trim()
+        $versionHash = (Get-FileHash -LiteralPath $versionPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Sums -and $Sums[$VersionName] -ne $versionHash) {
+            $msg = ('{0} does not match {1}' -f $VersionName, $SumsName)
+            if ($DryRun) { Say ('[dry-run] WARNING: ' + $msg + '; the real install would stop here') } else { throw $msg }
+        } elseif ($versionText -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$') {
+            $msg = ('{0} does not hold a version number' -f $VersionName)
+            if ($DryRun) { Say ('[dry-run] WARNING: ' + $msg + '; the real install would stop here') } else { throw $msg }
+        } else {
+            $Version = $versionText
+            Say ('  version        : {0}' -f $Version)
         }
     }
 
@@ -483,7 +534,25 @@ try {
         $sc.Save()
     }
 
-    # ---- 8. start the service
+    # ---- 8. installed apps entry (Settings > Apps)
+    if ($DryRun) {
+        $sizeKb = 0
+        $showVersion = $(if ($Version) { $Version } else { '<VERSION>' })
+    } else {
+        $bytes = [long]0
+        foreach ($f in (Get-ChildItem -LiteralPath $InstallDir -File -Recurse -Force)) { $bytes += $f.Length }
+        $sizeKb = [int][math]::Ceiling($bytes / 1024.0)
+        $showVersion = $Version
+    }
+    $entry = New-UninstallEntry $InstallDir $showVersion $sizeKb ((Get-Date).ToString('yyyyMMdd')) $Publisher
+    Step ("write {0}: {1}" -f $UninstallKey, (($entry.Keys | ForEach-Object { '{0}={1}' -f $_, $entry[$_].Value }) -join '; ')) {
+        New-Item -Path $UninstallKey -Force | Out-Null
+        foreach ($name in $entry.Keys) {
+            New-ItemProperty -Path $UninstallKey -Name $name -Value $entry[$name].Value -PropertyType $entry[$name].Kind -Force | Out-Null
+        }
+    }
+
+    # ---- 9. start the service
     Step ("Start-Service {0}" -f $ServiceName) {
         try {
             Start-Service -Name $ServiceName -ErrorAction Stop
@@ -526,6 +595,7 @@ try {
         $sasNow = (Get-Item -LiteralPath $SasKey).GetValue($SasValue, $null)
         Say ("  {0} = {1}" -f $SasValue, $(if ($null -eq $sasNow) { '(absent)' } else { $sasNow }))
         Say ("  shortcut : {0} ({1})" -f $lnk, $(if (Test-Path -LiteralPath $lnk) { 'present' } else { 'MISSING' }))
+        Say ("  apps list: {0} ({1})" -f $UninstallKey, $(if (Test-Path -LiteralPath $UninstallKey) { 'present' } else { 'MISSING' }))
         Start-Sleep -Seconds 3
         $helpers = @(Get-Process -Name 'swapdesk-helper' -ErrorAction SilentlyContinue)
         Say ("  helpers  : {0} swapdesk-helper process(es) running (two expected: system and user role)" -f $helpers.Count)

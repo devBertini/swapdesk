@@ -59,6 +59,50 @@ fn days_ago(at: LocalTime, clock: Clock) -> i64 {
     local_time(clock.now_ms, clock.utc_offset_min).day - at.day
 }
 
+/// Howard Hinnant's `civil_from_days` with the year: (year, month, day) of a day count since the epoch.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// "2026-11-12 15:25", local time: the moment of an exported activity line, sortable as text.
+pub fn export_when(at_ms: u64, utc_offset_min: i32) -> String {
+    let t = local_time(at_ms, utc_offset_min);
+    let (y, m, d) = civil(t.day);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", t.hour, t.minute)
+}
+
+/// One CSV field: quoted when it holds the separator, a quote or a line break.
+fn csv_field(s: &str) -> String {
+    if s.contains([';', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_owned() }
+}
+
+/// The activity log as the CSV file "Exportar registro" writes: a header line, then one line per entry, newest first,
+/// fields separated by ";" (what a spreadsheet in pt-BR opens by default), the moment in local time.
+pub fn activity_csv(lang: Language, rows: &[crate::api::AuditView], utc_offset_min: i32) -> String {
+    let mut csv = String::from(match lang {
+        Language::PtBr => "quando;dispositivo;o que aconteceu;duracao_s\n",
+        Language::En => "when;device;what happened;duration_s\n",
+    });
+    for r in rows {
+        csv.push_str(&format!(
+            "{};{};{};{}\n",
+            export_when(r.at_ms, utc_offset_min),
+            csv_field(&r.device_name),
+            csv_field(&text(lang, &r.what)),
+            r.duration_s.map_or(String::new(), |d| d.to_string())
+        ));
+    }
+    csv
+}
+
 /// "Hoje às 15:25", "Ontem às 23:40", "05/11 às 10:30".
 pub fn when_phrase(lang: Language, at_ms: u64, clock: Clock) -> String {
     let t = local_time(at_ms, clock.utc_offset_min);
@@ -95,6 +139,27 @@ pub fn minutes_phrase(lang: Language, secs: u32) -> String {
 /// "17 min" (at least 1 min).
 pub fn short_minutes(lang: Language, secs: u32) -> String {
     text(lang, &Msg::new(MsgKey::DurMinutes).with((secs / 60).max(1).to_string()))
+}
+
+/// A size in megabytes with one decimal, in the language's own decimal mark: "4,1 MB", "4.1 MB".
+pub fn size_mb(lang: Language, bytes: u64) -> String {
+    let s = format!("{:.1} MB", bytes as f64 / 1_000_000.0);
+    if lang == Language::PtBr { s.replace('.', ",") } else { s }
+}
+
+/// A whole count in groups of three digits with a no-break space ("10 000"), the SI form both languages read: a
+/// count is formatted when its message is made, and the same text stays right after the language changes.
+pub fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mark = '\u{a0}';
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(mark);
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// "1:42" for a countdown.
@@ -141,7 +206,7 @@ pub fn where_phrase(lang: Language, desktop: DesktopKind) -> String {
     let key = match desktop {
         DesktopKind::Default => MsgKey::WhereDefault,
         DesktopKind::Secure => MsgKey::WhereSecure,
-        DesktopKind::Locked => MsgKey::WhereLocked,
+        DesktopKind::Locked | DesktopKind::AccountAway => MsgKey::WhereLocked,
         DesktopKind::LoginWindow => MsgKey::WhereLogin,
     };
     text(lang, &Msg::new(key))
@@ -150,6 +215,14 @@ pub fn where_phrase(lang: Language, desktop: DesktopKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_is_grouped_by_three_digits_with_a_no_break_space() {
+        assert_eq!(count(10_000), "10\u{a0}000");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_234_567), "1\u{a0}234\u{a0}567");
+        assert_eq!(count(0), "0");
+    }
 
     /// 2026-11-08 15:30 UTC.
     const NOW: u64 = 1_794_151_800_000;

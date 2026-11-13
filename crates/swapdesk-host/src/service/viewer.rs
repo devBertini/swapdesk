@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use quinn::Endpoint;
 use swapdesk_extras::chat::{ChatEntry, ChatError};
 use swapdesk_extras::reconnect::{GiveUp, ReconnectEvent, ReconnectPolicy, reconnect, should_reconnect};
-use swapdesk_ipc::{ApiCode, Bytes, Message as Ipc, SessionState, Shape};
+use swapdesk_ipc::{ApiCode, Bytes, Message as Ipc, Payload, SessionState, Shape};
 use swapdesk_platform::{Level, TraceSink};
 use swapdesk_proto::{
     AudioControl, CursorPosition, CursorShape, DisplayList, ErrorCode, InputEvent, KeyframeRequest, Message as Ctl,
@@ -81,6 +81,13 @@ pub enum ViewerOut {
     State(StateChange),
     /// A terminal's bytes or its end, in order (the UI queue holds them for room instead of dropping them).
     Term(TermOut),
+    /// What the host stored for this machine (`StoredGrants`, minor 1): kept for Permissões, display only.
+    PeerGrants(swapdesk_proto::PermissionSet),
+    /// The host is asking its user about `feature` (D13, `ConsentPending`) for `timeout_s` seconds.
+    Consent {
+        feature: swapdesk_proto::Feature,
+        timeout_s: u16,
+    },
 }
 
 /// What a terminal of this session sends the UI.
@@ -297,6 +304,10 @@ pub(crate) struct Inner {
     stop: Arc<Stop>,
     chat: Arc<ChatRouter>,
     terms: Arc<ViewerTerms>,
+    elevation: Arc<ElevationWait>,
+    /// Where the session's states go (D56: the local release is told like a state from the host).
+    out: mpsc::Sender<ViewerOut>,
+    since_ms: u64,
     swap: SwapHandler,
     wall: Arc<dyn swapdesk_trust::WallClock>,
     clip: Arc<ClipboardHandler<PipeClipboard>>,
@@ -314,6 +325,77 @@ impl Drop for Inner {
     }
 }
 
+/// The answer to this session's `Elevate` (ACCOUNTS.md 9.3), filled by the event pump: the host's
+/// `PermissionsChanged` holding `UNATTENDED`, or its `Error` about 0x000C.
+pub(crate) struct ElevationWait {
+    waiting: Mutex<Option<tokio::sync::oneshot::Sender<Result<(), ErrorCode>>>>,
+    /// D56: this machine confirmed "Elevar controle" for a session a host of minor 0 let in with `UNATTENDED`.
+    released: AtomicBool,
+    /// This machine confirmed "Elevar controle" for this entry (the hub sets it after the host's answer): the
+    /// administrator terminal needs no second pass. Like `released` it belongs to one entry: a re-entry that is not a
+    /// resume clears it (F-SESS-02: an elevation does not survive a lost link).
+    confirmed: AtomicBool,
+    /// How the host let the session in, as of its last entry (a reconnect that enters again changes it; a resume
+    /// keeps it).
+    mode: Mutex<swapdesk_proto::GrantMode>,
+    /// What the host stored for this device, as it last told (`StoredGrants`); `None` before it did.
+    peer_stored: Mutex<Option<PermissionSet>>,
+}
+
+impl ElevationWait {
+    fn new(mode: swapdesk_proto::GrantMode) -> Self {
+        Self {
+            waiting: Mutex::new(None),
+            released: AtomicBool::new(false),
+            confirmed: AtomicBool::new(false),
+            mode: Mutex::new(mode),
+            peer_stored: Mutex::new(None),
+        }
+    }
+
+    fn mode(&self) -> swapdesk_proto::GrantMode {
+        *lock(&self.mode)
+    }
+
+    /// A new entry after a lost link (not a resume): its mode, and nothing of the last entry's confirmation.
+    fn entered_again(&self, mode: swapdesk_proto::GrantMode) {
+        if mode != swapdesk_proto::GrantMode::Resumed {
+            *lock(&self.mode) = mode;
+            self.released.store(false, Ordering::Release);
+            self.confirmed.store(false, Ordering::Release);
+        }
+    }
+
+    fn set_peer_stored(&self, grants: PermissionSet) {
+        *lock(&self.peer_stored) = Some(grants);
+    }
+}
+
+impl ElevationWait {
+    fn arm(&self) -> tokio::sync::oneshot::Receiver<Result<(), ErrorCode>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *lock(&self.waiting) = Some(tx);
+        rx
+    }
+
+    fn released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
+    }
+
+    fn peer_stored(&self) -> Option<PermissionSet> {
+        *lock(&self.peer_stored)
+    }
+
+    fn answer(&self, result: Result<(), ErrorCode>) {
+        if let Some(tx) = lock(&self.waiting).take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+/// How long the viewer waits for the host's answer to `Elevate` (ACCOUNTS.md 9.3).
+pub const ELEVATE_WAIT: Duration = Duration::from_secs(10);
+
 /// A viewer session, as the UI drives it. Cheap to clone; the last clone dropped disconnects.
 #[derive(Clone)]
 pub struct ViewerHandle {
@@ -328,6 +410,11 @@ impl ViewerHandle {
 
     pub fn device(&self) -> DeviceId {
         self.inner.device
+    }
+
+    /// How the host let this session in: after a question to its user, without one, or as a swap.
+    pub fn mode(&self) -> swapdesk_proto::GrantMode {
+        self.inner.elevation.mode()
     }
 
     /// What the host lets this session do now.
@@ -347,6 +434,10 @@ impl ViewerHandle {
         let ctx = self.inner.cell.get();
         if !ctx.granted().contains(PermissionSet::CONTROL) {
             return Err(ApplyError::NotPermitted);
+        }
+        // D56: held, nothing goes to a protected desktop of the host (as for a session that is not elevated).
+        if self.machine_level_held() && ctx.desktop_state().desktop != swapdesk_proto::Desktop::Default {
+            return Ok(());
         }
         if ctx.ended().is_some() {
             return Err(ApplyError::Closed);
@@ -408,6 +499,63 @@ impl ViewerHandle {
     pub fn wait_ended(&self, limit: Duration) -> Option<SessionEnd> {
         let ctx = self.inner.cell.get();
         self.inner.rt.block_on(async { tokio::time::timeout(limit, ctx.wait_ended()).await }).ok()
+    }
+
+    /// This machine elevated this entry of the session (op 50 after its confirmation): the administrator terminal
+    /// needs no second pass. A session the host let in already elevated does not count, and a fresh entry after a
+    /// lost link starts without it.
+    pub fn elevated_here(&self) -> bool {
+        self.inner.elevation.confirmed.load(Ordering::Acquire)
+    }
+
+    /// Records that this machine's confirmation was used for "Elevar controle" and the host elevated the session.
+    pub fn mark_elevated_here(&self) {
+        self.inner.elevation.confirmed.store(true, Ordering::Release);
+    }
+
+    /// D56: the machine-level reach of this session is held until this machine confirms "Elevar controle".
+    pub fn machine_level_held(&self) -> bool {
+        held_by_d56(&self.inner.cell.get(), self.inner.elevation.released())
+    }
+
+    /// Whether the session can be elevated: 0 no, 1 yes ("Elevar controle"), 2 elevated (ACCOUNTS.md 9.3, D56).
+    pub fn elevation(&self) -> u8 {
+        elevation_of(&self.inner.cell.get(), &self.inner.elevation)
+    }
+
+    /// "Elevar controle" (ACCOUNTS.md 9.3), after the confirmation on this machine: sends `Elevate` and waits for the
+    /// host's answer. `Ok` when the session holds `UNATTENDED` (at once if it already does). `UNSUPPORTED_VERSION`
+    /// toward a host of minor 0 (nothing is sent); `NOT_PERMITTED` for a session that entered with a prompt, or the
+    /// host's refusal; `TIMEOUT` after [`ELEVATE_WAIT`].
+    pub async fn elevate(&self) -> Result<(), ErrorCode> {
+        let ctx = self.inner.cell.get();
+        // D56: a host of minor 0 let it in elevated; this machine's confirmation releases the hold, and nothing is
+        // sent (a 1.0 host knows no `Elevate`).
+        if held_by_d56(&ctx, self.inner.elevation.released()) {
+            self.inner.elevation.released.store(true, Ordering::Release);
+            let state = active(&ctx, self.inner.since_ms, &self.inner.elevation);
+            let change = StateChange { session_id: self.inner.session_id, device: self.inner.device, state, end: None };
+            let _ = self.inner.out.send(ViewerOut::State(change)).await;
+            return Ok(());
+        }
+        if ctx.granted().contains(PermissionSet::UNATTENDED) {
+            return Ok(());
+        }
+        if ctx.peer_minor() < 1 {
+            return Err(ErrorCode::UnsupportedVersion);
+        }
+        if self.inner.elevation.mode() != swapdesk_proto::GrantMode::Unattended {
+            return Err(ErrorCode::NotPermitted);
+        }
+        let rx = self.inner.elevation.arm();
+        if ctx.try_send(swapdesk_proto::Elevate {}).is_err() {
+            return Err(ErrorCode::Unavailable);
+        }
+        match tokio::time::timeout(ELEVATE_WAIT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ErrorCode::Unavailable),
+            Err(_) => Err(ErrorCode::Timeout),
+        }
     }
 
     /// "Inverter" (PROTOCOL.md 6.3): asks the host to swap. Resolves with how it ended; see [`SwapOutcome`].
@@ -559,6 +707,9 @@ pub(crate) struct Opened {
     pub messages: ViewerMessages,
 }
 
+/// What a caller hears of an attempt before the host grants: `Connecting`, then `Prompted { remaining_s }`.
+pub type WaitHook = Arc<dyn Fn(SessionState) + Send + Sync>;
+
 /// What `open` needs besides the viewer configuration.
 pub(crate) struct OpenParams {
     pub rt: Handle,
@@ -574,6 +725,8 @@ pub(crate) struct OpenParams {
     pub clip_hooks: Arc<ClipHooksCell>,
     /// This session's files handler, registered in its registry.
     pub files: Arc<ViewerFiles>,
+    /// Told `Connecting` when the dial starts and `Prompted` when the host starts asking its user.
+    pub waiting: Option<WaitHook>,
 }
 
 /// What it takes to dial the same host again with a resume token.
@@ -584,6 +737,7 @@ struct Redial {
     expected: swapdesk_trust::Spki,
     /// The configuration of the first dial: same intent, same request (an unattended entry stays unattended).
     cfg: ViewerConfig,
+    trace: Arc<dyn TraceSink>,
 }
 
 impl Redial {
@@ -592,7 +746,26 @@ impl Redial {
         cfg.resume = Some(resume);
         cfg.swap_token = None;
         cfg.on_prompt = None;
-        ViewerSession::connect(&self.endpoint, &self.identity, self.addr, self.expected, cfg).await
+        let started = std::time::Instant::now();
+        let result = ViewerSession::connect_within(
+            &self.endpoint,
+            &self.identity,
+            self.addr,
+            self.expected,
+            cfg,
+            ReconnectPolicy::default().dial_limit,
+        )
+        .await;
+        let how = match &result {
+            Ok(_) => "resumed".to_string(),
+            Err(e) => format!("failed: {e:?}"),
+        };
+        self.trace.log(
+            Level::Debug,
+            "service",
+            format_args!("redial {how} after {} ms", started.elapsed().as_millis()),
+        );
+        result
     }
 }
 
@@ -628,10 +801,41 @@ struct Drive {
     stop: Arc<Stop>,
     redial: Arc<Redial>,
     terms: Arc<ViewerTerms>,
+    elevation: Arc<ElevationWait>,
 }
 
-fn active(ctx: &SessionCtx, since_ms: u64) -> SessionState {
-    SessionState::Active { since_ms, role: swapdesk_ipc::Role::Viewer, granted: ctx.granted().bits() }
+fn active(ctx: &SessionCtx, since_ms: u64, w: &ElevationWait) -> SessionState {
+    SessionState::Active {
+        since_ms,
+        role: swapdesk_ipc::Role::Viewer,
+        granted: ctx.granted().bits(),
+        elevation: elevation_of(ctx, w),
+    }
+}
+
+/// ACCOUNTS.md 9.3: 2 elevated (the session holds `UNATTENDED`), 1 available (it entered without a prompt toward a
+/// host of minor 1 or newer, or it is held by D56), 0 not available.
+pub(crate) fn elevation_of(ctx: &SessionCtx, w: &ElevationWait) -> u8 {
+    if held_by_d56(ctx, w.released()) {
+        1
+    } else if ctx.granted().contains(PermissionSet::UNATTENDED) {
+        2
+    } else if w.mode() == swapdesk_proto::GrantMode::Unattended
+        && ctx.peer_minor() >= 1
+        // The host no longer stores `UNATTENDED` for this device: its `Elevate` would be refused (review of S6, 7).
+        && w.peer_stored().is_none_or(|p| p.contains(PermissionSet::UNATTENDED))
+    {
+        1
+    } else {
+        0
+    }
+}
+
+/// D56: a host of minor 0 (by its authenticated `HelloAck`: a 1.0 build, or one a forged record made this machine ask)
+/// let the session in with `UNATTENDED`. This machine never confirmed that reach, so it holds it until "Elevar
+/// controle" is confirmed here: no input on the host's protected desktops, no Ctrl+Alt+Del.
+pub(crate) fn held_by_d56(ctx: &SessionCtx, released: bool) -> bool {
+    !released && ctx.peer_minor() == 0 && ctx.granted().contains(PermissionSet::UNATTENDED)
 }
 
 impl Drive {
@@ -668,12 +872,25 @@ impl Drive {
         let ctx = session.ctx().clone();
         while let Some(event) = session.next_event().await {
             let state = match event {
-                ViewerEvent::PermissionsChanged(_) | ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms)),
-                ViewerEvent::HostState { desktop, paused } => {
-                    Some(if paused { SessionState::Paused { desktop } } else { active(&ctx, self.since_ms) })
+                ViewerEvent::PermissionsChanged(granted) => {
+                    if granted.contains(PermissionSet::UNATTENDED) {
+                        self.elevation.answer(Ok(()));
+                    }
+                    Some(active(&ctx, self.since_ms, &self.elevation))
                 }
+                ViewerEvent::PeerOnline => Some(active(&ctx, self.since_ms, &self.elevation)),
+                ViewerEvent::HostState { desktop, paused } => Some(if paused {
+                    SessionState::Paused { desktop }
+                } else {
+                    active(&ctx, self.since_ms, &self.elevation)
+                }),
                 ViewerEvent::PeerOffline => Some(SessionState::Reconnecting { attempt: 0 }),
                 ViewerEvent::PromptPending { .. } => None,
+                ViewerEvent::PeerGrants(grants) => {
+                    self.elevation.set_peer_stored(grants);
+                    let _ = self.out.send(ViewerOut::PeerGrants(grants)).await;
+                    Some(active(&ctx, self.since_ms, &self.elevation))
+                }
                 ViewerEvent::Message(Ctl::DisplayList(list)) => {
                     let ids: Vec<u16> = list.displays.iter().map(|d| d.id).collect();
                     self.receiver.set_displays(&ids);
@@ -685,6 +902,13 @@ impl Drive {
                     if e.about_type == 0x0501 {
                         self.terms.refused(e.about_id, e.code);
                     }
+                    if e.about_type == 0x000C {
+                        self.elevation.answer(Err(e.code));
+                    }
+                    None
+                }
+                ViewerEvent::Message(Ctl::ConsentPending(p)) => {
+                    let _ = self.out.send(ViewerOut::Consent { feature: p.feature, timeout_s: p.timeout_s }).await;
                     None
                 }
                 ViewerEvent::Message(_) => None,
@@ -721,9 +945,10 @@ impl Drive {
         match result {
             Either::Left(Ok(session)) => {
                 let ctx = session.ctx().clone();
+                self.elevation.entered_again(session.grant().mode);
                 self.cell.replace(ctx.clone());
                 self.start_datagrams(&ctx);
-                self.emit(active(&ctx, self.since_ms), None).await;
+                self.emit(active(&ctx, self.since_ms, &self.elevation), None).await;
                 Some(session)
             }
             Either::Left(Err(why)) => {
@@ -746,12 +971,13 @@ impl Drive {
 
 /// Opens a viewer session on `p.endpoint` and starts its relays. `cfg.registry` is filled here.
 pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened, ConnectError> {
-    let OpenParams { rt, trace, wall, endpoint, identity, addr, expected, swap, hooks, clip_hooks, files } = p;
+    let OpenParams { rt, trace, wall, endpoint, identity, addr, expected, swap, hooks, clip_hooks, files, waiting } = p;
     let device = swapdesk_trust::device_id(&expected);
     let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
-    let _ = out_tx
-        .send(ViewerOut::State(StateChange { session_id: 0, device, state: SessionState::Connecting, end: None }))
-        .await;
+    // Before the grant there is no session to carry states: the caller's hook hears them.
+    if let Some(wait) = &waiting {
+        wait(SessionState::Connecting);
+    }
 
     // The receiver asks for keyframes through the session, which exists only after the grant.
     let session: Arc<Mutex<Option<SessionCtx>>> = Arc::default();
@@ -786,16 +1012,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let _ = registry.register(files.channel());
     cfg.registry = registry;
     let redial_cfg = cfg.clone();
-    cfg.on_prompt = Some({
-        let out = out_tx.clone();
-        Arc::new(move |remaining_s: u16| {
-            let _ = out.try_send(ViewerOut::State(StateChange {
-                session_id: 0,
-                device,
-                state: SessionState::Prompted { remaining_s },
-                end: None,
-            }));
-        })
+    cfg.on_prompt = waiting.map(|wait| {
+        Arc::new(move |remaining_s: u16| wait(SessionState::Prompted { remaining_s })) as Arc<dyn Fn(u16) + Send + Sync>
     });
 
     let session_handle =
@@ -803,6 +1021,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let ctx = session_handle.ctx().clone();
     *lock(&session) = Some(ctx.clone());
     let session_id = session_handle.grant().session_id;
+    let mode = session_handle.grant().mode;
+    let elevation = Arc::new(ElevationWait::new(mode));
     clip_session.store(session_id, std::sync::atomic::Ordering::Release);
     files.set_session(session_id);
     let since_ms = wall.unix_ms();
@@ -817,10 +1037,18 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         device,
         since_ms,
         stop: Arc::clone(&stop),
-        redial: Arc::new(Redial { endpoint: endpoint.clone(), identity, addr, expected, cfg: redial_cfg }),
+        redial: Arc::new(Redial {
+            endpoint: endpoint.clone(),
+            identity,
+            addr,
+            expected,
+            cfg: redial_cfg,
+            trace: Arc::clone(&trace),
+        }),
         terms: Arc::clone(&terms),
+        elevation: Arc::clone(&elevation),
     };
-    drive.emit(active(&ctx, since_ms), None).await;
+    drive.emit(active(&ctx, since_ms, &elevation), None).await;
 
     // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
     // the queue is full) the frame is dropped, and so is every P-frame after it until a keyframe, which is asked for.
@@ -849,7 +1077,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
                     ask(&mut asked, last_good);
                     continue;
                 }
-                let msg = Ipc::ViewerVideo { session_id, header: f.header, payload: Bytes(f.payload) };
+                let msg = Ipc::ViewerVideo { session_id, header: f.header, payload: Payload::from(f.payload) };
                 match out.try_send(ViewerOut::Message(msg)) {
                     Ok(()) => {
                         if key {
@@ -967,6 +1195,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     }
 
     let inner = Inner {
+        out: out_tx.clone(),
+        since_ms,
         session_id,
         cell,
         device,
@@ -976,6 +1206,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         stop,
         chat,
         terms,
+        elevation,
         swap,
         wall,
         clip,

@@ -8,7 +8,9 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 
 pub mod audit;
+pub mod blocklist;
 pub mod clock;
+pub mod datagram_filter;
 pub mod endpoint;
 pub mod error;
 pub mod gate;
@@ -24,10 +26,13 @@ pub mod tls;
 pub mod wipe;
 
 pub use audit::{AuditEntry, AuditEvent, AuditSink, DeviceRef, Direction, MemoryAudit, decode_log};
+pub use blocklist::{BLOCKED_NAME, BlockList, BlockedDevice, mac_text, parse_mac};
 pub use clock::{ClockWall, SystemWallClock, WallClock};
+pub use datagram_filter::{DatagramFilter, endpoint_from_socket_filtered};
 pub use endpoint::{
-    AdmittedHook, DEFAULT_MAX_IN_FLIGHT, Decision, IncomingFilter, PairingService, ServeOptions, accept_session,
-    connect_and_initiate, connect_session, endpoint_from_socket, open_pairing_endpoint, open_session_endpoint,
+    ACCEPT_HANDSHAKE_LIMIT, AdmittedHook, DEFAULT_MAX_IN_FLIGHT, Decision, IncomingFilter, PairingService,
+    ServeOptions, accept_session, connect_and_initiate, connect_session, endpoint_from_socket, open_pairing_endpoint,
+    open_pairing_endpoint_filtered, open_session_endpoint, open_session_endpoint_filtered,
 };
 pub use error::{Result, TrustError};
 pub use gate::{gate_pairing, gate_session_client, gate_session_server, peer_spki};

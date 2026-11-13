@@ -16,6 +16,8 @@ pub const USAGE: &str = "swapdesk-service.exe [--console [--instance <n>] [--dev
   --console           development mode: run as the current user in %LOCALAPPDATA%\\Swapdesk-dev\\<instance>\n\
   --instance <n>      development only (0..99): pipe names get the suffix -<n>, both UDP ports move up by 10*n\n\
   --dev-loopback      development only: listen on 127.0.0.1 only and accept loopback peers\n\
+  --apply-update <old> <new>  the update applier (started by the service, as SYSTEM, from its protected folder only)\n\
+  --roll-back <old> <new>     the same, restoring <old> after an update that was cut short\n\
   --help              this text";
 
 /// The highest `--instance`: 47821 + 10 * 99 stays below 65535 with room to spare.
@@ -32,6 +34,13 @@ pub struct Options {
 pub enum Parsed {
     Run(Options),
     Help,
+    /// The update applier (UPDATES.md 6.2 step 5, 6.4): replaces `old` with `new`, staged by the service, or with
+    /// `roll_back` puts `old` back.
+    ApplyUpdate {
+        old: String,
+        new: String,
+        roll_back: bool,
+    },
 }
 
 impl Options {
@@ -67,6 +76,15 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 o.instance = Some(n);
             }
             "--help" | "-h" | "/?" => return Ok(Parsed::Help),
+            // Alone: the applier takes no other switch.
+            mode @ ("--apply-update" | "--roll-back") if args.len() == 3 => {
+                let (old, new) = (it.next().ok_or("two versions")?, it.next().ok_or("two versions")?);
+                return Ok(Parsed::ApplyUpdate {
+                    old: old.clone(),
+                    new: new.clone(),
+                    roll_back: mode == "--roll-back",
+                });
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -93,6 +111,16 @@ mod tests {
         assert!(p(&["--dev-loopback"]).is_err());
         assert_eq!(p(&["--help"]), Ok(Parsed::Help));
         assert!(p(&["--bogus"]).is_err());
+        assert_eq!(
+            p(&["--apply-update", "1.1.0", "1.1.1"]),
+            Ok(Parsed::ApplyUpdate { old: "1.1.0".into(), new: "1.1.1".into(), roll_back: false })
+        );
+        assert_eq!(
+            p(&["--roll-back", "1.1.0", "1.1.1"]),
+            Ok(Parsed::ApplyUpdate { old: "1.1.0".into(), new: "1.1.1".into(), roll_back: true })
+        );
+        assert!(p(&["--console", "--apply-update", "1.1.1"]).is_err(), "the applier takes no other switch");
+        assert!(p(&["--apply-update", "1.1.1"]).is_err());
     }
 
     #[test]

@@ -25,13 +25,21 @@ pub enum ResumeError {
     NotLost,
     /// More than the window passed since the loss.
     Expired,
+    /// The host's user ended the lost session ("Desconectar"): the token is refused for good until its window ends,
+    /// not treated as unknown (an unknown token lets the request go the normal way, through `UNATTENDED` or a prompt,
+    /// which would start a fresh session a second after the user ended this one).
+    Killed,
 }
 
 struct Entry {
     device: DeviceId,
     granted: PermissionSet,
+    /// The session entered without a prompt: a resume of it is still such a session.
+    unattended: bool,
     token: Option<[u8; 16]>,
     lost_at: Option<Instant>,
+    /// The host's user ended the session while its link was lost: kept (refusing its token) until the window ends.
+    killed: bool,
 }
 
 pub struct ResumeTable {
@@ -44,11 +52,20 @@ impl ResumeTable {
         Self { window, entries: HashMap::new() }
     }
 
-    /// A session started or was resumed with a live connection. Returns its fresh token.
-    pub fn insert(&mut self, session_id: u64, device: DeviceId, granted: PermissionSet) -> [u8; 16] {
+    /// A session started or was resumed with a live connection. Returns its fresh token. `unattended` says it
+    /// entered without a prompt.
+    pub fn insert(&mut self, session_id: u64, device: DeviceId, granted: PermissionSet, unattended: bool) -> [u8; 16] {
         let token = random_token();
-        self.entries.insert(session_id, Entry { device, granted, token: Some(token), lost_at: None });
+        self.entries.insert(
+            session_id,
+            Entry { device, granted, unattended, token: Some(token), lost_at: None, killed: false },
+        );
         token
+    }
+
+    /// Whether the session `session_id` entered without a prompt (false for one the table does not hold).
+    pub fn entered_unattended(&self, session_id: u64) -> bool {
+        self.entries.get(&session_id).is_some_and(|e| e.unattended)
     }
 
     /// The connection was lost (an idle timeout or a transport error): the token becomes usable.
@@ -61,6 +78,18 @@ impl ResumeTable {
     /// The token dies (`Bye`, "Desconectar", a grant change, lock-on-end); the entry goes with it.
     pub fn invalidate(&mut self, session_id: u64) {
         self.entries.remove(&session_id);
+    }
+
+    /// The host's user ended a session whose link is lost: its token is refused (`ResumeError::Killed`) until the
+    /// window since the loss ends, when `purge` drops the entry. A session that is not lost has no window, so its
+    /// entry is simply dropped.
+    pub fn kill(&mut self, session_id: u64) {
+        match self.entries.get_mut(&session_id) {
+            Some(e) if e.lost_at.is_some() => e.killed = true,
+            _ => {
+                self.entries.remove(&session_id);
+            }
+        }
     }
 
     /// Forget: every token of the device dies.
@@ -79,16 +108,18 @@ impl ResumeTable {
         self.entries.retain(|_, e| e.lost_at.is_none_or(|t| now.saturating_duration_since(t) <= window));
     }
 
+    /// Whether the session has an entry that can still be resumed (a killed one only waits out its window).
     pub fn contains(&self, session_id: u64) -> bool {
-        self.entries.contains_key(&session_id)
+        self.entries.get(&session_id).is_some_and(|e| !e.killed)
     }
 
+    /// The entries that can be resumed or are live; the killed ones, kept to refuse their token, do not count.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.values().filter(|e| !e.killed).count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// Whether `token` would be accepted from `device` now, without using it. `Err(NotLost)` means "ask again
@@ -101,6 +132,9 @@ impl ResumeTable {
         match &e.token {
             Some(t) if tokens_equal(t, token) => {}
             _ => return Err(ResumeError::BadToken),
+        }
+        if e.killed {
+            return Err(ResumeError::Killed);
         }
         match e.lost_at {
             None => Err(ResumeError::NotLost),
@@ -185,7 +219,7 @@ mod tests {
 
     fn table() -> (ResumeTable, Instant, [u8; 16]) {
         let mut t = ResumeTable::new(WINDOW);
-        let tok = t.insert(7, A, PermissionSet::CONTROL | PermissionSet::FILES);
+        let tok = t.insert(7, A, PermissionSet::CONTROL | PermissionSet::FILES, false);
         (t, Instant::now(), tok)
     }
 
@@ -265,6 +299,31 @@ mod tests {
     }
 
     #[test]
+    fn a_killed_token_is_refused_for_good_until_its_window_ends() {
+        let (mut t, now, tok) = table();
+        let stored = PermissionSet::CONTROL | PermissionSet::FILES;
+        t.mark_lost(7, now);
+        t.kill(7);
+        assert_eq!(t.resume(now, &A, 7, &tok, stored), Err(ResumeError::Killed));
+        assert_eq!(t.check(now + secs(59), &A, 7, &tok), Err(ResumeError::Killed), "refused all through the window");
+        assert!(!t.contains(7) && t.is_empty(), "it is not a resumable session");
+        // A guess or another device learns nothing: it is refused as any wrong try is.
+        let mut bad = tok;
+        bad[0] ^= 1;
+        assert_eq!(t.check(now, &A, 7, &bad), Err(ResumeError::BadToken));
+        assert_eq!(t.check(now, &B, 7, &tok), Err(ResumeError::WrongDevice));
+        t.purge(now + secs(61));
+        assert_eq!(t.check(now + secs(61), &A, 7, &tok), Err(ResumeError::Unknown), "the window is over");
+    }
+
+    #[test]
+    fn killing_a_session_that_is_not_lost_drops_its_entry() {
+        let (mut t, now, tok) = table();
+        t.kill(7);
+        assert_eq!(t.check(now, &A, 7, &tok), Err(ResumeError::Unknown));
+    }
+
+    #[test]
     fn resumed_grants_are_the_original_intersected_with_what_is_still_stored() {
         let (mut t, now, tok) = table();
         t.mark_lost(7, now);
@@ -280,8 +339,8 @@ mod tests {
     #[test]
     fn purge_drops_expired_entries_only() {
         let mut t = ResumeTable::new(WINDOW);
-        t.insert(1, A, PermissionSet::VIEW);
-        t.insert(2, A, PermissionSet::VIEW);
+        t.insert(1, A, PermissionSet::VIEW, false);
+        t.insert(2, A, PermissionSet::VIEW, true);
         let now = Instant::now();
         t.mark_lost(1, now);
         t.purge(now + secs(30));

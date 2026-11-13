@@ -1,0 +1,45 @@
+[package]
+name = "swapdesk-sys-mac"
+description = "macOS system glue of Swapdesk (contract C3): the openpty PtySpawner for the terminal and the ActionRunner for the quick actions and keep-awake."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate: it holds the `unsafe` of this feature (libc calls). The workspace lints are repeated here without
+# `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[dependencies]
+swapdesk-platform = { path = "../swapdesk-platform" }
+# Only for the `Action` type that the ActionRunner takes (C3); a workspace crate, not a third-party one.
+swapdesk-proto = { path = "../swapdesk-proto" }
+# The updater's `HttpGet` trait and URL policy, which `http` implements with NSURLSession.
+swapdesk-update = { path = "../swapdesk-update" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+objc2 = { workspace = true }
+block2 = { workspace = true }
+
+# Authorization Services for the administrator confirmation (`admin`): the calls and the right's name only.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-security]
+workspace = true
+features = ["std", "Authorization", "AuthorizationTags"]
+
+# NSURLSession for the updater's HTTPS GET (`http`).
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+workspace = true
+features = [
+    "std", "block2", "NSObject", "NSString", "NSURL", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSURLCache",
+    "NSHTTPCookieStorage", "NSDate", "NSData", "NSDictionary", "NSError", "NSOperation",
+    # The volumes, places and Trash of `disk` (FILES-UI.md 7.4).
+    "NSFileManager", "NSArray", "NSValue", "NSEnumerator", "NSPathUtilities",
+]

@@ -34,6 +34,39 @@ pub(crate) fn os_err(op: &'static str, e: &windows::core::Error) -> PlatformErro
     PlatformError { kind, op, os_code: Some(i64::from(code)), detail }
 }
 
+/// Devices a test declared removed (F-VIEW-08): every renderer on one of them fails as on a real removal, until the
+/// process ends. Empty outside tests, so the check costs one atomic load.
+static SIMULATED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static ANY_SIMULATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: from now on the D3D11 device at `d3d11_device` (the raw pointer a `NativeSurface` carries) behaves as
+/// removed for every renderer of this process: `attach` and `present` fail with `DXGI_ERROR_DEVICE_REMOVED` and
+/// [`crate::WinRenderer::device_lost`] says so. Real Direct3D 11 has no call that removes a device on demand.
+#[doc(hidden)]
+pub fn simulate_device_removed(d3d11_device: u64) {
+    SIMULATED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(d3d11_device);
+    ANY_SIMULATED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn simulated_removed(device: &ID3D11Device) -> bool {
+    ANY_SIMULATED.load(std::sync::atomic::Ordering::SeqCst)
+        && SIMULATED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&(device.as_raw() as usize as u64))
+}
+
+/// The device is gone: removed by a test, or by the driver (`GetDeviceRemovedReason` is not `S_OK`).
+pub(crate) fn device_removed(device: &ID3D11Device) -> bool {
+    // SAFETY: a plain query on a live device.
+    simulated_removed(device) || unsafe { device.GetDeviceRemovedReason() }.is_err()
+}
+
+/// The error a call on a removed device gives.
+pub(crate) fn removed_err(op: &'static str) -> PlatformError {
+    os_err(op, &windows::core::Error::from(windows::core::HRESULT(DXGI_ERROR_DEVICE_REMOVED)))
+}
+
 pub(crate) fn err(kind: ErrorKind, op: &'static str, detail: impl Into<String>) -> PlatformError {
     PlatformError { kind, op, os_code: None, detail: detail.into() }
 }

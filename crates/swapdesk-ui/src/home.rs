@@ -82,8 +82,8 @@ impl UiState {
             .take(RECENT_LIMIT)
             .map(|row| {
                 let when = format::table_when(self.language(), row.at_ms, self.clock());
-                let who = if row.alert { self.t(MsgKey::UnknownDevice) } else { row.device_name.clone() };
-                let what = self.tm(&row.what);
+                let who = self.activity_who(row);
+                let what = self.activity_what(row);
                 let label = format!("{when}, {who}, {what}, {}", self.duration_cell(row));
                 RecentLine { when, who, what, alert: row.alert, label }
             })
@@ -117,7 +117,7 @@ impl UiState {
     pub(crate) fn home_controls(&self, s: &mut Specs) {
         let home = self.home();
         if let Some(name) = &home.name {
-            s.text(UiRole::Heading, name.clone());
+            s.heading(1, name.clone());
         }
         if let Some(status) = &home.status {
             s.text(UiRole::Text, status.clone());
@@ -125,11 +125,41 @@ impl UiState {
         if let Some(chip) = &home.network {
             s.text(UiRole::Text, chip.text.clone());
         }
+        // The update card comes first on Início (UPDATES.md 10.1).
+        if let Some(c) = self.update_card() {
+            // A wait (downloading, verifying, installing) is a polite live region, announced when its phase changes;
+            // the bar is a progress node outside it, read when focused, never announced each second (R-UI-13).
+            let waits = c.icon == crate::update_card::UpdIcon::Wait;
+            if waits {
+                s.region(crate::interact::Region::Status);
+            }
+            s.heading(2, c.title);
+            for text in c.body.into_iter().chain(c.note) {
+                s.text(UiRole::Text, text);
+            }
+            if waits {
+                s.region(crate::interact::Region::Content);
+            }
+            if let Some(bar) = c.bar {
+                let label = bar.text.clone().unwrap_or_default();
+                let p = s.add(ControlId::Static(u16::MAX - 1), UiRole::Progress, label);
+                p.value = Some(format!("{:.0}", bar.fraction * 100.0));
+            }
+            for (id, label, _) in c.buttons {
+                s.button(id, label);
+            }
+        }
+        if let Some((title, body)) = self.guide_card() {
+            s.heading(2, title);
+            s.text(UiRole::Text, body);
+            s.button(ControlId::GuideSkip, self.t(MsgKey::GuideSkip));
+            s.button(ControlId::GuideDone, self.t(MsgKey::GuideDone));
+        }
         self.crash_and_empty_controls(s);
         for card in &home.cards {
             match card {
                 HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
-                    s.text(UiRole::Heading, title.clone());
+                    s.heading(2, title.clone());
                     s.text(UiRole::Text, body.clone());
                     s.button(ControlId::PairThisComputer, button.clone());
                     let c = s.add(ControlId::Edit(EditId::Address), UiRole::TextInput, address_label.clone());
@@ -137,7 +167,7 @@ impl UiState {
                     s.button(ControlId::AddAddress, add.clone());
                 }
                 HomeCard::Recent { title, lines, empty, all } => {
-                    s.text(UiRole::Heading, title.clone());
+                    s.heading(2, title.clone());
                     s.button(ControlId::HomeActivityAll, all.clone());
                     if lines.is_empty() && !self.placeholder(DataKind::Activity) {
                         s.text(UiRole::Text, empty.clone());

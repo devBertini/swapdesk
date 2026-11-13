@@ -28,8 +28,10 @@ use swapdesk_codec_mac::{DecoderOptions, DecoderOutput, VtH264Decoder};
 use swapdesk_core_mac::{MacServiceParams, MacServiceSetup, mac_service_config, macos_version};
 use swapdesk_crossdrive::{DecoderFactory, Media, ViewerConfig, viewer_drive};
 use swapdesk_host::service::ServiceCore;
-use swapdesk_host::ui_hub::{ConnInfo, HubParams, NoHooks, NoPresence, UiHub};
+use swapdesk_host::ui_hub::{ConnInfo, DnsSdPresence, HubParams, NoHooks, NoPresence, Presence, UiHub};
 use swapdesk_ipc::{FrameReader, FrameWriter, Handshake};
+use swapdesk_lan::discovery::Config as DnsSdConfig;
+use swapdesk_lan::txt::Txt;
 use swapdesk_platform::{Clock, Level, MonoMicros, TraceSink, VideoDecoder};
 use swapdesk_proto::Os;
 use swapdesk_secret_mac::{
@@ -42,6 +44,10 @@ use swapdesk_ui::service_backend::ServiceBackend;
 use tokio::sync::oneshot;
 
 static N: AtomicU32 = AtomicU32::new(0);
+static DEBUG_TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The ports of a `--swap` run (the system picks them otherwise): the announcement names the session port.
+const SWAP_PORTS: (u16, u16) = (47850, 47851);
 
 // ---------- in-memory duplex pipe between the hub's `serve` and the backend ----------
 
@@ -137,7 +143,9 @@ struct StderrTrace;
 
 impl TraceSink for StderrTrace {
     fn log(&self, level: Level, target: &'static str, what: core::fmt::Arguments<'_>) {
-        if matches!(level, Level::Error | Level::Warn | Level::Info) {
+        if matches!(level, Level::Error | Level::Warn | Level::Info)
+            || (DEBUG_TRACE.load(Ordering::Relaxed) && matches!(level, Level::Debug))
+        {
             eprintln!("TRACE {level:?} {target}: {what}");
         }
     }
@@ -184,14 +192,36 @@ pub fn main() -> ExitCode {
     let (Some(host_addr), Some(peer_code), Some(go)) =
         (value(&args, "--host-addr"), value(&args, "--peer-code"), value(&args, "--go"))
     else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file>");
+        eprintln!(
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>] [--chat <dir>] [--term <dir>] [--swap] [--reconnect <dir>]"
+        );
         return ExitCode::from(2);
     };
     let Some(anchor) = value(&args, "--anchor-file") else {
-        eprintln!("usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file>");
+        eprintln!(
+            "usage: cross_viewer --host-addr <ipv4> --peer-code <file> --go <file> --anchor-file <file> [--clip <dir>] [--files <dir>] [--chat <dir>] [--term <dir>] [--swap] [--reconnect <dir>]"
+        );
         return ExitCode::from(2);
     };
-    match run(&host_addr, PathBuf::from(peer_code), PathBuf::from(go), PathBuf::from(anchor)) {
+    let type_after = value(&args, "--type").map(PathBuf::from);
+    let files_dir = value(&args, "--files").map(PathBuf::from);
+    let chat_dir = value(&args, "--chat").map(PathBuf::from);
+    let reconnect_dir = value(&args, "--reconnect").map(PathBuf::from);
+    let term_dir = value(&args, "--term").map(PathBuf::from);
+    let swap = args.iter().any(|a| a == "--swap");
+    match run(
+        &host_addr,
+        PathBuf::from(peer_code),
+        PathBuf::from(go),
+        PathBuf::from(anchor),
+        value(&args, "--clip"),
+        type_after,
+        files_dir,
+        chat_dir,
+        term_dir,
+        swap,
+        reconnect_dir,
+    ) {
         Ok(()) => {
             println!("VIEWER_RESULT PASS");
             ExitCode::SUCCESS
@@ -203,7 +233,21 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn run(
+    host_addr: &str,
+    peer_code: PathBuf,
+    go: PathBuf,
+    anchor: PathBuf,
+    clip_dir: Option<String>,
+    type_after: Option<PathBuf>,
+    files_dir: Option<PathBuf>,
+    chat_dir: Option<PathBuf>,
+    term_dir: Option<PathBuf>,
+    swap: bool,
+    reconnect_dir: Option<PathBuf>,
+) -> Result<(), String> {
+    DEBUG_TRACE.store(swap, Ordering::Relaxed);
     let scratch = Scratch::new()?;
     let trace: Arc<dyn TraceSink> = Arc::new(StderrTrace);
     let clock: Arc<dyn Clock> = Arc::new(Monotonic(Instant::now()));
@@ -218,8 +262,22 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
         trace: Arc::clone(&trace),
         ui: Arc::new(ViewerOnlyUi),
         dev_loopback: None,
-        ports: Some((0, 0)),
+        ports: Some(if swap { SWAP_PORTS } else { (0, 0) }),
     })?;
+    // `--swap`: the other side opens the reverse session to this machine, which it finds by its announcement.
+    let presence: Arc<dyn Presence> = if swap {
+        let own = Txt { name: settings.name.clone(), os: Os::MacOs, fingerprint: identity.device_id(), pairing: false };
+        match DnsSdPresence::start(
+            Arc::new(swapdesk_net_mac::MacNetInterfaces),
+            own,
+            DnsSdConfig { service_port: SWAP_PORTS.0, ..DnsSdConfig::default() },
+        ) {
+            Ok(p) => Arc::new(p),
+            Err(e) => return Err(format!("the swap proof needs discovery, which did not start: {e}")),
+        }
+    } else {
+        Arc::new(NoPresence)
+    };
     let hub = UiHub::new(HubParams {
         os: Os::MacOs,
         os_version: macos_version(),
@@ -228,7 +286,7 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
         secrets: scratch.store.clone(),
         settings,
         interfaces: Arc::new(swapdesk_net_mac::MacNetInterfaces),
-        presence: Arc::new(NoPresence),
+        presence,
         audit: Arc::new(MemoryAudit::new()),
         clock,
         wall: Arc::new(SystemWallClock),
@@ -242,6 +300,23 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     // The one UI below runs in session 1, the console's: only the console's UI may connect.
     hub.set_console_session(Some(1));
     println!("VIEWER_CORE_UP endpoints={:?}", core.local_addrs());
+    if swap {
+        // Whether this machine can be reached while the other side opens the reverse session: its endpoints, whenever
+        // they change.
+        let watched = Arc::downgrade(&core);
+        std::thread::spawn(move || {
+            let mut last = String::new();
+            while let Some(core) = watched.upgrade() {
+                let now = format!("{:?}", core.local_addrs());
+                if now != last {
+                    println!("VIEWER_ENDPOINTS {now}");
+                    last = now;
+                }
+                drop(core);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
 
     // The UI pipe: the hub serves one end, the backend of the shells' kind drives the other.
     let (client_end, server_end) = duplex();
@@ -256,6 +331,7 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
                 session_id: 1,
                 user: UserRef { id: "cross-viewer".into(), name: "cross-viewer".into() },
                 admin: false,
+                can_elevate: false,
             },
         )
     });
@@ -272,7 +348,34 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     )
     .map_err(|e| format!("hub handshake: {e}"))?;
 
-    let cfg = ViewerConfig::new(host_addr, peer_code, go, anchor);
+    let mut cfg = ViewerConfig::new(host_addr, peer_code, go, anchor);
+    // `--type <file>`: the keyboard proof toward the Windows host. Once the orchestrator wrote `<file>` (its text box
+    // has the focus there), the word is typed with physical keys; the chord after it is Ctrl+S.
+    // The orchestrator's text box needs a click of the person at the host before it has the focus: a longer wait.
+    if type_after.is_some() {
+        cfg.anchor_timeout = std::time::Duration::from_secs(75);
+    }
+    cfg.type_after = type_after;
+    cfg.save_with_ctrl = true;
+    // `--clip <dir>`: the copy and paste proof through this user's pasteboard; the orchestrator works the host's
+    // clipboard and meets this side through the files in `<dir>`.
+    if let Some(dir) = clip_dir {
+        backend.set_clipboard(swapdesk_input_mac::MacClipboard::new());
+        cfg.clip = Some(swapdesk_crossdrive::ClipStep {
+            dir: std::path::PathBuf::from(dir),
+            provider: std::sync::Mutex::new(Box::new(swapdesk_input_mac::MacClipboard::new())),
+        });
+    }
+    // `--files <dir>`: the files proof; the orchestrator works the host's disk and meets this side in `<dir>`.
+    cfg.files = files_dir;
+    // `--chat <dir>`: the chat proof; the orchestrator carries the texts to and from the host through `<dir>`.
+    cfg.chat = chat_dir;
+    // `--term <dir>`: the terminal and quick actions proof toward the host; the orchestrator writes the host's console
+    // user into `<dir>/term-expect-user`. `--swap`: asks for a swap and expects the reverse session (last).
+    cfg.term = term_dir;
+    cfg.swap = swap;
+    // `--reconnect <dir>`: the orchestrator drops this Mac's link for about 10 s and the session must come back (last).
+    cfg.reconnect = reconnect_dir;
     let log = |line: &str| println!("{line}");
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
     println!("{}", report.counts_line());
@@ -298,6 +401,27 @@ fn run(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor: PathBuf) -> Res
     println!("VIEWER_CLEANED keychain file, items and folder removed");
 
     result?;
+    if let Some(why) = report.clip_failed {
+        return Err(format!("copy and paste: {why}"));
+    }
+    if let Some(why) = report.files_failed {
+        return Err(format!("files: {why}"));
+    }
+    if let Some(why) = report.chat_failed {
+        return Err(format!("chat: {why}"));
+    }
+    if let Some(why) = report.term_failed {
+        return Err(format!("terminal: {why}"));
+    }
+    if let Some(why) = report.actions_failed {
+        return Err(format!("quick actions: {why}"));
+    }
+    if let Some(why) = report.swap_failed {
+        return Err(format!("swap: {why}"));
+    }
+    if let Some(why) = report.reconnect_failed {
+        return Err(format!("reconnect: {why}"));
+    }
     if report.frames_decoded == 0 {
         return Err("no frame decoded".into());
     }

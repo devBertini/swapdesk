@@ -21,6 +21,8 @@ unimplemented = "warn"
 swapdesk-platform = { path = "../swapdesk-platform" }
 # Only for the `Desktop` type that `ConsoleState` and `SessionEvent` carry (C3); a workspace crate, not a third-party one.
 swapdesk-proto = { path = "../swapdesk-proto" }
+# The updater's HTTP trait and URL policy (UPDATES.md 5); a workspace crate, not a third-party one.
+swapdesk-update = { path = "../swapdesk-update" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -30,6 +32,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Environment",
     "Win32_System_IO",
@@ -37,10 +40,26 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
+    "Win32_System_RestartManager",
     "Win32_System_Services",
     "Win32_System_Shutdown",
     "Win32_System_Threading",
+    "Win32_Networking_WinHttp",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `IFileOperation` for the bin (`disk`, FILES-UI.md 3.2): its COM interface comes from the `windows` crate.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+# `#[implement]` for the progress sink that guards the bin (`disk`): the macro names this crate in what it emits.
+windows-core = { workspace = true }

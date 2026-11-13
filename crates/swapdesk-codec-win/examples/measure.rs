@@ -146,7 +146,15 @@ mod run {
             device: if gpu_input { Some(uploader.device()) } else { None },
             ..Default::default()
         });
-        let cfg = EncoderConfig { width: W, height: H, fps: FPS as u16, kbps: KBPS, preset: Preset::Auto, adapter };
+        let cfg = EncoderConfig {
+            width: W,
+            height: H,
+            fps: FPS as u16,
+            kbps: KBPS,
+            preset: Preset::Auto,
+            adapter,
+            codec: swapdesk_platform::Codec::H264,
+        };
         enc.configure(&cfg).map_err(|e| e.to_string())?;
         let input: Vec<Frame> = if gpu_input {
             cpu_frames.iter().map(|f| uploader.upload(f).expect("upload")).collect()
@@ -276,8 +284,15 @@ mod run {
         cpu_frames: &[Frame],
     ) -> Result<Row, String> {
         let uploader = TextureUploader::new(adapter).map_err(|e| e.to_string())?;
-        let cfg =
-            EncoderConfig { width: size.0, height: size.1, fps: FPS as u16, kbps: KBPS, preset: Preset::Auto, adapter };
+        let cfg = EncoderConfig {
+            width: size.0,
+            height: size.1,
+            fps: FPS as u16,
+            kbps: KBPS,
+            preset: Preset::Auto,
+            adapter,
+            codec: swapdesk_platform::Codec::H264,
+        };
         let mut nv;
         let mut mf;
         let enc: &mut dyn VideoEncoder = match clsid {

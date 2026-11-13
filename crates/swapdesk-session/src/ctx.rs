@@ -114,9 +114,18 @@ pub(crate) struct CtxInner {
     pub desktop_req: watch::Sender<Option<Desktop>>,
     /// What the viewer's `Hello` asked for (host side; bits of a `PermissionSet`).
     requested: AtomicU16,
+    /// The protocol minor the peer announced in its `Hello` or `HelloAck` (0 until it did): nothing newer than it
+    /// is sent to that peer.
+    peer_minor: AtomicU16,
+    /// The session entered without a prompt (host side): the grant mode `Unattended`, or a resume of such a session.
+    /// It is not the `UNATTENDED` permission, which a viewer of minor 1 holds only after it elevated.
+    entered_unattended: AtomicBool,
     /// The stored grants of the device as the session last saw them (host side): a change of what is stored removes
     /// only what it revoked from them.
     pub stored_seen: Mutex<PermissionSet>,
+    /// What this side's account has stored for the peer's device (`grants_here` of its record): told to a peer of
+    /// minor 1 with `StoredGrants` after the grant and again on every change. `None`: not known, nothing is told.
+    pub own_stored: Mutex<Option<PermissionSet>>,
     /// Set when the session starts to close: nothing is started for it from then on.
     closing: AtomicBool,
 }
@@ -168,7 +177,10 @@ impl SessionCtx {
                 wake: Notify::new(),
                 desktop_req,
                 requested: AtomicU16::new(0),
+                peer_minor: AtomicU16::new(0),
+                entered_unattended: AtomicBool::new(false),
                 stored_seen: Mutex::new(PermissionSet::EMPTY),
+                own_stored: Mutex::new(None),
                 closing: AtomicBool::new(false),
             }),
         }
@@ -210,7 +222,8 @@ impl SessionCtx {
         tokio::time::timeout(limit, wait).await.unwrap_or(false) && self.inner.ended.borrow().is_none()
     }
 
-    /// What the viewer's `Hello` asked for (host side): an administrator terminal needs it as well as the grant (D10).
+    /// What the viewer's `Hello` asked for: on the host an administrator terminal needs it as well as the grant (D10);
+    /// on the viewer it caps what the viewer holds of the host's grant.
     pub fn requested(&self) -> PermissionSet {
         PermissionSet::closure(self.inner.requested.load(Ordering::SeqCst))
     }
@@ -219,7 +232,39 @@ impl SessionCtx {
         self.inner.requested.store(requested.bits(), Ordering::SeqCst);
     }
 
+    /// The protocol minor the peer announced (`Hello.proto_minor` on the host, `HelloAck.proto_minor` on the
+    /// viewer); 0 before that message, which is also what a 1.0 peer says.
+    pub fn peer_minor(&self) -> u16 {
+        self.inner.peer_minor.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_peer_minor(&self, minor: u16) {
+        self.inner.peer_minor.store(minor, Ordering::SeqCst);
+        self.inner.out.set_peer_minor(minor);
+    }
+
+    /// True for a host session that entered without a prompt (`GrantMode::Unattended`) and for a resume of one.
+    /// What D13 asks about: whether somebody at the host accepted this session.
+    pub fn entered_unattended(&self) -> bool {
+        self.inner.entered_unattended.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_entered_unattended(&self, unattended: bool) {
+        self.inner.entered_unattended.store(unattended, Ordering::SeqCst);
+    }
+
     /// What this session may do now.
+    /// What this side has stored for the peer's device changed (or is known now): a live session with a peer of
+    /// minor 1 tells it (`StoredGrants`, GRANTS-SYNC.md 3.2). It is about the stores, never about this session.
+    pub fn set_own_stored(&self, grants: PermissionSet) {
+        *lock(&self.inner.own_stored) = Some(grants);
+        self.inner.wake.notify_one();
+    }
+
+    pub(crate) fn own_stored(&self) -> Option<PermissionSet> {
+        *lock(&self.inner.own_stored)
+    }
+
     pub fn granted(&self) -> PermissionSet {
         *self.inner.grants.borrow()
     }

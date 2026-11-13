@@ -19,7 +19,7 @@ use swapdesk_proto::Sas;
 use swapdesk_trust::{
     Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
     PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex,
-    endpoint_from_socket, open_pairing_endpoint,
+    endpoint_from_socket, open_pairing_endpoint_filtered,
 };
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -172,9 +172,22 @@ impl Hub {
         let list = self.p.interfaces.list().unwrap_or_default();
         *lock(&self.pairing.nets) = list.clone();
         let mut sockets = Vec::new();
+        // Review of S3/S4, M6 (ACCOUNTS.md 5.5): a pairing port another program holds would hand the peer's "Parear"
+        // to that program. Pairing then does not open at all.
+        let mut held = false;
+        let is_held = |e: &std::io::Error| {
+            matches!(e.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied)
+        };
         for (addr, socket) in bind_quic_all_approved(&list, port) {
             match socket {
                 Ok(s) => sockets.push(s),
+                Err(e) if is_held(&e) => {
+                    held = true;
+                    self.log(
+                        Level::Warn,
+                        format_args!("the pairing port {port} is held by another program on {}", addr.addr),
+                    );
+                }
                 Err(e) => self.log(
                     Level::Warn,
                     format_args!("cannot open the pairing endpoint on {} ({}): {e}", addr.addr, addr.if_name),
@@ -195,11 +208,16 @@ impl Hub {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
+                        held |= is_held(&e);
                         self.log(Level::Warn, format_args!("cannot open the pairing endpoint on {addr}: {e}"));
                         break;
                     }
                 }
             }
+        }
+        if held {
+            self.log(Level::Warn, format_args!("pairing does not open: its port {port} is held by another program"));
+            return Err(ApiCode::Busy);
         }
         if sockets.is_empty() {
             return Err(ApiCode::Refused);
@@ -215,10 +233,11 @@ impl Hub {
         );
         let mut endpoints = Vec::new();
         for socket in sockets {
-            let endpoint = open_pairing_endpoint(socket, &self.p.identity).map_err(|e| {
-                self.log(Level::Warn, format_args!("pairing endpoint: {e}"));
-                ApiCode::Internal
-            })?;
+            let endpoint =
+                open_pairing_endpoint_filtered(socket, &self.p.identity, self.pairing_datagrams()).map_err(|e| {
+                    self.log(Level::Warn, format_args!("pairing endpoint: {e}"));
+                    ApiCode::Internal
+                })?;
             let serving = Arc::clone(&self.pairing.serving);
             serving.fetch_add(1, Ordering::SeqCst);
             let (service, e2) = (Arc::clone(&service), endpoint.clone());
@@ -231,6 +250,16 @@ impl Hub {
         Ok(endpoints)
     }
 
+    /// What quinn may see on the pairing sockets (F5): a blocked source, or one off the approved links, gets no answer.
+    fn pairing_datagrams(&self) -> swapdesk_trust::DatagramFilter {
+        crate::datagrams::pairing_datagrams(
+            Arc::clone(&self.pairing.nets),
+            Arc::clone(&self.p.trust),
+            Arc::clone(&self.neighbors),
+            self.allow_loopback(),
+        )
+    }
+
     /// The filter of the pairing endpoint: the LAN guard (PROTOCOL.md 1: on-link, not loopback, not this machine),
     /// then one connection attempt per source address per 30 s (PROTOCOL.md 3). A source that is not validated yet
     /// gets `retry()` and costs its turn nothing; a second attempt inside the interval is ignored before any
@@ -239,10 +268,12 @@ impl Hub {
         let (nets, allow_loopback) = (Arc::clone(&self.pairing.nets), self.allow_loopback());
         let rate = Arc::clone(&self.pairing.rate);
         let trust = Arc::clone(&self.p.trust);
+        let neighbors = Arc::clone(&self.neighbors);
         Arc::new(move |incoming| {
             let remote = incoming.remote_address().ip();
-            // A blocked address gets no answer, before any other look.
-            if trust.read(|s| s.is_blocked(remote)) {
+            // A blocked address, or a device blocked by its MAC (D65), gets no answer, before any other look.
+            let by_mac = neighbors.get().is_some_and(|n| crate::blocking::blocked_by_mac(&trust, n.as_ref(), remote));
+            if trust.read(|s| s.is_blocked(remote)) || by_mac {
                 return Decision::Ignore;
             }
             let local = incoming.local_ip();
@@ -308,6 +339,7 @@ impl Hub {
             id
         };
         self.p.presence.set_pairing(true);
+        self.update_receiving();
         let me = Arc::clone(self);
         rt.spawn(async move { me.watch_pairing_mode(id).await });
         self.notify_pairing(
@@ -372,6 +404,7 @@ impl Hub {
         };
         self.mode.close();
         self.p.presence.set_pairing(false);
+        self.update_receiving();
         self.notify_pairing(owner, Notify::Pairing { pairing_id: id, state });
     }
 
@@ -493,5 +526,6 @@ impl Hub {
             e.close(quinn::VarInt::from_u32(0), b"pairing closed");
         }
         self.p.presence.set_pairing(false);
+        self.update_receiving();
     }
 }

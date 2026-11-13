@@ -127,8 +127,16 @@ fn color_patches_round_trip_within_delta_e() {
             let who = format!("NVENC {preset:?}");
             let uploader = TextureUploader::new(nv.id).expect("uploader");
             let mut enc = NvencEncoder::new(NvencOptions { device: Some(uploader.device()), ..Default::default() });
-            enc.configure(&EncoderConfig { width: W, height: H, fps: 60, kbps: 20_000, preset, adapter: nv.id })
-                .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+            enc.configure(&EncoderConfig {
+                width: W,
+                height: H,
+                fps: 60,
+                kbps: 20_000,
+                preset,
+                adapter: nv.id,
+                codec: swapdesk_platform::Codec::H264,
+            })
+            .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
             let mut encoded = Vec::new();
             for n in 0..FRAMES {
                 encoded
@@ -175,8 +183,16 @@ fn every_encoder_signals_the_same_colour_in_the_sps() {
             let who = format!("NVENC {preset:?}");
             let uploader = TextureUploader::new(nv.id).expect("uploader");
             let mut enc = NvencEncoder::new(NvencOptions { device: Some(uploader.device()), ..Default::default() });
-            enc.configure(&EncoderConfig { width: W, height: H, fps: 60, kbps: 20_000, preset, adapter: nv.id })
-                .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
+            enc.configure(&EncoderConfig {
+                width: W,
+                height: H,
+                fps: 60,
+                kbps: 20_000,
+                preset,
+                adapter: nv.id,
+                codec: swapdesk_platform::Codec::H264,
+            })
+            .unwrap_or_else(|e| panic!("{who}: configure: {e}"));
             let encoded = enc.encode(&frame(&data, 0), false).expect("encode");
             seen.push((who.clone(), sps_color(&encoded, &who)));
         }

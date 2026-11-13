@@ -337,3 +337,86 @@ pub fn service_pid(name: &str) -> Result<u32, ServiceError> {
     let st = query_service(name)?;
     if st.pid == 0 { Err(ServiceError::NotRunning(name.to_string())) } else { Ok(st.pid) }
 }
+
+// ---------- stopping and starting a service (the update applier, UPDATES.md 6.2 step 5) ----------
+
+/// Opens the service `name` with `access` (the caller needs the rights: the applier runs as SYSTEM).
+fn open_service(name: &str, access: u32) -> Result<ScHandle, ServiceError> {
+    let name_w = wide(OsStr::new(name))?;
+    // SAFETY: null machine and database names mean the local active database.
+    let scm = unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) };
+    if scm.is_null() {
+        // SAFETY: no preconditions.
+        return Err(os_error("OpenSCManagerW", unsafe { GetLastError() }).into());
+    }
+    let scm = ScHandle(scm);
+    // SAFETY: `scm` is open; `name_w` is a null-terminated wide string.
+    let svc = unsafe { OpenServiceW(scm.0, name_w.as_ptr(), access) };
+    if svc.is_null() {
+        // SAFETY: no preconditions.
+        let code = unsafe { GetLastError() };
+        return Err(if code == ERROR_SERVICE_DOES_NOT_EXIST {
+            ServiceError::NotFound(name.to_string())
+        } else {
+            os_error("OpenServiceW", code).into()
+        });
+    }
+    Ok(ScHandle(svc))
+}
+
+/// Asks the SCM to stop `name` and waits up to `wait` for `SERVICE_STOPPED`; past that the service's process is
+/// ended. A service already stopped is fine.
+pub fn stop_service(name: &str, wait: Duration) -> Result<(), ServiceError> {
+    use windows_sys::Win32::System::Services::{ControlService, SERVICE_STOP};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    let svc = open_service(name, SERVICE_STOP | SERVICE_QUERY_STATUS)?;
+    // SAFETY: SERVICE_STATUS is plain data; zeroed is valid.
+    let mut status: SERVICE_STATUS = unsafe { core::mem::zeroed() };
+    // SAFETY: `svc` has SERVICE_STOP; `status` is live. A failure (not running, already stopping) is judged by the
+    // state read below.
+    unsafe { ControlService(svc.0, SERVICE_CONTROL_STOP, &mut status) };
+    let start = std::time::Instant::now();
+    loop {
+        let st = query_service(name)?;
+        if st.state == SERVICE_STOPPED {
+            return Ok(());
+        }
+        if start.elapsed() >= wait {
+            if st.pid != 0 {
+                // SAFETY: plain arguments; the handle is closed below.
+                let h = unsafe { OpenProcess(PROCESS_TERMINATE, 0, st.pid) };
+                if !h.is_null() {
+                    // SAFETY: `h` was opened with PROCESS_TERMINATE.
+                    unsafe { TerminateProcess(h, 1) };
+                    // SAFETY: `h` is valid and not used after this.
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+                }
+            }
+            // The SCM notices the process's end within moments.
+            for _ in 0..40 {
+                if query_service(name)?.state == SERVICE_STOPPED {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            return Err(os_error("stop_service", 1053).into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Asks the SCM to start `name` (it does not wait for `SERVICE_RUNNING`). A service already running is fine.
+pub fn start_service(name: &str) -> Result<(), ServiceError> {
+    use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
+    use windows_sys::Win32::System::Services::{SERVICE_START, StartServiceW};
+    let svc = open_service(name, SERVICE_START)?;
+    // SAFETY: `svc` has SERVICE_START; no arguments.
+    if unsafe { StartServiceW(svc.0, 0, null()) } == 0 {
+        // SAFETY: no preconditions.
+        let code = unsafe { GetLastError() };
+        if code != ERROR_SERVICE_ALREADY_RUNNING {
+            return Err(os_error("StartServiceW", code).into());
+        }
+    }
+    Ok(())
+}

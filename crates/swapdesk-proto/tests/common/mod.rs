@@ -79,6 +79,53 @@ pub fn dir_entry() -> impl Strategy<Value = DirEntry> {
     })
 }
 
+pub fn dir_entry2() -> impl Strategy<Value = DirEntry2> {
+    (text(255), sel(EntryKind::ALL), any::<u64>(), any::<u64>(), any::<u8>())
+        .prop_map(|(name, kind, size, mtime_ms, flags)| DirEntry2 { name, kind, size, mtime_ms, flags })
+}
+
+pub fn place() -> impl Strategy<Value = Place> {
+    (sel(PlaceKind::ALL), text(1024)).prop_map(|(kind, path)| Place { kind, path })
+}
+
+pub fn volume() -> impl Strategy<Value = Volume> {
+    (
+        any::<u32>(),
+        sel(VolumeKind::ALL),
+        text(64),
+        proptest::option::of(any::<u8>()),
+        any::<u64>(),
+        any::<u64>(),
+        any::<bool>(),
+    )
+        .prop_map(|(id, kind, label, letter, total_bytes, free_bytes, has_bin)| Volume {
+            id,
+            kind,
+            label,
+            letter,
+            total_bytes,
+            free_bytes,
+            has_bin,
+        })
+}
+
+pub fn fs_names() -> impl Strategy<Value = Vec<FsName>> {
+    proptest::collection::vec(text(255).prop_map(|name| FsName { name }), 0..=4)
+}
+
+pub fn fs_op_kind() -> impl Strategy<Value = FsOpKind> {
+    prop_oneof![
+        (text(1024), text(255)).prop_map(|(parent, name)| FsOpKind::MakeDir { parent, name }),
+        (text(1024), text(255), text(255)).prop_map(|(dir, name, new_name)| FsOpKind::Rename { dir, name, new_name }),
+        (text(1024), fs_names(), text(1024)).prop_map(|(from_dir, names, to_dir)| FsOpKind::Move {
+            from_dir,
+            names,
+            to_dir
+        }),
+        (text(1024), fs_names()).prop_map(|(dir, names)| FsOpKind::Trash { dir, names }),
+    ]
+}
+
 pub fn video_cap() -> impl Strategy<Value = VideoCap> {
     (sel(Codec::ALL), sel(H264Profile::ALL), any::<u8>(), any::<u16>(), any::<u16>(), any::<u16>()).prop_map(
         |(codec, profile, max_level, max_width, max_height, max_fps)| VideoCap {
@@ -144,6 +191,8 @@ pub fn message_strategies() -> Vec<BoxedStrategy<Message>> {
         msg!(Bye { code: errc() }),
         msg!(HostState { desktop: sel(Desktop::ALL), paused: any::<bool>() }),
         msg!(ConsentPending { feature: sel(Feature::ALL), timeout_s: any::<u16>() }),
+        msg!(StoredGrants { grants: perms() }),
+        Just(Message::Elevate(Elevate {})).boxed(),
         msg!(DisplayList { displays: proptest::collection::vec(display(), 0..=4) }),
         msg!(SelectDisplay { display: any::<u16>() }),
         msg!(VideoSettings {
@@ -196,6 +245,30 @@ pub fn message_strategies() -> Vec<BoxedStrategy<Message>> {
             truncated: any::<bool>(),
         }),
         msg!(FileGet { transfer_id: any::<u32>(), path: text(1024) }),
+        msg!(DirPage { req_id: any::<u32>(), path: text(1024), start: any::<u32>(), max: any::<u16>() }),
+        msg!(DirPageListing {
+            req_id: any::<u32>(),
+            path: text(1024),
+            start: any::<u32>(),
+            entries: proptest::collection::vec(dir_entry2(), 0..=4),
+            next: proptest::option::of(any::<u32>()),
+            free_bytes: proptest::option::of(any::<u64>()),
+        }),
+        msg!(VolumesRequest { req_id: any::<u32>() }),
+        msg!(VolumesList {
+            req_id: any::<u32>(),
+            home: text(1024),
+            places: proptest::collection::vec(place(), 0..=3),
+            volumes: proptest::collection::vec(volume(), 0..=3),
+        }),
+        msg!(FsOp { op_id: any::<u32>(), op: fs_op_kind() }),
+        msg!(FsOpResult {
+            op_id: any::<u32>(),
+            results: proptest::collection::vec(
+                (text(255), errc()).prop_map(|(name, code)| OpItem { name, code }),
+                0..=4
+            ),
+        }),
         msg!(TermOpen { term_id: any::<u32>(), cols: any::<u16>(), rows: any::<u16>(), admin: any::<bool>() }),
         msg!(TermOpened { term_id: any::<u32>(), account: text(64) }),
         msg!(TermResize { term_id: any::<u32>(), cols: any::<u16>(), rows: any::<u16>() }),
@@ -221,6 +294,7 @@ pub fn message_strategies() -> Vec<BoxedStrategy<Message>> {
         msg!(PairReveal { nonce_i: any::<[u8; 32]>() }),
         msg!(PairConfirm { matches: any::<bool>() }),
         msg!(PairResult { ok: any::<bool>(), code: errc() }),
+        msg!(GrantsSync { proto_minor: any::<u16>(), grants: perms() }),
         msg!(Ping { nonce: any::<u32>(), t_send_us: any::<u64>() }),
         msg!(Pong { nonce: any::<u32>(), t_send_us: any::<u64>(), t_peer_us: any::<u64>() }),
         msg!(

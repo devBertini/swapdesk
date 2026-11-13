@@ -337,13 +337,13 @@ fn every_unknown_tag_is_fatal() {
         }
     }
     check_u8::<Os>(&[0, 1]);
-    check_u8::<Codec>(&[1]);
+    check_u8::<Codec>(&[1, 2]);
     check_u8::<AudioCodec>(&[1]);
     check_u8::<Intent>(&[0, 1]);
     check_u8::<H264Profile>(&[0, 1]);
     check_u8::<KbKind>(&[0, 1, 2, 3, 4]);
     check_u8::<GrantMode>(&[0, 1, 2, 3]);
-    check_u8::<Desktop>(&[0, 1, 2, 3]);
+    check_u8::<Desktop>(&[0, 1, 2, 3, 4]);
     check_u8::<Feature>(&[0, 1]);
     check_u8::<Preset>(&[0, 1, 2]);
     check_u8::<Special>(&[0]);
@@ -357,7 +357,7 @@ fn every_unknown_tag_is_fatal() {
 fn error_codes_outside_section_8_are_fatal() {
     for code in 0..=u16::MAX {
         let r = ErrorCode::decode(&code.to_le_bytes());
-        if code <= 21 {
+        if code <= 26 {
             assert_eq!(r.unwrap().tag(), code);
         } else {
             assert!(matches!(r, Err(CodecError::UnknownTag { .. })), "{code}");
@@ -379,8 +379,8 @@ fn bad_tags_inside_messages_are_fatal() {
     assert_eq!(Message::decode_payload(0x0107, &[2]), Err(CodecError::InvalidBool));
     assert_eq!(Message::decode_payload(0x0107, &[1]).unwrap(), Message::AudioControl(AudioControl { enabled: true }));
     // an unknown enum value in PairResult.code and Error.code
-    assert!(Message::decode_payload(0x0705, &[1, 22, 0]).is_err());
-    assert!(Message::decode_payload(0x0FFF, &[22, 0, 1, 0, 0, 0, 0, 0]).is_err());
+    assert!(Message::decode_payload(0x0705, &[1, 27, 0]).is_err());
+    assert!(Message::decode_payload(0x0FFF, &[27, 0, 1, 0, 0, 0, 0, 0]).is_err());
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn headers_refuse_wrong_kinds_versions_flags_and_reserved_bytes() {
             let want = match off {
                 0 => val == 1,
                 1 => val < 8,
-                24 => val == 1,
+                24 => val == 1 || val == 2,
                 _ => val == 0,
             };
             assert_eq!(ok, want, "offset {off} value {val}");
@@ -588,4 +588,263 @@ fn pairing_inputs_are_plain_concatenations() {
             Ok(())
         })
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+// ---------- minor 1 ----------
+
+#[test]
+fn stored_grants_and_grants_sync_round_trip_byte_for_byte() {
+    for bits in 0..=0x00FFu16 {
+        let Some(grants) = PermissionSet::from_bits(bits) else { continue };
+        let stored = Message::StoredGrants(StoredGrants { grants });
+        let frame = stored.encode_frame().unwrap();
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap(), stored);
+        assert_eq!(frame, [&[0x0B, 0x02][..], &bits.to_le_bytes()].concat());
+        for proto_minor in [1u16, 2, 0x1234, u16::MAX] {
+            let sync = Message::GrantsSync(GrantsSync { proto_minor, grants });
+            let frame = sync.encode_frame().unwrap();
+            assert_eq!(Message::decode_frame_exact(&frame).unwrap(), sync);
+            assert_eq!(frame, [&[0x48, 0x01, 0x04][..], &proto_minor.to_le_bytes(), &bits.to_le_bytes()].concat());
+        }
+    }
+}
+
+#[test]
+fn stored_grants_and_grants_sync_have_the_documented_bytes() {
+    let stored = Message::StoredGrants(StoredGrants { grants: PermissionSet::CONTROL });
+    assert_eq!(stored.encode_frame().unwrap(), [0x0B, 0x02, 0x03, 0x00]);
+    let sync = Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::CONTROL });
+    assert_eq!(sync.encode_frame().unwrap(), [0x48, 0x01, 0x04, 0x01, 0x00, 0x03, 0x00]);
+    // Neither travels on the pairing endpoint.
+    assert!(!stored.is_pairing() && !sync.is_pairing());
+}
+
+#[test]
+fn a_grant_set_that_breaks_implies_or_uses_reserved_bits_is_rejected_in_both() {
+    for (bits, what) in [
+        (0b10u16, "CONTROL without VIEW"),
+        (0b1_0000, "ADMIN_TERMINAL without TERMINAL"),
+        (0b1000_0000, "UNATTENDED without VIEW"),
+        (0x0101, "reserved bit 8"),
+        (0x8000, "reserved bit 15"),
+    ] {
+        let b = bits.to_le_bytes();
+        assert_eq!(
+            Message::decode_payload(0x000B, &b),
+            Err(CodecError::InvalidValue("permission set")),
+            "StoredGrants: {what}"
+        );
+        assert_eq!(
+            Message::decode_payload(0x0801, &[1, 0, b[0], b[1]]),
+            Err(CodecError::InvalidValue("permission set")),
+            "GrantsSync: {what}"
+        );
+    }
+    // The payload is exactly its fields: nothing short, nothing after them.
+    assert!(Message::decode_payload(0x000B, &[3]).is_err());
+    assert_eq!(Message::decode_payload(0x000B, &[3, 0, 0]), Err(CodecError::TrailingBytes));
+    assert!(Message::decode_payload(0x0801, &[1, 0, 3]).is_err());
+    assert_eq!(Message::decode_payload(0x0801, &[1, 0, 3, 0, 0]), Err(CodecError::TrailingBytes));
+}
+
+#[test]
+fn elevate_and_account_away_round_trip_byte_for_byte() {
+    let elevate = Message::Elevate(Elevate {});
+    let frame = elevate.encode_frame().unwrap();
+    assert_eq!(Message::decode_frame_exact(&frame).unwrap(), elevate);
+    // No fields: any payload byte is one too many.
+    assert_eq!(Message::decode_payload(0x000C, &[0]), Err(CodecError::TrailingBytes));
+
+    let away: Vec<Message> = vec![
+        SessionRefused { code: ErrorCode::AccountAway }.into(),
+        Bye { code: ErrorCode::AccountAway }.into(),
+        ErrorMessage { code: ErrorCode::AccountAway, fatal: false, about_type: 0x000C, about_id: 0 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: true }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: false }.into(),
+    ];
+    for m in away {
+        let frame = m.encode_frame().unwrap();
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap(), m, "{m:?}");
+        assert_eq!(Message::decode_frame_exact(&frame).unwrap().encode_frame().unwrap(), frame);
+    }
+}
+
+#[test]
+fn they_have_the_documented_bytes() {
+    assert_eq!(Message::Elevate(Elevate {}).encode_frame().unwrap(), [0x0C, 0x00]);
+    let refused = Message::SessionRefused(SessionRefused { code: ErrorCode::AccountAway });
+    assert_eq!(refused.encode_frame().unwrap(), [0x06, 0x02, 0x16, 0x00]);
+    let state = Message::HostState(HostState { desktop: Desktop::AccountAway, paused: true });
+    assert_eq!(state.encode_frame().unwrap(), [0x09, 0x02, 0x04, 0x01]);
+}
+
+/// The minor of a message is the newest of its type and of the enum values it carries, so one check before a
+/// send keeps everything of minor 1 away from a 1.0 peer.
+#[test]
+fn every_type_names_the_minor_that_introduced_it() {
+    for id in Message::ALL_TYPE_IDS {
+        let want = match *id {
+            0x000B | 0x000C | 0x0801 => 1,
+            0x040C..=0x0411 => 2,
+            _ => 0,
+        };
+        assert_eq!(Message::type_min_minor(*id), want, "{id:#06x}");
+    }
+    assert_eq!(Message::type_min_minor(0x3FFF), 0, "an unknown type names no minor");
+
+    // Every generated message of a 1.0 type that carries no newer value is of minor 0; the new types are of 1.
+    let mut runner = TestRunner::new(Config { cases: 64, failure_persistence: None, ..Config::default() });
+    for strategy in message_strategies() {
+        runner
+            .run(&strategy, |m| {
+                let carries_new = format!("{m:?}").contains("AccountAway");
+                let of_type = Message::type_min_minor(m.type_id());
+                let want = if of_type == 2 { 2 } else { u16::from(of_type == 1 || carries_new) };
+                prop_assert_eq!(m.min_minor(), want, "{:?}", m);
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    // Each message that can carry a value of minor 1 says so.
+    let code = ErrorCode::AccountAway;
+    let carriers: Vec<Message> = vec![
+        SessionRefused { code }.into(),
+        Bye { code }.into(),
+        SwapDecline { request_id: 1, code }.into(),
+        FileDecline { transfer_id: 1, code }.into(),
+        QuickActionResult { action_id: 1, code }.into(),
+        PairResult { ok: false, code }.into(),
+        ErrorMessage { code, fatal: true, about_type: 0, about_id: 0 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: true }.into(),
+    ];
+    for m in carriers {
+        assert_eq!(m.min_minor(), 1, "{m:?}");
+        assert_eq!(Message::type_min_minor(m.type_id()), 0, "{m:?}: its type is of 1.0");
+    }
+    assert_eq!(Message::from(Bye { code: ErrorCode::NoError }).min_minor(), 0);
+}
+
+/// The one mapping the send path applies: a peer of minor 0 gets no minor-1 type, and each minor-1 value in the
+/// form its own minor has for it. A peer of minor 1 gets everything as it is.
+#[test]
+fn no_minor_1_type_or_value_reaches_a_minor_0_peer_in_any_message() {
+    let away = ErrorCode::AccountAway;
+    let carriers: Vec<Message> = vec![
+        SessionRefused { code: away }.into(),
+        Bye { code: away }.into(),
+        SwapDecline { request_id: 7, code: away }.into(),
+        FileDecline { transfer_id: 7, code: away }.into(),
+        QuickActionResult { action_id: 7, code: away }.into(),
+        PairResult { ok: false, code: away }.into(),
+        ErrorMessage { code: away, fatal: true, about_type: 3, about_id: 7 }.into(),
+        HostState { desktop: Desktop::AccountAway, paused: false }.into(),
+    ];
+    for m in carriers {
+        assert_eq!(m.clone().for_peer(1), Some(m.clone()), "a peer of minor 1 gets it whole");
+        let old = m.clone().for_peer(0).expect("its type is of 1.0: it is sent, in its 1.0 form");
+        assert_eq!((old.type_id(), old.min_minor()), (m.type_id(), 0), "{m:?} -> {old:?}");
+        assert!(format!("{old:?}").contains(if matches!(m, Message::HostState(_)) {
+            "Locked"
+        } else {
+            "NobodyPresent"
+        }));
+        // What 1.0 can decode: the frame round-trips, and nothing else of the message moved.
+        assert_eq!(Message::decode_frame_exact(&old.encode_frame().unwrap()).unwrap(), old);
+    }
+    // A desktop the old peer cannot be told of is one it must not act on: it reads as locked and paused.
+    let state = Message::from(HostState { desktop: Desktop::AccountAway, paused: false }).for_peer(0);
+    assert_eq!(state, Some(HostState { desktop: Desktop::Locked, paused: true }.into()));
+    // The types of minor 1 are not sent at all.
+    for m in [
+        Message::StoredGrants(StoredGrants { grants: PermissionSet::VIEW }),
+        Message::Elevate(Elevate {}),
+        Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::VIEW }),
+    ] {
+        assert_eq!(m.clone().for_peer(0), None, "{m:?}");
+        assert_eq!(m.clone().for_peer(1), Some(m));
+    }
+    // Every message of 1.0 is untouched for every peer.
+    let mut runner = TestRunner::new(Config { cases: 32, failure_persistence: None, ..Config::default() });
+    for strategy in message_strategies() {
+        runner
+            .run(&strategy, |m| {
+                if m.min_minor() == 0 {
+                    prop_assert_eq!(m.clone().for_peer(0), Some(m.clone()));
+                }
+                prop_assert_eq!(m.clone().for_peer(u16::MAX), Some(m));
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
+fn caps_with(codecs: &[Codec]) -> Capabilities {
+    Capabilities {
+        video_decode: codecs
+            .iter()
+            .map(|c| VideoCap {
+                codec: *c,
+                profile: H264Profile::Main,
+                max_level: 51,
+                max_width: 3840,
+                max_height: 2160,
+                max_fps: 60,
+            })
+            .collect(),
+        audio: vec![AudioCodec::Opus48Stereo],
+        max_datagram: 1200,
+        keyboard: KeyboardInfo { kind: KbKind::Unknown, layout: String::new() },
+        features: 0,
+    }
+}
+
+#[test]
+fn an_hevc_decoder_is_never_listed_to_a_minor_0_peer() {
+    let both = Message::Capabilities(caps_with(&[Codec::Hevc, Codec::H264]));
+    assert_eq!(both.min_minor(), 2);
+    assert_eq!(both.clone().for_peer(2), Some(both.clone()), "a minor-2 peer reads the HEVC entry");
+    assert_eq!(both.clone().for_peer(1), Some(Message::Capabilities(caps_with(&[Codec::H264]))), "minor 1: left out");
+    let old = both.for_peer(0).expect("Capabilities is a 1.0 type");
+    assert_eq!(old, Message::Capabilities(caps_with(&[Codec::H264])));
+    assert_eq!(old.min_minor(), 0);
+    assert_eq!(Message::decode_frame_exact(&old.encode_frame().unwrap()).unwrap(), old);
+    // A peer that lists only H.264 is sent its capabilities as they are.
+    let h264 = Message::Capabilities(caps_with(&[Codec::H264]));
+    assert_eq!(h264.clone().for_peer(0), Some(h264));
+}
+
+#[test]
+fn every_capability_combination_picks_the_expected_codec() {
+    for viewer in [&[][..], &[Codec::H264], &[Codec::Hevc], &[Codec::Hevc, Codec::H264]] {
+        for minor in [0u16, 1, 2, 7] {
+            for host_hw in [false, true] {
+                let want =
+                    if host_hw && minor >= 2 && viewer.contains(&Codec::Hevc) { Codec::Hevc } else { Codec::H264 };
+                assert_eq!(caps_with(viewer).pick_codec(minor, host_hw), want, "{viewer:?} minor {minor} hw {host_hw}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_video_header_in_hevc_round_trips() {
+    let header = VideoHeader {
+        keyframe: true,
+        config: true,
+        discontinuity: false,
+        display_id: 1,
+        frame_id: 9,
+        capture_us: 5,
+        encode_us: 3,
+        width: 1920,
+        height: 1080,
+        codec: Codec::Hevc,
+        payload_len: 4,
+    };
+    let mut w = swapdesk_proto::codec::Writer::new();
+    swapdesk_proto::codec::Wire::put(&header, &mut w, 0).unwrap();
+    let bytes = w.into_bytes();
+    let mut r = swapdesk_proto::codec::Reader::new(&bytes);
+    assert_eq!(<VideoHeader as swapdesk_proto::codec::Wire>::get(&mut r, 0).unwrap(), header);
 }

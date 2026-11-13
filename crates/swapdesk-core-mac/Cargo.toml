@@ -25,6 +25,10 @@ swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # Stage 23 cross-machine proof: `examples/cross_viewer`.
 swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
+# v1.1 copy and paste proof: `examples/cross_viewer --clip`.
+swapdesk-input-mac = { path = "../swapdesk-input-mac" }
+# The swap proof: `examples/cross_viewer --swap` announces itself on the LAN (the other side opens the reverse session to it).
+swapdesk-lan = { path = "../swapdesk-lan" }
 
 [dev-dependencies]
 swapdesk-audio = { path = "../swapdesk-audio" }

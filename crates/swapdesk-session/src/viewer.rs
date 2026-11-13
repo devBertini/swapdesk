@@ -27,6 +27,9 @@ pub struct ViewerConfig {
     pub os: Os,
     pub os_version: String,
     pub app_version: String,
+    /// The protocol minor this viewer announces in its `Hello`: this build's own. A test that plays a viewer
+    /// of 1.0 sets 0.
+    pub proto_minor: u16,
     pub intent: Intent,
     /// What the viewer asks for. The viewer's service sets `UNATTENDED` or `ADMIN_TERMINAL` only for a local
     /// administrator (D10, F-PERM-03).
@@ -45,6 +48,9 @@ pub struct ViewerConfig {
     pub registry: Registry,
     /// Called with the countdown when the host starts a prompt ("Aguardando <host>"), before the session opens.
     pub on_prompt: Option<Arc<dyn Fn(u16) + Send + Sync>>,
+    /// What this viewer's account has stored for the host (`grants_here` of the host's record): told to a host of
+    /// minor 1 with `StoredGrants` when the grant comes. `None`: not known, nothing is told.
+    pub stored_grants: Option<PermissionSet>,
 }
 
 impl ViewerConfig {
@@ -61,6 +67,7 @@ impl ViewerConfig {
             os,
             os_version: os_version.into(),
             app_version: app_version.into(),
+            proto_minor: PROTO_MINOR,
             intent: Intent::Control,
             requested: PermissionSet::CONTROL,
             resume: None,
@@ -72,12 +79,13 @@ impl ViewerConfig {
             clock,
             registry: Registry::new(),
             on_prompt: None,
+            stored_grants: None,
         }
     }
 
     fn hello(&self) -> Hello {
         Hello {
-            proto_minor: PROTO_MINOR,
+            proto_minor: self.proto_minor,
             app_version: self.app_version.clone(),
             name: self.name.clone(),
             os: self.os,
@@ -136,6 +144,8 @@ pub enum ViewerEvent {
         timeout_s: u16,
     },
     PermissionsChanged(PermissionSet),
+    /// What the host's account has stored for this viewer (`StoredGrants`, minor 1): display only.
+    PeerGrants(PermissionSet),
     HostState {
         desktop: Desktop,
         paused: bool,
@@ -153,6 +163,7 @@ impl std::fmt::Debug for ViewerEvent {
         match self {
             Self::PromptPending { timeout_s } => f.debug_struct("PromptPending").field("timeout_s", timeout_s).finish(),
             Self::PermissionsChanged(g) => f.debug_tuple("PermissionsChanged").field(g).finish(),
+            Self::PeerGrants(g) => f.debug_tuple("PeerGrants").field(g).finish(),
             Self::HostState { desktop, paused } => {
                 f.debug_struct("HostState").field("desktop", desktop).field("paused", paused).finish()
             }
@@ -182,6 +193,17 @@ impl Drop for ViewerSession {
     }
 }
 
+/// Armed while `open_io` waits for the host's answer: dropped armed, it says `Bye { NO_ERROR }`.
+struct UnansweredGuard(Option<SessionCtx>);
+
+impl Drop for UnansweredGuard {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.0.take() {
+            ctx.bye(ErrorCode::NoError);
+        }
+    }
+}
+
 impl ViewerSession {
     /// Dials `addr`, expecting the device whose key is `expected` (PROTOCOL.md 2.2), and opens the session.
     pub async fn connect(
@@ -191,7 +213,25 @@ impl ViewerSession {
         expected: Spki,
         cfg: ViewerConfig,
     ) -> Result<Self, OpenError> {
-        let conn = connect_session(endpoint, identity, addr, expected).await.map_err(|_| OpenError::Lost)?;
+        Self::connect_within(endpoint, identity, addr, expected, cfg, Duration::from_secs(10)).await
+    }
+
+    /// As [`connect`](Self::connect), with the QUIC handshake bounded by `handshake` (the decision after it is not).
+    /// A dial that runs while the link is down sends its first packet at once and then waits for QUIC's own
+    /// retransmissions, which come after 1 s, 3 s, 7 s: a link that returns in a gap is not noticed until the
+    /// next one. A caller that redials (the reconnect of F-NET-01) bounds each attempt and starts a fresh one instead.
+    pub async fn connect_within(
+        endpoint: &Endpoint,
+        identity: &Identity,
+        addr: std::net::SocketAddr,
+        expected: Spki,
+        cfg: ViewerConfig,
+        handshake: Duration,
+    ) -> Result<Self, OpenError> {
+        let conn = tokio::time::timeout(handshake, connect_session(endpoint, identity, addr, expected))
+            .await
+            .map_err(|_| OpenError::Lost)?
+            .map_err(|_| OpenError::Lost)?;
         Self::open(conn, Some(device_id(&expected)), cfg).await
     }
 
@@ -213,7 +253,9 @@ impl ViewerSession {
         host: Option<DeviceId>,
         cfg: ViewerConfig,
     ) -> Result<Self, OpenError> {
-        let ViewerConfig { liveness, grant_wait, caps, clock, registry, on_prompt, capabilities, .. } = cfg.clone();
+        let ViewerConfig {
+            liveness, grant_wait, caps, clock, registry, on_prompt, capabilities, stored_grants, ..
+        } = cfg.clone();
         io.out.send(cfg.hello()).await.map_err(|_| OpenError::Lost)?;
         io.out.send(capabilities).await.map_err(|_| OpenError::Lost)?;
         let (ev_tx, ev_rx) = mpsc::channel(256);
@@ -229,17 +271,27 @@ impl ViewerSession {
             clock,
             consent: None,
         });
+        if let Some(grants) = stored_grants {
+            ctx.set_own_stored(grants);
+        }
+        // What this viewer asked for caps what it holds of the host's grant (F2 of the review of 13/11).
+        ctx.set_requested(cfg.requested);
         let side = Side::Viewer {
             events: events_tx,
             opened: Some(opened_tx),
             deadline: now() + grant_wait,
             peer: None,
             on_prompt,
+            own_minor: cfg.proto_minor,
         };
         let actor = Actor::new(side, ctx.clone(), io, conn, ev_tx, ev_rx, Arc::new(registry), liveness, now());
         let task = tokio::spawn(actor.run());
+        // A caller that gives up before the host answers (the future is dropped) ends the attempt with a `Bye`, so the
+        // host closes its question instead of leaving it open until its own deadline.
+        let mut unanswered = UnansweredGuard(Some(ctx.clone()));
         // The state machine has its own deadline; this one only guards against a task that never answers.
         let waited = tokio::time::timeout(grant_wait + Duration::from_secs(5), opened_rx).await;
+        unanswered.0 = None;
         match waited {
             Ok(Ok(Ok(grant))) => Ok(Self { ctx, events: events_rx, grant, task, quiet: false }),
             Ok(Ok(Err(e))) => Err(e),

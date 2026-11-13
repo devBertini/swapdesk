@@ -51,28 +51,43 @@ fn gdi_capture(d: &DisplayInfo) -> Vec<u8> {
 /// For grey GDI pixels, the mean duplication value per GDI value. Returns the gap averaged over those pixels, the
 /// worst gap of a level with at least 500 pixels, and how many levels counted.
 fn grey_gap(dda: &[u8], stride: usize, gdi: &[u8], w: usize, h: usize) -> (f64, f64, usize) {
-    let mut levels = vec![(0u64, 0u64); 256];
+    // Per GDI grey level, a histogram of the duplication's R+G+B at the same pixels. The level's gap is taken at the
+    // median, not the mean: a patch of the desktop that changed between the two captures (a terminal printing, a
+    // clock) leaves outliers that would drag a mean, while the colour defect this guards against moves every pixel.
+    let mut levels = vec![[0u32; 766]; 256];
     for y in 0..h {
         for x in 0..w {
             let a = &dda[y * stride + x * 4..][..3];
             let b = &gdi[(y * w + x) * 4..][..3];
             if b[0] == b[1] && b[1] == b[2] {
-                let l = &mut levels[b[0] as usize];
-                l.0 += 1;
-                l.1 += u64::from(a[0]) + u64::from(a[1]) + u64::from(a[2]);
+                levels[b[0] as usize][usize::from(a[0]) + usize::from(a[1]) + usize::from(a[2])] += 1;
             }
         }
     }
     let mut worst = 0f64;
     let mut counted = 0;
     let (mut weighted, mut pixels) = (0f64, 0u64);
+    let counts: Vec<u64> = levels.iter().map(|h| h.iter().map(|&c| u64::from(c)).sum()).collect();
+    // A level counts when it covers 0.5% of the grey pixels (and at least 500). Smaller ones are an app's own content
+    // that the system composes differently for the duplication and for GDI under Advanced Color (measured: a few
+    // hundred to two thousand pixels of a 2560x1440 desktop, up to 20 levels apart, with the rest within 0.1).
+    let floor = (counts.iter().skip(16).sum::<u64>() / 200).max(500);
     // Below 16 the two paths round near-black differently (measured within 3 levels); the defect is far above it.
-    for (v, (n, total)) in levels.iter().enumerate().skip(16) {
-        if *n >= 500 {
+    for (v, hist) in levels.iter().enumerate().skip(16) {
+        let n = counts[v];
+        if n >= floor {
             counted += 1;
-            let gap = (*total as f64 / (*n * 3) as f64 - v as f64).abs();
+            let (mut seen, mut median) = (0u64, 0usize);
+            for (sum, &c) in hist.iter().enumerate() {
+                seen += u64::from(c);
+                if seen * 2 >= n {
+                    median = sum;
+                    break;
+                }
+            }
+            let gap = (median as f64 / 3.0 - v as f64).abs();
             worst = worst.max(gap);
-            weighted += gap * *n as f64;
+            weighted += gap * n as f64;
             pixels += n;
         }
     }
@@ -80,6 +95,7 @@ fn grey_gap(dda: &[u8], stride: usize, gdi: &[u8], w: usize, h: usize) -> (f64, 
 }
 
 #[test]
+#[ignore = "interactive: compares the live desktop with GDI, so anything that changes on screen meanwhile fails it; run on an idle PC"]
 fn the_duplicated_desktop_has_the_colours_gdi_sees() {
     // SAFETY: process-wide DPI awareness before any DC, so GDI works in physical pixels.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };

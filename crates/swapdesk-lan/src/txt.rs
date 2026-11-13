@@ -18,6 +18,9 @@ pub const KEY_NAME: &str = "name";
 pub const KEY_OS: &str = "os";
 pub const KEY_FP: &str = "fp";
 pub const KEY_PAIR: &str = "pair";
+/// The protocol minor the device speaks (GRANTS-SYNC.md 4.5). Not a field of [`Txt`] and never written by
+/// [`Txt::encode`]: the 1.0 record has exactly the four keys above, and a 1.0 reader ignores this one.
+pub const KEY_MINOR: &str = "minor";
 
 /// A received value, when its key was present.
 type Value<'a> = Option<&'a [u8]>;
@@ -30,6 +33,22 @@ pub struct Txt {
     /// The device ID: the first 16 bytes of SHA-256(SPKI).
     pub fingerprint: [u8; FINGERPRINT_BYTES],
     pub pairing: bool,
+}
+
+/// The `minor` entry to append to an own record: none for minor 0 (a 1.0 record has no such key).
+pub fn minor_entry(minor: u16) -> Option<(String, String)> {
+    (minor != 0).then(|| (KEY_MINOR.to_string(), minor.to_string()))
+}
+
+/// Reads `minor` from a received record, leniently: ASCII decimal without a leading zero, 1 to 65535. An absent key,
+/// a duplicate, or any other value reads 0 (a 1.0 peer) and never refuses the record.
+pub fn read_minor(entries: &[(&str, &[u8])]) -> u16 {
+    let mut found = entries.iter().filter(|(k, _)| k.eq_ignore_ascii_case(KEY_MINOR));
+    let (Some((_, val)), None) = (found.next(), found.next()) else { return 0 };
+    if val.is_empty() || val[0] == b'0' || !val.iter().all(u8::is_ascii_digit) {
+        return 0;
+    }
+    std::str::from_utf8(val).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +202,39 @@ mod tests {
                 assert_eq!(Txt::decode(&as_entries(&enc)).unwrap(), t);
             }
         }
+    }
+
+    #[test]
+    fn the_minor_key_is_appended_from_1_and_read_leniently() {
+        assert_eq!(minor_entry(0), None);
+        assert_eq!(minor_entry(1), Some(("minor".to_string(), "1".to_string())));
+        assert_eq!(minor_entry(65535), Some(("minor".to_string(), "65535".to_string())));
+        // Own record: the 1.0 keys, then minor; the 1.0 reader of the same record still decodes it.
+        let mut enc = sample().encode().unwrap();
+        enc.extend(minor_entry(1));
+        assert_eq!(enc.last().unwrap().0, "minor");
+        let entries = as_entries(&enc);
+        assert_eq!(read_minor(&entries), 1);
+        assert_eq!(Txt::decode(&entries).unwrap(), sample());
+        for (good, want) in [("1", 1u16), ("2", 2), ("10", 10), ("65535", 65535)] {
+            assert_eq!(read_minor(&[("minor", good.as_bytes())]), want, "{good}");
+        }
+        assert_eq!(read_minor(&[("MINOR", b"3")]), 3);
+        for bad in ["", "0", "01", "00", "65536", "99999999999", "-1", "+1", " 1", "1 ", "1.0", "x", "\u{0661}"] {
+            assert_eq!(read_minor(&[("minor", bad.as_bytes())]), 0, "{bad:?}");
+        }
+        assert_eq!(read_minor(&[("minor", &[0xFF, 0xFE])]), 0);
+        // A duplicate is bad data: 0, and the record itself is still not refused for it.
+        assert_eq!(read_minor(&[("minor", b"1"), ("minor", b"1")]), 0);
+    }
+
+    #[test]
+    fn a_1_0_record_without_minor_reads_as_minor_0() {
+        let enc = Txt { pairing: true, ..sample() }.encode().unwrap();
+        let entries = as_entries(&enc);
+        assert_eq!(read_minor(&entries), 0);
+        assert_eq!(read_minor(&[]), 0);
+        assert!(Txt::decode(&entries).is_ok());
     }
 
     #[test]

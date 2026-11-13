@@ -1,5 +1,5 @@
 //! The viewer's own shortcuts (D30) as the interface shows and runs them: the definitions, their names for the
-//! settings screen and the toolbar tooltip, and the full-screen state. Recognising the keys is `swapdesk-keys`'s
+//! settings screen, the hint of each button of the session bar, and the full-screen state. Recognising the keys is `swapdesk-keys`'s
 //! `shortcuts` (on HID usages); the shells and the viewer pipeline hand the recognised [`ViewerAction`] to
 //! [`UiState::run_shortcut`].
 //!
@@ -7,7 +7,7 @@
 //! Ctrl+Alt+Del with Ctrl+Alt+End, disconnect Ctrl+Alt+Q. macOS: Control+Option in place of Ctrl+Alt and
 //! Control+Command+F for full screen. They stay with Swapdesk when "Capturar atalhos do sistema" is on.
 
-use crate::api::{Command, Msg};
+use crate::api::{Command, Msg, SpecialKeys};
 use crate::interact::ControlId;
 use crate::state::{Activation, Changed, UiState};
 use crate::strings::MsgKey;
@@ -116,13 +116,32 @@ impl UiState {
         ViewerAction::ALL.iter().map(|a| (self.t(a.label()), self.shortcut_keys(*a))).collect()
     }
 
-    /// The toolbar's tooltip: the title, one line per shortcut and the note that they hold with the system-shortcut
-    /// capture on.
-    pub fn shortcuts_tooltip(&self) -> String {
-        let mut lines = vec![self.t(MsgKey::ShortcutsTitle)];
-        lines.extend(self.shortcut_rows().into_iter().map(|(what, keys)| format!("{what}: {keys}")));
-        lines.push(self.t(MsgKey::ShortcutsKeepHint));
-        lines.join("\n")
+    /// What a button of the session bar does, in one line: the hint shown under the button while the pointer is on
+    /// it, and its description for a screen reader. `None` for a control that is not a button of the bar. The
+    /// shortcut list is in the settings, not here (D42).
+    pub fn toolbar_hint(&self, id: ControlId) -> Option<String> {
+        let key = match id {
+            ControlId::TbScreen => MsgKey::TipScreen,
+            ControlId::TbFit => MsgKey::TipFit,
+            ControlId::TbAudio => MsgKey::TipAudio,
+            ControlId::TbGrab => MsgKey::TipGrab,
+            ControlId::TbKeys => MsgKey::TbKeys,
+            ControlId::TbTerminal => MsgKey::TipTerminal,
+            ControlId::TbFiles => MsgKey::TipFiles,
+            ControlId::TbChat => MsgKey::TipChat,
+            ControlId::TbSwap => MsgKey::TipSwap,
+            ControlId::TbElevate => MsgKey::ElevateHint,
+            ControlId::TbDisconnect => {
+                let keys = self.shortcut_keys(ViewerAction::Disconnect);
+                return Some(self.tm(&Msg::new(MsgKey::TipDisconnect).with(keys)));
+            }
+            ControlId::TbCollapse => {
+                let keys = self.shortcut_keys(ViewerAction::ToggleBar);
+                return Some(self.tm(&Msg::new(MsgKey::TipCollapse).with(keys)));
+            }
+            _ => return None,
+        };
+        Some(self.t(key))
     }
 
     // ----- full screen -----
@@ -134,7 +153,13 @@ impl UiState {
 
     /// The session bar (the toolbar) shows: always in a window, only when asked in full screen.
     pub fn session_bar_visible(&self) -> bool {
-        !self.fullscreen() || self.bar_shown
+        (!self.fullscreen() || self.bar_shown) && !self.bar_collapsed
+    }
+
+    /// The handle of a collapsed session bar shows where the bar would: in a window, or in full screen once the bar was
+    /// brought up (full screen starts with nothing over the picture, D30).
+    pub fn bar_handle_visible(&self) -> bool {
+        (!self.fullscreen() || self.bar_shown) && self.bar_collapsed
     }
 
     /// The monitor full screen goes to (an index of the shell's monitor list); `None` is the one the window is on.
@@ -185,13 +210,21 @@ impl UiState {
                 self.bar_shown = false;
                 Activation { changed: Changed::VIEWER, ..Activation::default() }
             }
+            // A collapsed bar comes back; in a window an open bar collapses (B22); in full screen it shows or hides.
             ViewerAction::ToggleBar => {
-                if self.fullscreen() {
+                if self.bar_collapsed {
+                    self.bar_collapsed = false;
+                    if self.fullscreen() {
+                        self.bar_shown = true;
+                    }
+                } else if self.fullscreen() {
                     self.bar_shown = !self.bar_shown;
+                } else {
+                    self.bar_collapsed = true;
                 }
                 Activation { changed: Changed::VIEWER, ..Activation::default() }
             }
-            ViewerAction::CtrlAltDel => self.activate(ControlId::TbKeys),
+            ViewerAction::CtrlAltDel => self.send_keys(SpecialKeys::CtrlAltDel),
             ViewerAction::Disconnect => self.activate(ControlId::TbDisconnect),
         }
     }

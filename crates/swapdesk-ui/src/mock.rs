@@ -14,7 +14,7 @@ use crate::api::*;
 use crate::format::Clock;
 use crate::inflight::{InFlight, Joined};
 use crate::interact::ControlId;
-use crate::state::{DataKind, DeviceTab, Nav, UiState};
+use crate::state::{DataKind, DeviceTab, DrawerTab, Nav, UiState};
 use crate::strings::MsgKey;
 
 /// 2026-11-08 15:30 UTC: the fixed "now" of every scenario, so captures do not change from day to day.
@@ -25,11 +25,44 @@ const HOUR: u64 = 60 * MIN;
 const DAY: u64 = 24 * HOUR;
 
 /// A moment `back_days` days before today at `hour:minute` (UTC, the scenario clock has no offset).
+/// This computer's Downloads in the mock (the explorer's left pane).
+fn local_entries() -> Vec<DirEntryView> {
+    vec![
+        DirEntryView { name: "Fotos da viagem".into(), is_dir: true, size: 0, mtime_ms: at(10, 12, 3) },
+        DirEntryView { name: "orçamento-2026.xlsx".into(), is_dir: false, size: 48_200, mtime_ms: at(9, 41, 1) },
+        DirEntryView { name: "relatório final.pdf".into(), is_dir: false, size: 2_400_000, mtime_ms: at(14, 5, 0) },
+        DirEntryView { name: "instalador.exe".into(), is_dir: false, size: 84_000_000, mtime_ms: at(8, 30, 6) },
+    ]
+}
+
+/// This computer's places and drives in the mock.
+fn local_places() -> Vec<LocalPlace> {
+    let p = |kind, label: &str, path: &str| LocalPlace { kind, label: label.into(), path: path.into() };
+    vec![
+        p(PlaceKind::Home, "", "C:\\Users\\ana"),
+        p(PlaceKind::Desktop, "", "C:\\Users\\ana\\Desktop"),
+        p(PlaceKind::Documents, "", "C:\\Users\\ana\\Documents"),
+        p(PlaceKind::Downloads, "", "C:\\Users\\ana\\Downloads"),
+        p(PlaceKind::Volume, "C:", "C:\\"),
+        p(PlaceKind::Volume, "E:", "E:\\"),
+    ]
+}
+
+fn remote_entry(name: &str, kind: RemoteKind, size: u64, mtime_ms: u64) -> RemoteEntry {
+    RemoteEntry { name: name.into(), kind, size, mtime_ms, hidden: false, system: false, read_only: false }
+}
+
 fn at(hour: u64, minute: u64, back_days: u64) -> u64 {
     NOW_MS - (15 * HOUR + 30 * MIN) + hour * HOUR + minute * MIN - back_days * DAY
 }
 
 pub const MAC: &str = "mac-alex";
+
+/// Bit 63 of an id marks a connect entry (or a wake's), as the service does.
+const ENTRY_BIT: u64 = 1 << 63;
+
+/// The id of a connect entry in the scenarios.
+pub const ENTRY: u64 = ENTRY_BIT | 7;
 pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
 
@@ -98,7 +131,7 @@ fn devices() -> Vec<DeviceView> {
 }
 
 fn this_device() -> ThisDevice {
-    ThisDevice { name: "Notebook da sala".into(), os: Os::Windows, ready: Ready::ReadyToReceive }
+    ThisDevice { name: "Notebook da sala".into(), os: Os::Windows, ready: Ready::ReadyToReceive, legacy_note: false }
 }
 
 fn network(notices: Vec<Notice>, category: NetCategoryView) -> NetworkStatus {
@@ -156,6 +189,18 @@ pub enum Step {
     Activate(ControlId),
     /// Activate a control and answer its command with an error, as the service would.
     ActivateRefused(ControlId, ApiCode),
+    /// A key of the explorer (slice 2a).
+    Key(crate::interact::explorer_manage::ExplorerKey),
+    /// Activate a control and answer each change it sent to the other computer with `ChangeOutcome` for every name,
+    /// as a 1.1 peer would (slice 2b).
+    ActivateAnswer(ControlId, ChangeOutcome),
+    /// Slice 3: press on a row and drag it over a control (the drag stays in the air).
+    Drag(ControlId, Option<ControlId>),
+    /// Slice 3: a right click on a control (the menu is native; the state holds it open).
+    ContextMenu(ControlId),
+    /// Slice 4: a drag from the system's file manager hovers the window (the paths, whether each is a folder, and the
+    /// control under the pointer; `None` is the picture).
+    SystemDrag(&'static [(&'static str, bool)], Option<ControlId>),
     /// The launch requests (R-UI-6), sent and not yet answered.
     Startup,
     /// A request for `DataKind` went out and has not been answered.
@@ -188,29 +233,100 @@ pub enum Scenario {
     EstadoRedePublica,
     EstadoServicoMac,
     EstadoPermissoesMac,
+    /// The Mac cannot save into the receiving folder until the user grants it (F-FILE-03).
+    EstadoPastaRecebimentoMac,
     EstadoReconectando,
     EstadoAcordando,
+    /// "Controlar" pressed: the card before the other computer has said anything.
+    EstadoConectando,
+    /// The other computer shows the request: the card with the seconds left.
+    EstadoAguardandoAceite,
+    /// The other computer's user said no.
+    EstadoConexaoRecusada,
+    /// Nobody is at the other computer (the longest line).
+    EstadoConexaoNinguem,
     EstadoInversaoRecusada,
     Visualizador,
     VisualizadorEscuro,
     Terminal,
-    Arquivos,
+    /// The files explorer (FILES-UI.md): both panes listed, two files selected on the right, transfers running.
+    Explorador,
+    /// Slice 2a: a row of this computer being renamed in place.
+    ExploradorRenomear,
+    /// Slice 2a: the "Excluir para sempre" card over the explorer.
+    ExploradorExcluirParaSempre,
+    /// Slice 2a: the properties card of a folder of this computer, counted.
+    ExploradorPropriedades,
+    /// Slice 2b: the other computer (Windows, 1.1) shown on a removable drive, its volumes in the navigation pane.
+    ExploradorOutroDisco,
+    /// Slice 2b: the notice after a delete there was answered "no bin".
+    ExploradorSemLixeira,
+    /// Slice 2b: the card that asks before sending files to the other computer's bin.
+    ExploradorLixeiraDeLa,
+    /// Slice 3: a file of this computer dragged over a folder row of the same pane (the pill says "Mover para ...").
+    ExploradorArrastando,
+    /// Slice 4: a file of the system's file manager hovering a folder row of the right pane.
+    ExploradorSoltando,
+    /// Slice 4: a file of the system's file manager hovering the picture of the Tela view, with its caption.
+    TelaSoltando,
+    /// R-UI-13: the explorer while the other side's user is asked whether the files may be used.
+    ExploradorAguardandoConsentimento,
+    /// Slice 3: the state right after a right click on a row (the menu itself is the system's and is not painted).
+    ExploradorMenu,
     Chat,
+    /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
+    AreaTransferencia,
     Banner,
     Inverter,
     InverterPedido,
+    /// The viewer asked to swap and waits for the other side, with the seconds left (R-UI-13).
+    InverterAguardando,
+    /// This side confirmed the pairing code and waits for the other side (R-UI-13).
+    PareamentoConfirmando,
     /// The last run ended in a panic (D12).
     EstadoFechouInesperado,
     /// The device list is empty after 10 s of discovery (F20).
     EstadoNenhumComputador,
+    /// A computer of the network that is not paired yet: its page holds one card (D51).
+    EstadoNaoPareado,
+    /// Atividade before anything was logged: the empty page (D51).
+    AtividadeVazia,
     /// Launch before any answer: placeholder blocks (R-UI-1).
     Carregando,
     AtividadeCarregando,
     ArquivosCarregando,
+    /// The terminal panel while the host asks its user (D13), with the seconds left (R-UI-13).
+    TerminalAguardandoConsentimento,
+    /// Permissões on a Mac: the administrator terminal is off and inert, with its line (ELEVATION-MAC.md M5).
+    PermissoesNoMac,
+    /// An account with no pairing on a computer a 1.0 install left data on: the one-time note under Pareados (D55).
+    PareadosAntesDa11,
+    /// A session that entered without a prompt: "Elevar controle" on the bar (ACCOUNTS.md 9, D55).
+    VisualizadorElevar,
+    /// The same session paused at the other computer's lock screen: the card with "Elevar controle".
+    VisualizadorPausadoElevar,
+    /// The session's account left the other computer's console: the card that says so (ACCOUNTS.md 5.1, D55).
+    VisualizadorContaAusente,
+    /// The host's banner of an elevated session: "Controle elevado" (ACCOUNTS.md 9.2, D55).
+    BannerElevado,
+    /// The host's banner while the viewer takes files from this computer: "Copiando arquivos: 2 de 5" (FILES-UI.md 6).
+    BannerArquivos,
+    /// Início with a new version on offer (UPDATES.md 10.2).
+    AtualizacaoOferecida,
+    /// The download running, with its bar and the time left.
+    AtualizacaoBaixando,
+    /// "Atualizar agora" with a live session: the confirmation (10.3).
+    AtualizacaoSessaoAtiva,
+    /// Ajustes after a check whose manifest did not carry the Swapdesk signature.
+    AtualizacaoFalhaAssinatura,
+    /// The version installed did not start and the old one was restored.
+    AtualizacaoRevertida,
+    /// The first start after an update.
+    Atualizado,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 32] = [
+    pub const ALL: [Scenario; 67] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -227,22 +343,57 @@ impl Scenario {
         Scenario::EstadoRedePublica,
         Scenario::EstadoServicoMac,
         Scenario::EstadoPermissoesMac,
+        Scenario::EstadoPastaRecebimentoMac,
         Scenario::EstadoReconectando,
         Scenario::EstadoAcordando,
+        Scenario::EstadoConectando,
+        Scenario::EstadoAguardandoAceite,
+        Scenario::EstadoConexaoRecusada,
+        Scenario::EstadoConexaoNinguem,
         Scenario::EstadoInversaoRecusada,
         Scenario::Visualizador,
         Scenario::VisualizadorEscuro,
         Scenario::Terminal,
-        Scenario::Arquivos,
+        Scenario::Explorador,
+        Scenario::ExploradorRenomear,
+        Scenario::ExploradorExcluirParaSempre,
+        Scenario::ExploradorPropriedades,
+        Scenario::ExploradorOutroDisco,
+        Scenario::ExploradorSemLixeira,
+        Scenario::ExploradorLixeiraDeLa,
+        Scenario::ExploradorArrastando,
+        Scenario::ExploradorSoltando,
+        Scenario::TelaSoltando,
+        Scenario::ExploradorAguardandoConsentimento,
+        Scenario::ExploradorMenu,
         Scenario::Chat,
+        Scenario::AreaTransferencia,
         Scenario::Banner,
         Scenario::Inverter,
         Scenario::InverterPedido,
+        Scenario::InverterAguardando,
+        Scenario::PareamentoConfirmando,
         Scenario::EstadoFechouInesperado,
         Scenario::EstadoNenhumComputador,
+        Scenario::EstadoNaoPareado,
+        Scenario::AtividadeVazia,
         Scenario::Carregando,
         Scenario::AtividadeCarregando,
         Scenario::ArquivosCarregando,
+        Scenario::TerminalAguardandoConsentimento,
+        Scenario::PermissoesNoMac,
+        Scenario::PareadosAntesDa11,
+        Scenario::VisualizadorElevar,
+        Scenario::VisualizadorPausadoElevar,
+        Scenario::VisualizadorContaAusente,
+        Scenario::BannerElevado,
+        Scenario::BannerArquivos,
+        Scenario::AtualizacaoOferecida,
+        Scenario::AtualizacaoBaixando,
+        Scenario::AtualizacaoSessaoAtiva,
+        Scenario::AtualizacaoFalhaAssinatura,
+        Scenario::AtualizacaoRevertida,
+        Scenario::Atualizado,
     ];
 
     /// The name `--mock` takes.
@@ -264,22 +415,57 @@ impl Scenario {
             Scenario::EstadoRedePublica => "estado-rede-publica",
             Scenario::EstadoServicoMac => "estado-servico-mac",
             Scenario::EstadoPermissoesMac => "estado-permissoes-mac",
+            Scenario::EstadoPastaRecebimentoMac => "estado-pasta-recebimento-mac",
             Scenario::EstadoReconectando => "estado-reconectando",
             Scenario::EstadoAcordando => "estado-acordando",
+            Scenario::EstadoConectando => "estado-conectando",
+            Scenario::EstadoAguardandoAceite => "estado-aguardando-aceite",
+            Scenario::EstadoConexaoRecusada => "estado-conexao-recusada",
+            Scenario::EstadoConexaoNinguem => "estado-conexao-ninguem",
             Scenario::EstadoInversaoRecusada => "estado-inversao-recusada",
             Scenario::Visualizador => "visualizador",
             Scenario::VisualizadorEscuro => "visualizador-escuro",
             Scenario::Terminal => "terminal",
-            Scenario::Arquivos => "arquivos",
+            Scenario::Explorador => "explorador",
+            Scenario::ExploradorRenomear => "explorador-renomear",
+            Scenario::ExploradorExcluirParaSempre => "explorador-excluir-para-sempre",
+            Scenario::ExploradorPropriedades => "explorador-propriedades",
+            Scenario::ExploradorOutroDisco => "explorador-outro-disco",
+            Scenario::ExploradorSemLixeira => "explorador-sem-lixeira",
+            Scenario::ExploradorLixeiraDeLa => "explorador-lixeira-de-la",
+            Scenario::ExploradorArrastando => "explorador-arrastando",
+            Scenario::ExploradorSoltando => "explorador-soltando",
+            Scenario::TelaSoltando => "tela-soltando",
+            Scenario::ExploradorAguardandoConsentimento => "explorador-aguardando-consentimento",
+            Scenario::ExploradorMenu => "explorador-menu",
             Scenario::Chat => "chat",
+            Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
             Scenario::Inverter => "inverter",
             Scenario::InverterPedido => "inverter-pedido",
+            Scenario::InverterAguardando => "inverter-aguardando",
+            Scenario::PareamentoConfirmando => "pareamento-confirmando",
             Scenario::EstadoFechouInesperado => "estado-fechou-inesperado",
             Scenario::EstadoNenhumComputador => "estado-nenhum-computador",
+            Scenario::EstadoNaoPareado => "estado-nao-pareado",
+            Scenario::PareadosAntesDa11 => "pareados-antes-da-1-1",
+            Scenario::VisualizadorElevar => "visualizador-elevar",
+            Scenario::VisualizadorPausadoElevar => "visualizador-pausado-elevar",
+            Scenario::VisualizadorContaAusente => "visualizador-conta-ausente",
+            Scenario::BannerElevado => "banner-elevado",
+            Scenario::BannerArquivos => "banner-arquivos",
+            Scenario::AtualizacaoOferecida => "update-offered",
+            Scenario::AtualizacaoBaixando => "update-downloading",
+            Scenario::AtualizacaoSessaoAtiva => "update-live-session",
+            Scenario::AtualizacaoFalhaAssinatura => "update-failed-signature",
+            Scenario::AtualizacaoRevertida => "update-rolled-back",
+            Scenario::Atualizado => "updated",
+            Scenario::AtividadeVazia => "atividade-vazia",
             Scenario::Carregando => "carregando",
             Scenario::AtividadeCarregando => "atividade-carregando",
             Scenario::ArquivosCarregando => "arquivos-carregando",
+            Scenario::TerminalAguardandoConsentimento => "terminal-aguardando-consentimento",
+            Scenario::PermissoesNoMac => "permissoes-no-mac",
         }
     }
 
@@ -306,22 +492,71 @@ impl Scenario {
             Scenario::EstadoRedePublica => "11. Erros e estados: rede Pública",
             Scenario::EstadoServicoMac => "11. Erros e estados: serviço no Mac",
             Scenario::EstadoPermissoesMac => "11. Erros e estados: permissões no Mac",
+            Scenario::EstadoPastaRecebimentoMac => "11. Erros e estados: pasta de recebimento no Mac",
             Scenario::EstadoReconectando => "11. Erros e estados: Reconectando",
             Scenario::EstadoAcordando => "11. Erros e estados: Acordando",
+            Scenario::EstadoConectando => "new: Conectando, before the other computer answers (R-UI-13)",
+            Scenario::EstadoAguardandoAceite => "new: Esperando o computador aceitar, with the seconds left (R-UI-13)",
+            Scenario::EstadoConexaoRecusada => "new: Não deu para conectar, o outro computador recusou (R-UI-13)",
+            Scenario::EstadoConexaoNinguem => "new: Não deu para conectar, ninguém no outro computador (R-UI-13)",
             Scenario::EstadoInversaoRecusada => "11. Erros e estados: inversão recusada",
             Scenario::Visualizador => "5. Visualizador",
             Scenario::VisualizadorEscuro => "5. Visualizador escuro",
             Scenario::Terminal => "8. Terminal e ações rápidas (shell only)",
-            Scenario::Arquivos => "9. Arquivos",
+            Scenario::Explorador => "new: Arquivos, the explorer (FILES-UI.md slice 1)",
+            Scenario::ExploradorRenomear => "new: Arquivos, renaming a row in place (slice 2a)",
+            Scenario::ExploradorExcluirParaSempre => "new: Arquivos, the delete-for-good card (slice 2a)",
+            Scenario::ExploradorPropriedades => "new: Arquivos, a folder's properties (slice 2a)",
+            Scenario::ExploradorOutroDisco => "new: Arquivos, the other computer on a removable drive (slice 2b)",
+            Scenario::ExploradorSemLixeira => "new: Arquivos, the notice of a delete there with no bin (slice 2b)",
+            Scenario::ExploradorLixeiraDeLa => "new: Arquivos, the card before the other computer's bin (slice 2b)",
+            Scenario::ExploradorArrastando => {
+                "new: Arquivos, a file dragged over a folder row, the pill and caption (slice 3)"
+            }
+            Scenario::ExploradorSoltando => {
+                "new: Arquivos, a file of the system's file manager over a folder row of the right pane (slice 4)"
+            }
+            Scenario::TelaSoltando => "new: Tela, a file of the system's file manager over the picture (slice 4)",
+            Scenario::ExploradorAguardandoConsentimento => {
+                "new: Arquivos while the other side's user is asked, with the seconds left (R-UI-13)"
+            }
+            Scenario::ExploradorMenu => {
+                "new: Arquivos, right after a right click on a row; the menu is native (slice 3)"
+            }
             Scenario::Chat => "10. Chat e copiar e colar",
+            Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
             Scenario::Inverter => "7. Inverter controle, step 1",
             Scenario::InverterPedido => "7. Inverter controle, step 2",
+            Scenario::InverterAguardando => {
+                "new: Esperando o computador aceitar a inversao, with the seconds left (R-UI-13)"
+            }
+            Scenario::PareamentoConfirmando => {
+                "new: Pareamento, waiting for the other side to confirm the code (R-UI-13)"
+            }
             Scenario::EstadoFechouInesperado => "new: crash notice (D12)",
             Scenario::EstadoNenhumComputador => "new: no computer found card (F20)",
+            Scenario::EstadoNaoPareado => "new: a computer not paired yet (D51)",
+            Scenario::PareadosAntesDa11 => "new: the note under an empty Pareados after the update from 1.0 (D55)",
+            Scenario::VisualizadorElevar => "new: Elevar controle on the session bar (D55)",
+            Scenario::VisualizadorPausadoElevar => "new: the paused picture with Elevar controle (D55)",
+            Scenario::VisualizadorContaAusente => "new: the session's account left the console (D55)",
+            Scenario::BannerElevado => "new: the host banner of an elevated session (D55)",
+            Scenario::BannerArquivos => {
+                "new: the host banner with its files line while files are copied out (FILES-UI.md 6)"
+            }
+            Scenario::AtualizacaoOferecida => "new: the update card on Início (UPDATES.md 10, D58)",
+            Scenario::AtualizacaoBaixando => "new: the update downloading, with the time left (D58)",
+            Scenario::AtualizacaoSessaoAtiva => "new: updating with a live session (UPDATES.md 10.3, D58)",
+            Scenario::AtualizacaoFalhaAssinatura => "new: Ajustes after a manifest without the signature (D58)",
+            Scenario::AtualizacaoRevertida => "new: the update that did not start, rolled back (D58)",
+            Scenario::Atualizado => "new: the first start after an update (D58)",
+            Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
-            Scenario::ArquivosCarregando => "R-UI-1: Arquivos while the folder lists",
+            Scenario::ArquivosCarregando => "R-UI-1: Arquivos (the explorer) while the folders list",
+            Scenario::TerminalAguardandoConsentimento => "new: Terminal while the other side's user is asked (R-UI-13)",
+            Scenario::PermissoesNoMac => "new: Permissões on a Mac, the administrator terminal unavailable (D32)",
         }
     }
 
@@ -336,16 +571,74 @@ impl Scenario {
                     reply(Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private)))),
                     reply(Ok(Reply::Devices(devices()))),
                     reply(Ok(Reply::Settings(settings()))),
+                    reply(Ok(Reply::Blocked(Vec::new()))),
                 ];
             }
             _ => {}
         }
+        let logged = if self == Scenario::AtividadeVazia { Vec::new() } else { activity() };
         vec![
             reply(Ok(Reply::ThisDevice(this_device()))),
             reply(Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private)))),
             reply(Ok(Reply::Devices(devices()))),
             reply(Ok(Reply::Settings(settings()))),
-            reply(Ok(Reply::Activity(activity()))),
+            reply(Ok(Reply::Blocked(Vec::new()))),
+            reply(Ok(Reply::Activity(logged))),
+            // The machine's updater: 1.1.0, nothing on offer (Ajustes shows its section).
+            reply(Ok(Reply::Update(update_idle()))),
+        ]
+    }
+
+    /// The explorer open on a Windows computer of minor 1: its home folder listed, its places and three volumes (C:,
+    /// a labelled D:, a removable E: with no bin) in the navigation pane.
+    fn windows_peer_explorer() -> Vec<Step> {
+        use Step::*;
+        let volume = |id, kind, label: &str, letter, total, free, has_bin| RemoteVolume {
+            id,
+            kind,
+            label: label.into(),
+            letter: Some(letter),
+            total_bytes: total,
+            free_bytes: free,
+            has_bin,
+        };
+        let place = |kind, path: &str| RemotePlace { kind, path: path.into() };
+        vec![
+            Select(DESKTOP),
+            Event(Self::viewer_session_to(DESKTOP, 18)),
+            Activate(ControlId::TbFiles),
+            Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+            Event(reply(Ok(Reply::LocalListing(LocalListing {
+                path: "C:\\Users\\ana\\Downloads".into(),
+                entries: local_entries(),
+                truncated: false,
+                hidden: Vec::new(),
+            })))),
+            Event(reply(Ok(Reply::RemoteVolumes(RemoteVolumes {
+                home: ":1/Users/ana".into(),
+                places: vec![
+                    place(PlaceName::Desktop, ":1/Users/ana/Desktop"),
+                    place(PlaceName::Documents, ":1/Users/ana/Documents"),
+                    place(PlaceName::Downloads, ":1/Users/ana/Downloads"),
+                    place(PlaceName::Received, ":1/Users/ana/Downloads/Swapdesk"),
+                ],
+                volumes: vec![
+                    volume(1, VolumeType::System, "", 'C', 512_000_000_000, 212_000_000_000, true),
+                    volume(2, VolumeType::Fixed, "Backup", 'D', 2_000_000_000_000, 1_100_000_000_000, true),
+                    volume(3, VolumeType::Removable, "", 'E', 32_000_000_000, 26_400_000_000, false),
+                ],
+            })))),
+            Event(reply(Ok(Reply::RemotePage(RemotePage {
+                path: String::new(),
+                start: 0,
+                entries: vec![
+                    remote_entry("Contratos", RemoteKind::Dir, 0, at(11, 2, 9)),
+                    remote_entry("Relatório de vendas.xlsx", RemoteKind::File, 182_000, at(9, 40, 1)),
+                    remote_entry("notas.txt", RemoteKind::File, 1_200, at(15, 20, 0)),
+                ],
+                next: None,
+                free: Some(212_000_000_000),
+            })))),
         ]
     }
 
@@ -367,8 +660,31 @@ impl Scenario {
                     Permission::Files,
                     Permission::Clipboard,
                 ]),
+                elevation: Default::default(),
             },
         }
+    }
+
+    /// A session that entered without a prompt and can be elevated, or is (`elevated`).
+    fn unattended_session(elevated: bool) -> UiEvent {
+        let mut granted = vec![Permission::View, Permission::Control, Permission::Audio, Permission::Files];
+        if elevated {
+            granted.push(Permission::Unattended);
+        }
+        UiEvent::Session {
+            session_id: 1,
+            device_id: MAC.into(),
+            state: SessionState::Active {
+                since_ms: NOW_MS - 3 * MIN,
+                role: Role::Viewer,
+                granted: perms(&granted),
+                elevation: if elevated { ElevationLevel::Elevated } else { ElevationLevel::Available },
+            },
+        }
+    }
+
+    fn paused(desktop: DesktopKind) -> UiEvent {
+        UiEvent::Session { session_id: 1, device_id: MAC.into(), state: SessionState::Paused { desktop } }
     }
 
     fn host_session_to(device: &str) -> UiEvent {
@@ -379,6 +695,7 @@ impl Scenario {
                 since_ms: NOW_MS - 12 * MIN,
                 role: Role::Host,
                 granted: perms(&[Permission::View, Permission::Control, Permission::Files]),
+                elevation: Default::default(),
             },
         }
     }
@@ -449,6 +766,13 @@ impl Scenario {
                     NetCategoryView::Private,
                 ))),
             ],
+            Scenario::EstadoPastaRecebimentoMac => vec![
+                mac(),
+                Event(UiEvent::NetworkChanged(network(
+                    vec![Notice::ReceiveFolderDenied("Downloads".into())],
+                    NetCategoryView::Private,
+                ))),
+            ],
             Scenario::EstadoReconectando => vec![
                 mac(),
                 Event(Self::viewer_session(12)),
@@ -466,6 +790,24 @@ impl Scenario {
                     state: SessionState::Waking { remaining_s: 36 },
                 }),
             ],
+            Scenario::EstadoConectando => vec![mac(), Activate(ControlId::Control)],
+            Scenario::EstadoAguardandoAceite => vec![mac(), Event(Self::entry_prompted()), Ticks(6)],
+            Scenario::EstadoConexaoRecusada | Scenario::EstadoConexaoNinguem => {
+                let why = if self == Scenario::EstadoConexaoRecusada {
+                    ConnectWhy::Declined
+                } else {
+                    ConnectWhy::NobodyPresent
+                };
+                vec![
+                    mac(),
+                    Event(Self::entry_prompted()),
+                    Event(UiEvent::Session {
+                        session_id: ENTRY,
+                        device_id: MAC.into(),
+                        state: SessionState::NotOpened { why },
+                    }),
+                ]
+            }
             Scenario::EstadoInversaoRecusada => vec![
                 mac(),
                 Event(Self::viewer_session(12)),
@@ -476,7 +818,10 @@ impl Scenario {
                     mac(),
                     Event(UiEvent::SettingsChanged(Settings { show_stats: true, ..settings() })),
                     Event(Self::viewer_session(12)),
-                    Event(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 18, fps: 60, kbps: 9000 } }),
+                    Event(UiEvent::Stats {
+                        session_id: 1,
+                        stats: Stats { latency_ms: 18, fps: 60, kbps: 9000, hevc: false },
+                    }),
                 ];
                 if self == Scenario::VisualizadorEscuro {
                     v.push(Event(UiEvent::ThemeChanged { dark: true }));
@@ -489,48 +834,152 @@ impl Scenario {
                 Activate(ControlId::TbTerminal),
                 Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } }),
             ],
-            Scenario::Arquivos => vec![
+            Scenario::Explorador => vec![
                 mac(),
                 Event(Self::viewer_session(18)),
                 Activate(ControlId::TbFiles),
-                Event(UiEvent::Transfer {
-                    transfer_id: 1,
-                    session_id: 1,
-                    name: "fotos-viagem.zip".into(),
-                    outgoing: true,
-                    state: TransferState::Running {
-                        done: 1_100_000_000,
-                        total: 1_800_000_000,
-                        bytes_per_s: 94_000_000,
-                    },
-                }),
-                Event(UiEvent::Transfer {
-                    transfer_id: 2,
-                    session_id: 1,
-                    name: "instalador.exe".into(),
-                    outgoing: true,
-                    state: TransferState::Paused { done: 35, total: 100, why: ApiCode::ServiceDown },
-                }),
-                Event(UiEvent::Transfer {
-                    transfer_id: 3,
-                    session_id: 1,
-                    name: "relatorio-novembro.pdf".into(),
-                    outgoing: true,
-                    state: TransferState::Done,
-                }),
+                Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+                Event(reply(Ok(Reply::LocalListing(LocalListing {
+                    path: "C:\\Users\\ana\\Downloads".into(),
+                    entries: local_entries(),
+                    truncated: false,
+                    hidden: Vec::new(),
+                })))),
                 Event(reply(Ok(Reply::Listing(Listing {
-                    path: "Mesa".into(),
+                    path: "Documents".into(),
                     entries: vec![
+                        DirEntryView { name: "Contratos".into(), is_dir: true, size: 0, mtime_ms: at(11, 2, 9) },
                         DirEntryView {
-                            name: "contrato-assinado.pdf".into(),
+                            name: "foto 2.heic".into(),
                             is_dir: false,
-                            size: 640_000,
-                            mtime_ms: at(9, 0, 1),
+                            size: 3_100_000,
+                            mtime_ms: at(9, 0, 2),
                         },
-                        DirEntryView { name: "Capturas".into(), is_dir: true, size: 12, mtime_ms: at(9, 0, 2) },
+                        DirEntryView {
+                            name: "foto 10.heic".into(),
+                            is_dir: false,
+                            size: 2_900_000,
+                            mtime_ms: at(9, 1, 2),
+                        },
+                        DirEntryView { name: "notas.txt".into(), is_dir: false, size: 1_200, mtime_ms: at(15, 20, 0) },
                     ],
                     truncated: false,
                 })))),
+                Activate(ControlId::ExpRow(true, 1)),
+                Event(UiEvent::Transfer {
+                    transfer_id: 1,
+                    session_id: 1,
+                    name: "foto 2.heic".into(),
+                    outgoing: false,
+                    state: TransferState::Running { done: 1_100_000, total: 3_100_000, bytes_per_s: 9_400_000 },
+                }),
+            ],
+            Scenario::ExploradorRenomear => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([Activate(ControlId::ExpRow(false, 1)), Activate(ControlId::ExpRename)]);
+                v
+            }
+            Scenario::ExploradorExcluirParaSempre => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([
+                    Activate(ControlId::ExpRow(false, 1)),
+                    Key(crate::interact::explorer_manage::ExplorerKey::DeleteForever),
+                ]);
+                v
+            }
+            Scenario::ExploradorPropriedades => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([
+                    Activate(ControlId::ExpRow(false, 0)),
+                    Activate(ControlId::ExpProps),
+                    Event(reply(Ok(Reply::LocalProps(LocalProps {
+                        path: std::path::Path::new(r"C:\Users\ana\Downloads").join("Fotos da viagem"),
+                        files: 214,
+                        folders: 31,
+                        bytes: 1_840_000_000,
+                        truncated: false,
+                        free_bytes: Some(212_000_000_000),
+                    })))),
+                ]);
+                v
+            }
+            Scenario::ExploradorOutroDisco => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([
+                    // E:, the removable drive: the third volume after the home folder and its four places.
+                    Activate(ControlId::ExpPlace(true, 7)),
+                    Event(reply(Ok(Reply::RemotePage(RemotePage {
+                        path: ":3".into(),
+                        start: 0,
+                        entries: vec![
+                            remote_entry("DCIM", RemoteKind::Dir, 0, at(10, 5, 4)),
+                            remote_entry("Fotos da viagem", RemoteKind::Dir, 0, at(9, 12, 6)),
+                            remote_entry("IMG_0412.jpg", RemoteKind::File, 4_200_000, at(10, 6, 4)),
+                            remote_entry("IMG_0413.jpg", RemoteKind::File, 3_900_000, at(10, 7, 4)),
+                            remote_entry("leia-me.txt", RemoteKind::File, 640, at(8, 0, 9)),
+                        ],
+                        next: None,
+                        free: Some(26_400_000_000),
+                    })))),
+                    Activate(ControlId::ExpRow(true, 2)),
+                ]);
+                v
+            }
+            Scenario::ExploradorSemLixeira => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([
+                    Activate(ControlId::ExpRow(true, 1)),
+                    Activate(ControlId::ExpDelete),
+                    ActivateAnswer(ControlId::ExpThereTrashConfirm, ChangeOutcome::NoBin),
+                ]);
+                v
+            }
+            Scenario::ExploradorLixeiraDeLa => {
+                let mut v = Self::windows_peer_explorer();
+                v.extend([Activate(ControlId::ExpRow(true, 1)), Activate(ControlId::ExpDelete)]);
+                v
+            }
+            Scenario::ExploradorArrastando => {
+                let mut v = Scenario::Explorador.script();
+                // Row 2 is "orçamento-2026.xlsx"; row 0 is the folder "Fotos da viagem".
+                v.push(Drag(ControlId::ExpRow(false, 2), Some(ControlId::ExpRow(false, 0))));
+                v
+            }
+            Scenario::ExploradorSoltando => {
+                let mut v = Scenario::Explorador.script();
+                // Row 0 of the other computer's pane is the folder "Contratos".
+                v.push(SystemDrag(&[("C:/Users/ana/Desktop/proposta.pdf", false)], Some(ControlId::ExpRow(true, 0))));
+                v
+            }
+            Scenario::TelaSoltando => vec![
+                mac(),
+                Event(Self::viewer_session(21)),
+                SystemDrag(&[("C:/Users/ana/Desktop/proposta.pdf", false)], None),
+            ],
+            Scenario::ExploradorAguardandoConsentimento => vec![
+                mac(),
+                Event(Self::viewer_session(18)),
+                Activate(ControlId::TbFiles),
+                Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+                Event(reply(Ok(Reply::LocalListing(LocalListing {
+                    path: "C:\\Users\\ana\\Downloads".into(),
+                    entries: local_entries(),
+                    truncated: false,
+                    hidden: Vec::new(),
+                })))),
+                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Files, remaining_s: 20 }),
+                Ticks(6),
+            ],
+            Scenario::ExploradorMenu => {
+                let mut v = Scenario::Explorador.script();
+                v.push(ContextMenu(ControlId::ExpRow(false, 2)));
+                v
+            }
+            Scenario::AreaTransferencia => vec![
+                mac(),
+                Event(Self::viewer_session(21)),
+                Activate(ControlId::TbChat),
+                Activate(ControlId::DrawerTab(DrawerTab::Clipboard)),
             ],
             Scenario::Chat => vec![
                 mac(),
@@ -581,14 +1030,144 @@ impl Scenario {
                     event: SwapEvent::Asked { request_id: 11, by: "Desktop do escritório".into(), remaining_s: 14 },
                 }),
             ],
+            // The request is sent (no backend in `apply_to`: it stays waiting) and 6 s of the 22 have passed.
+            Scenario::InverterAguardando => vec![
+                Select(DESKTOP),
+                Event(Self::viewer_session_to(DESKTOP, 12)),
+                Activate(ControlId::TbSwap),
+                Activate(ControlId::DialogPrimary),
+                Ticks(6),
+            ],
+            Scenario::PareamentoConfirmando => vec![
+                Select(AIR),
+                Event(UiEvent::Pairing {
+                    pairing_id: 1,
+                    state: PairingState::ShowCode { code: "482 913".into(), peer_name: "MacBook Air".into() },
+                }),
+                Activate(ControlId::PairSame),
+            ],
             Scenario::EstadoFechouInesperado => vec![mac(), CrashNotice],
             Scenario::EstadoNenhumComputador => vec![Event(UiEvent::DevicesChanged(Vec::new())), Ticks(10)],
+            Scenario::EstadoNaoPareado => vec![Select(AIR)],
+            Scenario::VisualizadorElevar => vec![mac(), Event(Self::unattended_session(false))],
+            Scenario::VisualizadorPausadoElevar => {
+                vec![mac(), Event(Self::unattended_session(false)), Event(Self::paused(DesktopKind::Locked))]
+            }
+            Scenario::VisualizadorContaAusente => {
+                vec![mac(), Event(Self::unattended_session(false)), Event(Self::paused(DesktopKind::AccountAway))]
+            }
+            Scenario::BannerArquivos => {
+                let transfer = |transfer_id: u32, state: TransferState| {
+                    Event(UiEvent::Transfer {
+                        transfer_id,
+                        session_id: 2,
+                        name: "relatorio.pdf".into(),
+                        outgoing: true,
+                        state,
+                    })
+                };
+                let running = || TransferState::Running { done: 1_000_000, total: 4_000_000, bytes_per_s: 2_000_000 };
+                vec![
+                    Event(Self::host_session_to(DESKTOP)),
+                    transfer(1, running()),
+                    transfer(2, running()),
+                    transfer(3, running()),
+                    transfer(4, running()),
+                    transfer(5, running()),
+                    transfer(1, TransferState::Done),
+                    transfer(2, TransferState::Done),
+                ]
+            }
+            Scenario::BannerElevado => vec![Event(UiEvent::Session {
+                session_id: 2,
+                device_id: DESKTOP.into(),
+                state: SessionState::Active {
+                    since_ms: NOW_MS - 12 * MIN,
+                    role: Role::Host,
+                    granted: perms(&[Permission::View, Permission::Control, Permission::Unattended]),
+                    elevation: Default::default(),
+                },
+            })],
+            Scenario::AtualizacaoOferecida => vec![Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Offered {
+                version: "1.1.1".into(),
+                manual: false,
+            })))],
+            Scenario::AtualizacaoBaixando => vec![
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Downloading {
+                    version: "1.1.1".into(),
+                    done: 2_100_000,
+                    total: 12_400_000,
+                }))),
+                Ticks(1),
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Downloading {
+                    version: "1.1.1".into(),
+                    done: 4_100_000,
+                    total: 12_400_000,
+                }))),
+                Ticks(1),
+            ],
+            Scenario::AtualizacaoSessaoAtiva => vec![
+                Event(Self::viewer_session(12)),
+                Event(UiEvent::UpdateChanged(update_with(UpdatePhase::Offered {
+                    version: "1.1.1".into(),
+                    manual: false,
+                }))),
+                Goto(Nav::Home),
+                ActivateRefused(ControlId::Update(crate::update_card::UpdAction::Install), ApiCode::Busy),
+            ],
+            Scenario::AtualizacaoFalhaAssinatura => vec![
+                Event(UiEvent::UpdateChanged(UpdateInfo {
+                    last_failure: Some(CheckFailure::Signature),
+                    ..update_idle()
+                })),
+                Goto(Nav::Settings),
+            ],
+            Scenario::AtualizacaoRevertida => {
+                vec![Event(UiEvent::UpdateChanged(UpdateInfo { rolled_back: Some("1.1.1".into()), ..update_idle() }))]
+            }
+            Scenario::Atualizado => {
+                vec![Event(UiEvent::UpdateChanged(UpdateInfo { updated: true, ..update_idle() }))]
+            }
+            Scenario::PareadosAntesDa11 => vec![
+                Event(UiEvent::Reply {
+                    ticket: Ticket(0),
+                    result: Ok(Reply::ThisDevice(ThisDevice { legacy_note: true, ..this_device() })),
+                }),
+                Event(UiEvent::DevicesChanged(
+                    devices()
+                        .into_iter()
+                        .filter(|d| matches!(d.status, DeviceStatus::OnNetworkUnpaired { .. }))
+                        .collect(),
+                )),
+                Ticks(10),
+            ],
+            Scenario::AtividadeVazia => vec![Goto(Nav::Activity)],
             Scenario::Carregando => vec![Startup, ArmPlaceholders],
             Scenario::AtividadeCarregando => vec![Goto(Nav::Activity), BeginFetch(DataKind::Activity), ArmPlaceholders],
             Scenario::ArquivosCarregando => {
                 vec![mac(), Event(Self::viewer_session(18)), Activate(ControlId::TbFiles), ArmPlaceholders]
             }
+            Scenario::TerminalAguardandoConsentimento => vec![
+                mac(),
+                Event(Self::viewer_session(15)),
+                Activate(ControlId::TbTerminal),
+                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Terminal, remaining_s: 20 }),
+                Ticks(6),
+            ],
+            Scenario::PermissoesNoMac => vec![
+                Event(UiEvent::Reply {
+                    ticket: Ticket(0),
+                    result: Ok(Reply::ThisDevice(ThisDevice { os: Os::MacOs, ..this_device() })),
+                }),
+                mac(),
+                Tab(DeviceTab::Permissions),
+            ],
         }
+    }
+
+    /// The service's word that the other computer shows the request, with its 20 seconds.
+    fn entry_prompted() -> UiEvent {
+        UiEvent::Session { session_id: ENTRY, device_id: MAC.into(), state: SessionState::Prompted { remaining_s: 20 } }
     }
 
     /// Replays the world and the script on `state`.
@@ -618,6 +1197,20 @@ impl Scenario {
                 Step::Startup => {
                     state.startup_commands();
                 }
+                Step::Key(k) => {
+                    state.explorer_key(k);
+                }
+                Step::Drag(from, over) => {
+                    state.drag_press(Some(from), (100.0, 100.0));
+                    state.drag_move(over, (140.0, 160.0), false, 1_000);
+                }
+                Step::SystemDrag(paths, over) => {
+                    let items = paths.iter().map(|(p, _)| (*p).into()).collect();
+                    state.system_drag_enter(crate::SystemDragData::Files(items), over, (420.0, 300.0), 1_000);
+                }
+                Step::ContextMenu(c) => {
+                    state.context_menu(Some(c), false);
+                }
                 Step::BeginFetch(k) => state.begin_fetch(k),
                 Step::CrashNotice => state.show_crash_notice(),
                 Step::Ticks(n) => {
@@ -627,6 +1220,25 @@ impl Scenario {
                 }
                 Step::ArmPlaceholders => {
                     state.arm_placeholders();
+                }
+                Step::ActivateAnswer(c, outcome) => {
+                    let a = state.activate(c);
+                    for cmd in a.commands {
+                        let names = match &cmd {
+                            Command::FilesChange { change, .. } => match change {
+                                RemoteChange::MakeDir { name, .. } | RemoteChange::Rename { name, .. } => {
+                                    vec![name.clone()]
+                                }
+                                RemoteChange::Move { names, .. } | RemoteChange::Trash { names, .. } => names.clone(),
+                            },
+                            _ => continue,
+                        };
+                        let t = Ticket(next_ticket);
+                        next_ticket += 1;
+                        state.track(t, &cmd);
+                        let results = names.into_iter().map(|n| (n, outcome)).collect();
+                        state.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::ChangeResults(results)) });
+                    }
                 }
                 Step::ActivateRefused(c, code) => {
                     let a = state.activate(c);
@@ -654,8 +1266,12 @@ impl Scenario {
 /// What the mock backend's thread remembers between commands.
 struct World {
     devices: Vec<DeviceView>,
+    /// The devices blocked by MAC (D65).
+    blocked: Vec<BlockedItem>,
     settings: Settings,
     next_session: u64,
+    /// The entries the user cancelled: their scheduled news does not arrive.
+    cancelled: Arc<Mutex<Vec<u64>>>,
 }
 
 struct Shared {
@@ -678,6 +1294,17 @@ impl Shared {
             me.push(e);
         });
     }
+
+    /// Like [`Shared::later`], unless `entry` was cancelled by then.
+    fn later_unless(self: &Arc<Self>, delay: Duration, e: UiEvent, entry: u64, cancelled: &Arc<Mutex<Vec<u64>>>) {
+        let (me, cancelled) = (Arc::clone(self), Arc::clone(cancelled));
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            if cancelled.lock().is_ok_and(|c| !c.contains(&entry)) {
+                me.push(e);
+            }
+        });
+    }
 }
 
 /// Faults a test or a demo arms for the next command.
@@ -685,6 +1312,25 @@ impl Shared {
 struct Faults {
     refuse_next: Option<ApiCode>,
     stall_next: bool,
+}
+
+/// The mock machine's updater: 1.1.0, nothing on offer, checked an hour before the scenarios' clock.
+pub fn update_idle() -> UpdateInfo {
+    UpdateInfo {
+        running: "1.1.0".into(),
+        phase: UpdatePhase::Idle,
+        check_on: true,
+        last_check_ms: Some(NOW_MS - 3_600_000),
+        dismissed: None,
+        last_failure: None,
+        rolled_back: None,
+        updated: false,
+    }
+}
+
+/// The mock updater in a phase.
+pub fn update_with(phase: UpdatePhase) -> UpdateInfo {
+    UpdateInfo { phase, ..update_idle() }
 }
 
 /// How long the mock "service" takes for a command: reads are quick, the activity log and folder listings are slow
@@ -715,7 +1361,13 @@ impl MockBackend {
     pub fn new(waker: Arc<dyn UiWaker>) -> MockBackend {
         MockBackend {
             shared: Arc::new(Shared { events: Mutex::new(VecDeque::new()), waker }),
-            world: Arc::new(Mutex::new(World { devices: devices(), settings: settings(), next_session: 10 })),
+            world: Arc::new(Mutex::new(World {
+                devices: devices(),
+                blocked: Vec::new(),
+                settings: settings(),
+                next_session: 10,
+                cancelled: Arc::new(Mutex::new(Vec::new())),
+            })),
             inflight: Arc::new(InFlight::new()),
             faults: Arc::new(Mutex::new(Faults::default())),
             executed: Arc::new(AtomicUsize::new(0)),
@@ -791,6 +1443,30 @@ impl World {
             Command::GetNetwork => Ok(Reply::Network(network(Vec::new(), NetCategoryView::Private))),
             Command::ListDevices => Ok(Reply::Devices(self.devices.clone())),
             Command::GetSettings => Ok(Reply::Settings(self.settings.clone())),
+            Command::ListBlocked => Ok(Reply::Blocked(self.blocked.clone())),
+            Command::BlockAddress { ipv4 } => {
+                let n = self.blocked.len() as u8;
+                self.blocked.insert(
+                    0,
+                    BlockedItem {
+                        mac: format!("02:5a:d0:00:00:{n:02x}"),
+                        last_ipv4: ipv4,
+                        name: String::new(),
+                        blocked_at_ms: 0,
+                    },
+                );
+                Ok(Reply::Blocked(self.blocked.clone()))
+            }
+            Command::UnblockDevice { mac } => {
+                let before = self.blocked.len();
+                self.blocked.retain(|b| b.mac != mac);
+                if self.blocked.len() == before {
+                    Err(ApiError::new(ApiCode::NotFound))
+                } else {
+                    Ok(Reply::Blocked(self.blocked.clone()))
+                }
+            }
+            Command::GetUpdate => Ok(Reply::Update(update_idle())),
             Command::ActivityList { .. } => Ok(Reply::Activity(activity())),
             Command::SetSettings { settings } => {
                 self.settings = settings.clone();
@@ -855,6 +1531,10 @@ impl World {
                 self.devices.retain(|d| d.id != device_id);
                 Ok(Reply::Done)
             }
+            Command::RefreshGrants { device_id } => {
+                self.device(&device_id)?;
+                Ok(Reply::Done)
+            }
             Command::RenameDevice { device_id, name } => {
                 let name = name.trim();
                 if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
@@ -869,58 +1549,64 @@ impl World {
                 sh.later(ms(50), UiEvent::DevicesChanged(devices));
                 Ok(Reply::Done)
             }
-            Command::Elevate { action } => {
+            Command::Elevate { action, run, .. } => {
                 if let ElevatedAction::SetGrants { device_id, grants } = &action
                     && let Ok(d) = self.device(device_id)
                 {
                     d.grants_here = *grants;
                 }
                 let devices = self.devices.clone();
-                sh.later(ms(900), UiEvent::ElevationResult { action, result: Ok(()) });
+                sh.later(ms(900), UiEvent::ElevationResult { action, run, result: Ok(()) });
                 sh.later(ms(950), UiEvent::DevicesChanged(devices));
                 Ok(Reply::Done)
             }
             Command::Connect { device_id, .. } => {
-                let asleep = matches!(self.device(&device_id)?.status, DeviceStatus::Asleep);
+                self.device(&device_id)?;
                 self.next_session += 1;
-                let id = self.next_session;
-                sh.later(
-                    ms(10),
-                    UiEvent::Session { session_id: id, device_id: device_id.clone(), state: SessionState::Connecting },
-                );
-                let active = UiEvent::Session {
-                    session_id: id,
-                    device_id: device_id.clone(),
-                    state: SessionState::Active {
-                        since_ms: NOW_MS,
-                        role: Role::Viewer,
-                        granted: perms(&[
-                            Permission::View,
-                            Permission::Control,
-                            Permission::Audio,
-                            Permission::Files,
-                            Permission::Clipboard,
-                        ]),
+                let session = self.next_session;
+                let entry = ENTRY_BIT | session;
+                let cancelled = Arc::clone(&self.cancelled);
+                let say =
+                    |state: SessionState| UiEvent::Session { session_id: entry, device_id: device_id.clone(), state };
+                sh.later_unless(ms(10), say(SessionState::Connecting), entry, &cancelled);
+                sh.later_unless(ms(300), say(SessionState::Prompted { remaining_s: 20 }), entry, &cancelled);
+                // The other computer accepted: the session's own Active first, then the entry's normal end.
+                sh.later_unless(
+                    ms(900),
+                    UiEvent::Session {
+                        session_id: session,
+                        device_id: device_id.clone(),
+                        state: SessionState::Active {
+                            since_ms: NOW_MS,
+                            role: Role::Viewer,
+                            granted: perms(&[
+                                Permission::View,
+                                Permission::Control,
+                                Permission::Audio,
+                                Permission::Files,
+                                Permission::Clipboard,
+                            ]),
+                            elevation: Default::default(),
+                        },
                     },
-                };
-                if asleep {
-                    sh.later(
-                        ms(30),
-                        UiEvent::Session { session_id: id, device_id, state: SessionState::Waking { remaining_s: 60 } },
-                    );
-                    sh.later(ms(2500), active);
-                } else {
-                    sh.later(ms(500), active);
-                }
-                Ok(Reply::SessionId(id))
+                    entry,
+                    &cancelled,
+                );
+                sh.later_unless(ms(920), say(SessionState::Ended { reason: None }), entry, &cancelled);
+                Ok(Reply::SessionId(entry))
             }
             Command::Disconnect { session_id } => {
+                if session_id & ENTRY_BIT != 0
+                    && let Ok(mut c) = self.cancelled.lock()
+                {
+                    c.push(session_id);
+                }
                 sh.later(
                     ms(20),
                     UiEvent::Session {
                         session_id,
                         device_id: String::new(),
-                        state: SessionState::Ended { reason: Some(ApiCode::NotFound) },
+                        state: SessionState::Ended { reason: None },
                     },
                 );
                 Ok(Reply::Done)
@@ -939,33 +1625,28 @@ impl World {
             Command::FilesList { .. } => {
                 Ok(Reply::Listing(Listing { path: "Mesa".into(), entries: Vec::new(), truncated: false }))
             }
+            // [UI] the made-up peer runs 1.0 (slice 2b's fallbacks): it answers none of the minor 1 requests.
+            Command::FilesVolumes { .. } | Command::FilesListPage { .. } | Command::FilesChange { .. } => {
+                Err(ApiError::new(ApiCode::Invalid))
+            }
+            // [UI] this computer's disk, made up: a capture never shows the real one.
+            Command::LocalList { path } => Ok(Reply::LocalListing(LocalListing {
+                path: path.unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\ana\\Downloads")),
+                entries: local_entries(),
+                truncated: false,
+                hidden: Vec::new(),
+            })),
+            Command::LocalPlaces => Ok(Reply::LocalPlaces(local_places())),
+            // [UI] made up: no dropped path is a folder.
+            Command::LocalKinds { paths } => Ok(Reply::LocalKinds(paths.into_iter().map(|p| (p, false)).collect())),
             Command::ChatSend { text, .. } => {
                 Ok(Reply::Chat(ChatView { msg_id: 100, mine: true, text, sent_at_ms: NOW_MS, read: false }))
             }
-            Command::ActivityExport { path } => {
+            Command::ActivityExport { path, language, utc_offset_min } => {
                 // [UI] work: the UI process writes the exported log itself, here on the backend thread.
-                let lang = Language::PtBr;
-                let mut csv = String::from(
-                    "quando;dispositivo;o que aconteceu;duracao_s
-",
-                );
-                for r in activity() {
-                    let when = crate::format::table_when(
-                        lang,
-                        r.at_ms,
-                        crate::format::Clock { now_ms: NOW_MS, utc_offset_min: 0 },
-                    );
-                    let what = crate::strings::text(lang, &r.what);
-                    csv.push_str(&format!(
-                        "{when};{};{what};{}
-",
-                        r.device_name,
-                        r.duration_s.map_or(String::new(), |d| d.to_string())
-                    ));
-                }
+                let csv = crate::format::activity_csv(language, &activity(), utc_offset_min);
                 std::fs::write(&path, csv).map(|()| Reply::Done).map_err(|_| ApiError::new(ApiCode::Internal))
             }
-            Command::RequestOsPermissions => Ok(Reply::MissingPermissions(Vec::new())),
             Command::ListDisplays { .. } => Ok(Reply::Displays(vec![DisplayView {
                 id: 1,
                 name: "Tela 1".into(),
@@ -1017,22 +1698,57 @@ mod tests {
             (Scenario::EstadoRedePublica, Screen::Devices, &[Main]),
             (Scenario::EstadoServicoMac, Screen::Devices, &[Main]),
             (Scenario::EstadoPermissoesMac, Screen::Devices, &[Main]),
+            (Scenario::EstadoPastaRecebimentoMac, Screen::Devices, &[Main]),
             (Scenario::EstadoReconectando, Screen::Devices, &[Main, Viewer]),
             (Scenario::EstadoAcordando, Screen::Devices, &[Main]),
+            (Scenario::EstadoConectando, Screen::Devices, &[Main]),
+            (Scenario::EstadoAguardandoAceite, Screen::Devices, &[Main]),
+            (Scenario::EstadoConexaoRecusada, Screen::Devices, &[Main]),
+            (Scenario::EstadoConexaoNinguem, Screen::Devices, &[Main]),
             (Scenario::EstadoInversaoRecusada, Screen::Devices, &[Main, Viewer]),
             (Scenario::Visualizador, Screen::Devices, &[Main, Viewer]),
             (Scenario::VisualizadorEscuro, Screen::Devices, &[Main, Viewer]),
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
-            (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
+            (Scenario::Explorador, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorRenomear, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorExcluirParaSempre, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorPropriedades, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorOutroDisco, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorSemLixeira, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorLixeiraDeLa, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorArrastando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorSoltando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::TelaSoltando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorMenu, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
+            (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),
             (Scenario::Inverter, Screen::Devices, &[Main, Viewer]),
             (Scenario::InverterPedido, Screen::Home, &[Main, Banner]),
+            (Scenario::InverterAguardando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::PareamentoConfirmando, Screen::Pairing, &[Main]),
             (Scenario::EstadoFechouInesperado, Screen::Devices, &[Main]),
             (Scenario::EstadoNenhumComputador, Screen::Home, &[Main]),
+            (Scenario::EstadoNaoPareado, Screen::Devices, &[Main]),
+            (Scenario::AtividadeVazia, Screen::Activity, &[Main]),
             (Scenario::Carregando, Screen::Home, &[Main]),
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::TerminalAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
+            (Scenario::PermissoesNoMac, Screen::Devices, &[Main]),
+            (Scenario::PareadosAntesDa11, Screen::Home, &[Main]),
+            (Scenario::VisualizadorElevar, Screen::Devices, &[Main, Viewer]),
+            (Scenario::VisualizadorPausadoElevar, Screen::Devices, &[Main, Viewer]),
+            (Scenario::VisualizadorContaAusente, Screen::Devices, &[Main, Viewer]),
+            (Scenario::BannerElevado, Screen::Home, &[Main, Banner]),
+            (Scenario::BannerArquivos, Screen::Home, &[Main, Banner]),
+            (Scenario::AtualizacaoOferecida, Screen::Home, &[Main]),
+            (Scenario::AtualizacaoBaixando, Screen::Home, &[Main]),
+            (Scenario::AtualizacaoSessaoAtiva, Screen::Home, &[Main, Viewer]),
+            (Scenario::AtualizacaoFalhaAssinatura, Screen::Settings, &[Main]),
+            (Scenario::AtualizacaoRevertida, Screen::Home, &[Main]),
+            (Scenario::Atualizado, Screen::Home, &[Main]),
         ];
         assert_eq!(expect.len(), Scenario::ALL.len());
         for (sc, screen, windows) in expect {
@@ -1119,7 +1835,11 @@ mod tests {
         let b = MockBackend::new(Arc::new(NoWake));
         let mut s = UiState::default();
         let commands = s.startup_commands();
-        assert_eq!(commands.len(), 5, "identity, network, devices, settings and activity are asked together");
+        assert_eq!(
+            commands.len(),
+            7,
+            "identity, network, devices, settings, the blocked devices, activity and the updater are asked together"
+        );
         // Before any answer nothing is drawn in between (R-UI-1) ...
         assert!(s.has_pending_fetch());
         assert!(!s.placeholder(DataKind::Devices));
@@ -1188,7 +1908,7 @@ mod tests {
         let a = fresh.activate(ControlId::HomeActivityAll);
         assert_eq!(a.commands.len(), 1, "first open asks once");
         let a = fresh.activate(ControlId::NavSettings);
-        assert_eq!(a.commands, vec![Command::GetSettings]);
+        assert_eq!(a.commands, vec![Command::GetSettings, Command::ListBlocked], "Ajustes and its blocked devices");
         let again = fresh.activate(ControlId::HomeActivityAll);
         assert!(again.commands.is_empty(), "a second visit does not ask again while the first is in flight");
         // An event refreshes the cache without a request.
@@ -1268,7 +1988,10 @@ mod tests {
         let a = s.activate(ControlId::PairSame);
         assert_eq!(a.commands.len(), 1);
         assert!(matches!(s.pairing().unwrap().state, PairingState::ShowCode { .. }), "still showing the code");
-        assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::PairSame && c.disabled));
+        // The two buttons give way to "Cancelar" alone (docs/WAITING.md row 7).
+        let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+        assert!(!ids.contains(&ControlId::PairSame) && !ids.contains(&ControlId::PairDifferent));
+        assert!(ids.contains(&ControlId::PairCancel));
         assert!(s.activate(ControlId::PairSame).commands.is_empty(), "a second press does nothing");
     }
 
@@ -1299,9 +2022,104 @@ mod tests {
 
     #[test]
     fn r_ui_7_a_refused_admin_prompt_or_a_slow_connect_have_their_own_limits() {
-        assert_eq!(Command::Elevate { action: ElevatedAction::OpenAdminTerminal { session_id: 1 } }.timeout_s(), 120);
-        assert_eq!(Command::Connect { device_id: "x".into(), intent: Intent::View, unattended: false }.timeout_s(), 20);
+        assert_eq!(
+            Command::Elevate {
+                action: ElevatedAction::OpenAdminTerminal { session_id: 1 },
+                line: String::new(),
+                run: 1
+            }
+            .timeout_s(),
+            120
+        );
+        // Connect and Wake answer at once with the entry's id: the wait is told by notifications, so 5 s is for the
+        // reply and the interface's own 60 s safety net (`CONNECT_GIVE_UP_S`) is for news that never comes.
+        assert_eq!(Command::Connect { device_id: "x".into(), intent: Intent::View, unattended: false }.timeout_s(), 5);
+        assert_eq!(Command::Wake { device_id: "x".into() }.timeout_s(), 5);
+        assert_eq!(crate::tokens::layout::CONNECT_GIVE_UP_S, 60);
         assert_eq!(Command::ListDevices.timeout_s(), 5);
+    }
+
+    #[test]
+    fn the_connect_scenarios_show_their_cards() {
+        use crate::state::{WaitIcon, WaitPhase};
+        let card = |sc: Scenario| {
+            let s = sc.prepared_state();
+            let card = s.wait_card(MAC).unwrap_or_else(|| panic!("{} has a card", sc.name()));
+            let name = s.device_by_id(MAC).unwrap().name.clone();
+            (card, name)
+        };
+        let (c, name) = card(Scenario::EstadoConectando);
+        assert_eq!((c.phase, c.icon), (WaitPhase::Connecting, WaitIcon::Clock));
+        assert_eq!(c.title, format!("Conectando ao {name}"));
+        // The click's card has no id yet, and the only button is Cancelar.
+        let s = Scenario::EstadoConectando.prepared_state();
+        assert_eq!(s.connect_flow(MAC).unwrap().entry, 0);
+        assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::ConnectCancel));
+
+        let (c, name) = card(Scenario::EstadoAguardandoAceite);
+        assert_eq!(c.phase, WaitPhase::Prompted);
+        assert_eq!(c.title, format!("Esperando o {name} aceitar"));
+        assert_eq!(c.bar.unwrap().text.as_deref(), Some("0:14"));
+
+        let (c, name) = card(Scenario::EstadoConexaoRecusada);
+        assert_eq!((c.phase, c.icon), (WaitPhase::Ended, WaitIcon::ShieldAlert));
+        assert_eq!(c.body, format!("O {name} recusou."));
+
+        let (c, name) = card(Scenario::EstadoConexaoNinguem);
+        assert_eq!(c.body, format!("Não há ninguém no {name} agora."));
+        assert!(c.buttons.iter().any(|b| b.id == ControlId::ConnectRetry));
+        for sc in [
+            Scenario::EstadoConectando,
+            Scenario::EstadoAguardandoAceite,
+            Scenario::EstadoConexaoRecusada,
+            Scenario::EstadoConexaoNinguem,
+        ] {
+            assert!(Scenario::ALL.contains(&sc) && Scenario::from_name(sc.name()) == Some(sc));
+            assert!(sc.name().starts_with("estado-") && !sc.board().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_mock_connect_answers_at_once_then_reports_the_wait_and_the_session_before_the_entry_ends() {
+        let b = MockBackend::new(Arc::new(NoWake));
+        let t = b.send(Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false });
+        let events = wait_for(&b, 5);
+        let entry = match &events[0] {
+            UiEvent::Reply { ticket, result: Ok(Reply::SessionId(id)) } if *ticket == t => *id,
+            other => panic!("the reply comes first: {other:?}"),
+        };
+        assert!(entry & (1 << 63) != 0, "an entry id has bit 63 set");
+        let states: Vec<(u64, &SessionState)> = events[1..]
+            .iter()
+            .map(|e| match e {
+                UiEvent::Session { session_id, state, .. } => (*session_id, state),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(states.len(), 4, "{states:?}");
+        assert_eq!(states[0], (entry, &SessionState::Connecting));
+        assert_eq!(states[1], (entry, &SessionState::Prompted { remaining_s: 20 }));
+        assert!(matches!(states[2], (id, SessionState::Active { role: Role::Viewer, .. }) if id != entry));
+        assert_eq!(states[3], (entry, &SessionState::Ended { reason: None }));
+    }
+
+    #[test]
+    fn a_cancelled_mock_connect_opens_no_session() {
+        let b = MockBackend::new(Arc::new(NoWake));
+        b.send(Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false });
+        let events = wait_for(&b, 1);
+        let UiEvent::Reply { result: Ok(Reply::SessionId(entry)), .. } = &events[0] else { panic!("{events:?}") };
+        b.send(Command::Disconnect { session_id: *entry });
+        std::thread::sleep(Duration::from_millis(1300));
+        let later = b.drain();
+        assert!(
+            !later.iter().any(|e| matches!(e, UiEvent::Session { state: SessionState::Active { .. }, .. })),
+            "{later:?}"
+        );
+        assert!(later.iter().any(|e| matches!(
+            e,
+            UiEvent::Session { session_id, state: SessionState::Ended { reason: None }, .. } if session_id == entry
+        )));
     }
 
     #[test]

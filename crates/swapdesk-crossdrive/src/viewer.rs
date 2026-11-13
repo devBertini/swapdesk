@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use swapdesk_platform::{Pixels, VideoDecoder};
 use swapdesk_proto::{CursorPosition, CursorShape, InputEvent, KeyframeRequest, VideoHeader};
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
-use swapdesk_ui::{Command, Intent, PairingState, Reply, Role, SessionState, UiEvent};
+use swapdesk_ui::{Command, Intent, Os, PairingState, Reply, Role, SessionState, UiEvent};
 
 use crate::pump::{Pump, wait_file};
 
@@ -38,6 +38,9 @@ struct CursorSample {
     at: Instant,
     x: u16,
     y: u16,
+    /// False while the host hides its pointer (an application does that while its user types): the position of
+    /// such an update is not a place on the screen.
+    visible: bool,
 }
 
 #[derive(Default)]
@@ -56,6 +59,8 @@ struct Shared {
     last_error: Mutex<String>,
     need_keyframe: AtomicBool,
     first_frame_ms: AtomicU64,
+    /// When the last picture was decoded.
+    last_decoded: Mutex<Option<Instant>>,
     /// `width << 16 | height` of the last video header.
     dims: AtomicU32,
     display: AtomicU32,
@@ -64,6 +69,8 @@ struct Shared {
     /// Percent of sampled pixels that are not black in the last sampled picture; 101 = none yet.
     nonblack: AtomicU32,
     cursor: Mutex<Vec<CursorSample>>,
+    /// Terminal output not yet taken by the terminal proof, by terminal id.
+    term_out: Mutex<Vec<(u32, Vec<u8>)>>,
 }
 
 struct Sink {
@@ -97,11 +104,15 @@ impl ViewerSink for Sink {
         self.shared.cursor_updates.fetch_add(1, Ordering::Relaxed);
         let mut samples = lock(&self.shared.cursor);
         if samples.len() < MAX_CURSOR_SAMPLES {
-            samples.push(CursorSample { at: Instant::now(), x: pos.x, y: pos.y });
+            samples.push(CursorSample { at: Instant::now(), x: pos.x, y: pos.y, visible: pos.visible });
         }
     }
 
     fn cursor_shape(&self, _session_id: u64, _shape: CursorShape) {}
+
+    fn term_output(&self, term_id: u32, bytes: Vec<u8>) {
+        lock(&self.shared.term_out).push((term_id, bytes));
+    }
 }
 
 /// The viewer's media side: a sink for `ServiceBackend::start_with_sink` and the decode thread behind it.
@@ -154,6 +165,7 @@ fn decode_one(s: &Shared, decoder: &mut dyn VideoDecoder, header: &VideoHeader, 
     match decoder.decode(header, payload) {
         Ok(Some(frame)) => {
             let n = s.frames_decoded.fetch_add(1, Ordering::Relaxed) + 1;
+            *lock(&s.last_decoded) = Some(Instant::now());
             if header.keyframe {
                 s.need_keyframe.store(false, Ordering::Relaxed);
             }
@@ -198,6 +210,12 @@ fn nonblack_percent(data: &[u8], stride: usize, width: usize, height: usize) -> 
     (lit * 100).checked_div(total).unwrap_or(0)
 }
 
+/// The clipboard this side uses for the copy and paste proof, and the folder shared with the orchestrator.
+pub struct ClipStep {
+    pub dir: PathBuf,
+    pub provider: Mutex<Box<dyn swapdesk_platform::ClipboardProvider + Send>>,
+}
+
 pub struct ViewerConfig {
     /// The host's IPv4 address, as typed in "add by address".
     pub host_addr: String,
@@ -225,7 +243,42 @@ pub struct ViewerConfig {
     pub send_input: bool,
     /// The session stays open at least this long after it went active (media keeps being counted).
     pub hold: Duration,
+    /// Keyboard proof: after the pointer moves, wait for this file (the orchestrator writes it once a text editor has
+    /// the focus on the host), then type [`TYPED_WORD`] with physical keys and save with Cmd+S, or Ctrl+S when
+    /// [`ViewerConfig::save_with_ctrl`] is set. `None`: no keys.
+    pub type_after: Option<PathBuf>,
+    /// The host is a Windows machine: the save chord of the keyboard proof is Ctrl+S (Cmd+S there is Win+S, which
+    /// opens the search).
+    pub save_with_ctrl: bool,
+    /// Copy and paste proof ([`crate::clip`]): after the keys, text and an image each way through this clipboard and
+    /// the files in this folder. `None`: no clipboard steps.
+    pub clip: Option<ClipStep>,
+    /// Files proof ([`crate::files`]): after the clipboard, a file each way and a cancel, meeting the orchestrator in
+    /// this folder. `None`: no file steps.
+    pub files: Option<PathBuf>,
+    /// Chat proof ([`crate::chat`]): a message each way with its read state, meeting the orchestrator in this folder.
+    /// `None`: no chat steps.
+    pub chat: Option<PathBuf>,
+    /// Reconnect proof ([`crate::reconnect`]): the orchestrator drops the link for about 10 s and this side must see
+    /// the session come back and a picture inside the budget; they meet in this folder. Runs last. `None`: no drop.
+    pub reconnect: Option<PathBuf>,
+    /// Terminal and quick actions proof ([`crate::term`], [`crate::actions`]): a shell on the host as its logged-in
+    /// user, resized and closed, then the quick action list (and the harmless run, toward a Mac); the orchestrator
+    /// writes the host's console user into `term-expect-user` in this folder. Needs `TERMINAL` granted by the host.
+    pub term: Option<PathBuf>,
+    /// Swap proof ([`crate::swap`]): asks for a swap, expects the reverse session, ends it. Runs last, and not with
+    /// the reconnect proof (the session it would drop is gone).
+    pub swap: bool,
+    /// No picture is waited for and no pointer is moved: the proofs that need no screen (terminal, quick actions, chat,
+    /// swap) toward a host that cannot capture one. The orchestrator says why in its report.
+    pub no_media: bool,
+    /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
+    /// `pair_with_fresh_host`). `None`: the host is found by its address.
+    pub host_up: Option<PathBuf>,
 }
+
+/// What the keyboard proof types, as HID usages of the US layout's letter keys (page 7).
+pub const TYPED_WORD: &str = "swapdesk";
 
 impl ViewerConfig {
     pub fn new(host_addr: &str, peer_code: PathBuf, go: PathBuf, anchor_file: PathBuf) -> Self {
@@ -242,6 +295,16 @@ impl ViewerConfig {
             paired: None,
             send_input: true,
             hold: Duration::ZERO,
+            type_after: None,
+            save_with_ctrl: false,
+            clip: None,
+            files: None,
+            chat: None,
+            reconnect: None,
+            term: None,
+            swap: false,
+            no_media: false,
+            host_up: None,
         }
     }
 }
@@ -269,6 +332,22 @@ pub struct ViewerReport {
     pub session_active: bool,
     pub ended_clean: bool,
     pub forgotten: bool,
+    /// The copy and paste proof failed (only when it ran): why.
+    pub clip_failed: Option<String>,
+    /// The files proof failed: why.
+    pub files_failed: Option<String>,
+    /// The chat proof failed: why.
+    pub chat_failed: Option<String>,
+    /// The reconnect proof failed: why.
+    pub reconnect_failed: Option<String>,
+    /// What the reconnect proof measured (when it got that far).
+    pub reconnect_times: Option<crate::reconnect::Times>,
+    /// The terminal proof failed: why.
+    pub term_failed: Option<String>,
+    /// The quick actions proof failed: why.
+    pub actions_failed: Option<String>,
+    /// The swap proof failed: why.
+    pub swap_failed: Option<String>,
 }
 
 impl ViewerReport {
@@ -391,37 +470,79 @@ fn script(
     // 2. Open the session with control.
     let shared = &media.shared;
     *lock(&shared.started) = Some(Instant::now());
-    let Reply::SessionId(session_id) = pump.ask(
+    // The reply is the id of the connect's entry; the session has its own id, the one of its first `Active`. Until it
+    // exists, ending the held id cancels the entry.
+    let Reply::SessionId(entry) = pump.ask(
         Command::Connect { device_id: host.clone(), intent: Intent::Control, unattended: false },
         cfg.connect_timeout,
     )?
     else {
-        return Err("Connect did not reply a session id".into());
+        return Err("Connect did not reply an entry id".into());
     };
+    held.session = Some(entry);
+    let (session_id, granted) = pump.wait("the session to go active", cfg.connect_timeout, |e| match e {
+        UiEvent::Session { session_id: s, state: SessionState::Active { role: Role::Viewer, granted, .. }, .. } => {
+            Some((*s, *granted))
+        }
+        UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == entry => {
+            log(&format!("VIEWER_SESSION_ENDED_EARLY {reason:?}"));
+            None
+        }
+        UiEvent::Session { session_id: s, state: SessionState::NotOpened { why }, .. } if *s == entry => {
+            log(&format!("VIEWER_SESSION_NOT_OPENED {why:?}"));
+            None
+        }
+        _ => None,
+    })?;
     held.session = Some(session_id);
-    let granted =
-        pump.wait("the session to go active", cfg.connect_timeout, |e| match e {
-            UiEvent::Session {
-                session_id: s, state: SessionState::Active { role: Role::Viewer, granted, .. }, ..
-            } if *s == session_id => Some(*granted),
-            UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == session_id => {
-                log(&format!("VIEWER_SESSION_ENDED_EARLY {reason:?}"));
-                None
-            }
-            _ => None,
-        })?;
     let active_at = Instant::now();
     report.session_active = true;
     log(&format!("VIEWER_ACTIVE session={session_id} granted={:#06x}", granted.0));
     pump.ask(Command::SetAudio { session_id, on: true }, REPLY)?;
-    script_media(pump, backend, media, cfg, log, held, report, session_id, active_at)
+    let host_os = match pump.ask(Command::ListDevices, REPLY)? {
+        Reply::Devices(list) => list.iter().find(|d| d.id == host).map(|d| d.os),
+        _ => None,
+    };
+    let host = Peer { id: host, os: host_os };
+    script_media(pump, backend, media, cfg, log, held, report, session_id, active_at, &host)
+}
+
+/// The host of the session: its device id and, when the list says, its system.
+struct Peer {
+    id: String,
+    os: Option<Os>,
 }
 
 /// Adds the host by address and runs the pairing ceremony; the device id it paired as.
 fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -> Result<String, String> {
-    let Reply::Device(placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
+    if let Some(up) = &cfg.host_up {
+        return pair_with_fresh_host(pump, cfg, log, up);
+    }
+    let Reply::Device(mut placeholder) = pump.ask(Command::AddByAddress { ipv4: cfg.host_addr.clone() }, REPLY)? else {
         return Err("AddByAddress did not reply a device".into());
     };
+    // The address can still name the machine's own app, already paired here and announced before the scripted host
+    // replaced it (its record outlives it). The scripted host has a fresh identity: it is the one device on the
+    // network that is not paired and runs the same OS. Wait a moment for its announcement.
+    if placeholder.paired {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(Reply::Devices(list)) = pump.ask(Command::ListDevices, REPLY) {
+                let fresh: Vec<_> = list.iter().filter(|d| !d.paired && d.os == placeholder.os).collect();
+                if let [one] = fresh.as_slice() {
+                    log(&format!("VIEWER_ADDRESS_NAMED_A_PAIRED_DEVICE using the unpaired {}", one.id));
+                    placeholder = (*one).clone();
+                    break;
+                }
+            }
+            if Instant::now() > end {
+                return Err(
+                    "the address names a paired device and no single unpaired one of its OS is on the network".into()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
     let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
         return Err("PairOpen did not reply a pairing id".into());
     };
@@ -436,6 +557,65 @@ fn pair_with_host(pump: &mut Pump<'_>, cfg: &ViewerConfig, log: &dyn Fn(&str)) -
     Ok(host)
 }
 
+/// The devices known once the list has stopped changing. Discovery fills the list in over the first seconds after a
+/// start, so a snapshot taken at once would call every machine of the network "new" a moment later: the list must
+/// hold still for three seconds (or fifteen have passed).
+fn settled_devices(pump: &mut Pump<'_>) -> Result<BTreeSet<String>, String> {
+    let ids = |pump: &mut Pump<'_>| -> Result<BTreeSet<String>, String> {
+        match pump.ask(Command::ListDevices, REPLY)? {
+            Reply::Devices(list) => Ok(list.into_iter().map(|d| d.id).collect()),
+            _ => Err("ListDevices did not reply the devices".into()),
+        }
+    };
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut known = ids(pump)?;
+    let mut still_since = Instant::now();
+    while still_since.elapsed() < Duration::from_secs(3) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = ids(pump)?;
+        if now != known {
+            known = now;
+            still_since = Instant::now();
+        }
+    }
+    Ok(known)
+}
+
+/// The scripted host gets a new key on every run, and a record of an earlier run can still sit at its address on this
+/// PC (a service before 1.1 keeps it). So: note the devices known now, let the orchestrator start the host (it writes
+/// `up`), then pair with the one unpaired device that appears after that.
+fn pair_with_fresh_host(
+    pump: &mut Pump<'_>,
+    cfg: &ViewerConfig,
+    log: &dyn Fn(&str),
+    up: &std::path::Path,
+) -> Result<String, String> {
+    let known = settled_devices(pump)?;
+    log(&format!("VIEWER_SNAPSHOT_TAKEN {} devices known", known.len()));
+    wait_file(up, "the host started by the orchestrator", cfg.pair_timeout)?;
+    let end = Instant::now() + Duration::from_secs(30);
+    let host = loop {
+        if let Ok(Reply::Devices(list)) = pump.ask(Command::ListDevices, REPLY) {
+            let fresh: Vec<_> = list.into_iter().filter(|d| !d.paired && !known.contains(&d.id)).collect();
+            if let [one] = fresh.as_slice() {
+                break one.id.clone();
+            }
+        }
+        if Instant::now() > end {
+            return Err("no single new unpaired device appeared after the host started".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    log(&format!("VIEWER_FRESH_HOST {host}"));
+    let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
+        return Err("PairOpen did not reply a pairing id".into());
+    };
+    log("VIEWER_PAIR_OPEN");
+    pair(pump, cfg, log, pairing_id, &host).inspect_err(|_| {
+        let _ = pump.request(Command::PairCancel { pairing_id }, REPLY);
+    })
+}
+
 /// The session's media and pointer, then its end. Runs once the session is active.
 #[allow(clippy::too_many_arguments)]
 fn script_media(
@@ -448,16 +628,20 @@ fn script_media(
     report: &mut ViewerReport,
     session_id: u64,
     active_at: Instant,
+    host: &Peer,
 ) -> Result<(), String> {
     let shared = &media.shared;
     let mut last_ask = Instant::now() - Duration::from_secs(1);
-    // 3. Video: wait for the first decoded picture, asking for a keyframe when the decoder lost its place.
+    // 3. Video: wait for the first decoded picture, asking for a keyframe when the decoder lost its place. Without
+    // media (a host whose screen cannot be captured, such as a locked Mac) the picture is not waited for.
     let end = Instant::now() + cfg.media_timeout;
-    while shared.frames_decoded.load(Ordering::Relaxed) == 0 && Instant::now() < end {
+    while !cfg.no_media && shared.frames_decoded.load(Ordering::Relaxed) == 0 && Instant::now() < end {
         request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
         std::thread::sleep(Duration::from_millis(30));
     }
-    if shared.frames_decoded.load(Ordering::Relaxed) == 0 {
+    if cfg.no_media {
+        log("VIEWER_MEDIA_SKIPPED no picture is waited for and no pointer is moved (--no-media)");
+    } else if shared.frames_decoded.load(Ordering::Relaxed) == 0 {
         return Err(format!(
             "no frame was decoded within {}s (received {}, decode errors {}, last: {})",
             cfg.media_timeout.as_secs(),
@@ -466,10 +650,102 @@ fn script_media(
             lock(&shared.last_error)
         ));
     }
-    log(&format!("VIEWER_FIRST_FRAME decoded={} ", shared.frames_decoded.load(Ordering::Relaxed)));
+    if !cfg.no_media {
+        log(&format!("VIEWER_FIRST_FRAME decoded={} ", shared.frames_decoded.load(Ordering::Relaxed)));
+    }
 
     // 4. Pointer: a few small moves around where the host's pointer is now, at most one second of them.
-    let pointer = if cfg.send_input { pointer_moves(backend, shared, session_id, cfg, log, report) } else { Ok(()) };
+    let pointer = if cfg.send_input && !cfg.no_media {
+        pointer_moves(backend, shared, session_id, cfg, log, report)
+    } else {
+        Ok(())
+    };
+    let pointer = pointer.and_then(|()| match &cfg.type_after {
+        Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, cfg.save_with_ctrl, log),
+        None => Ok(()),
+    });
+    if let Some(step) = &cfg.clip {
+        log("VIEWER_NEED_CLIP");
+        let mut provider = lock(&step.provider);
+        if let Err(e) = crate::clip::clip_round(provider.as_mut(), &step.dir, Duration::from_secs(20), log) {
+            log(&format!("CLIP_FAIL {e}"));
+            report.clip_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.files {
+        log("VIEWER_NEED_FILES");
+        if let Err(e) = crate::files::files_round(pump, session_id, dir, Duration::from_secs(60), log) {
+            log(&format!("FILES_FAIL {e}"));
+            report.files_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.chat {
+        log("VIEWER_NEED_CHAT");
+        if let Err(e) = crate::chat::chat_round(pump, session_id, dir, Duration::from_secs(30), log) {
+            log(&format!("CHAT_FAIL {e}"));
+            report.chat_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.term {
+        let drain = |term_id: u32| -> Vec<u8> {
+            let mut out = lock(&shared.term_out);
+            let mut bytes = Vec::new();
+            out.retain(|(t, b)| {
+                if *t == term_id {
+                    bytes.extend_from_slice(b);
+                }
+                *t != term_id
+            });
+            bytes
+        };
+        match host.os {
+            None => report.term_failed = Some("the host's system is not in the device list".into()),
+            Some(os) => {
+                if let Err(e) = crate::term::term_round(pump, session_id, dir, os, &drain, Duration::from_secs(30), log)
+                {
+                    log(&format!("TERM_FAIL {e}"));
+                    report.term_failed = Some(e);
+                }
+                if let Err(e) = crate::actions::actions_round(pump, session_id, &host.id, os, log) {
+                    log(&format!("ACTIONS_FAIL {e}"));
+                    report.actions_failed = Some(e);
+                }
+            }
+        }
+    }
+    if cfg.swap {
+        log("VIEWER_NEED_SWAP");
+        match crate::swap::swap_round(pump, session_id, &host.id, log) {
+            Ok(new_session) => {
+                end_after_swap(pump, new_session, held, report, log)?;
+                return pointer;
+            }
+            Err(e) => {
+                log(&format!("SWAP_FAIL {e}"));
+                report.swap_failed = Some(e);
+            }
+        }
+    }
+    if let Some(dir) = &cfg.reconnect {
+        log("VIEWER_NEED_RECONNECT");
+        let last_decoded = || *lock(&shared.last_decoded);
+        let mut tick = || request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
+        match crate::reconnect::reconnect_round(
+            pump,
+            session_id,
+            dir,
+            Duration::from_secs(120),
+            &last_decoded,
+            &mut tick,
+            log,
+        ) {
+            Ok(times) => report.reconnect_times = Some(times),
+            Err(e) => {
+                log(&format!("RECONNECT_FAIL {e}"));
+                report.reconnect_failed = Some(e);
+            }
+        }
+    }
     // 5. A moment more of media, and the audio; the hold keeps the session open as long as the caller asked.
     let hold_end = active_at + cfg.hold;
     let audio_end = Instant::now() + Duration::from_millis(1500);
@@ -492,6 +768,32 @@ fn script_media(
     pointer?;
     if !report.ended_clean {
         return Err(format!("the session ended with {reason:?}"));
+    }
+    Ok(())
+}
+
+/// After a swap: this machine hosts `new_session`; it stays up a moment (the other side's log says what it saw), then
+/// this side ends it.
+fn end_after_swap(
+    pump: &mut Pump<'_>,
+    new_session: u64,
+    held: &mut Held,
+    report: &mut ViewerReport,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    held.session = None;
+    std::thread::sleep(Duration::from_secs(2));
+    pump.ask(Command::Disconnect { session_id: new_session }, REPLY)?;
+    let reason = pump.wait("the reverse session to end", Duration::from_secs(10), |e| match e {
+        UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == new_session => {
+            Some(*reason)
+        }
+        _ => None,
+    })?;
+    report.ended_clean = reason.is_none();
+    log(&format!("VIEWER_SESSION_ENDED reason={reason:?} (the reverse session, after the swap)"));
+    if !report.ended_clean {
+        return Err(format!("the reverse session ended with {reason:?}"));
     }
     Ok(())
 }
@@ -526,7 +828,7 @@ fn pointer_moves(
         while lock(&s.cursor).is_empty() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
-        lock(&s.cursor).last().map_or((32768, 32768), |c| (c.x, c.y))
+        lock(&s.cursor).iter().rev().find(|c| c.visible).map_or((32768, 32768), |c| (c.x, c.y))
     } else {
         log("VIEWER_NEED_ANCHOR");
         let text = wait_file(&cfg.anchor_file, "the pointer reading of the host", cfg.anchor_timeout)?;
@@ -562,7 +864,11 @@ fn pointer_moves(
     }
     // The host's pointer position comes back as cursor updates; some of them must show the moves.
     std::thread::sleep(Duration::from_millis(600));
-    let samples = lock(&s.cursor).clone();
+    let all = lock(&s.cursor).clone();
+    // A hidden pointer reports no place (Windows gives the corner of the display for it): only the updates that
+    // show the pointer say where it is.
+    let hidden = all.iter().filter(|c| !c.visible).count();
+    let samples: Vec<CursorSample> = all.into_iter().filter(|c| c.visible).collect();
     // For the record: the host's own pointer positions around the moves (px), the first few distinct ones.
     let mut shown: Vec<String> = Vec::new();
     for c in &samples {
@@ -579,7 +885,11 @@ fn pointer_moves(
             shown.push(at);
         }
     }
-    log(&format!("POINTER host cursor samples ({} total): {}", samples.len(), shown.join(" ")));
+    log(&format!(
+        "POINTER host cursor samples ({} visible, {hidden} with the pointer hidden): {}",
+        samples.len(),
+        shown.join(" ")
+    ));
     // Movement, not position: the distinct positions the host reported while the moves ran, and how far they spread.
     let mut seen: Vec<(i32, i32)> = Vec::new();
     for c in samples.iter().filter(|c| c.at >= started) {
@@ -647,4 +957,55 @@ fn pair(
         }
         _ => None,
     })?
+}
+
+/// The HID usage (page 7) of a lower-case letter: `a` is 4, `z` is 29.
+fn letter_usage(c: char) -> Option<u16> {
+    c.is_ascii_lowercase().then(|| 4 + (c as u16 - u16::from(b'a')))
+}
+
+/// The keyboard proof: waits for `ready`, types [`TYPED_WORD`] key by key, then Cmd+S (Ctrl+S with `ctrl`).
+fn type_word(
+    backend: &ServiceBackend,
+    session_id: u64,
+    ready: &std::path::Path,
+    timeout: Duration,
+    ctrl: bool,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    const GAP: Duration = Duration::from_millis(40);
+    const S: u16 = 22;
+    // The modifier's usage and its bit in the modifiers byte: left Ctrl or left GUI (Cmd).
+    let (modifier, bit, chord) = if ctrl { (0xE0u16, 0x01u8, "Ctrl+S") } else { (0xE3u16, 0x08u8, "Cmd+S") };
+    log("VIEWER_NEED_TYPE");
+    wait_file(ready, "a text editor focused on the host", timeout)?;
+    let key =
+        |usage: u16, down: bool, modifiers: u8| InputEvent::Key { usage_page: 7, usage, down, modifiers, locks: 0 };
+    for c in TYPED_WORD.chars() {
+        let usage = letter_usage(c).ok_or_else(|| format!("{c:?} is not a letter key"))?;
+        backend.viewer_input(session_id, vec![key(usage, true, 0)]);
+        std::thread::sleep(GAP);
+        backend.viewer_input(session_id, vec![key(usage, false, 0)]);
+        std::thread::sleep(GAP);
+    }
+    for (usage, down, modifiers) in [(modifier, true, bit), (S, true, bit), (S, false, bit), (modifier, false, 0)] {
+        backend.viewer_input(session_id, vec![key(usage, down, modifiers)]);
+        std::thread::sleep(GAP);
+    }
+    log(&format!("TYPED {} letter keys, then {chord}", TYPED_WORD.len()));
+    Ok(())
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    #[test]
+    fn the_typed_word_is_letter_keys_of_page_7() {
+        assert_eq!(letter_usage('a'), Some(4));
+        assert_eq!(letter_usage('z'), Some(29));
+        assert_eq!(letter_usage('S'), None);
+        let usages: Vec<u16> = TYPED_WORD.chars().filter_map(letter_usage).collect();
+        assert_eq!(usages, vec![22, 26, 4, 19, 7, 8, 22, 14], "s w a p d e s k");
+    }
 }

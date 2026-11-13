@@ -86,6 +86,12 @@ pub struct TestUi {
     pub event_delay: Mutex<Option<Duration>>,
     /// How each consent card was closed.
     pub consents_closed: Mutex<Vec<PromptEnd>>,
+    /// Who owns the console (ACCOUNTS.md 5.1); `This` unless a test says otherwise.
+    pub owner: Mutex<swapdesk_session::ConsoleOwner>,
+    /// F-SESS-03: the banner's window of the host is connected (`true` unless a test says otherwise).
+    pub banner_window: AtomicBool,
+    /// How many times the session layer asked the machine to start the window.
+    pub banner_launches: AtomicUsize,
 }
 
 impl TestUi {
@@ -106,11 +112,22 @@ impl TestUi {
             panic_on_prompt: AtomicBool::new(false),
             event_delay: Mutex::new(None),
             consents_closed: Mutex::new(Vec::new()),
+            owner: Mutex::new(swapdesk_session::ConsoleOwner::This),
+            banner_window: AtomicBool::new(true),
+            banner_launches: AtomicUsize::new(0),
         })
     }
 
     pub fn accepting(grants: PermissionSet) -> Arc<Self> {
         Self::new(Script::Answer(PromptAnswer::Accept(grants)))
+    }
+
+    pub fn set_banner_window(&self, connected: bool) {
+        self.banner_window.store(connected, Ordering::SeqCst);
+    }
+
+    pub fn banner_launches(&self) -> usize {
+        self.banner_launches.load(Ordering::SeqCst)
     }
 
     pub fn set_present(&self, present: bool) {
@@ -148,6 +165,18 @@ impl TestUi {
 impl HostUi for TestUi {
     fn somebody_present(&self) -> bool {
         self.present.load(Ordering::SeqCst)
+    }
+
+    fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        *lock(&self.owner)
+    }
+
+    fn banner_ready(&self) -> bool {
+        self.banner_window.load(Ordering::SeqCst)
+    }
+
+    fn start_banner_window(&self) {
+        self.banner_launches.fetch_add(1, Ordering::SeqCst);
     }
 
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
@@ -371,6 +400,13 @@ pub fn viewer_config(requested: PermissionSet) -> ViewerConfig {
         Arc::new(FakeClock::new(MonoMicros(1))),
     );
     cfg.requested = requested;
+    cfg
+}
+
+/// As [`viewer_config`], for a viewer of 1.0: its `Hello` says protocol minor 0.
+pub fn viewer_config_1_0(requested: PermissionSet) -> ViewerConfig {
+    let mut cfg = viewer_config(requested);
+    cfg.proto_minor = 0;
     cfg
 }
 

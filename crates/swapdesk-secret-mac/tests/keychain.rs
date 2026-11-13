@@ -101,6 +101,26 @@ fn round_trip(store: &MacSecretStore) {
     assert_eq!(store.load("settings.bin").expect("load"), None);
 }
 
+/// macOS locks a new keychain file after five minutes without use (and when the Mac sleeps); a call on a locked
+/// keychain waits for a prompt, and a throwaway one has nobody to answer it (a scratch run of the app that lasted
+/// over five minutes hung at quit). Every call of the store unlocks its throwaway keychain again, with no prompt.
+#[test]
+fn file_keychain_that_locked_itself_serves_the_next_calls() {
+    let s = Scratch::new(true);
+    let path = s.keychain.as_ref().expect("a file keychain");
+    s.store.store("kept", b"value").expect("store");
+
+    swapdesk_secret_mac::lock_keychain_file(path).expect("the keychain locks");
+    assert_eq!(s.store.load("kept").expect("load after the lock").as_deref(), Some(&b"value"[..]));
+    swapdesk_secret_mac::lock_keychain_file(path).expect("the keychain locks");
+    s.store.store("second", b"2").expect("store after the lock");
+    swapdesk_secret_mac::lock_keychain_file(path).expect("the keychain locks");
+    s.store.delete("kept").expect("delete after the lock");
+    assert_eq!(s.store.load("kept").expect("load").as_deref(), None);
+    swapdesk_secret_mac::lock_keychain_file(path).expect("the keychain locks");
+    s.store.delete_all().expect("delete everything after the lock");
+}
+
 #[test]
 fn file_keychain_store_load_overwrite_delete_round_trip() {
     round_trip(&Scratch::new(true).store);

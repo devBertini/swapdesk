@@ -12,8 +12,17 @@ use std::sync::{Arc, Mutex};
 use crate::api::{KeyboardMode, Language, Quality, Settings, Theme};
 use crate::shortcuts::ReleaseKey;
 
-/// The `format` of the record this build writes and reads.
-pub const FORMAT: u16 = 1;
+/// The `format` of the record this build writes.
+pub const FORMAT: u16 = 2;
+/// The format 1.0 wrote: the same fields, but an "off" in its swap byte could be the old default and not a choice.
+const FORMAT_1: u16 = 1;
+
+/// The starting value of "Trocar Ctrl e Cmd no Mac": on in the Mac app, off in the Windows one. The viewers apply
+/// it only toward the other system (a Mac toward Windows, a Windows PC toward a Mac), so a Mac toward a Mac is
+/// never swapped.
+pub const fn default_swap_ctrl_cmd() -> bool {
+    cfg!(target_os = "macos")
+}
 /// The file name inside the per-user folder.
 pub const FILE_NAME: &str = "ui.bin";
 
@@ -38,7 +47,7 @@ impl Default for UserPrefs {
             quality: Quality::Auto,
             show_stats: false,
             keyboard_mode: KeyboardMode::Auto,
-            swap_ctrl_cmd: false,
+            swap_ctrl_cmd: default_swap_ctrl_cmd(),
             open_at_login: false,
             release_key: ReleaseKey::CtrlAlt,
         }
@@ -126,9 +135,15 @@ impl UserPrefs {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, PrefsError> {
+        Self::decode_with(bytes, default_swap_ctrl_cmd())
+    }
+
+    /// `decode` with the swap default to use for a record of format 1: its "off" may be the old default and not a
+    /// choice, so it reads as `swap_default`; its "on" stays on. A record of the current format is read as stored.
+    pub fn decode_with(bytes: &[u8], swap_default: bool) -> Result<Self, PrefsError> {
         let [f0, f1, rest @ ..] = bytes else { return Err(PrefsError::Corrupt) };
         let format = u16::from_le_bytes([*f0, *f1]);
-        if format != FORMAT {
+        if format != FORMAT && format != FORMAT_1 {
             return Err(PrefsError::UnknownFormat(format));
         }
         let [language, theme, quality, stats, keyboard, swap, login, release] = rest else {
@@ -164,7 +179,7 @@ impl UserPrefs {
                 2 => KeyboardMode::Text,
                 _ => return Err(PrefsError::Corrupt),
             },
-            swap_ctrl_cmd: flag(*swap)?,
+            swap_ctrl_cmd: flag(*swap)? || (format == FORMAT_1 && swap_default),
             open_at_login: flag(*login)?,
             release_key: match release {
                 0 => ReleaseKey::CtrlAlt,
@@ -267,7 +282,7 @@ pub fn load(store: &dyn PrefsStore) -> UserPrefs {
 pub fn load_or(store: &dyn PrefsStore, defaults: UserPrefs) -> UserPrefs {
     match store.read() {
         Ok(None) => defaults,
-        Ok(Some(bytes)) => UserPrefs::decode(&bytes).unwrap_or_else(|e| {
+        Ok(Some(bytes)) => UserPrefs::decode_with(&bytes, defaults.swap_ctrl_cmd).unwrap_or_else(|e| {
             note(&format!("ui.bin not used ({e}): defaults"));
             defaults
         }),
@@ -312,7 +327,7 @@ mod tests {
     fn the_record_round_trips_and_starts_with_its_format() {
         let p = sample();
         let bytes = p.encode();
-        assert_eq!(&bytes[..2], &1u16.to_le_bytes());
+        assert_eq!(&bytes[..2], &2u16.to_le_bytes());
         assert_eq!(UserPrefs::decode(&bytes), Ok(p));
         assert_eq!(UserPrefs::decode(&UserPrefs::default().encode()), Ok(UserPrefs::default()));
     }
@@ -320,8 +335,8 @@ mod tests {
     #[test]
     fn another_format_or_a_damaged_record_is_refused() {
         let mut other = sample().encode();
-        other[0] = 2;
-        assert_eq!(UserPrefs::decode(&other), Err(PrefsError::UnknownFormat(2)));
+        other[0] = 3;
+        assert_eq!(UserPrefs::decode(&other), Err(PrefsError::UnknownFormat(3)));
         let good = sample().encode();
         assert_eq!(UserPrefs::decode(&good[..good.len() - 1]), Err(PrefsError::Corrupt), "truncated");
         let mut long = good.clone();
@@ -333,6 +348,60 @@ mod tests {
             bad[at] = 9;
             assert_eq!(UserPrefs::decode(&bad), Err(PrefsError::Corrupt), "tag {at} out of range");
         }
+    }
+
+    fn format_1(swap: u8) -> Vec<u8> {
+        // language En, theme Dark, quality Motion, stats on, keyboard Text, swap, login on, release CtrlAltShift.
+        let mut b = 1u16.to_le_bytes().to_vec();
+        b.extend_from_slice(&[1, 2, 2, 1, 2, swap, 1, 2]);
+        b
+    }
+
+    #[test]
+    fn the_swap_starts_on_only_where_the_system_says_so() {
+        assert_eq!(UserPrefs::default().swap_ctrl_cmd, default_swap_ctrl_cmd());
+        assert_eq!(default_swap_ctrl_cmd(), cfg!(target_os = "macos"));
+        let first =
+            load_or(&FilePrefs::in_dir(&temp_dir("first")), UserPrefs { swap_ctrl_cmd: true, ..Default::default() });
+        assert!(first.swap_ctrl_cmd, "no file yet: the default given");
+    }
+
+    #[test]
+    fn an_old_record_loads_and_its_off_reads_as_the_default_while_its_on_stays() {
+        for default in [false, true] {
+            let off = UserPrefs::decode_with(&format_1(0), default).unwrap();
+            assert_eq!(off.swap_ctrl_cmd, default);
+            let on = UserPrefs::decode_with(&format_1(1), default).unwrap();
+            assert!(on.swap_ctrl_cmd);
+            assert_eq!(
+                (off.language, off.theme, off.quality, off.release_key),
+                (Language::En, Theme::Dark, Quality::Motion, ReleaseKey::CtrlAltShift)
+            );
+            assert!(off.show_stats && off.open_at_login);
+        }
+        assert_eq!(UserPrefs::decode_with(&format_1(2), true), Err(PrefsError::Corrupt));
+    }
+
+    #[test]
+    fn an_explicit_off_in_the_current_format_is_respected() {
+        for default in [false, true] {
+            let off = UserPrefs { swap_ctrl_cmd: false, ..sample() };
+            assert_eq!(UserPrefs::decode_with(&off.encode(), default), Ok(off));
+        }
+    }
+
+    #[test]
+    fn an_old_file_is_read_through_the_store_with_the_given_default() {
+        let dir = temp_dir("old");
+        let store = FilePrefs::in_dir(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(store.path(), format_1(0)).unwrap();
+        let loaded = load_or(&store, UserPrefs { swap_ctrl_cmd: true, ..Default::default() });
+        assert!(loaded.swap_ctrl_cmd && loaded.show_stats, "the old record is used, its off read as the default");
+        save(&store, &UserPrefs { swap_ctrl_cmd: false, ..loaded });
+        let again = load_or(&store, UserPrefs { swap_ctrl_cmd: true, ..Default::default() });
+        assert!(!again.swap_ctrl_cmd, "a choice made after the change stays off");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

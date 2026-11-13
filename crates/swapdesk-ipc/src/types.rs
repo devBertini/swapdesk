@@ -10,8 +10,8 @@ type CResult<T> = Result<T, CodecError>;
 
 /// Longest `device_id`, device name, OS version and peer name (C5 maximum).
 pub const MAX_NAME: usize = 64;
-/// Longest dotted IPv4 text.
-pub const MAX_IPV4: usize = 15;
+/// A typed address: an IPv4 literal, optionally followed by `:port` ("255.255.255.255:65535").
+pub const MAX_IPV4: usize = 21;
 /// Longest address text (IPv6 with scope fits).
 pub const MAX_ADDRESS: usize = 45;
 /// Longest network label.
@@ -40,12 +40,20 @@ wire_enum! {
     ApiCode {
         ServiceDown = 0, NotFound = 1, NotPermitted = 2, NeedsAdmin = 3, Busy = 4,
         Timeout = 5, Refused = 6, Locked = 7, Invalid = 8, Internal = 9,
+        /// The receiving folder's volume has too little free space for the file (F-FILE-03); added after 1.0.
+        NoSpace = 10,
     }
 }
 
 wire_enum! {
     /// `Hello.role`.
-    IpcRole { Ui = 1, HelperSystem = 2, HelperUser = 3 }
+    IpcRole {
+        Ui = 1,
+        HelperSystem = 2,
+        HelperUser = 3,
+        /// The elevated `Swapdesk.exe --elevated` instance that confirms one administrator action.
+        Elevator = 4,
+    }
 }
 
 wire_enum! {
@@ -101,6 +109,64 @@ wire_enum! {
     SpecialKeys { CtrlAltDel = 0, AltTab = 1, WinOrCmd = 2, AltF4OrCmdQ = 3, PrintScreen = 4 }
 }
 
+wire_enum! {
+    /// How an elevation ticket ended, in the reply of `ElevationEnd`.
+    ElevationOutcome {
+        /// The administrator confirmed in the elevated window.
+        Confirmed = 0,
+        /// The administrator pressed Cancel in the elevated window.
+        Declined = 1,
+        /// Never confirmed; the ticket is closed by this call.
+        Open = 2,
+        /// Expired, already ended, or never existed (also what a ticket of another connection answers).
+        Unknown = 3,
+    }
+}
+
+/// What an elevation ticket is for: the action the administrator confirms and the service lets through once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElevAction {
+    /// Set `grants` (the raw bit set of PROTOCOL.md 6.1, validated by the service) of a paired device.
+    SetGrants { device_id: String, grants: u16 },
+    // Tag 1 is unassigned: an unknown tag is a codec error.
+    /// Open the administrator terminal in viewer session `session_id` (ELEVATION.md 3.1, tag 2).
+    OpenAdminTerminal { session_id: u64 },
+    /// "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3, tag 3).
+    ElevateSession { session_id: u64 },
+}
+
+impl Wire for ElevAction {
+    const MIN_SIZE: usize = 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::SetGrants { device_id, grants } => {
+                w.put_u8(0);
+                w.put_str(device_id, MAX_NAME)?;
+                w.put_u16(*grants);
+            }
+            Self::OpenAdminTerminal { session_id } => {
+                w.put_u8(2);
+                w.put_u64(*session_id);
+            }
+            Self::ElevateSession { session_id } => {
+                w.put_u8(3);
+                w.put_u64(*session_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        match r.u8()? {
+            0 => Ok(Self::SetGrants { device_id: r.str(MAX_NAME)?, grants: r.u16()? }),
+            2 => Ok(Self::OpenAdminTerminal { session_id: r.u64()? }),
+            3 => Ok(Self::ElevateSession { session_id: r.u64()? }),
+            t => Err(unknown_tag("ElevAction", t)),
+        }
+    }
+}
+
 impl ApiCode {
     /// The `UiReply.status` of an error: the tag plus one (0 is ok).
     pub const fn status(self) -> u16 {
@@ -108,8 +174,20 @@ impl ApiCode {
     }
 }
 
+/// Most devices a blocked list holds.
+pub const MAX_BLOCKED: usize = 256;
+/// `aa:bb:cc:dd:ee:ff`.
+pub const MAX_MAC: usize = 17;
+
 wire_struct! {
-    ThisDevice { name: String [MAX_NAME], os: Os, ready: Ready }
+    /// A device blocked by its MAC (D65): the MAC, the IPv4 address and name seen when it was blocked, and when.
+    BlockedView { mac: String [MAX_MAC], last_ipv4: String [MAX_IPV4], name: String [MAX_NAME], blocked_at_ms: u64 }
+}
+
+wire_struct! {
+    /// `legacy_note`: show the one-time note that pairings made before 1.1 do not carry over (D55): a 1.0 install
+    /// left its data on this computer and this account has no pairing yet.
+    ThisDevice { name: String [MAX_NAME], os: Os, ready: Ready, legacy_note: bool }
 }
 
 /// A notice on the network status.
@@ -119,6 +197,8 @@ pub enum Notice {
     FirewallBlocks,
     ServiceNeedsApproval,
     MacPermissionsMissing(Vec<OsPermission>),
+    /// The Mac has no access to the receiving folder (F-FILE-03): the folder's display name. Tag 4, added after 1.0.
+    ReceiveFolderDenied(String),
 }
 
 impl Wire for Notice {
@@ -133,6 +213,10 @@ impl Wire for Notice {
                 w.put_u8(3);
                 list.put(w, OsPermission::ALL.len())?;
             }
+            Self::ReceiveFolderDenied(name) => {
+                w.put_u8(4);
+                w.put_str(name, MAX_NAME)?;
+            }
         }
         Ok(())
     }
@@ -143,6 +227,7 @@ impl Wire for Notice {
             1 => Ok(Self::FirewallBlocks),
             2 => Ok(Self::ServiceNeedsApproval),
             3 => Ok(Self::MacPermissionsMissing(<Vec<OsPermission> as Wire>::get(r, OsPermission::ALL.len())?)),
+            4 => Ok(Self::ReceiveFolderDenied(r.str(MAX_NAME)?)),
             t => Err(unknown_tag("Notice", t)),
         }
     }
@@ -308,6 +393,21 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// Why a connect entry ended without opening a session (`SessionState::NotOpened`). It travels on the UI's pipe
+    /// only: the other machine is told nothing of it.
+    ConnectWhy {
+        Declined = 0,
+        TimedOut = 1,
+        NobodyPresent = 2,
+        Busy = 3,
+        Forgotten = 4,
+        NotPermitted = 5,
+        Unreachable = 6,
+        Failed = 7,
+    }
+}
+
 /// State of a session as the UI shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -315,10 +415,12 @@ pub enum SessionState {
     Prompted {
         remaining_s: u16,
     },
+    /// `elevation` (ACCOUNTS.md 9.3, viewer sessions): 0 not available, 1 available ("Elevar controle"), 2 elevated.
     Active {
         since_ms: u64,
         role: Role,
         granted: u16,
+        elevation: u8,
     },
     Paused {
         desktop: Desktop,
@@ -333,6 +435,11 @@ pub enum SessionState {
     Ended {
         reason: Option<ApiCode>,
     },
+    /// The last state of a connect entry whose session never opened, with the reason. A real session never goes
+    /// through it.
+    NotOpened {
+        why: ConnectWhy,
+    },
 }
 
 impl Wire for SessionState {
@@ -345,11 +452,12 @@ impl Wire for SessionState {
                 w.put_u8(1);
                 w.put_u16(*remaining_s);
             }
-            Self::Active { since_ms, role, granted } => {
+            Self::Active { since_ms, role, granted, elevation } => {
                 w.put_u8(2);
                 w.put_u64(*since_ms);
                 role.put(w, 0)?;
                 w.put_u16(*granted);
+                w.put_u8(*elevation);
             }
             Self::Paused { desktop } => {
                 w.put_u8(3);
@@ -367,6 +475,10 @@ impl Wire for SessionState {
                 w.put_u8(6);
                 reason.put(w, 0)?;
             }
+            Self::NotOpened { why } => {
+                w.put_u8(7);
+                why.put(w, 0)?;
+            }
         }
         Ok(())
     }
@@ -375,11 +487,12 @@ impl Wire for SessionState {
         match r.u8()? {
             0 => Ok(Self::Connecting),
             1 => Ok(Self::Prompted { remaining_s: r.u16()? }),
-            2 => Ok(Self::Active { since_ms: r.u64()?, role: Role::get(r, 0)?, granted: r.u16()? }),
+            2 => Ok(Self::Active { since_ms: r.u64()?, role: Role::get(r, 0)?, granted: r.u16()?, elevation: r.u8()? }),
             3 => Ok(Self::Paused { desktop: Desktop::get(r, 0)? }),
             4 => Ok(Self::Reconnecting { attempt: r.u32()? }),
             5 => Ok(Self::Waking { remaining_s: r.u16()? }),
             6 => Ok(Self::Ended { reason: Option::<ApiCode>::get(r, 0)? }),
+            7 => Ok(Self::NotOpened { why: ConnectWhy::get(r, 0)? }),
             t => Err(unknown_tag("SessionState", t)),
         }
     }
@@ -521,4 +634,100 @@ impl Wire for SwapNote {
 wire_struct! {
     /// A chat message as the UI shows it. The text is as private as input: its `Debug` prints a length only.
     ChatItem { msg_id: u32, text: Text [MAX_CHAT_TEXT], sent_at_ms: u64 }
+}
+
+/// Where the machine's updater is (UPDATES.md 10.2), as the interfaces show it. Versions travel as their text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePhase {
+    Idle,
+    Checking,
+    /// A newer version; `manual`: it needs the installer (the interface links to its release page).
+    Offered {
+        version: String,
+        manual: bool,
+    },
+    Downloading {
+        version: String,
+        done: u64,
+        total: u64,
+    },
+    Verifying {
+        version: String,
+    },
+    /// Downloaded and verified: the install runs now.
+    Ready {
+        version: String,
+    },
+    /// An install that did not happen or stopped; `reason`: `swapdesk_update::manager::InstallFailure` as a tag.
+    Failed {
+        reason: u8,
+    },
+}
+
+impl Wire for UpdatePhase {
+    const MIN_SIZE: usize = 1;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::Idle => w.put_u8(0),
+            Self::Checking => w.put_u8(1),
+            Self::Offered { version, manual } => {
+                w.put_u8(2);
+                w.put_str(version, MAX_VERSION)?;
+                w.put_bool(*manual);
+            }
+            Self::Downloading { version, done, total } => {
+                w.put_u8(3);
+                w.put_str(version, MAX_VERSION)?;
+                w.put_u64(*done);
+                w.put_u64(*total);
+            }
+            Self::Verifying { version } => {
+                w.put_u8(4);
+                w.put_str(version, MAX_VERSION)?;
+            }
+            Self::Ready { version } => {
+                w.put_u8(5);
+                w.put_str(version, MAX_VERSION)?;
+            }
+            Self::Failed { reason } => {
+                w.put_u8(6);
+                w.put_u8(*reason);
+            }
+        }
+        Ok(())
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        Ok(match r.u8()? {
+            0 => Self::Idle,
+            1 => Self::Checking,
+            2 => Self::Offered { version: r.str(MAX_VERSION)?, manual: r.bool()? },
+            3 => Self::Downloading { version: r.str(MAX_VERSION)?, done: r.u64()?, total: r.u64()? },
+            4 => Self::Verifying { version: r.str(MAX_VERSION)? },
+            5 => Self::Ready { version: r.str(MAX_VERSION)? },
+            6 => Self::Failed { reason: r.u8()? },
+            t => return Err(unknown_tag("UpdatePhase", t)),
+        })
+    }
+}
+
+/// The longest version text (`1.10.0-preview.3`).
+pub const MAX_VERSION: usize = 32;
+
+wire_struct! {
+    /// The machine's updater (UPDATES.md 10): what runs, where it is, the switch, the last check, the version whose
+    /// card is hidden, why the last "Procurar agora" failed (0 network, 1 rate limited, 2 signature), and the version
+    /// that did not start and was rolled back in this run of the service; `updated`: the running version came by an
+    /// update that committed at this start.
+    UpdateView {
+        running: String [MAX_VERSION],
+        phase: UpdatePhase,
+        check_on: bool,
+        last_check_ms: Option<u64>,
+        dismissed: Option<String> [MAX_VERSION],
+        last_failure: Option<u8>,
+        rolled_back: Option<String> [MAX_VERSION],
+        updated: bool,
+    }
 }

@@ -22,6 +22,14 @@ impl<'a> Pump<'a> {
         self.seen.extend(self.backend.drain());
     }
 
+    /// The events delivered since `cursor` (which starts at 0 and is advanced), for a loop that reacts to each one.
+    pub fn fresh(&mut self, cursor: &mut usize) -> Vec<UiEvent> {
+        self.poll();
+        let out = self.seen[(*cursor).min(self.seen.len())..].to_vec();
+        *cursor = self.seen.len();
+        out
+    }
+
     /// The first event `f` accepts, from what was already delivered or what arrives within `timeout`.
     pub fn wait<T>(
         &mut self,

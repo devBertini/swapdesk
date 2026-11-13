@@ -7,7 +7,7 @@
 //! anything is allocated. The paths are virtual: relative to a root the process that owns the disk chose (see
 //! CONTRACTS.md C2.4 "Files"); this module only carries them.
 
-use swapdesk_proto::{CodecError, ErrorCode, Reader, Wire, Writer};
+use swapdesk_proto::{CodecError, EntryKind, ErrorCode, PlaceKind, Reader, VolumeKind, Wire, Writer};
 
 use crate::error::IpcError;
 use crate::redact::{Bytes, Text};
@@ -29,6 +29,13 @@ pub const MAX_FS_META: usize = 1024;
 pub const MAX_FS_MESSAGE: usize = MAX_FS_IO + 4096;
 /// Most files one `FilesSend` carries.
 pub const MAX_PICKS: usize = 64;
+/// Most names one change carries (`FsOp`, FILES-UI.md 8.4).
+pub const MAX_OP_NAMES: usize = 64;
+/// Most places and volumes of a volume list (FILES-UI.md 8.4).
+pub const MAX_PLACES: usize = 16;
+pub const MAX_VOLUMES: usize = 32;
+/// Longest volume label.
+pub const MAX_VOLUME_LABEL: usize = 64;
 
 wire_enum! {
     /// Which of a receiver's two side files a call is about.
@@ -72,6 +79,23 @@ pub enum FsCall {
     MetaRead { dir: Text, name: Text },
     /// 17. `data` is the rest of the body (at most [`MAX_FS_META`]).
     MetaWrite { dir: Text, name: Text, data: Bytes },
+    /// 24 (`FILES-UI.md` 7.3; 18 to 23 are the explorer's): the free bytes of the volume that holds `dir`, for the
+    /// free-space check before a file is accepted (F-FILE-03).
+    FreeSpace { dir: Text },
+    /// 18 (FILES-UI.md 7.4): a page of `path` from entry `start`, at most `max` entries, with flags and the free
+    /// space; answered with `Entries2`.
+    ListPage { path: Text, start: u32, max: u16 },
+    /// 19: makes the folder `dir/name`; `Exists` when anything is there.
+    MakeDir { dir: Text, name: Text },
+    /// 20: renames `dir/name` to `dir/new_name`, never replacing (`Exists`).
+    Rename { dir: Text, name: Text, new_name: Text },
+    /// 21: moves `from_dir/name` into `to_dir`, never replacing; across volumes the helper copies, verifies and sends
+    /// the source to the bin.
+    Move { from_dir: Text, name: Text, to_dir: Text },
+    /// 22: sends `dir/name` to the bin; `NoBin` before touching anything where there is none.
+    Trash { dir: Text, name: Text },
+    /// 23: the home folder, the places and the published volumes; answered with `Volumes`.
+    Volumes,
 }
 
 impl FsCall {
@@ -95,6 +119,13 @@ impl FsCall {
             Self::RemoveFile { .. } => 15,
             Self::MetaRead { .. } => 16,
             Self::MetaWrite { .. } => 17,
+            Self::FreeSpace { .. } => 24,
+            Self::ListPage { .. } => 18,
+            Self::MakeDir { .. } => 19,
+            Self::Rename { .. } => 20,
+            Self::Move { .. } => 21,
+            Self::Trash { .. } => 22,
+            Self::Volumes => 23,
         }
     }
 
@@ -116,7 +147,7 @@ impl FsCall {
                 path(w, p)?;
                 w.put_bool(*follow);
             }
-            Self::OpenRead { path: p } => path(w, p)?,
+            Self::OpenRead { path: p } | Self::FreeSpace { dir: p } => path(w, p)?,
             Self::ReadAt { id, offset, len } => {
                 w.put_u64(*id);
                 w.put_u64(*offset);
@@ -170,6 +201,26 @@ impl FsCall {
                 }
                 w.put_bytes(&data.0);
             }
+            Self::ListPage { path: p, start, max } => {
+                path(w, p)?;
+                w.put_u32(*start);
+                w.put_u16(*max);
+            }
+            Self::MakeDir { dir, name: n } | Self::Trash { dir, name: n } => {
+                path(w, dir)?;
+                name(w, n)?;
+            }
+            Self::Rename { dir, name: n, new_name } => {
+                path(w, dir)?;
+                name(w, n)?;
+                name(w, new_name)?;
+            }
+            Self::Move { from_dir, name: n, to_dir } => {
+                path(w, from_dir)?;
+                name(w, n)?;
+                path(w, to_dir)?;
+            }
+            Self::Volumes => {}
         }
         Ok(())
     }
@@ -208,6 +259,13 @@ impl FsCall {
             15 => Self::RemoveFile { dir: path(r)?, name: name(r)?, kind: FsKind::get(r, 0)? },
             16 => Self::MetaRead { dir: path(r)?, name: name(r)? },
             17 => Self::MetaWrite { dir: path(r)?, name: name(r)?, data: rest(r, MAX_FS_META, "meta record")? },
+            24 => Self::FreeSpace { dir: path(r)? },
+            18 => Self::ListPage { path: path(r)?, start: r.u32()?, max: r.u16()? },
+            19 => Self::MakeDir { dir: path(r)?, name: name(r)? },
+            20 => Self::Rename { dir: path(r)?, name: name(r)?, new_name: name(r)? },
+            21 => Self::Move { from_dir: path(r)?, name: name(r)?, to_dir: path(r)? },
+            22 => Self::Trash { dir: path(r)?, name: name(r)? },
+            23 => Self::Volumes,
             other => return Err(CodecError::UnknownTag { what: "FsRequest call", tag: u64::from(other) }),
         })
     }
@@ -226,6 +284,40 @@ wire_struct! {
 wire_struct! {
     /// A folder entry (`FsEntry`).
     FsEntryView { name: Text [MAX_FS_NAME], is_dir: bool, size: u64, mtime_ms: u64 }
+}
+
+wire_struct! {
+    /// A folder entry of a page (`DirEntry2` of PROTOCOL.md 5.3): `flags` holds the proto's `ENTRY_*` bits.
+    FsEntry2View { name: Text [MAX_FS_NAME], kind: EntryKind, size: u64, mtime_ms: u64, flags: u8 }
+}
+
+wire_struct! {
+    /// A well-known folder, as a virtual path.
+    PlaceView { kind: PlaceKind, path: Text [MAX_FS_PATH] }
+}
+
+wire_struct! {
+    /// A published volume: its virtual paths start with `:<id>`; `letter` is the Windows drive letter. The label is
+    /// shown, never used as a path.
+    VolumeView {
+        id: u32,
+        kind: VolumeKind,
+        label: Text [MAX_VOLUME_LABEL],
+        letter: Option<u8>,
+        total_bytes: u64,
+        free_bytes: u64,
+        has_bin: bool,
+    }
+}
+
+wire_struct! {
+    /// The home folder (a virtual path), the places and the volumes of the machine that owns the disk.
+    VolumesView { home: Text [MAX_FS_PATH], places: Vec<PlaceView> [MAX_PLACES], volumes: Vec<VolumeView> [MAX_VOLUMES] }
+}
+
+wire_struct! {
+    /// A page of a folder (`FsAnswer::Entries2`, and the UI's `FileListing2` without its path).
+    FsPage { entries: Vec<FsEntry2View> [MAX_FS_LIST], next: Option<u32>, free: Option<u64> }
 }
 
 /// What a successful call answers. The first byte of the body is the variant number.
@@ -247,6 +339,12 @@ pub enum FsAnswer {
     Len(u64),
     /// 7: `MetaRead`: `None` when the file is missing or not a regular file.
     Meta(Option<Bytes>),
+    /// 10 (8 and 9 are the explorer's): `FreeSpace`; `None` when the disk cannot tell.
+    Free(Option<u64>),
+    /// 8: `ListPage`.
+    Entries2(FsPage),
+    /// 9: `Volumes`.
+    Volumes(VolumesView),
 }
 
 impl FsAnswer {
@@ -294,6 +392,18 @@ impl FsAnswer {
                     }
                 }
             }
+            Self::Free(n) => {
+                w.put_u8(10);
+                n.put(w, 0)?;
+            }
+            Self::Entries2(p) => {
+                w.put_u8(8);
+                p.put(w, 0)?;
+            }
+            Self::Volumes(v) => {
+                w.put_u8(9);
+                v.put(w, 0)?;
+            }
         }
         Ok(())
     }
@@ -325,6 +435,9 @@ impl FsAnswer {
                     Self::Meta(None)
                 }
             }
+            10 => Self::Free(<Option<u64>>::get(r, 0)?),
+            8 => Self::Entries2(FsPage::get(r, 0)?),
+            9 => Self::Volumes(VolumesView::get(r, 0)?),
             tag => return Err(CodecError::UnknownTag { what: "FsReply answer", tag: u64::from(tag) }),
         })
     }
@@ -360,7 +473,74 @@ wire_struct! {
     FilePick { token: u32, name: Text [MAX_FS_NAME] }
 }
 
-/// The UI ops of the files feature (numbers 40 to 49; 46 to 49 are free).
+wire_struct! {
+    /// A name inside an [`FsChange`].
+    FsNameView { name: Text [MAX_FS_NAME] }
+}
+
+/// A change of the other computer's files (the wire's `FsOpKind`, FILES-UI.md 7.3), as the UI asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsChange {
+    MakeDir { parent: Text, name: Text },
+    Rename { dir: Text, name: Text, new_name: Text },
+    Move { from_dir: Text, names: Vec<FsNameView>, to_dir: Text },
+    Trash { dir: Text, names: Vec<FsNameView> },
+}
+
+impl Wire for FsChange {
+    const MIN_SIZE: usize = 3;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> CResult<()> {
+        match self {
+            Self::MakeDir { parent, name } => {
+                w.put_u8(0);
+                parent.put(w, MAX_FS_PATH)?;
+                name.put(w, MAX_FS_NAME)
+            }
+            Self::Rename { dir, name, new_name } => {
+                w.put_u8(1);
+                dir.put(w, MAX_FS_PATH)?;
+                name.put(w, MAX_FS_NAME)?;
+                new_name.put(w, MAX_FS_NAME)
+            }
+            Self::Move { from_dir, names, to_dir } => {
+                w.put_u8(2);
+                from_dir.put(w, MAX_FS_PATH)?;
+                names.put(w, MAX_OP_NAMES)?;
+                to_dir.put(w, MAX_FS_PATH)
+            }
+            Self::Trash { dir, names } => {
+                w.put_u8(3);
+                dir.put(w, MAX_FS_PATH)?;
+                names.put(w, MAX_OP_NAMES)
+            }
+        }
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> CResult<Self> {
+        let path = |r: &mut Reader<'_>| Text::get(r, MAX_FS_PATH);
+        let name = |r: &mut Reader<'_>| Text::get(r, MAX_FS_NAME);
+        Ok(match r.u8()? {
+            0 => Self::MakeDir { parent: path(r)?, name: name(r)? },
+            1 => Self::Rename { dir: path(r)?, name: name(r)?, new_name: name(r)? },
+            2 => Self::Move { from_dir: path(r)?, names: Vec::get(r, MAX_OP_NAMES)?, to_dir: path(r)? },
+            3 => Self::Trash { dir: path(r)?, names: Vec::get(r, MAX_OP_NAMES)? },
+            tag => return Err(CodecError::UnknownTag { what: "FsChange", tag: u64::from(tag) }),
+        })
+    }
+}
+
+wire_struct! {
+    /// The outcome of one name of a change: `NoError` when done.
+    OpResultView { name: Text [MAX_FS_NAME], code: ErrorCode }
+}
+
+wire_struct! {
+    /// The reply to `FilesOp::ListPage`: the folder as the host spells it and one page of it.
+    FileListing2 { path: Text [MAX_FS_PATH], start: u32, page: FsPage }
+}
+
+/// The UI ops of the files feature (numbers 40 to 49; 49 is free).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesOp {
     /// 40: list a folder of the host of the viewer session (`None` is its home); the reply is a [`FileListing`].
@@ -377,6 +557,15 @@ pub enum FilesOp {
     Resume { transfer_id: u32 },
     /// 45.
     Cancel { transfer_id: u32 },
+    /// 46: a page of a folder of the host (a 1.1 path); the reply is a [`FileListing2`]. `Invalid` at once toward a
+    /// host of minor below 2, so the UI knows the peer is 1.0 without a field of its own.
+    ListPage { session_id: u64, path: Text, start: u32 },
+    /// 47: a change of the host's files; the reply is the results (`OpResults`) after the host's answer, `Timeout`
+    /// after 30 s; `Invalid` toward a host of minor below 2.
+    Change { session_id: u64, change: FsChange },
+    /// 48: the host's home folder, places and volumes; the reply is `Volumes`; `Invalid` toward a host of minor
+    /// below 2.
+    Volumes { session_id: u64 },
 }
 
 impl FilesOp {
@@ -388,6 +577,9 @@ impl FilesOp {
             Self::Pause { .. } => 43,
             Self::Resume { .. } => 44,
             Self::Cancel { .. } => 45,
+            Self::ListPage { .. } => 46,
+            Self::Change { .. } => 47,
+            Self::Volumes { .. } => 48,
         }
     }
 
@@ -415,6 +607,16 @@ impl FilesOp {
             Self::Pause { transfer_id } | Self::Resume { transfer_id } | Self::Cancel { transfer_id } => {
                 w.put_u32(*transfer_id)
             }
+            Self::ListPage { session_id, path, start } => {
+                w.put_u64(*session_id);
+                path.put(w, MAX_FS_PATH)?;
+                w.put_u32(*start);
+            }
+            Self::Change { session_id, change } => {
+                w.put_u64(*session_id);
+                change.put(w, 0)?;
+            }
+            Self::Volumes { session_id } => w.put_u64(*session_id),
         }
         Ok(())
     }
@@ -431,6 +633,9 @@ impl FilesOp {
             43 => Self::Pause { transfer_id: r.u32()? },
             44 => Self::Resume { transfer_id: r.u32()? },
             45 => Self::Cancel { transfer_id: r.u32()? },
+            46 => Self::ListPage { session_id: r.u64()?, path: Text::get(r, MAX_FS_PATH)?, start: r.u32()? },
+            47 => Self::Change { session_id: r.u64()?, change: FsChange::get(r, 0)? },
+            48 => Self::Volumes { session_id: r.u64()? },
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiRequest op", tag: u64::from(other) }));
             }
@@ -506,7 +711,7 @@ impl Wire for TransferWire {
     }
 }
 
-/// The notifications of the files feature (kinds 20 to 24; 22 to 24 are free).
+/// The notifications of the files feature (kinds 20 to 24).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesNote {
     /// 20: a transfer of the session changed (progress at most 4 times a second per transfer).
@@ -514,6 +719,14 @@ pub enum FilesNote {
     /// 21: a received file was saved under `name`, which differs from the offered name because that one was taken
     /// (files never overwrite: "name (2).ext"). Sent just before the `Done` of the same transfer.
     SavedAs { session_id: u64, transfer_id: u32, name: Text },
+    /// 22: the host's set of volumes changed (pushed by the host, at most once a second).
+    Volumes { session_id: u64, volumes: VolumesView },
+    /// 23: host side only, for the session banner (FILES-UI.md 6): the viewer made a change here. `op` is the audit's
+    /// (0 new folder, 1 rename, 2 move, 3 to the bin), `count` the names done. Counts only, never a name.
+    Changed { session_id: u64, op: u8, count: u32 },
+    /// 24: host side only, for the session banner: the viewer reached a volume outside the home folder, sent the first
+    /// time it happens in the session.
+    Reach { session_id: u64 },
 }
 
 impl FilesNote {
@@ -521,6 +734,9 @@ impl FilesNote {
         match self {
             Self::Transfer { .. } => 20,
             Self::SavedAs { .. } => 21,
+            Self::Volumes { .. } => 22,
+            Self::Changed { .. } => 23,
+            Self::Reach { .. } => 24,
         }
     }
 
@@ -542,6 +758,16 @@ impl FilesNote {
                 w.put_u32(*transfer_id);
                 name.put(w, MAX_FS_NAME)?;
             }
+            Self::Volumes { session_id, volumes } => {
+                w.put_u64(*session_id);
+                volumes.put(w, 0)?;
+            }
+            Self::Changed { session_id, op, count } => {
+                w.put_u64(*session_id);
+                w.put_u8(*op);
+                w.put_u32(*count);
+            }
+            Self::Reach { session_id } => w.put_u64(*session_id),
         }
         Ok(())
     }
@@ -556,6 +782,9 @@ impl FilesNote {
                 state: TransferWire::get(r, 0)?,
             },
             21 => Self::SavedAs { session_id: r.u64()?, transfer_id: r.u32()?, name: Text::get(r, MAX_FS_NAME)? },
+            22 => Self::Volumes { session_id: r.u64()?, volumes: VolumesView::get(r, 0)? },
+            23 => Self::Changed { session_id: r.u64()?, op: r.u8()?, count: r.u32()? },
+            24 => Self::Reach { session_id: r.u64()? },
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));
             }

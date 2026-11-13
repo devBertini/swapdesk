@@ -175,6 +175,13 @@ impl VideoProc {
         unsafe {
             let enumerator = vdev.CreateVideoProcessorEnumerator(&content).ctx("CreateVideoProcessorEnumerator")?;
             let processor = vdev.CreateVideoProcessor(&enumerator, 0).ctx("CreateVideoProcessor")?;
+            // Scaling (F-VIEW-06): the source rectangle is the part of the input surface that is blitted; the stream
+            // destination rectangle is the part of the output surface that receives it; the output target rectangle
+            // is the area of the output surface drawn into. With `visible` the whole input and `out_size` the whole
+            // output, one blit scales `visible` to `out_size` while it converts the colour. Primary pages, read
+            // 2026-11-12: learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11videocontext-
+            // videoprocessorsetstreamsourcerect, ...-videoprocessorsetstreamdestrect (default is an empty
+            // rectangle: nothing is written unless it is set and enabled) and ...-videoprocessorsetoutputtargetrect.
             let src = RECT { left: 0, top: 0, right: visible.0 as i32, bottom: visible.1 as i32 };
             let dst = RECT { left: 0, top: 0, right: out_size.0 as i32, bottom: out_size.1 as i32 };
             vctx.VideoProcessorSetStreamColorSpace(&processor, 0, &color_space(input));

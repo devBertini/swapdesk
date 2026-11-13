@@ -1,13 +1,14 @@
 //! Development tool of the stage 24 proof: this PC as the controlling machine, with no human at it.
 //!
-//! Connects to the UI pipe of the installed `SwapdeskService` as the logged-in user, exactly as `Swapdesk.exe` does
+//! Connects to the UI pipe of the installed `SwapdeskService` (or of a development instance: `--instance N
+//! --service-pid P`) as the logged-in user, exactly as `Swapdesk.exe` does
 //! (`swapdesk_app::connect::open_pipe`), picks an already paired device, and runs `swapdesk_crossdrive::viewer_drive`
 //! in its paired mode: connects with control, decodes the video with the Windows H.264 decoder, counts the audio
 //! datagrams and the host's cursor updates, sends a few small pointer moves and ends the session. Nothing is paired and
 //! nothing is forgotten: the pairing outlives the tool.
 //!
 //!     cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input]
+//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--term] [--swap] [--no-media] [--reconnect]
 //!
 //! `--pair` is the full script against a host run by `Swapdesk --drive-host` (a scratch identity on the Mac): it adds
 //! the host by address, prints `VIEWER_CODE <code>`, reads the host's code from `<folder>/peer-code.txt`, waits for
@@ -65,10 +66,13 @@ fn pick(devices: &[DeviceView], wanted: &str) -> Result<String, String> {
 }
 
 /// Whether the report meets the proof: active, decoded, not black, audio.
-fn verdict(r: &ViewerReport) -> Result<(), String> {
+fn verdict(r: &ViewerReport, no_media: bool) -> Result<(), String> {
     let mut missing = Vec::new();
     if !r.session_active {
         missing.push("the session never went active".to_string());
+    }
+    if no_media {
+        return if missing.is_empty() { Ok(()) } else { Err(missing.join("; ")) };
     }
     if r.frames_decoded == 0 {
         missing.push(format!(
@@ -92,7 +96,7 @@ pub fn main() -> ExitCode {
     if device.is_none() == pair.is_none() {
         eprintln!(
             "usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input]"
+       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--term] [--swap] [--no-media] [--reconnect]"
         );
         return ExitCode::from(2);
     }
@@ -103,7 +107,14 @@ pub fn main() -> ExitCode {
         ExitCode::FAILURE
     };
 
-    let conn = match open_pipe(&Options::default()) {
+    // `--instance N --service-pid P`: a development instance of the service (`swapdesk-service --console --instance
+    // N`) instead of the installed one, which development never drives.
+    let options = Options {
+        instance: value(&args, "--instance").and_then(|v| v.parse().ok()),
+        service_pid: value(&args, "--service-pid").and_then(|v| v.parse().ok()),
+        ..Options::default()
+    };
+    let conn = match open_pipe(&options) {
         Ok(c) => c,
         Err(e) => return fail(&format!("cannot open the UI pipe: {e}")),
     };
@@ -142,12 +153,78 @@ pub fn main() -> ExitCode {
     };
     cfg.send_input = !args.iter().any(|a| a == "--no-input");
     cfg.hold = Duration::from_secs(seconds);
+    // `--type`: the keyboard proof; the orchestrator writes `<dir>/type` once the host's text editor has the focus.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--type"), &pair) {
+        cfg.type_after = Some(PathBuf::from(dir).join("type"));
+    }
+    // `--clip`: the copy and paste proof through this user's clipboard; the orchestrator works the host's in `<dir>`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--clip"), &pair) {
+        backend.set_clipboard(swapdesk_input_win::clipboard::WinClipboard::new());
+        cfg.clip = Some(swapdesk_crossdrive::ClipStep {
+            dir: PathBuf::from(dir),
+            provider: std::sync::Mutex::new(Box::new(swapdesk_input_win::clipboard::WinClipboard::new())),
+        });
+    }
+    // `--files`: the files proof; the orchestrator works the host's disk in `<dir>`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--files"), &pair) {
+        cfg.files = Some(PathBuf::from(dir));
+    }
+    // `--chat`: the chat proof; the orchestrator carries the texts to and from the host through `<dir>`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--chat"), &pair) {
+        cfg.chat = Some(PathBuf::from(dir));
+    }
+    // `--term`: the terminal and quick actions proof; the orchestrator writes the host's console user into
+    // `<dir>/term-expect-user`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--term"), &pair) {
+        cfg.term = Some(PathBuf::from(dir));
+    }
+    // `--swap`: asks for a swap and expects the reverse session (runs last, not with `--reconnect`).
+    cfg.swap = pair.is_some() && args.iter().any(|a| a == "--swap");
+    // `--no-media`: no picture is waited for (a host that cannot capture one, such as a locked Mac): the session, the
+    // terminal, the quick actions, the chat and the swap are proven, the picture is not.
+    cfg.no_media = args.iter().any(|a| a == "--no-media");
+    // `--reconnect`: the orchestrator drops the link for about 10 s and the session must come back (runs last).
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--reconnect"), &pair) {
+        cfg.reconnect = Some(PathBuf::from(dir));
+    }
+    // `--fresh-host`: the orchestrator starts the host after this viewer and writes `<dir>/host-up`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--fresh-host"), &pair) {
+        cfg.host_up = Some(PathBuf::from(dir).join("host-up"));
+    }
     let (report, result) = viewer_drive(&backend, &media, &cfg, &log);
     // The backend must not deliver video once the decode thread is gone.
     drop(backend);
     media.finish();
     println!("{}", report.counts_line());
-    let verdict = verdict(&report);
+    let verdict = verdict(&report, cfg.no_media)
+        .and_then(|()| match &report.clip_failed {
+            Some(why) => Err(format!("copy and paste: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.files_failed {
+            Some(why) => Err(format!("files: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.chat_failed {
+            Some(why) => Err(format!("chat: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.term_failed {
+            Some(why) => Err(format!("terminal: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.actions_failed {
+            Some(why) => Err(format!("quick actions: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.swap_failed {
+            Some(why) => Err(format!("swap: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.reconnect_failed {
+            Some(why) => Err(format!("reconnect: {why}")),
+            None => Ok(()),
+        });
     match (verdict, result) {
         (Ok(()), Ok(())) => {
             println!("VIEWER_RESULT PASS");

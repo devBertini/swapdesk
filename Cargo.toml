@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -22,12 +22,17 @@ unimplemented = "warn"
 # Owned by the main session: a lane that needs a crate asks; new third-party crates need the owner's yes (docs/DECISIONS.md D14, D18, D19).
 # Each crate adds only the features it uses (`windows` and `windows-sys` features per crate).
 [workspace.dependencies]
+# D40: an encoded frame is shared by reference count and handed to quinn without a copy (already in the tree through quinn).
+bytes = "1.12"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 ring = "0.17.14"
 tokio = { version = "1.54", default-features = false, features = ["rt", "net", "time", "sync"] }
 mdns-sd = { version = "0.21.7", default-features = false }
 windows = { version = "0.62.2", default-features = false }
+# The `windows` crate's own core, already in the lock through it: `#[implement]` emits `::windows_core` paths, so a
+# crate that implements a COM interface (OLE drag and drop) names it directly.
+windows-core = { version = "0.62.2", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 accesskit = "0.25.2"
 accesskit_windows = "0.35.2"

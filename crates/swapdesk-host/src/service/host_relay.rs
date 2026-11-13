@@ -21,19 +21,21 @@ use std::time::Duration;
 
 use quinn::{RecvStream, VarInt};
 use swapdesk_ipc::{Events, Message as Ipc, VideoBackend};
-use swapdesk_platform::Level;
+use swapdesk_platform::{Codec, Level};
 use swapdesk_proto::{
     CodecError, DisplayList, ErrorCode, HostMute, InputEvent, Message as Ctl, PermissionSet, Preset, StreamKind, Wire,
 };
 use swapdesk_session::{ChannelHandler, Forwarded, IncomingStream, SessionCtx, SessionEnd, VIDEO_CONTROL_TYPES};
-use swapdesk_video::{SenderConfig, VideoSender};
+use swapdesk_video::{RateConfig, SenderConfig, VideoSender};
 use tokio::sync::mpsc;
 
 use super::helper_link::HelperLink;
 use super::media_path::{DirectOut, VideoPath, VideoRun};
-use super::routing::{HelperKind, input_helper};
+use super::routing::{HelperKind, InputRoute, SpecialVerdict, input_route, special_verdict};
 use super::shared::{MediaEv, RelayEv, RelayHandle, Shared};
 
+/// The message type of `SendSpecial`, as `Error.about_type` names it.
+const SEND_SPECIAL_TYPE: u16 = 0x0109;
 /// Messages the relay's queue holds before the helper pump waits.
 const RELAY_QUEUE: usize = 512;
 /// The relay's housekeeping beat (keyframe wants that no frame prompts).
@@ -44,6 +46,31 @@ const DEFAULT_KBPS: u32 = 8_000;
 const MAX_BATCH: usize = 128;
 /// Bytes of an unfinished input record the stream task keeps; more is a protocol violation.
 const MAX_PENDING: usize = 4 * 1024;
+
+/// The display to stream: the viewer's choice if the host still has it, else the primary, else the first.
+fn pick_display(selected: Option<u16>, displays: &[swapdesk_proto::Display]) -> Option<u16> {
+    selected
+        .filter(|s| displays.iter().any(|d| d.id == *s))
+        .or_else(|| displays.iter().find(|d| d.primary).map(|d| d.id))
+        .or_else(|| displays.first().map(|d| d.id))
+}
+
+/// Whether the streamed display `id` is not what it was when its video started: gone from the new list, or the same
+/// id on another monitor (its name, place, scale or rotation differ). A size change alone is not: the capture follows
+/// a new size by itself and sends a keyframe at it.
+fn display_replaced(old: &[swapdesk_proto::Display], new: &[swapdesk_proto::Display], id: u16) -> bool {
+    let Some(now) = new.iter().find(|d| d.id == id) else { return true };
+    match old.iter().find(|d| d.id == id) {
+        Some(was) => {
+            was.name != now.name
+                || (was.x, was.y) != (now.x, now.y)
+                || was.scale_milli != now.scale_milli
+                || was.rotation != now.rotation
+        }
+        // The old list did not hold it (an empty list from before the helper came): nothing to compare.
+        None => false,
+    }
+}
 
 fn code(c: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(c.tag()))
@@ -104,10 +131,17 @@ impl ChannelHandler for HostRelays {
         let (tx, rx) = mpsc::channel(RELAY_QUEUE);
         let ended = Arc::new(AtomicBool::new(false));
         let video = VideoPath::new();
+        video.set_gate(ctx.clone());
         let out = Arc::new(DirectOut::new(Some(ctx.clone()), ctx.connection().cloned()));
         self.shared.register_relay(
             ctx.session_id(),
-            RelayHandle { tx: tx.clone(), ended: Arc::clone(&ended), video: Arc::clone(&video), out: Arc::clone(&out) },
+            RelayHandle {
+                tx: tx.clone(),
+                ended: Arc::clone(&ended),
+                video: Arc::clone(&video),
+                out: Arc::clone(&out),
+                ctx: ctx.clone(),
+            },
         );
         let relay = HostRelay::new(Arc::clone(&self.shared), ctx.clone(), tx.clone(), ended, video, out);
         self.shared.rt.spawn(relay.run(rx));
@@ -137,7 +171,20 @@ struct RunVideo {
     display: u16,
     fps: u16,
     preset: Preset,
+    /// The codec picked for this session's video (F-VIEW-07).
+    codec: Codec,
     kbps_sent: u32,
+    /// The `SetScale` the helper last got for this run (0x0 = native, what a new `StartVideo` begins with).
+    scale_sent: (u16, u16),
+}
+
+/// F-VIEW-06: what to tell the helper to encode at: `scale::target_size` of the display for the viewer's area and
+/// preset, as 0x0 (native) when that is the display's own size, so a display that changes size is still followed.
+fn wire_scale(display: Option<&swapdesk_proto::Display>, view: (u16, u16), preset: Preset) -> (u16, u16) {
+    let Some(d) = display else { return (0, 0) };
+    let native = (d.width, d.height);
+    let (w, h) = crate::scale::target_size(native, (u32::from(view.0), u32::from(view.1)), preset);
+    if (w, h) == native { (0, 0) } else { (u16::try_from(w).unwrap_or(0), u16::try_from(h).unwrap_or(0)) }
 }
 
 struct HostRelay {
@@ -150,6 +197,8 @@ struct HostRelay {
     selected: Option<u16>,
     preset: Preset,
     max_fps: u16,
+    /// The viewer's video area in physical pixels, 0x0 = native (`VideoSettings.view_width/height`).
+    view: (u16, u16),
     video: Option<RunVideo>,
     path: Arc<VideoPath>,
     out: Arc<DirectOut>,
@@ -174,7 +223,9 @@ impl HostRelay {
                 rate.store(kbps, Ordering::Relaxed);
                 let _ = wake.try_send(RelayEv::Wake);
             };
-            VideoSender::new(conn, SenderConfig::default(), Arc::new(sink))
+            // A wired link starts higher than a wireless one; both ramp to the ceiling while the link is clean.
+            let rate = RateConfig::for_link(shared.is_wired(conn.local_ip()));
+            VideoSender::new(conn, SenderConfig { rate, ..SenderConfig::default() }, Arc::new(sink))
         });
         // The video task lives as long as the relay: it ends when `cleanup` closes the path.
         if let Some(sender) = sender.clone() {
@@ -191,6 +242,7 @@ impl HostRelay {
             selected: None,
             preset: Preset::Auto,
             max_fps: 0,
+            view: (0, 0),
             video: None,
             audio_on: false,
             audio: None,
@@ -243,6 +295,7 @@ impl HostRelay {
             Ctl::VideoSettings(m) => {
                 self.preset = m.preset;
                 self.max_fps = m.max_fps;
+                self.view = (m.view_width, m.view_height);
                 if let Some(s) = &self.sender {
                     s.set_bitrate_cap(m.max_kbps);
                 }
@@ -258,14 +311,66 @@ impl HostRelay {
                 }
             }
             Ctl::AudioControl(c) => self.audio_on = c.enabled,
-            Ctl::SendSpecial(_) => self.shared.log(Level::Info, format_args!("SendSpecial is not wired in this build")),
+            Ctl::SendSpecial(m) => self.send_special(m.key),
             _ => {}
+        }
+    }
+
+    /// A viewer's `SendSpecial` (PROTOCOL.md 0x0109, D11): the session needs `UNATTENDED` (the session layer already
+    /// refuses it otherwise with `NOT_PERMITTED`; the verdict checks again, with the desktop, at the moment of
+    /// sending), and the service process sends the sequence. A refusal or a failure is an `Error` about the message,
+    /// not fatal.
+    fn send_special(&self, key: swapdesk_proto::Special) {
+        let granted = self.ctx.granted();
+        let desktop = self.ctx.desktop_state().desktop;
+        let refused = |code: ErrorCode| {
+            let _ = self.ctx.try_send(swapdesk_proto::ErrorMessage {
+                code,
+                fatal: false,
+                about_type: SEND_SPECIAL_TYPE,
+                about_id: 0,
+            });
+        };
+        match special_verdict(key, granted, desktop) {
+            SpecialVerdict::Refuse(code) => {
+                self.shared.log(
+                    Level::Warn,
+                    format_args!("session {:#x}: SendSpecial refused ({code:?})", self.ctx.session_id()),
+                );
+                refused(code);
+            }
+            SpecialVerdict::Send => match self.shared.sas_sender.get() {
+                Some(send) => match send() {
+                    Ok(()) => self.shared.log(
+                        Level::Info,
+                        format_args!("session {:#x}: the secure attention sequence was sent", self.ctx.session_id()),
+                    ),
+                    Err(why) => {
+                        self.shared.log(Level::Warn, format_args!("the secure attention sequence failed: {why}"));
+                        refused(ErrorCode::Unavailable);
+                    }
+                },
+                None => {
+                    self.shared.log(
+                        Level::Info,
+                        format_args!("no sender for the secure attention sequence on this core: SendSpecial refused"),
+                    );
+                    refused(ErrorCode::Unavailable);
+                }
+            },
         }
     }
 
     async fn media(&mut self, ev: MediaEv) {
         match ev {
             MediaEv::Displays(list) => {
+                // F-VIEW-02: the display on the wire may now be another monitor, or gone, or laid out anew: the video
+                // starts again on the right one (a keyframe at its size follows) instead of streaming a stale source.
+                if let Some(run) = &self.video
+                    && display_replaced(&self.displays, &list, run.display)
+                {
+                    self.stop_video().await;
+                }
                 self.displays = list.clone();
                 let _ = self.ctx.send(DisplayList { displays: list }).await;
             }
@@ -291,16 +396,24 @@ impl HostRelay {
         }
     }
 
+    /// F-VIEW-07: HEVC for this viewer only when both machines have it in hardware and the viewer's minor knows it.
+    fn session_codec(&self) -> Codec {
+        super::session_codec(
+            self.ctx.peer_capabilities().as_ref(),
+            self.ctx.peer_minor(),
+            self.shared.host_hevc_hardware.load(Ordering::Relaxed),
+        )
+    }
+
     fn fps(&self) -> u16 {
-        if self.max_fps == 0 { 60 } else { self.max_fps.clamp(1, 240) }
+        let refresh =
+            self.pick_display().and_then(|id| self.displays.iter().find(|d| d.id == id)).map_or(0, |d| d.refresh_mhz);
+        crate::scale::target_fps(self.preset, self.max_fps, refresh)
     }
 
     /// The display to stream: the viewer's choice if the host still has it, else the primary, else the first.
     fn pick_display(&self) -> Option<u16> {
-        self.selected
-            .filter(|s| self.displays.iter().any(|d| d.id == *s))
-            .or_else(|| self.displays.iter().find(|d| d.primary).map(|d| d.id))
-            .or_else(|| self.displays.first().map(|d| d.id))
+        pick_display(self.selected, &self.displays)
     }
 
     /// Brings the helper's work in line with the session's grants and the viewer's choices.
@@ -323,9 +436,14 @@ impl HostRelay {
     async fn reconcile_video(&mut self, view: bool, media: Option<&Arc<HelperLink>>) {
         let want = if view { media.zip(self.pick_display()) } else { None };
         let (fps, preset) = (self.fps(), self.preset);
+        let codec = self.session_codec();
         let same = match (&self.video, want) {
             (Some(run), Some((helper, display))) => {
-                run.helper.id == helper.id && run.display == display && run.fps == fps && run.preset == preset
+                run.helper.id == helper.id
+                    && run.display == display
+                    && run.fps == fps
+                    && run.preset == preset
+                    && run.codec == codec
             }
             (None, None) => true,
             _ => false,
@@ -346,17 +464,25 @@ impl HostRelay {
             if let Some((helper, display)) = want {
                 let kbps = self.sender.as_ref().map_or(DEFAULT_KBPS, VideoSender::target_kbps);
                 let started = helper
-                    .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto })
+                    .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto, codec })
                     .await;
                 self.shared.log(
                     Level::Debug,
                     format_args!(
-                        "session {:#x}: StartVideo display {display} fps {fps} sent: {started}",
+                        "session {:#x}: StartVideo display {display} fps {fps} codec {codec:?} sent: {started}",
                         self.ctx.session_id()
                     ),
                 );
                 if started {
-                    self.video = Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, kbps_sent: kbps });
+                    self.video = Some(RunVideo {
+                        helper: Arc::clone(helper),
+                        display,
+                        fps,
+                        preset,
+                        codec,
+                        kbps_sent: kbps,
+                        scale_sent: (0, 0),
+                    });
                     let (link, rt) = (Arc::clone(helper), self.shared.rt.clone());
                     // A keyframe is asked for from the video task, which must not wait on the helper's queue.
                     let key = Arc::new(move || {
@@ -368,6 +494,18 @@ impl HostRelay {
                     self.path.set_run(Some(VideoRun { display, key }));
                 }
             }
+        }
+        // The viewer's window size goes to the encoder (the helper holds it back with `SizeDebounce`).
+        let wanted = self
+            .video
+            .as_ref()
+            .map(|run| wire_scale(self.displays.iter().find(|d| d.id == run.display), self.view, run.preset));
+        if let (Some(run), Some(scale)) = (self.video.as_mut(), wanted)
+            && scale != run.scale_sent
+        {
+            run.scale_sent = scale;
+            let helper = Arc::clone(&run.helper);
+            helper.send(Ipc::SetScale { display: run.display, width: scale.0, height: scale.1 }).await;
         }
         // The rate control's target goes to the encoder.
         let target = self.target_kbps.load(Ordering::Relaxed);
@@ -484,6 +622,8 @@ async fn input_task(shared: Arc<Shared>, ctx: SessionCtx, mut recv: RecvStream) 
 struct InputState {
     /// The helper that got the last batch.
     last: Option<HelperKind>,
+    /// The helper link that was last given the media helper's displays in this session.
+    listed: Option<u64>,
     warned: bool,
     /// A batch was dropped (paused host, no helper, a closed pipe): the next one that goes through is preceded by a
     /// `ReleaseAll`, since the dropped batch may have held the key-up of a key that is down at the helper (D9).
@@ -499,7 +639,15 @@ async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st:
         st.dropped = true;
         return;
     }
-    let kind = input_helper(ctx.granted());
+    // Which helper takes the records on the desktop the host is on (D11, F-UNAT-01): a protected desktop only from the
+    // system helper and only for `UNATTENDED`; nothing while another account is at the console.
+    let kind = match input_route(ctx.granted(), ctx.desktop_state().desktop) {
+        InputRoute::Helper(kind) => kind,
+        InputRoute::Drop => {
+            st.dropped = true;
+            return;
+        }
+    };
     let Some(helper) = shared.helper(kind) else {
         // Never the other helper: a prompted session must not reach the SYSTEM injector (D11).
         st.dropped = true;
@@ -520,10 +668,83 @@ async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st:
         old.send(Ipc::ReleaseAll).await;
     }
     st.last = Some(kind);
+    // D64: each session maps its pointer onto the displays of now, the ones its pictures show. A helper that is not
+    // the media one gets them before its first batch; later changes reach it from the pump.
+    if st.listed != Some(helper.id) {
+        st.listed = Some(helper.id);
+        if let Some((_, media)) = shared.media()
+            && media.id != helper.id
+        {
+            helper.send(Ipc::Displays(DisplayList { displays: media.displays() })).await;
+        }
+    }
     if std::mem::take(&mut st.dropped) {
         helper.send(Ipc::ReleaseAll).await;
     }
     if !helper.send(Ipc::Input { events: Events(events) }).await {
         st.dropped = true;
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use swapdesk_proto::Display;
+
+    fn display(id: u16, x: i32, scale_milli: u16, primary: bool) -> Display {
+        Display {
+            id,
+            name: format!("Display {id}"),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_milli,
+            refresh_mhz: 60_000,
+            rotation: 0,
+            primary,
+        }
+    }
+
+    #[test]
+    fn the_wire_scale_is_the_target_size_or_native() {
+        let d = display(0, 0, 1000, true); // 1920x1080
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Auto), (960, 540));
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Motion), (960, 540));
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Text), (0, 0), "Texto nitido is native");
+        assert_eq!(wire_scale(Some(&d), (0, 0), Preset::Auto), (0, 0), "1:1 mode reports 0x0");
+        assert_eq!(wire_scale(Some(&d), (3840, 2160), Preset::Auto), (0, 0), "an area above the display");
+        assert_eq!(wire_scale(None, (960, 540), Preset::Auto), (0, 0), "no display to size against");
+    }
+
+    #[test]
+    fn the_viewers_choice_wins_while_the_host_has_it_else_the_primary_else_the_first() {
+        let list = [display(0, 0, 1000, false), display(1, 1920, 2000, true), display(2, 3840, 1500, false)];
+        assert_eq!(pick_display(None, &list), Some(1), "the primary by default");
+        assert_eq!(pick_display(Some(2), &list), Some(2));
+        assert_eq!(pick_display(Some(9), &list), Some(1), "a display that is gone falls back to the primary");
+        let no_primary = [display(3, 0, 1000, false), display(4, 100, 1000, false)];
+        assert_eq!(pick_display(Some(9), &no_primary), Some(3));
+        assert_eq!(pick_display(None, &[]), None);
+    }
+
+    #[test]
+    fn a_streamed_display_is_replaced_when_gone_or_another_monitor_but_not_for_a_size_change() {
+        let old = [display(0, 0, 1000, true), display(1, 1920, 2000, false)];
+        assert!(!display_replaced(&old, &old, 1), "an unchanged list");
+        assert!(display_replaced(&old, &old[..1], 1), "gone");
+        let moved = [display(0, 0, 1000, true), display(1, 2560, 2000, false)];
+        assert!(display_replaced(&old, &moved, 1), "another place");
+        let rescaled = [display(0, 0, 1000, true), display(1, 1920, 1500, false)];
+        assert!(display_replaced(&old, &rescaled, 1), "another scale");
+        let mut other = old.clone();
+        other[1].name = "Other".into();
+        assert!(display_replaced(&old, &other, 1), "another name");
+        let mut resized = old.clone();
+        resized[1].width = 2560;
+        resized[1].primary = true;
+        assert!(!display_replaced(&old, &resized, 1), "the capture follows a size change itself");
+        assert!(!display_replaced(&old[..1], &old, 1), "no earlier entry to compare");
+        assert!(!display_replaced(&old, &old, 0), "another display's entry is not this one's");
     }
 }

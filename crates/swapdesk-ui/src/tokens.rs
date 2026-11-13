@@ -100,6 +100,152 @@ pub const fn palette(dark: bool) -> &'static Palette {
     if dark { &DARK } else { &LIGHT }
 }
 
+/// The colours of a Windows contrast theme, as the system gives them (`GetSysColor`), each 0xRRGGBB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemColors {
+    pub window: u32,
+    pub window_text: u32,
+    pub hotlight: u32,
+    pub gray_text: u32,
+    pub highlight: u32,
+    pub highlight_text: u32,
+    pub button_face: u32,
+    pub button_text: u32,
+}
+
+/// The palette while a Windows contrast theme is on: only the theme's own colours, in the pairs Microsoft gives
+/// (learn.microsoft.com/windows/apps/design/accessibility/high-contrast-themes, read 12/11/2026): pages, panes and bars
+/// on Window; every text, border and the switch track in WindowText (GrayText is for disabled UI only, never for
+/// secondary text); links in Hotlight on Window; what is selected on Highlight; controls on ButtonFace. Status colours
+/// (ok, danger) carry no hue of their own: the words say it.
+pub const fn contrast_palette(c: &SystemColors) -> Palette {
+    let window = Color::rgb(c.window);
+    let text = Color::rgb(c.window_text);
+    Palette {
+        canvas: window,
+        surface: window,
+        sunken: window,
+        control: Color::rgb(c.button_face),
+        placeholder: Color::rgb(c.button_face),
+        track: text,
+        ink: text,
+        soft: text,
+        line: text,
+        link: Color::rgb(c.hotlight),
+        link_ink: window,
+        link_tint: Color::rgb(c.highlight),
+        ok: text,
+        danger: text,
+        danger_tint: window,
+        remote: window,
+    }
+}
+
+/// The palettes while macOS "Increase contrast" is on: the same hues as `LIGHT` and `DARK`, with secondary text,
+/// borders, the switch track and links pushed toward the ink so every pair reads at 7:1 or more.
+pub const LIGHT_MORE_CONTRAST: Palette = Palette {
+    control: Color::rgb(0xD9DDE3),
+    track: Color::rgb(0x4A505C),
+    soft: Color::rgb(0x2E333D),
+    line: Color::rgb(0x6B7281),
+    link: Color::rgb(0x1F2C9E),
+    ok: Color::rgb(0x0F5A3A),
+    danger: Color::rgb(0x8E1F17),
+    ..LIGHT
+};
+
+pub const DARK_MORE_CONTRAST: Palette = Palette {
+    canvas: Color::rgb(0x000000),
+    control: Color::rgb(0x3A3F4A),
+    track: Color::rgb(0xB4BAC6),
+    ink: Color::rgb(0xFFFFFF),
+    soft: Color::rgb(0xD5D9E0),
+    line: Color::rgb(0x8C93A0),
+    link: Color::rgb(0xB8C2FF),
+    ok: Color::rgb(0x7FDDB2),
+    danger: Color::rgb(0xFFA59C),
+    ..DARK
+};
+
+/// The colours that do not follow light and dark (the session toolbar, the terminal, the dark cards), as one set: the
+/// design's ([`fixed`]), or a Windows contrast theme's own colours, which replace every hard-coded colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedColors {
+    pub terminal_ink: Color,
+    pub terminal_bg: Color,
+    pub card_dark_soft: Color,
+    pub card_dark_border: Color,
+    pub toolbar: Color,
+    pub spinner: Color,
+    pub toolbar_link: Color,
+    pub toolbar_ink: Color,
+    pub shadow_dialog: Color,
+    pub card_dark_ink: Color,
+    pub toolbar_sep: Color,
+    pub toolbar_pressed: Color,
+    pub toolbar_danger: Color,
+    pub remote_screen: Color,
+    pub toolbar_raise: Color,
+    pub toolbar_soft: Color,
+}
+
+pub const FIXED: FixedColors = FixedColors {
+    terminal_ink: fixed::TERMINAL_INK,
+    terminal_bg: fixed::TERMINAL_BG,
+    card_dark_soft: fixed::CARD_DARK_SOFT,
+    card_dark_border: fixed::CARD_DARK_BORDER,
+    toolbar: fixed::TOOLBAR,
+    spinner: fixed::SPINNER,
+    toolbar_link: fixed::TOOLBAR_LINK,
+    toolbar_ink: fixed::TOOLBAR_INK,
+    shadow_dialog: fixed::SHADOW_DIALOG,
+    card_dark_ink: fixed::CARD_DARK_INK,
+    toolbar_sep: fixed::TOOLBAR_SEP,
+    toolbar_pressed: fixed::TOOLBAR_PRESSED,
+    toolbar_danger: fixed::TOOLBAR_DANGER,
+    remote_screen: fixed::REMOTE_SCREEN,
+    toolbar_raise: fixed::TOOLBAR_RAISE,
+    toolbar_soft: fixed::TOOLBAR_SOFT,
+};
+
+/// [`FixedColors`] under a contrast theme: bars and panes on Window with WindowText, the toolbar's buttons in
+/// ButtonText, a pressed one on Highlight, links in Hotlight, and no shadow.
+pub const fn contrast_fixed(c: &SystemColors) -> FixedColors {
+    let window = Color::rgb(c.window);
+    let text = Color::rgb(c.window_text);
+    let button_text = Color::rgb(c.button_text);
+    FixedColors {
+        terminal_ink: text,
+        terminal_bg: window,
+        card_dark_soft: text,
+        card_dark_border: text,
+        toolbar: window,
+        spinner: text,
+        toolbar_link: Color::rgb(c.hotlight),
+        toolbar_ink: button_text,
+        shadow_dialog: Color::rgba(0, 0, 0, 0),
+        card_dark_ink: text,
+        toolbar_sep: text,
+        toolbar_pressed: Color::rgb(c.highlight),
+        toolbar_danger: button_text,
+        remote_screen: window,
+        toolbar_raise: Color::rgb(c.button_face),
+        toolbar_soft: text,
+    }
+}
+
+/// What the system asks for beyond light and dark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Contrast {
+    /// Nothing: the design's palettes.
+    #[default]
+    Standard,
+    /// macOS "Increase contrast".
+    More,
+    /// A Windows contrast theme, with its colours.
+    Theme(SystemColors),
+}
+
 /// Colours that do not change with the theme (the viewer toolbar, the dark cards, the placeholder screen). The toolbar
 /// colours are the `--hud-*` variables, the same in both theme blocks.
 pub mod fixed {
@@ -126,18 +272,37 @@ pub mod fixed {
     pub const SHADOW_DIALOG: Color = Color::rgba(0, 0, 0, 45);
 }
 
-/// A CSS-like text style: size in px, weight, line height as a multiple of the size, tracking in em.
+/// A CSS-like text style: size in px, weight, line height as a multiple of the size, tracking in em; the interface's
+/// face or the system's monospaced one (the terminal grid), upright or italic (the monospaced face only).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextStyle {
     pub size: f32,
     pub weight: u16,
     pub line: f32,
     pub tracking: f32,
+    /// The system's monospaced face (Windows: Cascadia Mono, else Consolas; the Mac: Menlo) instead of the
+    /// interface's.
+    pub mono: bool,
+    /// Italic (honoured on the monospaced face; the interface's face has no italic).
+    pub italic: bool,
 }
 
 impl TextStyle {
     pub const fn new(size: f32, weight: u16) -> TextStyle {
-        TextStyle { size, weight, line: 1.45, tracking: 0.0 }
+        TextStyle { size, weight, line: 1.45, tracking: 0.0, mono: false, italic: false }
+    }
+    pub const fn mono(self) -> TextStyle {
+        TextStyle { mono: true, ..self }
+    }
+    pub const fn italic(self) -> TextStyle {
+        TextStyle { italic: true, ..self }
+    }
+    pub const fn weight(self, weight: u16) -> TextStyle {
+        TextStyle { weight, ..self }
+    }
+    /// The bits a shell's text caches tell styles apart by (the face and the slant).
+    pub const fn face_bits(self) -> u8 {
+        (self.mono as u8) | ((self.italic as u8) << 1)
     }
     pub const fn line(self, line: f32) -> TextStyle {
         TextStyle { line, ..self }
@@ -168,9 +333,13 @@ pub mod text {
     pub const TAB: TextStyle = TextStyle::new(14.0, 500);
     pub const TAB_SELECTED: TextStyle = TextStyle::new(14.0, 600);
     pub const PAIR_CODE: TextStyle = TextStyle::new(64.0, 600).line(1.0).tracking(0.04);
+    /// The time left to pair, beside its bar (board "Esperando o outro computador").
+    pub const COUNTDOWN: TextStyle = TextStyle::new(28.0, 600).line(1.0);
     pub const TABLE_HEAD: TextStyle = TextStyle::new(12.0, 600);
     pub const BAR: TextStyle = TextStyle::new(13.0, 600);
     pub const MONO: TextStyle = TextStyle::new(13.0, 400).line(1.7);
+    /// The terminal grid: the monospaced face; a cell is 0.6 em wide and one line high (`swapdesk_paint::grid`).
+    pub const TERM: TextStyle = TextStyle::new(13.0, 400).line(1.3).mono();
 }
 
 /// Layout numbers of the main window, in CSS pixels.
@@ -190,7 +359,6 @@ pub mod layout {
     pub const SWITCH_W: f32 = 38.0;
     pub const SWITCH_H: f32 = 22.0;
     pub const FIELD_H: f32 = 36.0;
-    pub const VIEWER_BAR_H: f32 = 40.0;
     pub const DRAWER_W: f32 = 448.0;
     /// Pair strip geometry (Visão geral): column width, icon size, wire thickness, arrow size.
     pub const PAIR_COLUMN_W: f32 = 180.0;
@@ -201,6 +369,9 @@ pub mod layout {
     pub const PAIR_COUNTDOWN_S: u16 = 120;
     /// How long "Acordando" waits for the device to appear (F-WAKE-01).
     pub const WAKE_COUNTDOWN_S: u16 = 60;
+    /// How long a connect entry may go without news before the interface ends it itself: past the service's own
+    /// worst case (10 s handshake, 10 s control stream, 25 s answer and a 5 s guard).
+    pub const CONNECT_GIVE_UP_S: u16 = 60;
 }
 
 pub const FONT_FAMILY: &str = "Instrument Sans";
@@ -277,6 +448,112 @@ mod tests {
         block[at..end].parse().unwrap()
     }
 
+    fn colours_of(p: &Palette) -> [Color; 16] {
+        [
+            p.canvas,
+            p.surface,
+            p.sunken,
+            p.control,
+            p.placeholder,
+            p.track,
+            p.ink,
+            p.soft,
+            p.line,
+            p.link,
+            p.link_ink,
+            p.link_tint,
+            p.ok,
+            p.danger,
+            p.danger_tint,
+            p.remote,
+        ]
+    }
+
+    /// WCAG 2.x contrast ratio of two opaque colours.
+    fn ratio(a: Color, b: Color) -> f64 {
+        let lum = |c: Color| {
+            let ch = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// F-UI-01: under a Windows contrast theme every colour drawn is one of the theme's own (Microsoft: no hard-coded
+    /// colour), the hard-coded toolbar, card and dialog colours included.
+    #[test]
+    fn a_contrast_theme_draws_only_in_its_own_colours() {
+        let c = SystemColors {
+            window: 0x202020,
+            window_text: 0xFFFFFF,
+            hotlight: 0x75E9FC,
+            gray_text: 0xA6A6A6,
+            highlight: 0x8EE3F0,
+            highlight_text: 0x263B50,
+            button_face: 0x202020,
+            button_text: 0xFFFFFF,
+        };
+        let own = [
+            c.window,
+            c.window_text,
+            c.hotlight,
+            c.gray_text,
+            c.highlight,
+            c.highlight_text,
+            c.button_face,
+            c.button_text,
+        ];
+        for colour in colours_of(&contrast_palette(&c)) {
+            assert!(own.contains(&colour.hex()), "{colour:?} is not a colour of the theme");
+        }
+        let f = contrast_fixed(&c);
+        let fixed = [
+            f.terminal_ink,
+            f.terminal_bg,
+            f.card_dark_soft,
+            f.card_dark_border,
+            f.toolbar,
+            f.spinner,
+            f.toolbar_link,
+            f.toolbar_ink,
+            f.card_dark_ink,
+            f.toolbar_sep,
+            f.toolbar_pressed,
+            f.toolbar_danger,
+            f.remote_screen,
+            f.toolbar_raise,
+            f.toolbar_soft,
+        ];
+        for colour in fixed {
+            assert!(own.contains(&colour.hex()), "{colour:?} (fixed) is not a colour of the theme");
+        }
+        assert_eq!(f.shadow_dialog.a, 0, "no shadow under a contrast theme");
+        // Secondary text is never GrayText (Microsoft keeps it for disabled UI).
+        assert_eq!(contrast_palette(&c).soft.hex(), c.window_text);
+    }
+
+    /// F-UI-01: with macOS "Increase contrast" the text, the secondary text and the links read at 7:1 or more on the
+    /// surfaces they are drawn on.
+    #[test]
+    fn the_increased_contrast_palettes_reach_seven_to_one() {
+        for (name, p) in [("light", LIGHT_MORE_CONTRAST), ("dark", DARK_MORE_CONTRAST)] {
+            for bg in [p.canvas, p.surface, p.sunken] {
+                for (what, fg) in [("ink", p.ink), ("soft", p.soft), ("link", p.link)] {
+                    let r = ratio(fg, bg);
+                    assert!(r >= 7.0, "{name} {what} {:06X} on {:06X}: {r:.2}", fg.hex(), bg.hex());
+                }
+            }
+            // Borders and the switch track stand out from the surface (WCAG 1.4.11 asks 3:1).
+            for (what, fg) in [("line", p.line), ("track", p.track)] {
+                let r = ratio(fg, p.surface);
+                assert!(r >= 3.0, "{name} {what}: {r:.2}");
+            }
+        }
+    }
+
     #[test]
     fn palettes_match_the_design_files() {
         for file in BOARDS {
@@ -328,6 +605,9 @@ mod tests {
         let pair = include_str!("../../../docs/design/Pareamento.dc.html");
         assert!(pair.contains("font-size: 64px; font-weight: 600; letter-spacing: 0.04em"));
         assert_eq!((text::PAIR_CODE.size, text::PAIR_CODE.tracking), (64.0, 0.04));
+        let states = include_str!("../../../docs/design/EstadosPareamento.dc.html");
+        assert!(states.contains("font-size: 28px; font-weight: 600; line-height: 1\">1:47"));
+        assert_eq!((text::COUNTDOWN.size, text::COUNTDOWN.weight, text::COUNTDOWN.line), (28.0, 600, 1.0));
     }
 
     #[test]

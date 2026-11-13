@@ -45,6 +45,8 @@ swapdesk-session = { path = "../swapdesk-session" }
 swapdesk-shell-mac = { path = "../swapdesk-shell-mac" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 swapdesk-ui = { path = "../swapdesk-ui" }
+# The updater's manager, package and watcher sequence (UPDATES.md 7).
+swapdesk-update = { path = "../swapdesk-update" }
 tokio.workspace = true
 # Only with the `dev-harness` feature: the scripted host user of `--drive-host`.
 swapdesk-crossdrive = { path = "../swapdesk-crossdrive", optional = true }
@@ -60,16 +62,18 @@ swapdesk-capture-mac = { path = "../swapdesk-capture-mac" }
 swapdesk-codec-mac = { path = "../swapdesk-codec-mac" }
 swapdesk-net-mac = { path = "../swapdesk-net-mac" }
 swapdesk-secret-mac = { path = "../swapdesk-secret-mac" }
+swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }
 dispatch2.workspace = true
 objc2.workspace = true
+block2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError"]
+features = ["std", "objc2-core-foundation", "NSGeometry", "NSString", "NSArray", "NSObject", "NSThread", "NSError", "NSNotification", "NSOperation", "block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"]
+features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSWorkspace"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 workspace = true

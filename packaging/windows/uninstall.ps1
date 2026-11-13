@@ -7,13 +7,18 @@
     1. stops the service SwapdeskService and any Swapdesk process running from the install folder;
     2. deletes the service;
     3. removes the firewall rules of the group Swapdesk;
-    4. removes the all-users Start menu shortcut;
+    4. removes the all-users Start menu shortcut and the installed apps entry (HKLM\...\Uninstall\Swapdesk); for every user
+       profile on this PC it removes the per-user Run value Swapdesk ("open at login": a hive that is not loaded is
+       loaded, changed and unloaded) and the user's logs, %LOCALAPPDATA%\Swapdesk\logs (the folder Swapdesk\ goes
+       when it is empty);
     5. restores SoftwareSASGeneration to the value saved by install.ps1 (or removes it when it was absent), only when
        the install recorded that it set it (install -EnableSas) and unless someone changed it since (then it is left
        and reported); removes HKLM\SOFTWARE\Swapdesk;
-    6. deletes the files install.ps1 put in %ProgramFiles%\Swapdesk, then the folder if it is empty;
+    6. deletes the files install.ps1 put in %ProgramFiles%\Swapdesk (this script and uninstall.cmd included: run from
+       that folder, the elevated copy first copies itself to an administrator-only folder under %WINDIR%\Temp and
+       runs from there), then the folder if it is empty;
     7. deletes the data folder %ProgramData%\Swapdesk (identity, trust store, settings, audit and trace logs) unless
-       -KeepData is given. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
+       -KeepData is given; the updater's folder update inside it is removed whole. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
        then the folder if it is empty. A folder that is a reparse point is never entered.
   Then it writes one Application event (id 1001), removes the Event Log source Swapdesk, and queries the service, the rules, the folders, the shortcut, the registry key and the processes, and exits
   with 1 when something is left.
@@ -27,6 +32,12 @@
 .PARAMETER DryRun
   Prints every action without doing any of it. Needs no administrator rights and does not elevate.
 
+.PARAMETER Quiet
+  Accepted for the installed apps entry's QuietUninstallString. There is no prompt to hide; it changes nothing.
+
+.PARAMETER Relocated
+  Internal: this is the copy that the elevated script started from %WINDIR%\Temp so the install folder can be deleted.
+
 .PARAMETER LogFile
   Internal: the elevated copy of this script writes what it prints here so the first window can show it.
 
@@ -39,6 +50,8 @@ param(
     [switch]$KeepData,
     [switch]$Force,
     [switch]$DryRun,
+    [switch]$Quiet,
+    [switch]$Relocated,
     [string]$LogFile
 )
 
@@ -53,10 +66,17 @@ $SasKey        = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Syste
 $SasValue      = 'SoftwareSASGeneration'
 $OwnRoot       = 'HKLM:\SOFTWARE\Swapdesk'
 $OwnKey        = 'HKLM:\SOFTWARE\Swapdesk\Installer'
-$InstalledFiles = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe', 'LICENSE-MIT', 'LICENSE-APACHE')
+$InstalledFiles = @('Swapdesk.exe', 'swapdesk-service.exe', 'swapdesk-helper.exe', 'LICENSE-MIT', 'LICENSE-APACHE', 'uninstall.cmd', 'uninstall.ps1')
+$UninstallKey  = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Swapdesk'
+$ProfileList   = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+$RunKeyPath    = 'Software\Microsoft\Windows\CurrentVersion\Run'   # under each user's hive
+$RunValue      = 'Swapdesk'
+$TempHive      = 'SwapdeskUninstall'
 # CONTRACTS C5.2: identity.bin, trust.bin, settings.bin, audit-sessions.log, audit-network.log, trace.log
 # (rotation keeps <name>.1; a file that does not decode is set aside as <name>.damaged-<ms>; writes go through <name>.tmp).
-$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log')
+$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log', 'accounts.bin')
+# ACCOUNTS.md 10.6: each account's folder accounts\<SID> holds these.
+$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'audit-sessions.log', 'audit-network.log')
 $ProcessNames  = @('Swapdesk', 'swapdesk-helper', 'swapdesk-service')
 $EventSource   = 'Swapdesk'
 $EventLogName  = 'Application'
@@ -86,6 +106,7 @@ if (-not $DryRun -and -not (Test-Admin)) {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath), '-LogFile', ('"{0}"' -f $log))
     if ($KeepData) { $argList += '-KeepData' }
     if ($Force) { $argList += '-Force' }
+    if ($Quiet) { $argList += '-Quiet' }
     Write-Host 'Swapdesk uninstall needs administrator rights: approve the Windows (UAC) prompt.'
     try {
         $p = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $argList -Verb RunAs -Wait -PassThru
@@ -98,6 +119,36 @@ if (-not $DryRun -and -not (Test-Admin)) {
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
     exit $p.ExitCode
+}
+
+# ---------------------------------------------------------------- relocation (the install folder cannot delete the script that runs in it)
+# Elevated, started from the install folder: copy this script to a folder only SYSTEM and Administrators can use, run
+# that copy to do the work, then remove the folder. The copy lives under %WINDIR%\Temp, never a user's Temp.
+if (-not $DryRun -and -not $Relocated -and (($PSScriptRoot.TrimEnd('\') + '\').StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase))) {
+    $work = Join-Path $env:windir ('Temp\swapdesk-uninstall-{0}' -f [guid]::NewGuid().ToString('N'))
+    $code = 1
+    try {
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        & icacls.exe $work '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '/grant:r' '*S-1-5-32-544:(OI)(CI)F' '/Q' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw ('icacls failed on {0} with exit code {1}' -f $work, $LASTEXITCODE) }
+        $copy = Join-Path $work 'uninstall.ps1'
+        Copy-Item -LiteralPath $PSCommandPath -Destination $copy -Force
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $copy, '-Relocated')
+        if ($KeepData) { $childArgs += '-KeepData' }
+        if ($Force) { $childArgs += '-Force' }
+        if ($Quiet) { $childArgs += '-Quiet' }
+        if ($LogFile) { $childArgs += @('-LogFile', $LogFile) }
+        Set-Location -LiteralPath $env:windir
+        & (Join-Path $PSHOME 'powershell.exe') @childArgs
+        $code = $LASTEXITCODE
+    } catch {
+        Say ('FAILED: {0}' -f $_.Exception.Message)
+        $code = 1
+    } finally {
+        Set-Location -LiteralPath $env:windir
+        if ($work -like '*\Temp\swapdesk-uninstall-*') { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    exit $code
 }
 
 # ---------------------------------------------------------------- helpers
@@ -128,7 +179,9 @@ function Get-RunningFromInstallDir {
     foreach ($p in (Get-Process -ErrorAction SilentlyContinue | Where-Object { $ProcessNames -contains $_.ProcessName })) {
         $path = $null
         try { $path = $p.Path } catch { }
-        if ($path -and $path.StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $found += $p }
+        # UPDATES.md 6.2: an update applier runs a copy of the service from the data folder's update\applier.
+        $applierPrefix = (Join-Path $DataDir 'update\applier') + '\'
+        if ($path -and ($path.StartsWith($InstallPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $path.StartsWith($applierPrefix, [System.StringComparison]::OrdinalIgnoreCase))) { $found += $p }
     }
     return $found
 }
@@ -161,6 +214,49 @@ function Remove-KnownFolder([string]$Dir, [string[]]$Names, [bool]$Everything) {
         Say ("   removed the empty folder {0}" -f $Dir)
     }
     return $left
+}
+
+# The real accounts on this PC (local, domain, Microsoft, Entra): SID and profile folder. System and service profiles are skipped.
+function Get-UserProfiles {
+    $found = @()
+    foreach ($k in (Get-ChildItem -LiteralPath $ProfileList -ErrorAction SilentlyContinue)) {
+        $sid = $k.PSChildName
+        if ($sid -notmatch '^S-1-(5-21|12-1)-[0-9-]+$') { continue }
+        $path = $k.GetValue('ProfileImagePath', $null)
+        if ($path) { $found += [pscustomobject]@{ Sid = $sid; Path = [Environment]::ExpandEnvironmentVariables([string]$path) } }
+    }
+    return $found
+}
+
+# Removes the value Swapdesk of one user's Run key. A hive that is loaded (the user is signed in) is used as it is;
+# otherwise NTUSER.DAT is loaded under HKU\SwapdeskUninstall and unloaded again. Returns $null when done, or a text.
+function Remove-UserRunValue($UserProfile) {
+    $loaded = Test-Path -LiteralPath ('Registry::HKEY_USERS\' + $UserProfile.Sid)
+    $root = 'Registry::HKEY_USERS\' + $UserProfile.Sid
+    $mounted = $false
+    try {
+        if (-not $loaded) {
+            $dat = Join-Path $UserProfile.Path 'NTUSER.DAT'
+            if (-not (Test-Path -LiteralPath $dat -PathType Leaf)) { return $null }
+            Invoke-Native 'reg.exe' @('load', ('HKU\' + $TempHive), $dat)
+            $mounted = $true
+            $root = 'Registry::HKEY_USERS\' + $TempHive
+        }
+        $key = $root + '\' + $RunKeyPath
+        if ((Test-Path -LiteralPath $key) -and ($null -ne (Get-Item -LiteralPath $key).GetValue($RunValue, $null))) {
+            Remove-ItemProperty -LiteralPath $key -Name $RunValue -ErrorAction Stop
+            Say ("   removed the Run value {0} of {1}" -f $RunValue, $UserProfile.Sid)
+        }
+        return $null
+    } catch {
+        return ("the Run value of {0} could not be removed: {1}" -f $UserProfile.Sid, $_.Exception.Message)
+    } finally {
+        if ($mounted) {
+            [System.GC]::Collect()
+            [System.GC]::WaitForPendingFinalizers()
+            try { Invoke-Native 'reg.exe' @('unload', ('HKU\' + $TempHive)) } catch { Say ("   WARNING: {0}" -f $_.Exception.Message) }
+        }
+    }
 }
 
 # ---------------------------------------------------------------- main
@@ -223,6 +319,31 @@ try {
         Say '  no Start menu shortcut'
     }
 
+    # ---- 4b. installed apps entry
+    if (Test-Path -LiteralPath $UninstallKey) {
+        Step ("remove the installed apps entry {0}" -f $UninstallKey) { Remove-Item -LiteralPath $UninstallKey -Recurse -Force }
+    } else {
+        Say '  no installed apps entry'
+    }
+
+    # ---- 4c. each user's Run value ("open at login") and logs
+    foreach ($u in (Get-UserProfiles)) {
+        $user = $u
+        $logsDir = Join-Path $user.Path 'AppData\Local\Swapdesk\logs'
+        $logsParent = Join-Path $user.Path 'AppData\Local\Swapdesk'
+        if ($DryRun) {
+            Say ('[dry-run] would: remove the Run value {0} of {1} and the folder {2} (then {3} if empty)' -f $RunValue, $user.Sid, $logsDir, $logsParent)
+            continue
+        }
+        $problem = Remove-UserRunValue $user
+        if ($problem) { $leftovers += $problem; Say ('   WARNING: ' + $problem) }
+        if (Test-Path -LiteralPath $logsDir) {
+            Say ("-> delete the user's logs {0}" -f $logsDir)
+            foreach ($l in @(Remove-KnownFolder $logsDir @() $true)) { $leftovers += ("{0}: not deleted" -f $l) }
+        }
+        if (Test-Path -LiteralPath $logsParent) { [void](Remove-KnownFolder $logsParent @() $false) }
+    }
+
     # ---- 5. SoftwareSASGeneration
     if (Test-Path -LiteralPath $OwnKey) {
         $own = Get-Item -LiteralPath $OwnKey
@@ -283,9 +404,31 @@ try {
     if ($KeepData) {
         Say ('  data kept: {0}' -f $DataDir)
     } elseif (Test-Path -LiteralPath $DataDir) {
+        $accountsDir = Join-Path $DataDir 'accounts'
         if ($DryRun) {
+            Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from each folder {1}\<SID>, then each folder and {1} if empty' -f ($AccountFiles -join ', '), $accountsDir)
+            Say ('[dry-run] would: delete the update folder {0}\update (the updater''s state, journal, staging, rollback and applier)' -f $DataDir)
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from {1}{2}, then the folder if empty' -f ($DataFiles -join ', '), $DataDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
         } else {
+            # ACCOUNTS.md 10.6: the accounts first, each by the names it holds; a link is never entered.
+            if (-not $Force -and (Test-Path -LiteralPath $accountsDir)) {
+                if (Test-ReparsePoint $accountsDir) {
+                    $leftovers += @(Remove-KnownFolder $accountsDir @() $false)
+                } else {
+                    foreach ($acct in (Get-ChildItem -LiteralPath $accountsDir -Force -Directory | Where-Object { $_.Name -match '^S-1-[0-9-]+$' })) {
+                        Say ("-> delete the account files in {0}" -f $acct.FullName)
+                        foreach ($l in @(Remove-KnownFolder $acct.FullName $AccountFiles $false)) { $leftovers += ("{0}: {1}" -f $acct.FullName, $l) }
+                    }
+                    foreach ($l in @(Remove-KnownFolder $accountsDir @() $false)) { $leftovers += ("{0}: {1}" -f $accountsDir, $l) }
+                }
+            }
+            # UPDATES.md 6.3: the folder update holds only the updater's own files (its state, the journal, a staged or
+            # rolled-back version, the applier and its log): removed whole, a link never entered.
+            $updateDir = Join-Path $DataDir 'update'
+            if (Test-Path -LiteralPath $updateDir) {
+                Say ("-> delete the update folder {0}" -f $updateDir)
+                foreach ($l in @(Remove-KnownFolder $updateDir @() $true)) { $leftovers += ("{0}: {1}" -f $updateDir, $l) }
+            }
             Say ("-> delete the data files in {0}" -f $DataDir)
             $dataLeft = @(Remove-KnownFolder $DataDir $DataFiles ([bool]$Force))
             foreach ($l in $dataLeft) { $leftovers += ("{0}: {1}" -f $DataDir, $l) }
@@ -312,6 +455,10 @@ try {
         foreach ($n in $RuleNames) { if (Get-NetFirewallRule -Name $n -ErrorAction SilentlyContinue) { $problems += ("firewall rule {0} remains" -f $n) } }
         if (Test-Path -LiteralPath $Shortcut) { $problems += ("shortcut {0} remains" -f $Shortcut) }
         if (Test-Path -LiteralPath $OwnRoot) { $problems += ("registry key {0} remains" -f $OwnRoot) }
+        if (Test-Path -LiteralPath $UninstallKey) { $problems += ("installed apps entry {0} remains" -f $UninstallKey) }
+        foreach ($u in (Get-UserProfiles)) {
+            if (Test-Path -LiteralPath (Join-Path $u.Path 'AppData\Local\Swapdesk\logs')) { $problems += ("the logs of {0} remain" -f $u.Sid) }
+        }
         $srcLeft = $false
         try { $srcLeft = [System.Diagnostics.EventLog]::SourceExists($EventSource) } catch { }
         if ($srcLeft) { $problems += ("Event Log source {0} remains" -f $EventSource) }
@@ -327,6 +474,7 @@ try {
         Say ("  data folder          : {0}" -f $(if ($KeepData) { 'kept on request' } elseif (Test-Path -LiteralPath $DataDir) { 'STILL THERE' } else { 'gone' }))
         Say ("  shortcut             : {0}" -f $(if (Test-Path -LiteralPath $Shortcut) { 'STILL THERE' } else { 'gone' }))
         Say ("  registry key         : {0}" -f $(if (Test-Path -LiteralPath $OwnRoot) { 'STILL THERE' } else { 'gone' }))
+        Say ("  installed apps entry : {0}" -f $(if (Test-Path -LiteralPath $UninstallKey) { 'STILL THERE' } else { 'gone' }))
         $sasNow = (Get-Item -LiteralPath $SasKey).GetValue($SasValue, $null)
         Say ("  {0} : {1}" -f $SasValue, $(if ($null -eq $sasNow) { '(absent)' } else { $sasNow }))
         Say ''

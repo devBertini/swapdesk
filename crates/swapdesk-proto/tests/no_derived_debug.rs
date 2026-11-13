@@ -15,6 +15,7 @@ const GUARDED: &[(&str, &str)] = &[
     ("swapdesk-proto/src/pairing.rs", "Sas"),
     ("swapdesk-proto/src/media.rs", "CursorShape"),
     ("swapdesk-proto/src/media.rs", "ClipboardPayload"),
+    ("swapdesk-ipc/src/redact.rs", "Payload"),
     ("swapdesk-video/src/sender.rs", "Frame"),
     ("swapdesk-video/src/receiver.rs", "ReceivedFrame"),
     ("swapdesk-host/src/service/shared.rs", "MediaEv"),

@@ -56,7 +56,7 @@ use swapdesk_ui::{
 use crate::shared::out::input_loop;
 use audio::AudioPlayer;
 use decode::Shared;
-pub use decode::{PresentEvent, PresentObserver};
+pub use decode::{PresentEvent, PresentObserver, ProbeObserver, ProbeTap};
 use keys::{KeyConfig, WindowKeys, action_of};
 use mailbox::{Cmd, Frame, Mailbox};
 use pointer::PointerRouter;
@@ -68,11 +68,16 @@ pub struct ViewerOptions {
     pub on_present: Option<PresentObserver>,
     /// Start the audio thread (the real WASAPI sink). Tests turn it off.
     pub audio: bool,
+    /// Measurements only: pixels of every presented picture (see [`ProbeTap`]). `None` in the application.
+    pub probe: Option<ProbeTap>,
+    /// Tests only: every present takes at least this long, as on a desktop that holds back the pictures of a
+    /// window that is not in front. `None` in the application.
+    pub present_delay: Option<Duration>,
 }
 
 impl Default for ViewerOptions {
     fn default() -> Self {
-        Self { on_present: None, audio: true }
+        Self { on_present: None, audio: true, probe: None, present_delay: None }
     }
 }
 
@@ -81,6 +86,8 @@ impl Default for ViewerOptions {
 pub struct PipelineStats {
     pub presented: u64,
     pub last_frame_id: Option<u32>,
+    /// Pictures decoded and not shown because a newer frame was already waiting.
+    pub skipped: u64,
     pub lost: u64,
     pub decode_errors: u64,
     pub keyframe_requests: u64,
@@ -162,7 +169,14 @@ impl ViewerPipeline {
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = sync_channel(INPUT_QUEUE);
         let audio = options.audio.then(|| AudioPlayer::start(Arc::clone(&shared.audio_underruns)));
-        let decode = decode::spawn(Arc::clone(&mailbox), Arc::clone(&out), Arc::clone(&shared), options.on_present)?;
+        let decode = decode::spawn(
+            Arc::clone(&mailbox),
+            Arc::clone(&out),
+            Arc::clone(&shared),
+            options.on_present,
+            options.probe,
+            options.present_delay,
+        )?;
         let (o, s, st) = (Arc::clone(&out), Arc::clone(&input_session), Arc::clone(&stop));
         let input = std::thread::Builder::new()
             .name("swapdesk-viewer-input".into())
@@ -215,6 +229,7 @@ impl ViewerPipeline {
 
     /// Who to wake when a viewer shortcut was recognised on the hook thread (the shell's waker).
     pub fn set_waker(&self, waker: Arc<dyn UiWaker>) {
+        *lock(&self.shared.waker) = Some(Arc::clone(&waker));
         *lock(&self.shortcuts.waker) = Some(waker);
     }
 
@@ -224,6 +239,7 @@ impl ViewerPipeline {
             presented: s.presented.load(Ordering::Relaxed),
             last_frame_id: (s.presented.load(Ordering::Relaxed) > 0)
                 .then(|| s.last_frame_id.load(Ordering::Relaxed) as u32),
+            skipped: s.skipped.load(Ordering::Relaxed),
             lost: s.lost.load(Ordering::Relaxed),
             decode_errors: s.decode_errors.load(Ordering::Relaxed),
             keyframe_requests: s.keyframe_requests.load(Ordering::Relaxed),
@@ -390,7 +406,8 @@ impl ViewerPipeline {
                             Some((*session_id, device_id.clone(), granted.has(Permission::Control))),
                         );
                     }
-                    SessionState::Connecting | SessionState::Paused { .. } | SessionState::Reconnecting { .. } => {
+                    // `Connecting` is a connect entry waiting for the host, not a session: it has no media to show.
+                    SessionState::Paused { .. } | SessionState::Reconnecting { .. } => {
                         if !same {
                             self.set_session(&mut ui, Some((*session_id, device_id.clone(), false)));
                         }
@@ -545,6 +562,11 @@ impl ViewerHost for ViewerPipeline {
             self.shortcuts.push(action);
         }
         true
+    }
+
+    fn device_lost(&self) -> bool {
+        // Taken once: the shell builds one new device for it; a new surface that fails again sets it again.
+        self.shared.device_lost.swap(false, Ordering::SeqCst)
     }
 
     fn take_shortcuts(&self) -> Vec<ViewerAction> {

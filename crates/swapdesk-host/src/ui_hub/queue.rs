@@ -332,11 +332,11 @@ mod tests {
             codec: swapdesk_proto::Codec::H264,
             payload_len: len as u32,
         };
-        Message::ViewerVideo { session_id: 1, header, payload: Bytes(vec![0; len]) }
+        Message::ViewerVideo { session_id: 1, header, payload: vec![0; len].into() }
     }
 
     fn stats(session_id: u64, fps: u16) -> Message {
-        Message::UiNotify(Notify::Stats { session_id, latency_ms: 1, fps, kbps: 1 })
+        Message::UiNotify(Notify::Stats { session_id, latency_ms: 1, fps, kbps: 1, hevc: false })
     }
 
     #[test]

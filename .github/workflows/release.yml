@@ -31,10 +31,15 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip.FullName).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$($zip.FullName).sha256" -Value "$hash  $($zip.Name)" -Encoding ascii -NoNewline
           "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          $pkg = Get-ChildItem -Path "$env:CARGO_TARGET_DIR\package" -Filter 'Swapdesk-windows-x64-*.sdpkg' | Select-Object -First 1
+          if (-not $pkg) { throw 'no update package' }
+          "pkg=$($pkg.FullName)" >> $env:GITHUB_OUTPUT
       - name: Provenance attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ steps.zip.outputs.path }}
+          subject-path: |
+            ${{ steps.zip.outputs.path }}
+            ${{ steps.zip.outputs.pkg }}
       - name: Draft release
         shell: pwsh
         env:
@@ -42,7 +47,7 @@ jobs:
         run: |
           $args = @('release', 'create', '${{ github.ref_name }}', '--draft', '--generate-notes')
           if ('${{ github.ref_name }}' -like '*-*') { $args += '--prerelease' }
-          $args += @('${{ steps.zip.outputs.path }}', '${{ steps.zip.outputs.path }}.sha256')
+          $args += @('${{ steps.zip.outputs.path }}', '${{ steps.zip.outputs.path }}.sha256', '${{ steps.zip.outputs.pkg }}')
           & gh @args
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed: $LASTEXITCODE" }
 
@@ -57,18 +62,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build and pack
+        env:
+          SWAPDESK_RELEASE_P12_BASE64: ${{ secrets.MACOS_RELEASE_P12 }}
+          SWAPDESK_RELEASE_P12_PASSWORD: ${{ secrets.MACOS_RELEASE_P12_PASSWORD }}
         run: bash packaging/macos/build-release.sh
       - name: Find the zip
         id: zip
         run: |
-          zip="$(ls target/package/Swapdesk-macos-arm64-*.zip | head -1)"
+          zips=(target/package/Swapdesk-macos-arm64-*.zip)
+          zip="${zips[0]}"
           [ -f "$zip" ] || { echo "no release zip"; exit 1; }
           echo "path=$PWD/$zip" >> "$GITHUB_OUTPUT"
+          pkgs=(target/package/Swapdesk-macos-arm64-*.sdpkg)
+          pkg="${pkgs[0]}"
+          [ -f "$pkg" ] || { echo "no update package"; exit 1; }
+          echo "pkg=$PWD/$pkg" >> "$GITHUB_OUTPUT"
       - name: Provenance attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ steps.zip.outputs.path }}
+          subject-path: |
+            ${{ steps.zip.outputs.path }}
+            ${{ steps.zip.outputs.pkg }}
       - name: Add to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" "${{ steps.zip.outputs.path }}" "${{ steps.zip.outputs.path }}.sha256"
+        run: gh release upload "${{ github.ref_name }}" "${{ steps.zip.outputs.path }}" "${{ steps.zip.outputs.path }}.sha256" "${{ steps.zip.outputs.pkg }}"

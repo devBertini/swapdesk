@@ -1,5 +1,8 @@
 //! `VideoEncoder` over a Media Foundation H.264 encoder MFT.
 //!
+//! F-VIEW-06: the configured size is the size encoded. A frame of another size (the display's own, while the viewer's
+//! window asks for less) is scaled to it by the same video-processor pass that converts the colour.
+//!
 //! Frames reach the MFT as NV12: BGRA (CPU rows or a D3D11 texture) goes through the D3D11 video processor into a pool of
 //! NV12 textures; a hardware MFT takes those textures (DXGI buffers), the software MFT takes a system-memory copy. Hardware
 //! MFTs are asynchronous (`METransformNeedInput` / `METransformHaveOutput` through [`crate::events`]); the software MFT is
@@ -11,7 +14,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use swapdesk_platform::{
-    AdapterId, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, Result, VideoEncoder,
+    AdapterId, Codec, EncodedFrame, EncoderConfig, EncoderInfo, ErrorKind, Frame, MonoMicros, Pixels, Result,
+    VideoEncoder,
 };
 use swapdesk_proto::H264Profile;
 use windows::Win32::Graphics::Direct3D11::{
@@ -32,8 +36,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFNominalRange_16_235,
     MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_NV12, MFVideoPrimaries_BT709,
+    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncH265VProfile_Main_420_8,
 };
 use windows::core::{GUID, Interface};
 
@@ -267,6 +271,8 @@ struct Active {
     // GPU side.
     gpu: Gpu,
     proc: VideoProc,
+    /// The size of the frames `proc` reads (the capture's); the encoded size is `cfg`'s (F-VIEW-06).
+    src_size: (u32, u32),
     bgra_in: Option<ID3D11Texture2D>,
     pool: Vec<ID3D11Texture2D>,
     next_pool: usize,
@@ -308,11 +314,45 @@ pub struct MfH264Encoder {
     restore: Option<EncoderConfig>,
     /// Set while `refine` rebuilds the MFT: ask for the quality rate-control mode at this QP.
     quality_qp: Option<u32>,
+    /// How many MFTs this encoder has built (`configure` and every rebuild); a live refinement leaves it unchanged.
+    builds: u32,
 }
 
 impl MfH264Encoder {
     pub fn new(options: EncoderOptions) -> Self {
-        Self { options, active: None, last_cfg: None, restore: None, quality_qp: None }
+        Self { options, active: None, last_cfg: None, restore: None, quality_qp: None, builds: 0 }
+    }
+
+    /// The number of MFTs built so far (observable proof that a refinement did or did not rebuild the MFT).
+    pub fn builds(&self) -> u32 {
+        self.builds
+    }
+
+    /// The live refinement (see `refine`): `None` when the MFT does not take the change while streaming, and nothing
+    /// was left changed, so the caller falls back to the rebuild; `Some` is the answer of the refinement.
+    fn refine_live(&mut self, frame: &Frame) -> Option<Result<Vec<EncodedFrame>>> {
+        let a = self.active.as_mut()?;
+        // Measured 2026-11-12 on the NVIDIA MFT, which takes the mean live: the boosted rate gained only 1.3 dB (the
+        // VBV buffer stays three frames of the normal frame rate), against 30 dB or more through the rebuild. So the
+        // live path is for software MFTs only; a hardware MFT keeps the rebuild.
+        if a.candidate.hardware || a.codec.is_none() || !a.bitrate_live {
+            return None;
+        }
+        let normal = a.cfg;
+        let boosted = normal.kbps.saturating_mul(8).clamp(REFINE_MIN_KBPS, MAX_KBPS);
+        if a.set_rate(boosted, normal.fps).is_err() {
+            let _ = a.set_rate(normal.kbps, normal.fps); // best effort: the rebuild path configures anew anyway
+            return None;
+        }
+        let wait = a.options.output_wait;
+        a.options.output_wait = REFINE_OUTPUT_WAIT;
+        let out = a.encode(frame, true);
+        a.options.output_wait = wait;
+        if a.set_rate(normal.kbps, normal.fps).is_err() {
+            // The normal rate did not come back: the next `encode` rebuilds the MFT at the normal configuration.
+            self.restore = Some(normal);
+        }
+        Some(out)
     }
 
     /// The MFT in use, once configured.
@@ -351,30 +391,34 @@ impl MfH264Encoder {
     }
 }
 
-fn candidates(gpu: &Gpu, choice: &MftChoice) -> Result<Vec<Mft>> {
+fn candidates(gpu: &Gpu, choice: &MftChoice, codec: Codec) -> Result<Vec<Mft>> {
     let hardware = |g: &Gpu| -> Result<Vec<Mft>> {
         if g.adapter.software {
             return Ok(Vec::new());
         }
-        mft::hardware(Category::Encoder, Some(g.adapter.id))
+        mft::hardware_for(Category::Encoder, Some(g.adapter.id), codec)
     };
+    // HEVC is offered by hardware MFTs only (D39: the project ships no HEVC implementation and the inbox software
+    // transform is not a candidate), so the software list is never consulted for it.
+    let software =
+        |c: Category| -> Result<Vec<Mft>> { if codec == Codec::Hevc { Ok(Vec::new()) } else { mft::software(c) } };
     let mut out = Vec::new();
     match choice {
         MftChoice::Auto => {
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
         }
-        MftChoice::SoftwareOnly => out.extend(mft::software(Category::Encoder)?),
+        MftChoice::SoftwareOnly => out.extend(software(Category::Encoder)?),
         MftChoice::HardwareOnly => out.extend(hardware(gpu)?),
         MftChoice::Named(text) => {
             let needle = text.to_lowercase();
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
             out.retain(|m| m.name.to_lowercase().contains(&needle));
         }
         MftChoice::Clsid(text) => {
             out.extend(hardware(gpu)?);
-            out.extend(mft::software(Category::Encoder)?);
+            out.extend(software(Category::Encoder)?);
             out.retain(|m| crate::mft::guid_text(&m.clsid) == text.to_lowercase());
         }
     }
@@ -391,12 +435,16 @@ impl VideoEncoder for MfH264Encoder {
             Some(d) => Gpu::from_device(d.clone())?,
             None => Gpu::on_adapter(config.adapter)?,
         };
-        let list = candidates(&gpu, &self.options.choice)?;
+        let list = candidates(&gpu, &self.options.choice, config.codec)?;
         if list.is_empty() {
+            let (kind, name) = match config.codec {
+                Codec::H264 => (ErrorKind::Unavailable, "H.264"),
+                Codec::Hevc => (ErrorKind::Unsupported, "hardware HEVC"),
+            };
             return Err(err(
-                ErrorKind::Unavailable,
+                kind,
                 "VideoEncoder::configure",
-                format!("no H.264 encoder MFT for {:?} on adapter {}", self.options.choice, gpu.adapter.name),
+                format!("no {name} encoder MFT for {:?} on adapter {}", self.options.choice, gpu.adapter.name),
             ));
         }
         let mut failures = Vec::new();
@@ -406,12 +454,14 @@ impl VideoEncoder for MfH264Encoder {
                     let info = active.info.clone();
                     self.last_cfg = Some(*config);
                     self.active = Some(active);
+                    self.builds += 1;
                     return Ok(info);
                 }
                 Err(e) => failures.push(format!("{}: {e}", candidate.name)),
             }
         }
-        Err(err(ErrorKind::Unavailable, "VideoEncoder::configure", failures.join("; ")))
+        let kind = if config.codec == Codec::Hevc { ErrorKind::Unsupported } else { ErrorKind::Unavailable };
+        Err(err(kind, "VideoEncoder::configure", failures.join("; ")))
     }
 
     fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> Result<Vec<EncodedFrame>> {
@@ -429,17 +479,8 @@ impl VideoEncoder for MfH264Encoder {
                 None => return Err(err(ErrorKind::Closed, "VideoEncoder::encode", "configure was not called")),
             }
         }
-        let (w, h) = {
-            let a = self.active_mut()?;
-            (a.cfg.width, a.cfg.height)
-        };
-        if frame.width != w || frame.height != h {
-            // A display size change: new MFT instance, new SPS/PPS, first frame a keyframe with `config_change`.
-            let mut cfg = self.active_mut()?.cfg;
-            cfg.width = frame.width;
-            cfg.height = frame.height;
-            self.configure(&cfg)?;
-        }
+        // The frame may be larger than the configured size: `Active::encode` scales it (F-VIEW-06). A new encoded
+        // size is a new `configure` (new MFT, new SPS/PPS, a keyframe with `config_change`), the caller's decision.
         self.active_mut()?.encode(frame, force_keyframe)
     }
 
@@ -478,14 +519,26 @@ impl VideoEncoder for MfH264Encoder {
     /// which this encoder does not run. So the MFT is rebuilt for the refinement at a high bitrate and a very low frame
     /// rate, which makes the three-frame VBV buffer three seconds of bits; the next `encode` rebuilds the normal
     /// configuration lazily (a keyframe with new SPS/PPS, as after a `set_rate` rebuild).
+    ///
+    /// B7: before any rebuild, `refine_live` tries the change the MFT accepts while streaming: the mean bitrate (and the
+    /// peak that follows it) through `ICodecAPI` `AVEncCommonMeanBitRate` / `AVEncCommonMaxBitRate`, raised for one
+    /// forced IDR and put back right after, with no new MFT (`builds()` stays the same). It runs only when the MFT
+    /// reports the mean bitrate as modifiable while streaming. `AVEncVideoEncodeQP` / `AVEncCommonQuality` are not
+    /// used live: they apply only in the quality rate-control mode, which the streaming configuration never runs. On
+    /// Quick Sync the properties are reported not modifiable, so the rebuild below remains its path; whether any
+    /// software MFT gains enough through the live change is to be proven in the test phase.
     fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
         if self.restore.is_some() {
             return Ok(Vec::new()); // already refined, nothing changed since
         }
         let a = self.active_mut()?;
-        if frame.width != a.cfg.width || frame.height != a.cfg.height {
+        if (frame.width, frame.height) != a.src_size {
             return Ok(Vec::new()); // the display changed size since the picture was captured: nothing to refine
         }
+        if let Some(done) = self.refine_live(frame) {
+            return done;
+        }
+        let a = self.active_mut()?;
         let normal = a.cfg;
         let hardware = a.candidate.hardware;
         let cfg = EncoderConfig {
@@ -772,7 +825,7 @@ impl Active {
         let staging = if d3d_input { None } else { Some(Staging::new(gpu, cfg.width, cfg.height, NV12)?) };
 
         // SPS/PPS from the output type, when the MFT publishes them.
-        let seq_header = sequence_header(&transform);
+        let seq_header = sequence_header(&transform, cfg.codec);
 
         let low_latency =
             outcomes.iter().any(|o| (o.name == "AVEncCommonLowLatency" || o.name == "AVLowLatencyMode") && o.applied)
@@ -822,6 +875,7 @@ impl Active {
             out_info,
             gpu: gpu.clone(),
             proc,
+            src_size: (cfg.width, cfg.height),
             bgra_in: None,
             pool,
             next_pool: 0,
@@ -834,6 +888,17 @@ impl Active {
             force_next: false,
             timing: FrameTiming::default(),
         })
+    }
+
+    /// The capture's size changed (or differs from the encoded size from the start): a video processor that reads
+    /// `src` and writes the configured size. Its source rectangle is the whole input and its destination rectangle
+    /// the whole output, so the one blit scales and converts (see `VideoProc::new`).
+    fn set_source_size(&mut self, src: (u32, u32)) -> Result<()> {
+        let out = (self.cfg.width, self.cfg.height);
+        self.proc = VideoProc::new(&self.gpu, src, src, out, Space::Rgb, Space::Yuv709Limited, self.coded_fps)?;
+        self.bgra_in = None;
+        self.src_size = src;
+        Ok(())
     }
 
     /// The BGRA texture holding this frame (uploaded for CPU frames).
@@ -897,6 +962,9 @@ impl Active {
             return Ok(out);
         }
 
+        if (frame.width, frame.height) != self.src_size {
+            self.set_source_size((frame.width, frame.height))?;
+        }
         let src = self.source_texture(frame)?;
         let nv12 = self.pool[self.next_pool].clone();
         self.next_pool = (self.next_pool + 1) % POOL;
@@ -1064,10 +1132,11 @@ impl Active {
         }
         // SAFETY: a getter on the sample.
         let clean = unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.map(|v| v != 0).unwrap_or(false);
-        let keyframe = annexb::is_idr(&data) || clean;
-        let has_sps = annexb::contains(&data, annexb::NAL_SPS);
+        let codec = self.cfg.codec;
+        let keyframe = annexb::is_idr_of(codec, &data) || clean;
+        let has_sps = annexb::has_sps(codec, &data);
         if has_sps {
-            let ps = annexb::parameter_sets(&data);
+            let ps = annexb::parameter_sets_of(codec, &data);
             if !ps.is_empty() {
                 self.seq_header = ps;
             }
@@ -1076,7 +1145,7 @@ impl Active {
             with.extend_from_slice(&data);
             data = with;
         }
-        let carries_ps = annexb::contains(&data, annexb::NAL_SPS);
+        let carries_ps = annexb::has_sps(codec, &data);
         let config_change = keyframe && carries_ps && self.config_pending;
         if config_change {
             self.config_pending = false;
@@ -1170,12 +1239,18 @@ fn set_types(
     kbps: u32,
     level: u32,
 ) -> Result<(H264Profile, u32)> {
-    let attempts: [(u32, Option<u32>, H264Profile); 3] =
-        [(100, Some(level), H264Profile::High), (100, None, H264Profile::High), (77, None, H264Profile::Main)];
+    // HEVC: the Main profile (`eAVEncH265VProfile_Main_420_8`, codecapi.h) with the level left to the MFT. The H.264
+    // profile and level numbers do not apply, so `EncoderInfo` reports `Main` and level 0 as "not an H.264 value".
+    let attempts: [(u32, Option<u32>, H264Profile); 3] = match cfg.codec {
+        Codec::Hevc => [(eAVEncH265VProfile_Main_420_8.0 as u32, None, H264Profile::Main); 3],
+        Codec::H264 => {
+            [(100, Some(level), H264Profile::High), (100, None, H264Profile::High), (77, None, H264Profile::Main)]
+        }
+    };
     let mut last = None;
     let mut accepted = None;
     for (profile, lvl, which) in attempts {
-        let t: IMFMediaType = video_type(&MFVideoFormat_H264, cfg.width, cfg.height, coded_fps)?;
+        let t: IMFMediaType = video_type(&mft::subtype(cfg.codec), cfg.width, cfg.height, coded_fps)?;
         // SAFETY: attribute writes on our media type, then the type is offered to the MFT.
         let result = unsafe {
             t.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000).ctx("MF_MT_AVG_BITRATE")?;
@@ -1193,7 +1268,7 @@ fn set_types(
         };
         match result {
             Ok(()) => {
-                accepted = Some((which, lvl.unwrap_or(level)));
+                accepted = Some((which, if cfg.codec == Codec::Hevc { 0 } else { lvl.unwrap_or(level) }));
                 break;
             }
             Err(e) => last = Some(os_err("IMFTransform::SetOutputType", &e)),
@@ -1227,7 +1302,7 @@ fn set_types(
 }
 
 /// SPS and PPS the MFT published in its output type (`MF_MT_MPEG_SEQUENCE_HEADER`), as Annex B.
-fn sequence_header(transform: &IMFTransform) -> Vec<u8> {
+fn sequence_header(transform: &IMFTransform, codec: Codec) -> Vec<u8> {
     // SAFETY: reads a blob attribute of the current output type into a buffer sized from GetBlobSize.
     unsafe {
         let Ok(t) = transform.GetOutputCurrentType(0) else { return Vec::new() };
@@ -1237,6 +1312,6 @@ fn sequence_header(transform: &IMFTransform) -> Vec<u8> {
         if attrs.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut buf, None).is_err() {
             return Vec::new();
         }
-        annexb::parameter_sets(&buf)
+        annexb::parameter_sets_of(codec, &buf)
     }
 }

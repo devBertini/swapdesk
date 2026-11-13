@@ -7,10 +7,14 @@
 pub mod classify;
 
 #[cfg(windows)]
+mod neighbor;
+#[cfg(windows)]
 mod watch;
 #[cfg(windows)]
 mod windows_impl;
 
+#[cfg(windows)]
+pub use neighbor::WindowsNeighborTable;
 #[cfg(windows)]
 pub use watch::NetworkWatcher;
 #[cfg(windows)]

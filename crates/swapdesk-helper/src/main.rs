@@ -16,6 +16,9 @@ fn main() {
 }
 
 #[cfg(windows)]
+mod system_disk;
+
+#[cfg(windows)]
 mod win {
     use std::sync::Arc;
     use std::time::Duration;
@@ -174,6 +177,12 @@ mod win {
             Arc::new(QpcClock),
         )
         // The user's clipboard and quick actions, for the service's clipboard sync and `QuickAction` (stage 42).
+        // ACCOUNTS.md 5.1: after every desktop switch, capture and input wait until the service lets them go on.
+        .with_fence()
+        // F-UNAT-01: which desktop receives input (`Winlogon` and every desktop of another name is `Secure`), told to
+        // the service before the first picture of it. The system helper follows onto the secure desktop; the user
+        // helper cannot open it, which the probe also reports as `Secure`.
+        .with_desktop_probe(swapdesk_sys_win::input_desktop)
         .with_clipboard(|| Ok(swapdesk_input_win::clipboard::WinClipboard::new()))
         .with_actions(|| Ok(swapdesk_sys_win::actions::WinActions::user()))
         // Terminals (stage 43): the shell runs as this helper's user. `ConPtySpawner` re-runs the token guard (`check_spawn`)
@@ -190,13 +199,19 @@ mod win {
             Some(CaptureMode::Loopback) => AudioModeKind::Loopback,
             None => AudioModeKind::Off,
         });
-        // The user helper serves the user's files to the service (C2.4 "Files"): its root is this user's home, chosen
-        // here and never by the service; every path the service sends is checked against it again.
+        // The user helper serves the user's files to the service (C2.4 "Files"): its roots are this user's home and
+        // the published volumes (FILES-UI.md 8.1), chosen here and never by the service; every path the service sends
+        // is checked against them again.
         let deps = match (args.role, home_dir()) {
-            (IpcRole::HelperUser, Some(home)) => deps.with_fs(Arc::new(FsServer::new(Roots::Home {
-                home,
-                receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()),
-            }))),
+            (IpcRole::HelperUser, Some(home)) => deps.with_fs(Arc::new(
+                FsServer::with_fs(
+                    // The disk knows its volumes' free space, so a file that does not fit is declined before any byte is
+                    // written (F-FILE-03).
+                    Arc::new(swapdesk_files::LocalFs::with_free_space(swapdesk_sys_win::free_bytes)),
+                    Roots::Home { home, receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()) },
+                )
+                .with_system(crate::system_disk::system_disk()),
+            )),
             _ => deps,
         };
         match run_helper(reader, writer, deps, args.role, std::process::id()) {

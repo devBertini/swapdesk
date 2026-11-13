@@ -442,6 +442,7 @@ pub fn produce(s: &EncodeSettings, mut sink: impl FnMut(EncodedFrame) -> bool) -
         kbps: s.kbps,
         preset: Preset::Auto,
         adapter: AdapterId(s.adapter),
+        codec: swapdesk_platform::Codec::H264,
     };
     enc.configure(&cfg).map_err(|e| e.to_string())?;
     let total = (s.seconds * f64::from(s.fps)).round() as u32;

@@ -1,10 +1,10 @@
 //! Bodies of `UiRequest` (by op), `UiReply` (by the op it answers) and `UiNotify` (by kind), C2.4.
 
-use swapdesk_proto::{Action, CodecError, Intent, Preset, Reader, Wire, Writer};
+use swapdesk_proto::{Action, CodecError, Feature, Intent, Preset, Reader, Wire, Writer};
 
 use crate::error::{IpcError, Result};
 use crate::files::{FileListing, FilesNote, FilesOp};
-use crate::redact::Text;
+use crate::redact::{ElevationTicket, Text};
 use crate::term::{MAX_TERM_ACCOUNT, TermOutcome};
 use crate::types::*;
 
@@ -146,8 +146,83 @@ pub enum UiOp {
     TermClose {
         term_id: u32,
     },
+    /// Open an administrator confirmation for `action` (op 35). Sent by role `Ui`, the console's connection only; the
+    /// reply carries the ticket the elevated instance presents.
+    ElevationBegin {
+        action: ElevAction,
+    },
+    /// The elevated instance asks what ticket `ticket` is for (op 36). Sent by role `Elevator` only.
+    ElevationDescribe {
+        ticket: ElevationTicket,
+    },
+    /// The elevated instance's answer to the confirmation window (op 37): `approve` false closes the ticket. Sent
+    /// by role `Elevator` only. Reply `Done`.
+    ElevationConfirm {
+        ticket: ElevationTicket,
+        approve: bool,
+    },
+    /// The asking connection is done with `ticket` (op 38); the reply says how it ended. Sent by role `Ui`, the
+    /// asking connection only.
+    ElevationEnd {
+        ticket: ElevationTicket,
+    },
+    /// Op 39: the interface opened a paired device's Permissões: the service syncs that device's grants if its last
+    /// sync is older than 30 s (GRANTS-SYNC.md 6). `Done` at once; the result arrives as `DevicesChanged`.
+    RefreshGrants {
+        device_id: String,
+    },
     /// Ops 40 to 49: the files feature (stage 44), see [`FilesOp`].
     Files(FilesOp),
+    /// Ops 51 to 56: the machine's updater (UPDATES.md 10, 13). `UpdateGet` answers `Update(view)`; the others
+    /// `Done` (the result arrives as `UpdateChanged`). `UpdateInstall` is refused (`NotPermitted`) from a UI that is not
+    /// the console's, and (`Busy`) with a live session unless `end_sessions` ("Encerrar e atualizar").
+    UpdateGet,
+    UpdateCheckNow,
+    UpdateInstall {
+        version: String,
+        end_sessions: bool,
+    },
+    UpdateCancel,
+    UpdateDismiss {
+        version: String,
+    },
+    UpdateSetCheck {
+        on: bool,
+    },
+    /// Op 57: what this machine's GPU does in hardware, probed by the interface in the user's session (the service
+    /// runs where it cannot tell): HEVC encode and decode (F-VIEW-07).
+    MediaCaps {
+        hevc_encode: bool,
+        hevc_decode: bool,
+    },
+    /// Op 58: block the device behind `ipv4` by its MAC (D65); `name` is what it announced, or empty. `NotFound` when
+    /// its MAC cannot be learned (it left the network); `Busy` when the list is full. From the console's UI only. The
+    /// reply is the list as it now is (`Blocked`), so the interface never asks again in a race with the change.
+    BlockDevice {
+        ipv4: String,
+        name: String,
+    },
+    /// Op 59: unblock a MAC (`aa:bb:cc:dd:ee:ff`). `NotFound` when it was not blocked. From the console's UI only.
+    /// The reply is the list as it now is (`Blocked`).
+    UnblockDevice {
+        mac: String,
+    },
+    /// Op 60: the devices blocked by MAC, the reply `Blocked`.
+    ListBlocked,
+    /// F-VIEW-06: the viewer's video area in physical pixels (0x0 = native, 1:1 mode) and the refresh rate of its
+    /// monitor; the host encodes at that size. Answered with `Done`.
+    SetViewSize {
+        session_id: u64,
+        width: u16,
+        height: u16,
+        max_fps: u16,
+    },
+    /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
+    /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
+    /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
+    ElevateSession {
+        session_id: u64,
+    },
 }
 
 impl UiOp {
@@ -187,13 +262,35 @@ impl UiOp {
             Self::TermOpen { .. } => 32,
             Self::TermResize { .. } => 33,
             Self::TermClose { .. } => 34,
+            Self::ElevationBegin { .. } => 35,
+            Self::ElevationDescribe { .. } => 36,
+            Self::ElevationConfirm { .. } => 37,
+            Self::ElevationEnd { .. } => 38,
+            Self::RefreshGrants { .. } => 39,
             Self::Files(f) => f.code(),
+            Self::ElevateSession { .. } => 50,
+            Self::UpdateGet => 51,
+            Self::UpdateCheckNow => 52,
+            Self::UpdateInstall { .. } => 53,
+            Self::UpdateCancel => 54,
+            Self::UpdateDismiss { .. } => 55,
+            Self::UpdateSetCheck { .. } => 56,
+            Self::MediaCaps { .. } => 57,
+            Self::BlockDevice { .. } => 58,
+            Self::UnblockDevice { .. } => 59,
+            Self::ListBlocked => 60,
+            Self::SetViewSize { .. } => 61,
         }
     }
 
     pub(crate) fn put_body(&self, w: &mut Writer) -> CResult<()> {
         match self {
-            Self::GetThisDevice | Self::GetNetwork | Self::ListDevices | Self::GetSettings => {}
+            Self::GetThisDevice | Self::GetNetwork | Self::ListDevices | Self::GetSettings | Self::ListBlocked => {}
+            Self::BlockDevice { ipv4, name } => {
+                w.put_str(ipv4, MAX_IPV4)?;
+                w.put_str(name, MAX_NAME)?;
+            }
+            Self::UnblockDevice { mac } => w.put_str(mac, MAX_MAC)?,
             Self::AddByAddress { ipv4 } => w.put_str(ipv4, MAX_IPV4)?,
             Self::PairOpen { device_id } => device_id.put(w, MAX_NAME)?,
             Self::PairStart { pairing_id, device_id } => {
@@ -228,6 +325,12 @@ impl UiOp {
             Self::SetQuality { session_id, quality } => {
                 w.put_u64(*session_id);
                 quality.put(w, 0)?;
+            }
+            Self::SetViewSize { session_id, width, height, max_fps } => {
+                w.put_u64(*session_id);
+                w.put_u16(*width);
+                w.put_u16(*height);
+                w.put_u16(*max_fps);
             }
             Self::SetAudio { session_id, on } | Self::SetViewOnly { session_id, on } => {
                 w.put_u64(*session_id);
@@ -281,6 +384,25 @@ impl UiOp {
                 w.put_u16(*rows);
             }
             Self::TermClose { term_id } => w.put_u32(*term_id),
+            Self::ElevationBegin { action } => action.put(w, 0)?,
+            Self::ElevationDescribe { ticket } | Self::ElevationEnd { ticket } => ticket.put(w, 0)?,
+            Self::RefreshGrants { device_id } => w.put_str(device_id, MAX_NAME)?,
+            Self::ElevateSession { session_id } => w.put_u64(*session_id),
+            Self::UpdateGet | Self::UpdateCheckNow | Self::UpdateCancel => {}
+            Self::UpdateInstall { version, end_sessions } => {
+                w.put_str(version, crate::types::MAX_VERSION)?;
+                w.put_bool(*end_sessions);
+            }
+            Self::UpdateDismiss { version } => w.put_str(version, crate::types::MAX_VERSION)?,
+            Self::UpdateSetCheck { on } => w.put_bool(*on),
+            Self::MediaCaps { hevc_encode, hevc_decode } => {
+                w.put_bool(*hevc_encode);
+                w.put_bool(*hevc_decode);
+            }
+            Self::ElevationConfirm { ticket, approve } => {
+                ticket.put(w, 0)?;
+                w.put_bool(*approve);
+            }
             Self::Files(f) => f.put_body(w)?,
         }
         Ok(())
@@ -321,7 +443,24 @@ impl UiOp {
             32 => Self::TermOpen { session_id: r.u64()?, cols: r.u16()?, rows: r.u16()?, admin: r.bool()? },
             33 => Self::TermResize { term_id: r.u32()?, cols: r.u16()?, rows: r.u16()? },
             34 => Self::TermClose { term_id: r.u32()? },
+            35 => Self::ElevationBegin { action: ElevAction::get(r, 0)? },
+            36 => Self::ElevationDescribe { ticket: ElevationTicket::get(r, 0)? },
+            37 => Self::ElevationConfirm { ticket: ElevationTicket::get(r, 0)?, approve: r.bool()? },
+            38 => Self::ElevationEnd { ticket: ElevationTicket::get(r, 0)? },
+            39 => Self::RefreshGrants { device_id: r.str(MAX_NAME)? },
             40..=49 => Self::Files(FilesOp::get_body(op, r)?),
+            50 => Self::ElevateSession { session_id: r.u64()? },
+            51 => Self::UpdateGet,
+            52 => Self::UpdateCheckNow,
+            53 => Self::UpdateInstall { version: r.str(crate::types::MAX_VERSION)?, end_sessions: r.bool()? },
+            54 => Self::UpdateCancel,
+            55 => Self::UpdateDismiss { version: r.str(crate::types::MAX_VERSION)? },
+            56 => Self::UpdateSetCheck { on: r.bool()? },
+            57 => Self::MediaCaps { hevc_encode: r.bool()?, hevc_decode: r.bool()? },
+            58 => Self::BlockDevice { ipv4: r.str(MAX_IPV4)?, name: r.str(MAX_NAME)? },
+            59 => Self::UnblockDevice { mac: r.str(MAX_MAC)? },
+            60 => Self::ListBlocked,
+            61 => Self::SetViewSize { session_id: r.u64()?, width: r.u16()?, height: r.u16()?, max_fps: r.u16()? },
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }
@@ -335,7 +474,7 @@ fn unknown_op(op: u16) -> CodecError {
 /// carries no tag: [`ReplyBody::decode`] needs the op of the request with the same `req`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyBody {
-    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25, 28 to 30, 33, 34, 43 to 45).
+    /// Empty body (ops 6 to 10, 12 to 18, 20, 23, 25, 28 to 30, 33, 34, 37, 43 to 45).
     Done,
     ThisDevice(ThisDevice),
     Network(NetworkStatus),
@@ -358,12 +497,37 @@ pub enum ReplyBody {
         outcome: TermOutcome,
         account: Text,
     },
+    /// The ticket of an administrator confirmation and how long it lives (op 35). `ttl_s` 0: the ticket is already
+    /// confirmed (an administrator approved this device's permissions on this connection a moment ago, D62), so no
+    /// elevated instance is started; `ElevationEnd` reports it `Confirmed`.
+    ElevationTicket {
+        ticket: ElevationTicket,
+        ttl_s: u16,
+    },
+    /// What a ticket is for, the name of the peer it concerns and the seconds left (op 36).
+    ElevationAction {
+        action: ElevAction,
+        peer_name: String,
+        remaining_s: u16,
+    },
+    /// How a ticket ended (op 38).
+    ElevationOutcome(ElevationOutcome),
     /// A folder of the host (op 40).
     Listing(FileListing),
     /// The transfer numbers of `FilesSend`, one per pick (op 41).
     TransferIds(Vec<u32>),
     /// The transfer number of `FilesGet` (op 42).
     TransferId(u32),
+    /// A page of a folder of the host (op 46).
+    Listing2(crate::files::FileListing2),
+    /// One result per name of a change (op 47).
+    OpResults(Vec<crate::files::OpResultView>),
+    /// The host's home folder, places and volumes (op 48).
+    Volumes(crate::files::VolumesView),
+    /// The machine's updater (op 51).
+    Update(crate::types::UpdateView),
+    /// The devices blocked by MAC (op 60).
+    Blocked(Vec<BlockedView>),
 }
 
 impl ReplyBody {
@@ -388,9 +552,24 @@ impl ReplyBody {
                 outcome.put(&mut w, 0)?;
                 account.put(&mut w, MAX_TERM_ACCOUNT)?;
             }
+            Self::ElevationTicket { ticket, ttl_s } => {
+                ticket.put(&mut w, 0)?;
+                w.put_u16(*ttl_s);
+            }
+            Self::ElevationAction { action, peer_name, remaining_s } => {
+                action.put(&mut w, 0)?;
+                w.put_str(peer_name, MAX_NAME)?;
+                w.put_u16(*remaining_s);
+            }
+            Self::ElevationOutcome(v) => v.put(&mut w, 0)?,
             Self::Listing(v) => v.put(&mut w, 0)?,
             Self::TransferIds(v) => v.put(&mut w, crate::files::MAX_PICKS)?,
             Self::TransferId(v) => w.put_u32(*v),
+            Self::Listing2(v) => v.put(&mut w, 0)?,
+            Self::OpResults(v) => v.put(&mut w, crate::files::MAX_OP_NAMES)?,
+            Self::Volumes(v) => v.put(&mut w, 0)?,
+            Self::Update(v) => v.put(&mut w, 0)?,
+            Self::Blocked(v) => v.put(&mut w, MAX_BLOCKED)?,
         }
         Ok(w.into_bytes())
     }
@@ -415,10 +594,22 @@ impl ReplyBody {
                 outcome: TermOutcome::get(&mut r, 0)?,
                 account: Text::get(&mut r, MAX_TERM_ACCOUNT)?,
             },
+            35 => Self::ElevationTicket { ticket: ElevationTicket::get(&mut r, 0)?, ttl_s: r.u16()? },
+            36 => Self::ElevationAction {
+                action: ElevAction::get(&mut r, 0)?,
+                peer_name: r.str(MAX_NAME)?,
+                remaining_s: r.u16()?,
+            },
+            38 => Self::ElevationOutcome(ElevationOutcome::get(&mut r, 0)?),
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 43..=45 => Self::Done,
+            46 => Self::Listing2(crate::files::FileListing2::get(&mut r, 0)?),
+            47 => Self::OpResults(<Vec<crate::files::OpResultView>>::get(&mut r, crate::files::MAX_OP_NAMES)?),
+            48 => Self::Volumes(crate::files::VolumesView::get(&mut r, 0)?),
+            51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
+            58..=60 => Self::Blocked(<Vec<BlockedView>>::get(&mut r, MAX_BLOCKED)?),
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=57 | 61 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;
@@ -465,6 +656,8 @@ pub enum Notify {
         latency_ms: u32,
         fps: u16,
         kbps: u32,
+        /// The last picture came in HEVC (else H.264): the latency panel names the codec (F-VIEW-07).
+        hevc: bool,
     },
     ActivityAlert(AuditView),
     SettingsChanged(Settings),
@@ -495,6 +688,17 @@ pub enum Notify {
         term_id: u32,
         exit_code: Option<i32>,
     },
+    /// The host is asking its user whether this viewer session may use `feature` (D13): the question runs for
+    /// `remaining_s` more seconds. The answer arrives as the outcome of the request that caused it.
+    ConsentPending {
+        session_id: u64,
+        feature: Feature,
+        remaining_s: u16,
+    },
+    /// Kind 18: the machine's updater changed (UPDATES.md 10.2).
+    UpdateChanged(crate::types::UpdateView),
+    /// Kind 19: the install runs now: the service stops in a moment and comes back updated (10.2 "Installing").
+    UpdateRestarting,
     /// Kinds 20 to 24: the files feature (stage 44), see [`FilesNote`].
     Files(FilesNote),
 }
@@ -518,6 +722,9 @@ impl Notify {
             Self::ChatRead { .. } => 13,
             Self::ClipboardSkipped { .. } => 14,
             Self::TermExited { .. } => 16,
+            Self::ConsentPending { .. } => 17,
+            Self::UpdateChanged(_) => 18,
+            Self::UpdateRestarting => 19,
             Self::Files(f) => f.kind(),
         }
     }
@@ -544,11 +751,12 @@ impl Notify {
                 w.put_u64(*session_id);
                 list.put(w, MAX_DISPLAYS)?;
             }
-            Self::Stats { session_id, latency_ms, fps, kbps } => {
+            Self::Stats { session_id, latency_ms, fps, kbps, hevc } => {
                 w.put_u64(*session_id);
                 w.put_u32(*latency_ms);
                 w.put_u16(*fps);
                 w.put_u32(*kbps);
+                w.put_bool(*hevc);
             }
             Self::ActivityAlert(v) => v.put(w, 0)?,
             Self::SettingsChanged(v) => v.put(w, 0)?,
@@ -572,6 +780,13 @@ impl Notify {
                 w.put_u32(*term_id);
                 exit_code.put(w, 0)?;
             }
+            Self::ConsentPending { session_id, feature, remaining_s } => {
+                w.put_u64(*session_id);
+                feature.put(w, 0)?;
+                w.put_u16(*remaining_s);
+            }
+            Self::UpdateChanged(view) => view.put(w, 0)?,
+            Self::UpdateRestarting => {}
             Self::Files(f) => f.put_body(w)?,
         }
         Ok(())
@@ -586,7 +801,13 @@ impl Notify {
             5 => Self::IncomingClosed { request_id: r.u32()?, reason: ApiCode::get(r, 0)? },
             6 => Self::Session { session_id: r.u64()?, device_id: r.str(MAX_NAME)?, state: SessionState::get(r, 0)? },
             7 => Self::Displays { session_id: r.u64()?, list: <Vec<DisplayView>>::get(r, MAX_DISPLAYS)? },
-            8 => Self::Stats { session_id: r.u64()?, latency_ms: r.u32()?, fps: r.u16()?, kbps: r.u32()? },
+            8 => Self::Stats {
+                session_id: r.u64()?,
+                latency_ms: r.u32()?,
+                fps: r.u16()?,
+                kbps: r.u32()?,
+                hevc: r.bool()?,
+            },
             9 => Self::ActivityAlert(AuditView::get(r, 0)?),
             10 => Self::SettingsChanged(Settings::get(r, 0)?),
             11 => Self::Swap { session_id: r.u64()?, note: SwapNote::get(r, 0)? },
@@ -594,10 +815,32 @@ impl Notify {
             13 => Self::ChatRead { session_id: r.u64()?, up_to: r.u32()? },
             14 => Self::ClipboardSkipped { session_id: r.u64()?, reason: ApiCode::get(r, 0)? },
             16 => Self::TermExited { term_id: r.u32()?, exit_code: <Option<i32>>::get(r, 0)? },
+            17 => Self::ConsentPending { session_id: r.u64()?, feature: Feature::get(r, 0)?, remaining_s: r.u16()? },
+            18 => Self::UpdateChanged(crate::types::UpdateView::get(r, 0)?),
+            19 => Self::UpdateRestarting,
             20..=24 => Self::Files(FilesNote::get_body(kind, r)?),
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod reply_arm_tests {
+    use super::*;
+
+    fn unknown(r: &Result<impl Sized>) -> bool {
+        matches!(r, Err(IpcError::Codec(CodecError::UnknownTag { what: "UiRequest op", .. })))
+    }
+
+    /// Every op a request can carry has a reply arm, so its answer decodes (op 57 had none).
+    #[test]
+    fn every_request_op_has_a_reply_arm() {
+        for op in 0..=u16::from(u8::MAX) {
+            let request = UiOp::get_body(op, &mut Reader::new(&[]));
+            let reply = ReplyBody::decode(op, &[]);
+            assert_eq!(unknown(&request), unknown(&reply), "op {op}: request known {}", !unknown(&request));
+        }
     }
 }

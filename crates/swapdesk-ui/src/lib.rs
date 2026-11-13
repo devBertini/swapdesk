@@ -12,11 +12,14 @@
 pub mod a11y;
 pub mod api;
 pub mod debounce;
+pub mod elevated_client;
 pub mod format;
 pub mod home;
+mod host_files;
 pub mod inflight;
 pub mod interact;
 pub mod list;
+pub mod local_disk;
 pub mod mock;
 pub mod prefs;
 pub mod service_backend;
@@ -25,21 +28,37 @@ pub mod state;
 pub mod strings;
 pub mod tokens;
 pub mod trace;
+pub mod update_card;
 
 #[cfg(test)]
 mod a11y_tests;
+#[cfg(test)]
+mod host_files_tests;
 #[cfg(test)]
 mod notice_tests;
 #[cfg(test)]
 mod shortcut_tests;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod update_tests;
 
 pub use api::*;
-pub use interact::{ControlId, ControlSpec, DialogTexts, FILES_PAGE, Region, UiRole};
+pub use interact::explorer_drag::out::{
+    Avail, DragOut, DragOutFile, MAX_NAME_UNITS, PullError, clean_stale_staging, staging_root,
+};
+pub use interact::explorer_drag::{DRAG_START_DIPS, DragView, EDGE_DIPS, SPRING_MS, drag_autoscroll};
+pub use interact::explorer_drop::{DropEffect, DropReply, SystemDragData};
+pub use interact::explorer_manage::{ExplorerKey, ManageView};
+pub use interact::explorer_remote::{CardButton, CardStyle, CardView};
+pub use interact::{
+    ControlId, ControlSpec, DialogTexts, PaneView, PlaceView, PointerMods, Region, RowView, SORT_MODIFIED, SORT_NAME,
+    SORT_SIZE, SORT_TYPE, UiRole,
+};
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{
-    Activation, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId, Effect, Fetch,
-    Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, TermPhase, UiState, WindowKind,
+    Activation, ButtonSide, Changed, ConnectFlow, ConnectPhase, DataKind, DeviceTab, DialogKind, DrawerTab, EditId,
+    Effect, ElevatedConfirm, Fetch, Nav, NoticeKind, RenameDraft, Screen, SelectId, SwapPhase, SwapWait, TermPhase,
+    UiState, WaitBar, WaitButton, WaitCard, WaitIcon, WaitPhase, WindowKind,
 };
 pub use strings::MsgKey;

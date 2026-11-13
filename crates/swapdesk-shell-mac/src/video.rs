@@ -6,20 +6,27 @@
 //!
 //! Apple documentation: `NSView` / `NSResponder` event methods (developer.apple.com/documentation/appkit/nsresponder),
 //! `NSEvent` (developer.apple.com/documentation/appkit/nsevent: `keyCode`, `characters`, `modifierFlags`,
-//! `isARepeat`, `locationInWindow`, `buttonNumber`, `scrollingDeltaX`, `hasPreciseScrollingDeltas`),
+//! `isARepeat`, `locationInWindow`, `buttonNumber`, `scrollingDeltaX`, `hasPreciseScrollingDeltas`, `phase`),
 //! `NSView.performKeyEquivalent(with:)`, `NSView.isFlipped`; objc2 `define_class!` (docs.rs/objc2/0.6.5/objc2/macro.define_class.html).
 
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use objc2::rc::Retained;
-use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags, NSImage, NSView};
+use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSCursor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventPhase,
+    NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification,
+};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize,
+};
 use objc2_quartz_core::CALayer;
 
-use crate::input::{KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
+use crate::input::{FocusLatch, KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 use crate::model::VideoArea;
 
 /// What the render lane receives when the viewer window is up: the host view and its root layer. The view lives as
@@ -50,8 +57,14 @@ pub trait VideoSlot: Send + Sync {
 #[derive(Default)]
 pub struct VideoIvars {
     input: RefCell<Option<Arc<dyn ViewerInput>>>,
+    /// Whether the view has the keyboard, as the input lane was last told (see `FocusLatch`).
+    focus: std::cell::Cell<FocusLatch>,
+    /// The window whose key notifications this view observes.
+    observed: RefCell<Option<objc2::rc::Weak<NSWindow>>>,
     /// The pointer over the video: the host's shape while the viewer controls, else the system arrow (`None`).
     cursor: RefCell<Option<Retained<NSCursor>>>,
+    /// Mouse events this view received, and how many of them the input lane took (development: `dev_state`).
+    mouse_seen: std::cell::Cell<(u64, u64)>,
 }
 
 /// What the pointer looks like over the video view.
@@ -60,6 +73,19 @@ pub enum ViewCursor<'a> {
     System,
     /// The host's cursor shape: its size and hot spot in points, the hot spot from the top-left corner.
     Image { image: &'a CGImage, size: (f64, f64), hot: (f64, f64) },
+}
+
+/// Shows the pointer of the video view `view` now: the host's shape while the viewer controls, else the arrow. Any
+/// other view shows the arrow.
+pub fn show_view_cursor(view: &NSView) {
+    let shape = if view.isKindOfClass(VideoView::class()) {
+        // SAFETY: the object is a `VideoView` (checked above), whose layout starts with its `NSView` superclass.
+        let video = unsafe { &*(view as *const NSView).cast::<VideoView>() };
+        video.ivars().cursor.borrow().clone()
+    } else {
+        None
+    };
+    shape.unwrap_or_else(NSCursor::arrowCursor).set();
 }
 
 /// Sets the pointer of the video view behind `view` (the `VideoSurface::view`); any other view is left alone.
@@ -105,9 +131,9 @@ define_class!(
 
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
-            if let Some(c) = self.ivars().cursor.borrow().as_ref() {
-                self.addCursorRect_cursor(self.bounds(), c);
-            }
+            // The arrow when the host sends no shape, so the rect never leaves the last control's pointer in place.
+            let shape = self.ivars().cursor.borrow().clone().unwrap_or_else(NSCursor::arrowCursor);
+            self.addCursorRect_cursor(self.bounds(), &shape);
         }
 
         #[unsafe(method(acceptsFirstMouse:))]
@@ -117,18 +143,30 @@ define_class!(
 
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
-            if let Some(i) = self.input() {
-                i.focus(true);
-            }
+            // The window does not name this view its first responder until this returns.
+            let key = self.window().is_some_and(|w| w.isKeyWindow());
+            self.tell_focus(key, true);
             true
         }
 
         #[unsafe(method(resignFirstResponder))]
         fn resign_first_responder(&self) -> bool {
-            if let Some(i) = self.input() {
-                i.focus(false);
-            }
+            self.tell_focus(false, false);
             true
+        }
+
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn view_did_move_to_window(&self) {
+            // SAFETY: forwards to NSView's implementation.
+            unsafe { msg_send![super(self), viewDidMoveToWindow] }
+            self.observe_window();
+        }
+
+        // `NSWindowDidBecomeKeyNotification` / `NSWindowDidResignKeyNotification` of the view's window: Command+Tab,
+        // a click in another window or app, Spotlight, a system panel. The view stays first responder through them.
+        #[unsafe(method(windowKeyChanged:))]
+        fn window_key_changed(&self, _n: &NSNotification) {
+            self.sync_focus();
         }
 
         #[unsafe(method(keyDown:))]
@@ -212,10 +250,50 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            // A trackpad gesture starts with `MayBegin` (fingers down) or `Began`; momentum and legacy wheel events
+            // have the phase `None` (NSEvent.phase).
+            let starts = event.phase().intersects(NSEventPhase::MayBegin | NSEventPhase::Began);
             self.mouse(
                 event,
-                MouseKind::Scroll { dx: event.scrollingDeltaX(), dy: event.scrollingDeltaY(), precise: event.hasPreciseScrollingDeltas() },
+                MouseKind::Scroll {
+                    dx: event.scrollingDeltaX(),
+                    dy: event.scrollingDeltaY(),
+                    precise: event.hasPreciseScrollingDeltas(),
+                    starts,
+                },
             );
+        }
+
+        // A trackpad pinch. It is not a scroll: AppKit reports it apart, and the input lane turns it into what the
+        // host's own touchpad would send (Ctrl and the wheel on Windows).
+        #[unsafe(method(magnifyWithEvent:))]
+        fn magnify_with_event(&self, event: &NSEvent) {
+            let ends = event.phase().intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+            self.mouse(event, MouseKind::Magnify { amount: event.magnification(), ends });
+        }
+    }
+    // Files dragged from the Finder over the picture (FILES-UI.md 4.2): the canvas lets the mouse through over the
+    // video rectangle, so the window offers the drag to this view; the functions are the canvas's.
+    // SAFETY: the selectors and signatures are the protocol's.
+    unsafe impl NSDraggingDestination for VideoView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::entered(self, sender)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::updated(self, sender)
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            crate::drop::exited();
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            crate::drop::perform(self, sender)
         }
     }
 );
@@ -250,11 +328,69 @@ impl VideoView {
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<VideoView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
+        crate::drop::register(&view);
         view
     }
 
+    /// Hands the view to the input lane (or takes it away). An input attached while the view already has the keyboard
+    /// is told so at once; an input taken away while it had the keyboard is told it lost it (it releases every key on
+    /// the host).
     pub fn set_input(&self, input: Option<Arc<dyn ViewerInput>>) {
+        let mut latch = self.ivars().focus.get();
+        if let (Some(old), Some(focused)) = (self.input(), latch.detach()) {
+            old.focus(focused);
+        }
+        self.ivars().focus.set(latch);
         *self.ivars().input.borrow_mut() = input;
+        self.sync_focus();
+    }
+
+    /// Tells the input lane whether the view has the keyboard, when that changed.
+    fn tell_focus(&self, key_window: bool, first_responder: bool) {
+        let mut latch = self.ivars().focus.get();
+        let change = latch.update(key_window, first_responder);
+        self.ivars().focus.set(latch);
+        if let (Some(focused), Some(input)) = (change, self.input()) {
+            input.focus(focused);
+        }
+    }
+
+    /// Reads the window's state now: key, and this view its first responder.
+    fn sync_focus(&self) {
+        if self.input().is_none() {
+            return;
+        }
+        let (key, first) = match self.window() {
+            Some(w) => {
+                let me: *const NSView = &**self;
+                let first = w.firstResponder().is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r).cast::<NSView>(), me));
+                (w.isKeyWindow(), first)
+            }
+            None => (false, false),
+        };
+        self.tell_focus(key, first);
+    }
+
+    /// Observes the key notifications of the window the view is in now (and no other).
+    fn observe_window(&self) {
+        let center = NSNotificationCenter::defaultCenter();
+        let window = self.window();
+        let observer: &AnyObject = self.as_ref();
+        // SAFETY: the observer is this view and the selector exists on it; the notification names are AppKit's
+        // constants. Since macOS 10.11 the center does not message a deallocated selector-based observer.
+        unsafe {
+            if let Some(old) = self.ivars().observed.borrow_mut().take().and_then(|w| w.load()) {
+                center.removeObserver_name_object(observer, Some(NSWindowDidBecomeKeyNotification), Some(&old));
+                center.removeObserver_name_object(observer, Some(NSWindowDidResignKeyNotification), Some(&old));
+            }
+            if let Some(w) = &window {
+                for name in [NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification] {
+                    center.addObserver_selector_name_object(observer, sel!(windowKeyChanged:), Some(name), Some(w));
+                }
+            }
+        }
+        *self.ivars().observed.borrow_mut() = window.as_deref().map(objc2::rc::Weak::from);
+        self.sync_focus();
     }
 
     fn input(&self) -> Option<Arc<dyn ViewerInput>> {
@@ -294,9 +430,20 @@ impl VideoView {
     }
 
     fn mouse(&self, event: &NSEvent, kind: MouseKind) -> bool {
+        let (seen, taken) = self.ivars().mouse_seen.get();
+        self.ivars().mouse_seen.set((seen + 1, taken));
         let Some(input) = self.input() else { return false };
         let p = self.point(event);
-        input.mouse(MouseMsg { kind, x: p.x, y: p.y, modifiers: modifiers_of(event.modifierFlags()) })
+        let took = input.mouse(MouseMsg { kind, x: p.x, y: p.y, modifiers: modifiers_of(event.modifierFlags()) });
+        if took {
+            self.ivars().mouse_seen.set((seen + 1, taken + 1));
+        }
+        took
+    }
+
+    /// Mouse events this view received and how many the input lane took (development).
+    pub fn mouse_seen(&self) -> (u64, u64) {
+        self.ivars().mouse_seen.get()
     }
 
     fn button(&self, event: &NSEvent, button: PointerButton, down: bool) {

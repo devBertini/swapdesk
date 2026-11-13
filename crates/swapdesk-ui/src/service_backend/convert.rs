@@ -17,6 +17,8 @@ use crate::strings::MsgKey;
 pub enum ConvertError {
     /// `Msg.key` is past the last [`MsgKey`].
     UnknownMsgKey(u16),
+    /// A reply body only the elevation worker reads (ops 35, 36, 38) came to the general reply path.
+    ElevationReply,
 }
 
 type CResult<T> = Result<T, ConvertError>;
@@ -39,9 +41,32 @@ pair_enum!(os_to_wire, os_from_wire, a::Os, p::Os; Windows, MacOs);
 pair_enum!(intent_to_wire, intent_from_wire, a::Intent, p::Intent; View, Control);
 pair_enum!(feature_to_wire, feature_from_wire, a::Feature, p::Feature; Terminal, Files);
 pair_enum!(quality_to_wire, quality_from_wire, a::Quality, p::Preset; Auto, Text, Motion);
-pair_enum!(desktop_to_wire, desktop_from_wire, a::DesktopKind, p::Desktop; Default, Secure, Locked, LoginWindow);
+
+/// The wire twin of a UI value.
+pub fn desktop_to_wire(v: a::DesktopKind) -> p::Desktop {
+    match v {
+        a::DesktopKind::Default => p::Desktop::Default,
+        a::DesktopKind::Secure => p::Desktop::Secure,
+        a::DesktopKind::Locked => p::Desktop::Locked,
+        a::DesktopKind::AccountAway => p::Desktop::AccountAway,
+        a::DesktopKind::LoginWindow => p::Desktop::LoginWindow,
+    }
+}
+
+/// The UI twin of a wire value. `AccountAway` (protocol minor 1) reads as a locked screen until the interface
+/// has a state of its own for an account that left the console.
+pub fn desktop_from_wire(v: p::Desktop) -> a::DesktopKind {
+    match v {
+        p::Desktop::Default => a::DesktopKind::Default,
+        p::Desktop::Secure => a::DesktopKind::Secure,
+        p::Desktop::Locked => a::DesktopKind::Locked,
+        p::Desktop::AccountAway => a::DesktopKind::AccountAway,
+        p::Desktop::LoginWindow => a::DesktopKind::LoginWindow,
+    }
+}
+
 pair_enum!(code_to_wire, code_from_wire, a::ApiCode, w::ApiCode;
-    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal);
+    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal, NoSpace);
 pair_enum!(ready_to_wire, ready_from_wire, a::Ready, w::Ready; ReadyToReceive, ServiceOff, ServiceNeedsApproval, NoNetwork);
 pair_enum!(category_to_wire, category_from_wire, a::NetCategoryView, w::NetCategoryView; Public, Private, Domain);
 pair_enum!(os_perm_to_wire, os_perm_from_wire, a::OsPermission, w::OsPermission; ScreenRecording, Accessibility, InputMonitoring);
@@ -52,6 +77,8 @@ pair_enum!(theme_to_wire, theme_from_wire, a::Theme, w::Theme; System, Light, Da
 pair_enum!(keyboard_to_wire, keyboard_from_wire, a::KeyboardMode, w::KeyboardMode; Auto, Physical, Text);
 pair_enum!(keys_to_wire, keys_from_wire, a::SpecialKeys, w::SpecialKeys; CtrlAltDel, AltTab, WinOrCmd, AltF4OrCmdQ, PrintScreen);
 pair_enum!(swap_why_to_wire, swap_why_from_wire, a::SwapWhy, w::SwapWhy; Declined, TimedOut, NobodyPresent, NotPermitted, Busy);
+pair_enum!(connect_why_to_wire, connect_why_from_wire, a::ConnectWhy, w::ConnectWhy;
+    Declined, TimedOut, NobodyPresent, Busy, Forgotten, NotPermitted, Unreachable, Failed);
 
 // ---------- Msg ----------
 
@@ -69,11 +96,16 @@ pub fn msg_from_wire(m: &w::Msg) -> CResult<a::Msg> {
 // ---------- DTOs ----------
 
 pub fn this_device_to_wire(v: &a::ThisDevice) -> w::ThisDevice {
-    w::ThisDevice { name: v.name.clone(), os: os_to_wire(v.os), ready: ready_to_wire(v.ready) }
+    w::ThisDevice {
+        name: v.name.clone(),
+        os: os_to_wire(v.os),
+        ready: ready_to_wire(v.ready),
+        legacy_note: v.legacy_note,
+    }
 }
 
 pub fn this_device_from_wire(v: w::ThisDevice) -> a::ThisDevice {
-    a::ThisDevice { name: v.name, os: os_from_wire(v.os), ready: ready_from_wire(v.ready) }
+    a::ThisDevice { name: v.name, os: os_from_wire(v.os), ready: ready_from_wire(v.ready), legacy_note: v.legacy_note }
 }
 
 fn notice_to_wire(n: &a::Notice) -> w::Notice {
@@ -84,6 +116,7 @@ fn notice_to_wire(n: &a::Notice) -> w::Notice {
         a::Notice::MacPermissionsMissing(l) => {
             w::Notice::MacPermissionsMissing(l.iter().copied().map(os_perm_to_wire).collect())
         }
+        a::Notice::ReceiveFolderDenied(name) => w::Notice::ReceiveFolderDenied(name.clone()),
     }
 }
 
@@ -95,6 +128,7 @@ fn notice_from_wire(n: w::Notice) -> a::Notice {
         w::Notice::MacPermissionsMissing(l) => {
             a::Notice::MacPermissionsMissing(l.into_iter().map(os_perm_from_wire).collect())
         }
+        w::Notice::ReceiveFolderDenied(name) => a::Notice::ReceiveFolderDenied(name),
     }
 }
 
@@ -234,13 +268,21 @@ pub fn session_state_to_wire(s: &a::SessionState) -> w::SessionState {
     match s {
         a::SessionState::Connecting => w::SessionState::Connecting,
         a::SessionState::Prompted { remaining_s } => w::SessionState::Prompted { remaining_s: *remaining_s },
-        a::SessionState::Active { since_ms, role, granted } => {
-            w::SessionState::Active { since_ms: *since_ms, role: role_to_wire(*role), granted: granted.0 }
-        }
+        a::SessionState::Active { since_ms, role, granted, elevation } => w::SessionState::Active {
+            since_ms: *since_ms,
+            role: role_to_wire(*role),
+            granted: granted.0,
+            elevation: match elevation {
+                a::ElevationLevel::Unavailable => 0,
+                a::ElevationLevel::Available => 1,
+                a::ElevationLevel::Elevated => 2,
+            },
+        },
         a::SessionState::Paused { desktop } => w::SessionState::Paused { desktop: desktop_to_wire(*desktop) },
         a::SessionState::Reconnecting { attempt } => w::SessionState::Reconnecting { attempt: *attempt },
         a::SessionState::Waking { remaining_s } => w::SessionState::Waking { remaining_s: *remaining_s },
         a::SessionState::Ended { reason } => w::SessionState::Ended { reason: reason.map(code_to_wire) },
+        a::SessionState::NotOpened { why } => w::SessionState::NotOpened { why: connect_why_to_wire(*why) },
     }
 }
 
@@ -248,13 +290,21 @@ pub fn session_state_from_wire(s: w::SessionState) -> a::SessionState {
     match s {
         w::SessionState::Connecting => a::SessionState::Connecting,
         w::SessionState::Prompted { remaining_s } => a::SessionState::Prompted { remaining_s },
-        w::SessionState::Active { since_ms, role, granted } => {
-            a::SessionState::Active { since_ms, role: role_from_wire(role), granted: a::Permissions(granted) }
-        }
+        w::SessionState::Active { since_ms, role, granted, elevation } => a::SessionState::Active {
+            since_ms,
+            role: role_from_wire(role),
+            granted: a::Permissions(granted),
+            elevation: match elevation {
+                1 => a::ElevationLevel::Available,
+                2 => a::ElevationLevel::Elevated,
+                _ => a::ElevationLevel::Unavailable,
+            },
+        },
         w::SessionState::Paused { desktop } => a::SessionState::Paused { desktop: desktop_from_wire(desktop) },
         w::SessionState::Reconnecting { attempt } => a::SessionState::Reconnecting { attempt },
         w::SessionState::Waking { remaining_s } => a::SessionState::Waking { remaining_s },
         w::SessionState::Ended { reason } => a::SessionState::Ended { reason: reason.map(code_from_wire) },
+        w::SessionState::NotOpened { why } => a::SessionState::NotOpened { why: connect_why_from_wire(why) },
     }
 }
 
@@ -361,10 +411,56 @@ fn chat_to_wire(m: &a::ChatView) -> w::ChatItem {
 
 // ---------- replies and notifications ----------
 
+/// The updater's wire view as the interface keeps it.
+pub fn update_from_wire(v: w::UpdateView) -> a::UpdateInfo {
+    use a::UpdateFailure as F;
+    let phase = match v.phase {
+        w::UpdatePhase::Idle => a::UpdatePhase::Idle,
+        w::UpdatePhase::Checking => a::UpdatePhase::Checking,
+        w::UpdatePhase::Offered { version, manual } => a::UpdatePhase::Offered { version, manual },
+        w::UpdatePhase::Downloading { version, done, total } => a::UpdatePhase::Downloading { version, done, total },
+        w::UpdatePhase::Verifying { version } => a::UpdatePhase::Verifying { version },
+        w::UpdatePhase::Ready { version } => a::UpdatePhase::Installing { version },
+        w::UpdatePhase::Failed { reason } => a::UpdatePhase::Failed(match reason {
+            0 => F::NotConsole,
+            1 => F::NeedsConfirmation,
+            2 => F::NotOffered,
+            3 => F::Busy,
+            4 => F::Download,
+            5 => F::Mismatch,
+            6 => F::Disk,
+            8 => F::Unwritable,
+            9 => F::Translocated,
+            10 => F::NotApplied,
+            _ => F::Cancelled,
+        }),
+    };
+    a::UpdateInfo {
+        running: v.running,
+        phase,
+        check_on: v.check_on,
+        last_check_ms: v.last_check_ms,
+        dismissed: v.dismissed,
+        last_failure: v.last_failure.map(|f| match f {
+            0 => a::CheckFailure::Network,
+            1 => a::CheckFailure::RateLimited,
+            _ => a::CheckFailure::Signature,
+        }),
+        rolled_back: v.rolled_back,
+        updated: v.updated,
+    }
+}
+
 /// The C6 `Reply` of a decoded reply body.
 pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
     Ok(match body {
         w::ReplyBody::Done => a::Reply::Done,
+        // The backend's own elevation worker reads these bodies; none of them is a reply of the interface.
+        // The elevation worker reads these through its own reply table (`elevation.rs`); C6 has no reply for them.
+        w::ReplyBody::ElevationTicket { .. }
+        | w::ReplyBody::ElevationAction { .. }
+        | w::ReplyBody::ElevationOutcome(_) => return Err(ConvertError::ElevationReply),
+        w::ReplyBody::Update(v) => a::Reply::Update(update_from_wire(v)),
         w::ReplyBody::ThisDevice(v) => a::Reply::ThisDevice(this_device_from_wire(v)),
         w::ReplyBody::Network(v) => a::Reply::Network(network_from_wire(v)),
         w::ReplyBody::Devices(v) => a::Reply::Devices(devices_from_wire(v)),
@@ -382,6 +478,21 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
         w::ReplyBody::Listing(v) => a::Reply::Listing(super::files::listing_from_wire(v)),
         w::ReplyBody::TransferIds(v) => a::Reply::TransferIds(v),
         w::ReplyBody::TransferId(v) => a::Reply::TransferId(v),
+        w::ReplyBody::Listing2(v) => a::Reply::RemotePage(super::files::page_from_wire(v)),
+        w::ReplyBody::OpResults(v) => a::Reply::ChangeResults(
+            v.into_iter().map(|r| (r.name.0, super::files::outcome_from_wire(r.code))).collect(),
+        ),
+        w::ReplyBody::Volumes(v) => a::Reply::RemoteVolumes(super::files::volumes_from_wire(v)),
+        w::ReplyBody::Blocked(v) => a::Reply::Blocked(
+            v.into_iter()
+                .map(|b| a::BlockedItem {
+                    mac: b.mac,
+                    last_ipv4: b.last_ipv4,
+                    name: b.name,
+                    blocked_at_ms: b.blocked_at_ms,
+                })
+                .collect(),
+        ),
     })
 }
 
@@ -406,6 +517,8 @@ pub fn term_outcome_error(outcome: w::TermOutcome) -> a::ApiError {
 pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
     use a::UiEvent as E;
     Ok(match n {
+        w::Notify::UpdateChanged(v) => E::UpdateChanged(update_from_wire(v)),
+        w::Notify::UpdateRestarting => E::UpdateRestarting,
         w::Notify::DevicesChanged(v) => E::DevicesChanged(devices_from_wire(v)),
         w::Notify::NetworkChanged(v) => E::NetworkChanged(network_from_wire(v)),
         w::Notify::Pairing { pairing_id, state } => E::Pairing { pairing_id, state: pairing_from_wire(state) },
@@ -419,8 +532,8 @@ pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
         w::Notify::Displays { session_id, list } => {
             E::Displays { session_id, displays: list.into_iter().map(display_from_wire).collect() }
         }
-        w::Notify::Stats { session_id, latency_ms, fps, kbps } => {
-            E::Stats { session_id, stats: a::Stats { latency_ms, fps, kbps } }
+        w::Notify::Stats { session_id, latency_ms, fps, kbps, hevc } => {
+            E::Stats { session_id, stats: a::Stats { latency_ms, fps, kbps, hevc } }
         }
         w::Notify::ActivityAlert(v) => E::ActivityAlert(audit_from_wire(v)?),
         w::Notify::SettingsChanged(v) => E::SettingsChanged(settings_from_wire(v)),
@@ -432,6 +545,9 @@ pub fn notify_to_event(n: w::Notify) -> CResult<a::UiEvent> {
         }
         w::Notify::TermExited { term_id, exit_code } => {
             E::Term { term_id, event: a::TermEvent::Exited { code: exit_code } }
+        }
+        w::Notify::ConsentPending { session_id, feature, remaining_s } => {
+            E::ConsentPending { session_id, feature: feature_from_wire(feature), remaining_s }
         }
         w::Notify::Files(n) => super::files::note_to_event(n),
     })
@@ -458,9 +574,13 @@ pub fn event_to_notify(e: &a::UiEvent) -> Option<w::Notify> {
         E::Displays { session_id, displays } => {
             w::Notify::Displays { session_id: *session_id, list: displays.iter().map(display_to_wire).collect() }
         }
-        E::Stats { session_id, stats } => {
-            w::Notify::Stats { session_id: *session_id, latency_ms: stats.latency_ms, fps: stats.fps, kbps: stats.kbps }
-        }
+        E::Stats { session_id, stats } => w::Notify::Stats {
+            session_id: *session_id,
+            latency_ms: stats.latency_ms,
+            fps: stats.fps,
+            kbps: stats.kbps,
+            hevc: stats.hevc,
+        },
         E::ActivityAlert(v) => w::Notify::ActivityAlert(audit_to_wire(v)),
         E::SettingsChanged(v) => w::Notify::SettingsChanged(settings_to_wire(v)),
         E::Swap { session_id, event } => w::Notify::Swap { session_id: *session_id, note: swap_note_to_wire(event) },
@@ -475,6 +595,11 @@ pub fn event_to_notify(e: &a::UiEvent) -> Option<w::Notify> {
         E::Term { term_id, event: a::TermEvent::Exited { code } } => {
             w::Notify::TermExited { term_id: *term_id, exit_code: *code }
         }
+        E::ConsentPending { session_id, feature, remaining_s } => w::Notify::ConsentPending {
+            session_id: *session_id,
+            feature: feature_to_wire(*feature),
+            remaining_s: *remaining_s,
+        },
         E::Transfer { .. } | E::TransferSavedAs { .. } => w::Notify::Files(super::files::event_to_note(e)?),
         _ => return None,
     })
@@ -493,18 +618,26 @@ pub fn action_to_wire(a: a::ActionKind) -> p::Action {
 // ---------- commands ----------
 
 /// What a [`a::Command`] becomes in the backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Route {
     /// Sent to the service as this request.
     Op(w::UiOp),
     /// UI-local (`SetScale`, `SetKeyboardMode`, `SetGrab`): answered `Done` at once, the viewer pipeline applies it.
     LocalDone,
-    /// No stage-18 op: answered `Internal` at once.
+    /// No op: answered `Internal` at once.
     Unsupported,
     /// Written to the pipe as these messages (terminal input, cut into chunks), answered `Done` at once.
     Messages(Vec<w::Message>),
     /// The command's arguments cannot be sent (a picked file with no name): answered `Invalid` at once.
     Invalid,
+    /// `Elevate`: a worker thread asks for a ticket, runs the platform's elevator, ends the ticket and reports.
+    Elevate(a::ElevatedAction, String, u32),
+    /// `ActivityExport`: a worker thread lists the activity log and writes the file (the path, the language, the
+    /// offset of local time).
+    Export(std::path::PathBuf, a::Language, i32),
+    /// A command on this computer's disk (`LocalList`, `LocalPlaces` and the slice 2a changes): run by a worker
+    /// thread of this process (`local_disk::answer`); nothing about this disk reaches the service (C2.3).
+    Local(crate::api::Command),
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -523,6 +656,8 @@ pub fn route(c: &a::Command) -> Route {
         C::SetGrants { device_id, grants } => O::SetGrants { device_id: device_id.clone(), grants: grants.0 },
         C::ForgetDevice { device_id } => O::ForgetDevice { device_id: device_id.clone() },
         C::RenameDevice { device_id, name } => O::RenameDevice { device_id: device_id.clone(), name: name.clone() },
+        C::RefreshGrants { device_id } => O::RefreshGrants { device_id: device_id.clone() },
+        C::ElevateSession { session_id } => O::ElevateSession { session_id: *session_id },
         C::Connect { device_id, intent, unattended } => {
             O::Connect { device_id: device_id.clone(), intent: intent_to_wire(*intent), unattended: *unattended }
         }
@@ -537,6 +672,9 @@ pub fn route(c: &a::Command) -> Route {
         }
         C::SelectDisplay { session_id, display_id } => O::SelectDisplay { session_id: *session_id, display: *display_id },
         C::SetQuality { session_id, quality } => O::SetQuality { session_id: *session_id, quality: quality_to_wire(*quality) },
+        C::SetViewSize { session_id, width, height, max_fps } => {
+            O::SetViewSize { session_id: *session_id, width: *width, height: *height, max_fps: *max_fps }
+        }
         C::SetAudio { session_id, on } => O::SetAudio { session_id: *session_id, on: *on },
         C::SetViewOnly { session_id, on } => O::SetViewOnly { session_id: *session_id, on: *on },
         C::SendKeys { session_id, keys } => O::SendKeys { session_id: *session_id, keys: keys_to_wire(*keys) },
@@ -565,22 +703,50 @@ pub fn route(c: &a::Command) -> Route {
             let chunks = bytes.chunks(w::MAX_TERM_CHUNK).map(|c| w::Message::TermInput { term_id: *term_id, bytes: w::Bytes(c.to_vec()) }).collect();
             return Route::Messages(chunks);
         }
-        C::FilesList { .. } | C::TransferPause { .. } | C::TransferResume { .. } | C::TransferCancel { .. } => match super::files::op_of(c) {
+        C::FilesList { .. }
+        | C::FilesListPage { .. }
+        | C::FilesChange { .. }
+        | C::FilesVolumes { .. }
+        | C::TransferPause { .. }
+        | C::TransferResume { .. }
+        | C::TransferCancel { .. } => match super::files::op_of(c) {
             Some(op) => op,
             None => return Route::Unsupported,
         },
         C::SetScale { .. } | C::SetKeyboardMode { .. } | C::SetGrab { .. } | C::SetReleaseKey { .. } => {
             return Route::LocalDone;
         }
-        C::Elevate { .. }
-        | C::CancelSwap { .. }
+        C::Elevate { action, line, run } => return Route::Elevate(action.clone(), line.clone(), *run),
+        C::ActivityExport { path, language, utc_offset_min } => {
+            return Route::Export(path.clone(), *language, *utc_offset_min);
+        }
+        C::LocalList { .. }
+        | C::LocalPlaces
+        | C::LocalKinds { .. }
+        | C::LocalMakeDir { .. }
+        | C::LocalRename { .. }
+        | C::LocalMove { .. }
+        | C::LocalDeleteForever { .. }
+        | C::LocalTrash { .. }
+        | C::LocalProps { .. } => return Route::Local(c.clone()),
+        C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }
-        | C::FilesGet { .. }
-        | C::ActivityExport { .. }
-        | C::BlockAddress { .. }
-        | C::OpenSystemSettings { .. }
-        | C::RequestOsPermissions => return Route::Unsupported,
+        | C::FilesGet { .. } => return Route::Unsupported,
+        C::BlockAddress { ipv4 } => O::BlockDevice { ipv4: ipv4.clone(), name: String::new() },
+        C::UnblockDevice { mac } => O::UnblockDevice { mac: mac.clone() },
+        C::ListBlocked => O::ListBlocked,
+        C::GetUpdate => O::UpdateGet,
+        C::UpdateCheckNow => O::UpdateCheckNow,
+        C::UpdateInstall { version, end_sessions } => {
+            O::UpdateInstall { version: version.clone(), end_sessions: *end_sessions }
+        }
+        C::UpdateCancel => O::UpdateCancel,
+        C::UpdateDismiss { version } => O::UpdateDismiss { version: version.clone() },
+        C::UpdateSetCheck { on } => O::UpdateSetCheck { on: *on },
+        C::MediaCaps { hevc_encode, hevc_decode } => {
+            O::MediaCaps { hevc_encode: *hevc_encode, hevc_decode: *hevc_decode }
+        }
     })
 }
 
@@ -642,10 +808,11 @@ mod tests {
             notices: vec![
                 a::Notice::PublicNetwork,
                 a::Notice::MacPermissionsMissing(vec![a::OsPermission::Accessibility]),
+                a::Notice::ReceiveFolderDenied("Downloads".into()),
             ],
         };
         assert_eq!(network_from_wire(network_to_wire(&n)), n);
-        let t = a::ThisDevice { name: "PC".into(), os: a::Os::Windows, ready: a::Ready::NoNetwork };
+        let t = a::ThisDevice { name: "PC".into(), os: a::Os::Windows, ready: a::Ready::NoNetwork, legacy_note: true };
         assert_eq!(this_device_from_wire(this_device_to_wire(&t)), t);
         let s = settings();
         assert_eq!(settings_from_wire(settings_to_wire(&s)), s);
@@ -666,7 +833,12 @@ mod tests {
         for s in [
             a::SessionState::Connecting,
             a::SessionState::Prompted { remaining_s: 9 },
-            a::SessionState::Active { since_ms: 1, role: a::Role::Host, granted: a::Permissions(3) },
+            a::SessionState::Active {
+                since_ms: 1,
+                role: a::Role::Host,
+                granted: a::Permissions(3),
+                elevation: Default::default(),
+            },
             a::SessionState::Paused { desktop: a::DesktopKind::Secure },
             a::SessionState::Reconnecting { attempt: 2 },
             a::SessionState::Waking { remaining_s: 30 },
@@ -707,7 +879,7 @@ mod tests {
     fn notifications_round_trip_through_events() {
         let events = vec![
             a::UiEvent::DevicesChanged(vec![device()]),
-            a::UiEvent::Stats { session_id: 4, stats: a::Stats { latency_ms: 5, fps: 60, kbps: 9000 } },
+            a::UiEvent::Stats { session_id: 4, stats: a::Stats { latency_ms: 5, fps: 60, kbps: 9000, hevc: false } },
             a::UiEvent::Session { session_id: 4, device_id: "mac-1".into(), state: a::SessionState::Connecting },
             a::UiEvent::SettingsChanged(settings()),
             a::UiEvent::IncomingClosed { request_id: 2, reason: a::ApiCode::Timeout },
@@ -737,6 +909,16 @@ mod tests {
     }
 
     #[test]
+    fn a_not_opened_entry_round_trips_for_every_why() {
+        for why in w::ConnectWhy::ALL {
+            let wire = w::SessionState::NotOpened { why: *why };
+            let ui = session_state_from_wire(wire);
+            assert_eq!(ui, a::SessionState::NotOpened { why: connect_why_from_wire(*why) });
+            assert_eq!(session_state_to_wire(&ui), wire);
+        }
+    }
+
+    #[test]
     fn unknown_msg_key_is_an_error() {
         let bad = w::Msg { key: u16::MAX, args: vec![] };
         assert_eq!(msg_from_wire(&bad), Err(ConvertError::UnknownMsgKey(u16::MAX)));
@@ -760,6 +942,10 @@ mod tests {
         );
         assert_eq!(route(&C::SetScale { session_id: 1, scale: a::Scale::Fit }), Route::LocalDone);
         assert_eq!(
+            route(&C::SetViewSize { session_id: 1, width: 960, height: 540, max_fps: 144 }),
+            Route::Op(w::UiOp::SetViewSize { session_id: 1, width: 960, height: 540, max_fps: 144 })
+        );
+        assert_eq!(
             route(&C::Wake { device_id: "d".into() }),
             Route::Op(w::UiOp::Wake { device_id: "d".into(), intent: p::Intent::Control })
         );
@@ -781,7 +967,6 @@ mod tests {
             Route::Unsupported,
             "the swap library has no cancel and the UI no control for it"
         );
-        assert_eq!(route(&C::RequestOsPermissions), Route::Unsupported);
         assert_eq!(route(&C::ListDisplays { session_id: 4 }), Route::Op(w::UiOp::ListDisplays { session_id: 4 }));
         assert_eq!(
             route(&C::SetClipboardSync { session_id: 4, on: false }),
@@ -790,6 +975,38 @@ mod tests {
         assert_eq!(
             route(&C::RunAction { session_id: 4, action: a::ActionKind::Restart }),
             Route::Op(w::UiOp::RunAction { session_id: 4, action: p::Action::Restart })
+        );
+    }
+
+    /// F-SEC-02: the activity alert's `BlockAddress` becomes the service's `BlockDevice` (the MAC is learned there),
+    /// and the service's `Blocked` reply (the list as it now is) comes back as the list's items; Desbloquear and the
+    /// list request map too.
+    #[test]
+    fn block_address_becomes_block_device_and_the_blocked_reply_comes_back_as_the_list() {
+        assert_eq!(
+            route(&a::Command::BlockAddress { ipv4: "192.168.0.57".into() }),
+            Route::Op(w::UiOp::BlockDevice { ipv4: "192.168.0.57".into(), name: String::new() })
+        );
+        assert_eq!(
+            route(&a::Command::UnblockDevice { mac: "02:5a:d0:00:00:39".into() }),
+            Route::Op(w::UiOp::UnblockDevice { mac: "02:5a:d0:00:00:39".into() })
+        );
+        assert_eq!(route(&a::Command::ListBlocked), Route::Op(w::UiOp::ListBlocked));
+        let reply = reply_from_wire(w::ReplyBody::Blocked(vec![swapdesk_ipc::BlockedView {
+            mac: "02:5a:d0:00:00:39".into(),
+            last_ipv4: "192.168.0.57".into(),
+            name: "Sala".into(),
+            blocked_at_ms: 7,
+        }]))
+        .expect("a reply");
+        assert_eq!(
+            reply,
+            a::Reply::Blocked(vec![a::BlockedItem {
+                mac: "02:5a:d0:00:00:39".into(),
+                last_ipv4: "192.168.0.57".into(),
+                name: "Sala".into(),
+                blocked_at_ms: 7,
+            }])
         );
     }
 }

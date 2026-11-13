@@ -7,9 +7,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use swapdesk_ui::trace::SlowGuard;
-use swapdesk_ui::{Activation, Changed, Command, ControlId, EditId, Effect, SelectId, UiBackend, UiState, WindowKind};
+use swapdesk_ui::{
+    Activation, Changed, Command, ControlId, EditId, Effect, SelectId, Ticket, UiBackend, UiEvent, UiState, WindowKind,
+};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, Result};
@@ -21,25 +23,35 @@ use crate::viewer::ViewerHost;
 use crate::window::{TIMER_BANNER, TIMER_PLACEHOLDER, TIMER_TICK, Window};
 
 pub struct Shared {
-    pub gfx: Gfx,
+    /// The graphics device and its factories; made again when the device is lost (F-VIEW-08).
+    gfx: RefCell<Rc<Gfx>>,
     pub state: RefCell<UiState>,
     pub backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
     /// The viewer pipeline's hooks (stage 18g); `None` in the mock and offscreen runs.
     pub host: Option<Arc<dyn ViewerHost>>,
+    /// The main window minimizes itself when a session starts: only in a real run (one with the viewer pipeline),
+    /// never in the mock and offscreen runs.
+    minimize_on_session: bool,
     windows: RefCell<Vec<Rc<Window>>>,
     tick_on: Cell<bool>,
     placeholder_on: Cell<bool>,
     /// The banner's minute timer is armed (one-shot in effect: re-armed after each firing).
     banner_on: Cell<bool>,
+    /// When (local clock, ms) the armed banner timer fires, to arm it again when something is due sooner.
+    banner_due_ms: Cell<u64>,
     /// The appearance the windows (their DWM title bars) were last given: the state's effective theme.
     dark_applied: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
     pub terminal: RefCell<TerminalPane>,
+    /// The notification area icon is up (a real run): closing the main window hides it instead of ending the run.
+    pub tray: Cell<bool>,
 }
 
 thread_local! {
     static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
+    /// This thread started OLE (`OleInitialize`), so the run ends with `OleUninitialize`.
+    static OLE_STARTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The composition-tree handles of a window kind, for the renderer of stage 15 to attach its video visual to (C3
@@ -74,11 +86,58 @@ pub fn run_with_host(
     startup: Vec<Command>,
     host: Option<Arc<dyn ViewerHost>>,
 ) -> Result<()> {
+    run_shell(state, backend, waker, startup, host).map(|_| ())
+}
+
+/// The confirmation window talks to nobody: the instance's own connection carries the answer.
+struct NoBackend;
+
+impl UiBackend for NoBackend {
+    fn send(&self, _command: Command) -> Ticket {
+        Ticket(0)
+    }
+
+    fn drain(&self) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+/// Runs the elevated instance's confirmation window (ELEVATION.md 3.5; `state` from
+/// `UiState::for_elevated_confirm`) until the person answers, the time runs out or the window is closed. The
+/// answer is `Some(true)` only for a real click or key on "Confirmar"; a closed window is `None`.
+pub fn run_confirm(state: UiState) -> Result<Option<bool>> {
+    run_confirm_with(state, Arc::new(Waker::new()))
+}
+
+/// [`run_confirm`] with the waker the window is set on (tests find the window through it).
+pub(crate) fn run_confirm_with(state: UiState, waker: Arc<Waker>) -> Result<Option<bool>> {
+    let shared = run_shell(state, Arc::new(NoBackend), waker, Vec::new(), None)?;
+    let answer = shared.state.borrow().confirm_answer();
+    Ok(answer)
+}
+
+/// The shell's run: builds the shared state, shows the main window and pumps messages until it closes.
+fn run_shell(
+    mut state: UiState,
+    backend: Arc<dyn UiBackend>,
+    waker: Arc<Waker>,
+    startup: Vec<Command>,
+    host: Option<Arc<dyn ViewerHost>>,
+) -> Result<Rc<Shared>> {
     // SAFETY: called once at startup, before any window exists; failures (already set by a manifest) are harmless.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // OleInitialize starts COM as a single-threaded apartment and OLE: RegisterDragDrop (files dragged from
+        // Explorer onto the viewer window) fails on a thread that only called CoInitializeEx.
+        let ole = OleInitialize(None).is_ok();
+        OLE_STARTED.with(|o| o.set(ole));
     }
+    if host.is_some() {
+        // Leftovers of a crashed drag out to the system's file manager (slice 5), removed on a worker.
+        swapdesk_ui::clean_stale_staging(swapdesk_ui::staging_root());
+    }
+    // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
+    state.set_live_picture(host.is_some());
     register_gdi_font();
     // R-UI-10: UI-thread work over 16 ms goes to the debugger output with its name and duration, nothing else.
     swapdesk_ui::trace::set_hook(|e| {
@@ -87,27 +146,28 @@ pub fn run_with_host(
     });
     let gfx = Gfx::new()?;
     let mut state = state;
+    // The explorer's bin and free space (slice 2a), for the backend's worker thread.
+    swapdesk_ui::local_disk::set_os(crate::trash::local_os());
+    // A contrast theme on at start: the first paint is in its colours.
+    let _ = state.set_contrast(crate::system::system_contrast());
     // The full-screen monitor setting offers one entry for each monitor.
     state.set_local_monitors(u8::try_from(crate::fullscreen::monitor_rects().len()).unwrap_or(1));
-    // Files are received into this user's Downloads folder until the user picks another (the file panel).
-    if state.receive_dir().is_none()
-        && let Some(dir) = crate::files_dialogs::default_receive_dir()
-    {
-        let _ = state.set_receive_dir(dir);
-    }
     let dark_now = state.dark();
     let shared = Rc::new(Shared {
-        gfx,
+        gfx: RefCell::new(Rc::new(gfx)),
         state: RefCell::new(state),
         backend,
         waker: Arc::clone(&waker),
+        minimize_on_session: host.is_some(),
         host,
         windows: RefCell::new(Vec::new()),
         tick_on: Cell::new(false),
         placeholder_on: Cell::new(false),
         banner_on: Cell::new(false),
+        banner_due_ms: Cell::new(0),
         dark_applied: Cell::new(dark_now),
         terminal: RefCell::new(TerminalPane::default()),
+        tray: Cell::new(false),
     });
     // Terminal output arrives on the pipe's reader thread and wakes this thread to pump and repaint.
     set_terminal_waker(Arc::clone(&waker) as Arc<dyn swapdesk_ui::UiWaker>);
@@ -115,6 +175,12 @@ pub fn run_with_host(
     // The window appears before any answer; the requests go out right after, all together.
     let main = Window::create(&shared, WindowKind::Main)?;
     waker.set_window(main.hwnd());
+    // A real run gets the notification area icon (B16), with the same actions as the Mac's menu bar item.
+    let tray_hwnd = main.hwnd();
+    if shared.host.is_some() {
+        let tip = shared.state.borrow().t(swapdesk_ui::MsgKey::AppName);
+        shared.tray.set(crate::tray::add(tray_hwnd, &tip));
+    }
     shared.windows.borrow_mut().push(main);
     shared.send_commands(startup);
     shared.refresh(Changed::ALL);
@@ -128,11 +194,46 @@ pub fn run_with_host(
             DispatchMessageW(&msg);
         }
     }
+    if shared.tray.get() {
+        crate::tray::remove(tray_hwnd);
+    }
     SHARED.with(|s| *s.borrow_mut() = None);
-    Ok(())
+    if OLE_STARTED.with(|o| o.replace(false)) {
+        // SAFETY: balances the successful OleInitialize of this thread.
+        unsafe { OleUninitialize() };
+    }
+    Ok(shared)
 }
 
 impl Shared {
+    /// The current graphics device and factories.
+    pub fn gfx(&self) -> Rc<Gfx> {
+        Rc::clone(&self.gfx.borrow())
+    }
+
+    /// The graphics device is gone (a driver reset, the adapter removed: F-VIEW-08). A new device is made; every
+    /// window lets go of its surface (the viewer's pipeline detaches first) and paints again on the new one, which
+    /// hands the viewer a new surface. A device that cannot be made yet is tried again at the next paint. The
+    /// sessions go on meanwhile. False when no device could be made.
+    pub fn recover_device(&self) -> bool {
+        let fresh = match Gfx::new() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::system::trace_line(&format!("swapdesk: the graphics device could not be made again: {e}\0"));
+                return false;
+            }
+        };
+        let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        for w in &windows {
+            w.drop_surface();
+        }
+        *self.gfx.borrow_mut() = Rc::new(fresh);
+        for w in &windows {
+            w.invalidate();
+        }
+        true
+    }
+
     pub fn window(&self, kind: WindowKind) -> Option<Rc<Window>> {
         self.windows.borrow().iter().find(|w| w.kind == kind).cloned()
     }
@@ -160,6 +261,9 @@ impl Shared {
         }
         // The viewer's own shortcuts (D30), recognised by the pipeline on the window's keys or the system-wide hook.
         if let Some(host) = &self.host {
+            if host.device_lost() {
+                let _ = self.recover_device();
+            }
             for action in host.take_shortcuts() {
                 let act = self.state.borrow_mut().run_shortcut(action);
                 self.send_commands(act.commands);
@@ -170,6 +274,29 @@ impl Shared {
         self.send_commands(followups);
         self.pump_terminal();
         self.refresh(changed);
+        self.apply_focus_request();
+    }
+
+    /// The state asks for the keyboard focus after a service event (a wait card appeared or ended): it goes to that
+    /// control of the main window, once.
+    fn apply_focus_request(&self) {
+        let request = self.state.borrow_mut().take_focus_request();
+        if let (Some(id), Some(main)) = (request, self.window(WindowKind::Main)) {
+            main.focus_control(id, true);
+        }
+    }
+
+    /// Esc in the main window activates the control the state names (Cancelar on a waiting card, Fechar on an ended
+    /// one), as a click on it would. False when Esc means nothing there.
+    pub fn escape(self: &Rc<Self>, from: &Window) -> bool {
+        let target = self.state.borrow().escape_target(from.kind);
+        match target {
+            Some(id) => {
+                self.activate(id, from);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Feeds the open shell's model with the output that arrived (a byte budget a turn, so a burst never holds the
@@ -206,14 +333,101 @@ impl Shared {
         self.dispatch(act, from);
     }
 
+    /// The pointer moved while the left button is down over the explorer (slice 3). The state starts the drag, decides
+    /// the target and the caption; `copy` is Ctrl.
+    pub fn drag_move(self: &Rc<Self>, under: Option<ControlId>, at: (f32, f32), copy: bool, from: &Window) {
+        let act = self.state.borrow_mut().drag_move(under, at, copy, now_ms());
+        self.dispatch(act, from);
+    }
+
+    /// A 50 ms tick while a drag runs: a folder hovered for 800 ms opens.
+    pub fn drag_tick(self: &Rc<Self>, from: &Window) {
+        let act = self.state.borrow_mut().drag_tick(now_ms());
+        self.dispatch(act, from);
+    }
+
+    /// The left button went up over the explorer: true when a drag ended (the window must not click).
+    pub fn drag_release(self: &Rc<Self>, under: Option<ControlId>, at: (f32, f32), copy: bool, from: &Window) -> bool {
+        let act = self.state.borrow_mut().drag_release(under, at, copy);
+        match act {
+            Some(act) => {
+                self.dispatch(act, from);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A drag from the system's file manager came over the viewer window (slice 4): the effect for the OS.
+    pub fn system_drag_enter(
+        self: &Rc<Self>,
+        data: swapdesk_ui::SystemDragData,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drag_enter(data, under, at, now_ms());
+        self.dispatch(r.activation, from);
+        r.effect
+    }
+
+    /// The system drag moved or rested.
+    pub fn system_drag_over(
+        self: &Rc<Self>,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drag_over(under, at, now_ms());
+        self.dispatch(r.activation, from);
+        r.effect
+    }
+
+    /// The system drag left the window.
+    pub fn system_drag_leave(self: &Rc<Self>) {
+        let changed = self.state.borrow_mut().system_drag_leave();
+        self.refresh(changed);
+    }
+
+    /// The system drag was released over the viewer window.
+    pub fn system_drop(
+        self: &Rc<Self>,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drop(under, at);
+        self.dispatch(r.activation, from);
+        r.effect
+    }
+
+    /// Capture or focus was lost while a drag runs.
+    pub fn drag_cancel(self: &Rc<Self>) {
+        let changed = self.state.borrow_mut().drag_cancel();
+        self.refresh(changed);
+    }
+
+    /// A context menu was asked for on `under` (slice 3); the menu opens once the message has finished.
+    pub fn context_menu(self: &Rc<Self>, under: Option<ControlId>, from_keyboard: bool, from: &Window) {
+        let act = self.state.borrow_mut().context_menu(under, from_keyboard);
+        self.dispatch(act, from);
+    }
+
+    /// A key of the explorer (slice 2a), as the window mapped it.
+    pub fn explorer_key(self: &Rc<Self>, key: swapdesk_ui::ExplorerKey, from: &Window) {
+        let act = self.state.borrow_mut().explorer_key(key);
+        self.dispatch(act, from);
+    }
+
     pub fn submit_edit(self: &Rc<Self>, id: EditId, text: String, from: &Window) {
         let act = self.state.borrow_mut().submit_edit(id, text);
         self.dispatch(act, from);
     }
 
-    fn dispatch(self: &Rc<Self>, act: Activation, from: &Window) {
+    pub(crate) fn dispatch(self: &Rc<Self>, act: Activation, from: &Window) {
         match act.effect {
             Some(Effect::FocusEdit(e)) => from.focus_control(ControlId::Edit(e), true),
+            Some(Effect::Focus(id)) => from.focus_control(id, true),
             Some(Effect::SubmitEdit(e)) => {
                 let text = from.edit_value(e);
                 let again = self.state.borrow_mut().submit_edit(e, text);
@@ -226,7 +440,32 @@ impl Shared {
             Some(Effect::OpenLogs) => {
                 crate::system::open_logs_folder();
             }
-            Some(effect @ (Effect::Menu(_) | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder)) => {
+            Some(Effect::OpenWebPage) => {
+                let page = self.state.borrow_mut().take_web_page();
+                if let Some(url) = page {
+                    crate::system::open_web_page(&url);
+                }
+            }
+            Some(Effect::OpenLocal) => {
+                let target = self.state.borrow_mut().take_local_target();
+                if let Some(path) = target {
+                    crate::system::open_local_file(&path);
+                }
+            }
+            Some(Effect::RevealLocal) => {
+                let target = self.state.borrow_mut().take_local_target();
+                if let Some(path) = target {
+                    crate::system::reveal_local_item(&path);
+                }
+            }
+            // The Mac's notices (Login Items, macOS permissions): no Windows service raises them, so nothing is done here.
+            Some(Effect::OpenLoginItems) => {}
+            Some(Effect::RequestOsPermissions) => {
+                self.state.borrow_mut().take_os_permission_request();
+            }
+            // Menus and dialogs wait for a person: queued, run after the message that asked (see `run_modal`).
+            Some(effect @ (Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::SystemDrag)) => {
+                debug_assert_eq!(handling(&effect), Handling::Modal);
                 from.set_pending_effect(effect)
             }
             None => {}
@@ -245,32 +484,29 @@ impl Shared {
                     self.refresh(act.changed);
                 }
             }
+            Effect::ContextMenu => {
+                let items = self.state.borrow().context_items();
+                let flags: Vec<(String, MENU_ITEM_FLAGS)> = items
+                    .into_iter()
+                    .map(|(label, on)| (label, if on { MF_STRING } else { MF_STRING | MF_GRAYED }))
+                    .collect();
+                match popup_menu(from, &flags, from.menu_point()) {
+                    Some(index) => {
+                        let act = self.state.borrow_mut().context_chosen(index);
+                        self.dispatch(act, from);
+                    }
+                    None => self.state.borrow_mut().context_closed(),
+                }
+            }
             Effect::SaveLog => {
                 if let Some(path) =
                     crate::dialogs::save_log(from.hwnd(), &self.state.borrow().t(swapdesk_ui::MsgKey::ExportLog))
                 {
-                    self.send_commands(vec![Command::ActivityExport { path }]);
+                    let export = self.state.borrow().activity_export(path);
+                    self.send_commands(vec![export]);
                 }
             }
-            Effect::PickFiles => {
-                let paths = crate::files_dialogs::pick_files(
-                    from.hwnd(),
-                    &self.state.borrow().t(swapdesk_ui::MsgKey::ChooseFiles),
-                );
-                if !paths.is_empty() {
-                    let act = self.state.borrow_mut().send_files(paths);
-                    self.send_commands(act.commands);
-                    self.refresh(act.changed);
-                }
-            }
-            Effect::PickReceiveFolder => {
-                let title = self.state.borrow().t(swapdesk_ui::MsgKey::FilesPickFolder);
-                if let Some(dir) = crate::files_dialogs::pick_folder(from.hwnd(), &title) {
-                    let act = self.state.borrow_mut().set_receive_dir(dir);
-                    self.send_commands(act.commands);
-                    self.refresh(act.changed);
-                }
-            }
+            Effect::SystemDrag => self.run_system_drag(from),
             _ => {}
         }
     }
@@ -281,24 +517,17 @@ impl Shared {
         if options.is_empty() {
             return None;
         }
-        let (x, y) = from.screen_point_of(ControlId::Select(select));
-        // SAFETY: a popup menu created, shown and destroyed here; the strings outlive the call.
-        unsafe {
-            let menu = CreatePopupMenu().ok()?;
-            for (i, (label, on)) in options.iter().enumerate() {
-                let flags = if *on { MF_STRING | MF_CHECKED } else { MF_STRING };
-                let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(label.as_str()));
-            }
-            let chosen =
-                TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, x, y, None, from.hwnd(), None);
-            let _ = DestroyMenu(menu);
-            (chosen.0 > 0).then(|| chosen.0 as usize - 1)
-        }
+        let items: Vec<(String, MENU_ITEM_FLAGS)> = options
+            .iter()
+            .map(|(label, on)| (label.clone(), if *on { MF_STRING | MF_CHECKED } else { MF_STRING }))
+            .collect();
+        popup_menu(from, &items, from.screen_point_of(select.anchor()))
     }
 
     pub fn tick(self: &Rc<Self>) {
         let c = self.state.borrow_mut().tick();
         self.refresh(c);
+        self.apply_focus_request();
     }
 
     /// The banner's minute came: the clock moves, the banner repaints, and `refresh` arms the next minute.
@@ -326,9 +555,13 @@ impl Shared {
         self.refresh(c);
     }
 
+    /// The system's appearance changed: light or dark, or a contrast theme turned on, off or edited.
     pub fn system_theme_changed(self: &Rc<Self>) {
         let dark = system_dark();
-        let c = self.state.borrow_mut().set_dark(dark);
+        let c = {
+            let mut st = self.state.borrow_mut();
+            st.set_dark(dark).union(st.set_contrast(crate::system::system_contrast()))
+        };
         self.refresh(c);
     }
 
@@ -360,6 +593,17 @@ impl Shared {
 
     /// Windows follow the state (a viewer exists while a session does), then whatever changed redraws.
     pub fn refresh(self: &Rc<Self>, changed: Changed) {
+        // The elevated instance's confirmation window ends with its answer.
+        let answered = self.state.borrow().confirm_answer().is_some();
+        if answered {
+            if let Some(main) = self.window(WindowKind::Main) {
+                // SAFETY: our window; its WM_DESTROY ends the message loop.
+                unsafe {
+                    let _ = DestroyWindow(main.hwnd());
+                }
+            }
+            return;
+        }
         let wanted = self.state.borrow().windows();
         for kind in &wanted {
             if self.window(*kind).is_none()
@@ -387,11 +631,64 @@ impl Shared {
         }
         for w in &windows {
             if changed.hits(w.kind) {
+                w.fit_banner();
                 w.invalidate();
             }
         }
         self.attention();
+        self.minimize_main_for_session();
+        self.restore_main_after_session();
+        self.close_for_update();
         self.sync_timers();
+    }
+
+    /// A session of this computer just came up (either role): the main window goes to the taskbar, once per session,
+    /// unless it is already minimized or hidden. Nothing brings it back when the session ends.
+    /// An update is being installed (UPDATES.md 6.2 step 4): the run ends before the applier's sweep, through
+    /// `WM_QUIT_APP` (a `WM_CLOSE` would only hide the window into the notification area).
+    fn close_for_update(&self) {
+        if !self.state.borrow_mut().take_quit_request() {
+            return;
+        }
+        if let Some(h) = self.main_hwnd() {
+            // SAFETY: our window; the message ends the run from its own thread.
+            unsafe {
+                let _ = PostMessageW(
+                    Some(h),
+                    crate::system::WM_QUIT_APP,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
+    }
+
+    fn minimize_main_for_session(&self) {
+        if !self.minimize_on_session || !self.state.borrow_mut().take_minimize_request() {
+            return;
+        }
+        let Some(h) = self.main_hwnd() else { return };
+        // SAFETY: our window.
+        unsafe {
+            if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_MINIMIZE);
+            }
+        }
+    }
+
+    /// The last session that minimized the main window ended: the window comes back, if it is still minimized (one the
+    /// user already brought back is left as it is). Only in a real run, like the minimize.
+    fn restore_main_after_session(&self) {
+        if !self.minimize_on_session || !self.state.borrow_mut().take_restore_request() {
+            return;
+        }
+        let Some(h) = self.main_hwnd() else { return };
+        // SAFETY: our window.
+        unsafe {
+            if IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
+            }
+        }
     }
 
     /// A request that needs an answer brings the main window up (restored, flashing) if it is not in front.
@@ -424,11 +721,11 @@ impl Shared {
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
         let Some(h) = self.main_hwnd() else { return };
-        let (tick, placeholder, banner) = {
+        let (now_ms, tick, placeholder, banner) = {
             let st = self.state.borrow();
             let now = crate::system::local_clock().now_ms;
             // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
-            (st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
+            (now, st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
         // SAFETY: our window.
         unsafe {
@@ -440,9 +737,13 @@ impl Shared {
                 self.tick_on.set(false);
             }
             if let Some(ms) = banner {
-                if !self.banner_on.get() {
+                // Armed again (the same timer id is replaced) when the due moment moved earlier: a files note that
+                // ends in 10 s comes before the minute the timer was armed for.
+                let due = now_ms.saturating_add(ms);
+                if !self.banner_on.get() || due + 50 < self.banner_due_ms.get() {
                     SetTimer(Some(h), TIMER_BANNER, u32::try_from(ms).unwrap_or(60_000), None);
                     self.banner_on.set(true);
+                    self.banner_due_ms.set(due);
                 }
             } else if self.banner_on.get() {
                 let _ = KillTimer(Some(h), TIMER_BANNER);
@@ -456,5 +757,109 @@ impl Shared {
                 self.placeholder_on.set(false);
             }
         }
+    }
+}
+
+/// Milliseconds on a monotonic clock that starts with the first call (the drag's spring-loaded folders read it).
+pub fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The system's own popup menu of `items` (a label and its flags: `MF_GRAYED` disabled, `MF_CHECKED` checked) at the
+/// screen point `at`; the index of the chosen item. The select menus and the explorer's context menu both use it.
+fn popup_menu(from: &Window, items: &[(String, MENU_ITEM_FLAGS)], at: (i32, i32)) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    // SAFETY: a popup menu created, shown and destroyed here; the strings outlive the call.
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for (i, (label, flags)) in items.iter().enumerate() {
+            let _ = AppendMenuW(menu, *flags, i + 1, &HSTRING::from(label.as_str()));
+        }
+        let chosen =
+            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.0, at.1, None, from.hwnd(), None);
+        let _ = DestroyMenu(menu);
+        (chosen.0 > 0).then(|| chosen.0 as usize - 1)
+    }
+}
+
+/// How the shell runs an effect: at once, or as a modal thing that waits for a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Handling {
+    Immediate,
+    Modal,
+}
+
+/// The handling of every effect. No catch-all: a new `Effect` does not build until it is decided here, and
+/// `dispatch` and `run_modal` handle each side.
+pub(crate) fn handling(effect: &Effect) -> Handling {
+    match effect {
+        Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::SystemDrag => Handling::Modal,
+        Effect::FocusEdit(_)
+        | Effect::Focus(_)
+        | Effect::SubmitEdit(_)
+        | Effect::OpenLogs
+        | Effect::OpenWebPage
+        | Effect::OpenLoginItems
+        | Effect::RequestOsPermissions
+        | Effect::OpenLocal
+        | Effect::RevealLocal => Handling::Immediate,
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+    use swapdesk_ui::SelectId;
+
+    /// One effect of every kind; the match has no catch-all, so a new variant must be listed here.
+    fn every_effect() -> Vec<Effect> {
+        let all = vec![
+            Effect::Menu(SelectId::Theme),
+            Effect::FocusEdit(EditId::Address),
+            Effect::SubmitEdit(EditId::Rename),
+            Effect::SaveLog,
+            Effect::OpenLogs,
+            Effect::Focus(ControlId::ConnectCancel),
+            Effect::OpenWebPage,
+            Effect::OpenLoginItems,
+            Effect::RequestOsPermissions,
+            Effect::OpenLocal,
+            Effect::ContextMenu,
+            Effect::RevealLocal,
+            Effect::SystemDrag,
+        ];
+        for e in &all {
+            match e {
+                Effect::Menu(_)
+                | Effect::FocusEdit(_)
+                | Effect::Focus(_)
+                | Effect::SubmitEdit(_)
+                | Effect::SaveLog
+                | Effect::OpenLogs
+                | Effect::OpenWebPage
+                | Effect::OpenLoginItems
+                | Effect::RequestOsPermissions
+                | Effect::OpenLocal
+                | Effect::ContextMenu
+                | Effect::RevealLocal
+                | Effect::SystemDrag => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
+        let all = every_effect();
+        assert_eq!(all.len(), 13);
+        for e in &all {
+            // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
+            let _ = handling(e);
+        }
+        assert_eq!(handling(&Effect::ContextMenu), Handling::Modal);
+        assert_eq!(handling(&Effect::RevealLocal), Handling::Immediate);
     }
 }

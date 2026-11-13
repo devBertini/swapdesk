@@ -340,6 +340,34 @@ fn an_offer_over_the_size_limit_is_too_large() {
     let _ = std::fs::remove_dir_all(&dst);
 }
 
+/// F-FILE-03: an offer larger than the free space is declined with `NoSpace` before anything is written, and the
+/// sender's transfer event carries that reason.
+#[test]
+fn an_offer_larger_than_the_free_space_is_declined_no_space_and_the_sender_is_told() {
+    let (src, dst) = (temp("nospace-src"), temp("nospace-dst"));
+    std::fs::write(src.join("big.bin"), data(5_000_000, 3)).unwrap();
+    let mut w = World::new(Some(&dst), &dst);
+    let mut cfg = FilesConfig::new(Side::Host, dst.clone());
+    cfg.default_dir = Some(dst.clone());
+    // The receiving volume has 1000 bytes free.
+    w.host = Engine::with_fs(cfg, std::sync::Arc::new(swapdesk_files::LocalFs::with_free_space(|_| Some(1000))));
+    let outs = w.viewer.send_file(9, &src.join("big.bin"), None);
+    w.pump(true, outs, None);
+    assert!(
+        w.to_viewer.iter().any(|m| matches!(m, Message::FileDecline(FileDecline { code: ErrorCode::NoSpace, .. }))),
+        "the receiver declines with NoSpace: {:?}",
+        w.to_viewer
+    );
+    assert!(
+        w.viewer_events.contains(&Event::Failed { id: 9, code: ErrorCode::NoSpace }),
+        "the sender's transfer event carries the reason: {:?}",
+        w.viewer_events
+    );
+    assert!(leftovers(&dst).is_empty(), "nothing was written: {:?}", leftovers(&dst));
+    assert_eq!(w.host.active() + w.viewer.active(), 0);
+    let _ = (std::fs::remove_dir_all(&src), std::fs::remove_dir_all(&dst));
+}
+
 #[test]
 fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
     let save = temp("unsolicited");
@@ -361,7 +389,7 @@ fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
 
     // An offer with another id than the request is refused as well; the right one is accepted and `dest` ignored.
     let other = temp("unsolicited-dest");
-    w.viewer.request_get(5, "irrelevant".into(), save.clone());
+    w.viewer.request_get(5, "irrelevant/ok.bin".into(), save.clone());
     let wrong = FileOffer { transfer_id: 6, ..offer.clone() };
     assert!(matches!(w.viewer.on_message(Message::FileOffer(wrong)).as_slice(), [Out::Msg(Message::FileDecline(_))]));
     let right =
@@ -371,6 +399,33 @@ fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
     assert!(leftovers(&other).is_empty(), "dest is ignored by a viewer");
     assert!(leftovers(&save).contains(&"ok.bin.swapdesk-part".to_string()));
     let _ = (std::fs::remove_dir_all(&save), std::fs::remove_dir_all(&other));
+}
+
+#[test]
+fn a_viewer_takes_only_the_file_it_asked_for_by_name() {
+    let (save, host_files) = (temp("get-name-save"), temp("get-name-host"));
+    let mut w = World::new(None, &host_files);
+    // The viewer asked for `docs/report.pdf`; the host offers another name (a script, a double extension...).
+    w.viewer.request_get(5, "docs/report.pdf".into(), save.clone());
+    let evil = FileOffer { transfer_id: 5, name: "report.pdf.exe".into(), size: 3, mtime_ms: 1, dest: None };
+    let outs = w.viewer.on_message(Message::FileOffer(evil));
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Msg(Message::FileDecline(FileDecline { code: ErrorCode::InvalidName, .. })))),
+        "{outs:?}"
+    );
+    assert!(leftovers(&save).is_empty(), "nothing was created: {:?}", leftovers(&save));
+    assert!(!w.viewer.has(5), "the request is spent");
+
+    // The same name, in the 1.0 spelling of a host path too (both separators), is taken.
+    for (id, path) in [(6, "docs/report.pdf"), (7, r"C:\Users\me\report.pdf"), (8, ":2/a/report.pdf")] {
+        w.viewer.request_get(id, path.into(), save.clone());
+        let ok = FileOffer { transfer_id: id, name: "report.pdf".into(), size: 3, mtime_ms: 1, dest: None };
+        let outs = w.viewer.on_message(Message::FileOffer(ok));
+        assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileAccept(_)))), "{path}: {outs:?}");
+        w.viewer.cancel(id);
+    }
+    let _ = (std::fs::remove_dir_all(&save), std::fs::remove_dir_all(&host_files));
 }
 
 #[test]
@@ -402,7 +457,7 @@ fn an_existing_file_is_never_overwritten() {
     let outs = w.viewer.send_file(1, &src.join("a.txt"), None);
     w.pump(true, outs, None);
     assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"mine");
-    assert_eq!(std::fs::read(dst.join("a (1).txt")).unwrap(), b"new");
+    assert_eq!(std::fs::read(dst.join("a (2).txt")).unwrap(), b"new");
     let _ = (std::fs::remove_dir_all(&src), std::fs::remove_dir_all(&dst));
 }
 

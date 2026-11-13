@@ -92,6 +92,30 @@ wire_struct! {
     }
 }
 
+impl Capabilities {
+    /// The newest minor among the codecs these capabilities name (an HEVC entry is of minor 1).
+    pub fn min_minor(&self) -> u16 {
+        self.video_decode.iter().map(|c| c.codec.min_minor()).max().unwrap_or(0)
+    }
+
+    /// These capabilities as a peer of `minor` may read them: every decode entry of a newer codec left out.
+    #[must_use]
+    pub fn for_minor(mut self, minor: u16) -> Self {
+        self.video_decode.retain(|c| c.codec.min_minor() <= minor);
+        self
+    }
+
+    /// The codec a host sends to the viewer that announced these capabilities and `viewer_minor` (F-VIEW-07):
+    /// HEVC only when the viewer is of minor 2 or newer and lists an HEVC decoder (a viewer lists one only when
+    /// its hardware decodes it) and `host_hevc_hardware` says the host has a hardware HEVC encoder; H.264
+    /// otherwise, which every build of every minor decodes.
+    pub fn pick_codec(&self, viewer_minor: u16, host_hevc_hardware: bool) -> Codec {
+        let viewer_hevc =
+            viewer_minor >= Codec::Hevc.min_minor() && self.video_decode.iter().any(|c| c.codec == Codec::Hevc);
+        if viewer_hevc && host_hevc_hardware { Codec::Hevc } else { Codec::H264 }
+    }
+}
+
 wire_struct! {
     /// 0x0004, host to viewer.
     PromptPending { timeout_s: u16 }
@@ -130,6 +154,18 @@ wire_struct! {
 wire_struct! {
     /// 0x000A, host to viewer (D13).
     ConsentPending { feature: Feature, timeout_s: u16 }
+}
+
+wire_struct! {
+    /// 0x000B, both, minor 1: what the sender's account has stored for the peer's device, not what this session
+    /// holds. Display only for the receiver.
+    StoredGrants { grants: PermissionSet }
+}
+
+wire_struct! {
+    /// 0x000C, viewer to host, minor 1: an unattended session asks for the elevated bits, after the system's
+    /// confirmation on the viewer's machine.
+    Elevate {}
 }
 
 // ---------- display and video ----------
@@ -308,6 +344,165 @@ wire_struct! {
     FileGet { transfer_id: u32, path: String [1024] }
 }
 
+// ---------- files, minor 2 (FILES-UI.md 7.3) ----------
+
+wire_enum! {
+    /// What a `DirEntry2` is; a link is the entry itself, never its target.
+    EntryKind: u8 { File = 0, Dir = 1, Link = 2 }
+}
+
+/// `DirEntry2.flags`: hidden.
+pub const ENTRY_HIDDEN: u8 = 1;
+/// `DirEntry2.flags`: a system file.
+pub const ENTRY_SYSTEM: u8 = 2;
+/// `DirEntry2.flags`: read-only.
+pub const ENTRY_READ_ONLY: u8 = 4;
+
+wire_struct! {
+    /// One entry of a `DirPageListing`; `flags` holds `ENTRY_*` bits, the others 0.
+    DirEntry2 { name: String [255], kind: EntryKind, size: u64, mtime_ms: u64, flags: u8 }
+}
+
+wire_struct! {
+    /// 0x040C, viewer to host: a page of the folder `path` (a 1.1 path: empty is the home folder, `:<id>/...` a
+    /// volume) from entry `start`, at most `max` (≤ 2000) entries.
+    DirPage { req_id: u32, path: String [1024], start: u32, max: u16 }
+}
+
+wire_struct! {
+    /// 0x040D, host to viewer: a page stops before the frame passes 65 535 bytes; `next` is the `start` of the
+    /// following page.
+    DirPageListing {
+        req_id: u32,
+        path: String [1024],
+        start: u32,
+        entries: Vec<DirEntry2> [2000],
+        next: Option<u32>,
+        free_bytes: Option<u64>,
+    }
+}
+
+wire_struct! {
+    /// 0x040E, viewer to host.
+    VolumesRequest { req_id: u32 }
+}
+
+wire_enum! {
+    /// A well-known folder of the other computer.
+    PlaceKind: u8 { Desktop = 0, Documents = 1, Downloads = 2, Pictures = 3, Music = 4, Videos = 5, Received = 6 }
+}
+
+wire_struct! {
+    Place { kind: PlaceKind, path: String [1024] }
+}
+
+wire_enum! {
+    VolumeKind: u8 { System = 0, Fixed = 1, Removable = 2, Network = 3, Optical = 4, Image = 5 }
+}
+
+wire_struct! {
+    /// A published volume: its paths start with `:<id>`; `letter` is the Windows drive letter (`b'A'..=b'Z'`). The
+    /// label is shown, never used as a path.
+    Volume {
+        id: u32,
+        kind: VolumeKind,
+        label: String [64],
+        letter: Option<u8>,
+        total_bytes: u64,
+        free_bytes: u64,
+        has_bin: bool,
+    }
+}
+
+wire_struct! {
+    /// 0x040F, host to viewer: `req_id` 0 when pushed unasked (the set changed, at most once a second).
+    VolumesList { req_id: u32, home: String [1024], places: Vec<Place> [16], volumes: Vec<Volume> [32] }
+}
+
+wire_struct! {
+    /// A name inside an `FsOpKind`.
+    FsName { name: String [255] }
+}
+
+/// What an `FsOp` changes on the host (FILES-UI.md 7.3). Tag `u8`: 0 `MakeDir`, 1 `Rename`, 2 `Move`, 3 `Trash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsOpKind {
+    MakeDir { parent: String, name: String },
+    Rename { dir: String, name: String, new_name: String },
+    Move { from_dir: String, names: Vec<FsName>, to_dir: String },
+    Trash { dir: String, names: Vec<FsName> },
+}
+
+/// Most names one `Move` or `Trash` carries.
+pub const MAX_OP_NAMES: usize = 64;
+
+impl FsOpKind {
+    /// The names it acts on, in order (one result each).
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Self::MakeDir { name, .. } | Self::Rename { name, .. } => vec![name.as_str()],
+            Self::Move { names, .. } | Self::Trash { names, .. } => names.iter().map(|n| n.name.as_str()).collect(),
+        }
+    }
+}
+
+impl Wire for FsOpKind {
+    const MIN_SIZE: usize = 3;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> Result<()> {
+        match self {
+            Self::MakeDir { parent, name } => {
+                w.put_u8(0);
+                w.put_str(parent, 1024)?;
+                w.put_str(name, 255)
+            }
+            Self::Rename { dir, name, new_name } => {
+                w.put_u8(1);
+                w.put_str(dir, 1024)?;
+                w.put_str(name, 255)?;
+                w.put_str(new_name, 255)
+            }
+            Self::Move { from_dir, names, to_dir } => {
+                w.put_u8(2);
+                w.put_str(from_dir, 1024)?;
+                names.put(w, MAX_OP_NAMES)?;
+                w.put_str(to_dir, 1024)
+            }
+            Self::Trash { dir, names } => {
+                w.put_u8(3);
+                w.put_str(dir, 1024)?;
+                names.put(w, MAX_OP_NAMES)
+            }
+        }
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> Result<Self> {
+        Ok(match r.u8()? {
+            0 => Self::MakeDir { parent: r.str(1024)?, name: r.str(255)? },
+            1 => Self::Rename { dir: r.str(1024)?, name: r.str(255)?, new_name: r.str(255)? },
+            2 => Self::Move { from_dir: r.str(1024)?, names: Vec::get(r, MAX_OP_NAMES)?, to_dir: r.str(1024)? },
+            3 => Self::Trash { dir: r.str(1024)?, names: Vec::get(r, MAX_OP_NAMES)? },
+            tag => return Err(CodecError::UnknownTag { what: "FsOpKind", tag: u64::from(tag) }),
+        })
+    }
+}
+
+wire_struct! {
+    /// 0x0410, viewer to host: a change on the host's disk; needs `FILES` and `CONTROL`; at most 4 in flight per
+    /// session (`BUSY` beyond).
+    FsOp { op_id: u32, op: FsOpKind }
+}
+
+wire_struct! {
+    /// The outcome for one name of an `FsOp`: `NO_ERROR` when done.
+    OpItem { name: String [255], code: ErrorCode }
+}
+
+wire_struct! {
+    /// 0x0411, host to viewer: one result per name, in the order of the `FsOp`.
+    FsOpResult { op_id: u32, results: Vec<OpItem> [64] }
+}
+
 // ---------- terminal ----------
 
 wire_struct! {
@@ -350,6 +545,14 @@ wire_struct! {
 wire_struct! {
     /// 0x0603, host to viewer.
     WakeInfo { macs: Vec<[u8; 6]> [8] }
+}
+
+// ---------- between paired accounts, outside a session ----------
+
+wire_struct! {
+    /// 0x0801, both, minor 1: the only message of a grants sync connection, sent once each way in place of
+    /// `Hello`. `grants` is what the sender's account has stored for the other device.
+    GrantsSync { proto_minor: u16, grants: PermissionSet }
 }
 
 // ---------- keepalive and errors ----------
@@ -430,6 +633,8 @@ messages! {
     Bye(Bye) = 0x0008,
     HostState(HostState) = 0x0009,
     ConsentPending(ConsentPending) = 0x000A,
+    StoredGrants(StoredGrants) = 0x000B,
+    Elevate(Elevate) = 0x000C,
     DisplayList(DisplayList) = 0x0101,
     SelectDisplay(SelectDisplay) = 0x0102,
     VideoSettings(VideoSettings) = 0x0103,
@@ -459,6 +664,12 @@ messages! {
     DirRequest(DirRequest) = 0x0409,
     DirListing(DirListing) = 0x040A,
     FileGet(FileGet) = 0x040B,
+    DirPage(DirPage) = 0x040C,
+    DirPageListing(DirPageListing) = 0x040D,
+    VolumesRequest(VolumesRequest) = 0x040E,
+    VolumesList(VolumesList) = 0x040F,
+    FsOp(FsOp) = 0x0410,
+    FsOpResult(FsOpResult) = 0x0411,
     TermOpen(TermOpen) = 0x0501,
     TermOpened(TermOpened) = 0x0502,
     TermResize(TermResize) = 0x0503,
@@ -472,6 +683,7 @@ messages! {
     PairReveal(PairReveal) = 0x0703,
     PairConfirm(PairConfirm) = 0x0704,
     PairResult(PairResult) = 0x0705,
+    GrantsSync(GrantsSync) = 0x0801,
     Ping(Ping) = 0x0F01,
     Pong(Pong) = 0x0F02,
     Error(ErrorMessage) = 0x0FFF,
@@ -481,6 +693,85 @@ impl Message {
     /// True for the five `Pair*` messages, which travel on the pairing endpoint only.
     pub const fn is_pairing(&self) -> bool {
         matches!(self.type_id(), 0x0701..=0x0705)
+    }
+
+    /// The protocol minor that introduced the type `type_id` (PROTOCOL.md 1); 0 for every type of 1.0 and for an
+    /// unknown one.
+    pub const fn type_min_minor(type_id: u16) -> u16 {
+        match type_id {
+            0x000B | 0x000C | 0x0801 => 1,
+            0x040C..=0x0411 => 2,
+            _ => 0,
+        }
+    }
+
+    /// The lowest minor a peer must have announced to be sent this message: the newest of its type and of the
+    /// enum values it carries. A sender checks it against the peer's minor before it writes the message.
+    pub fn min_minor(&self) -> u16 {
+        let carried = match self {
+            Self::Capabilities(m) => m.min_minor(),
+            Self::SessionRefused(m) => m.code.min_minor(),
+            Self::Bye(m) => m.code.min_minor(),
+            Self::HostState(m) => m.desktop.min_minor(),
+            Self::SwapDecline(m) => m.code.min_minor(),
+            Self::FileDecline(m) => m.code.min_minor(),
+            Self::QuickActionResult(m) => m.code.min_minor(),
+            Self::PairResult(m) => m.code.min_minor(),
+            Self::Error(m) => m.code.min_minor(),
+            _ => 0,
+        };
+        let of_type = Self::type_min_minor(self.type_id());
+        if carried > of_type { carried } else { of_type }
+    }
+
+    /// This message as a peer that announced `minor` may be sent it: unchanged when the peer knows all of it; with
+    /// each newer enum value replaced by the older one that says the same ([`ErrorCode::for_minor`],
+    /// [`Desktop::for_minor`]); `None` when the type itself is newer than the peer, which is then sent nothing.
+    pub fn for_peer(self, minor: u16) -> Option<Self> {
+        if Self::type_min_minor(self.type_id()) > minor {
+            return None;
+        }
+        if self.min_minor() <= minor {
+            return Some(self);
+        }
+        Some(match self {
+            Self::Capabilities(m) => Self::Capabilities(m.for_minor(minor)),
+            Self::SessionRefused(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::SessionRefused(m)
+            }
+            Self::Bye(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::Bye(m)
+            }
+            Self::HostState(mut m) => {
+                // A desktop the peer does not know reads as locked, and a locked desktop it cannot see is paused.
+                m.paused |= m.desktop.for_minor(minor) != m.desktop;
+                m.desktop = m.desktop.for_minor(minor);
+                Self::HostState(m)
+            }
+            Self::SwapDecline(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::SwapDecline(m)
+            }
+            Self::FileDecline(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::FileDecline(m)
+            }
+            Self::QuickActionResult(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::QuickActionResult(m)
+            }
+            Self::PairResult(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::PairResult(m)
+            }
+            Self::Error(mut m) => {
+                m.code = m.code.for_minor(minor);
+                Self::Error(m)
+            }
+            other => other,
+        })
     }
 
     /// The whole frame: `type`, `len`, payload. A payload over [`MAX_FRAME_PAYLOAD`] is an error.
@@ -552,13 +843,36 @@ mod tests {
     #[test]
     fn type_ids_are_unique_and_match_the_table() {
         let mut ids = Message::ALL_TYPE_IDS.to_vec();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 64);
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 55);
+        assert_eq!(ids.len(), 64);
         let ping = Message::Ping(Ping { nonce: 1, t_send_us: 2 });
         assert_eq!(ping.type_id(), 0x0F01);
         assert_eq!(ping.encode_frame().unwrap()[..3], [0x4F, 0x01, 12]);
+    }
+
+    /// FILES-UI.md 7.3: every kind of change round trips, an unknown kind and a 65th name are refused.
+    #[test]
+    fn fs_op_kinds_round_trip_and_refuse_bad_input() {
+        let names = |n: usize| (0..n).map(|i| FsName { name: format!("f{i}") }).collect::<Vec<_>>();
+        for op in [
+            FsOpKind::MakeDir { parent: ":3/Fotos".into(), name: "Nova pasta".into() },
+            FsOpKind::Rename { dir: String::new(), name: "a.txt".into(), new_name: "b.txt".into() },
+            FsOpKind::Move { from_dir: "Docs".into(), names: names(2), to_dir: ":1".into() },
+            FsOpKind::Trash { dir: "Docs".into(), names: names(MAX_OP_NAMES) },
+        ] {
+            let msg = Message::FsOp(FsOp { op_id: 7, op });
+            assert_eq!(Message::decode_frame_exact(&msg.encode_frame().unwrap()).unwrap(), msg);
+            assert_eq!(msg.min_minor(), 2);
+        }
+        let too_many = Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: names(65) } });
+        assert!(too_many.encode_frame().is_err());
+        let mut bad = Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: names(1) } })
+            .encode_payload()
+            .unwrap();
+        bad[4] = 9;
+        assert!(Message::decode_payload(0x0410, &bad).is_err());
     }
 
     #[test]

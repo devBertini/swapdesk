@@ -4,11 +4,13 @@
 
 use swapdesk_fakes::{FakeActions, FakeClipboard};
 use swapdesk_ipc::ClipReplyBody;
-use swapdesk_platform::{ClipContent, ErrorKind};
+use swapdesk_platform::{ActionRunner, ClipContent, ErrorKind};
 use swapdesk_proto::Action;
 use swapdesk_ui::service_backend::clipboard::answer_clipboard;
 
+use super::super::clip_actions::HubClipActions;
 use super::*;
+use crate::service::ClipActionHooks;
 
 const SET_SYNC_OP: u16 = 28;
 const RUN_ACTION_OP: u16 = 29;
@@ -18,14 +20,18 @@ fn text(s: &str) -> ClipContent {
     ClipContent::Text(s.into())
 }
 
-fn attach_user_helper(m: &mut Machine, clip: &FakeClipboard, actions: &FakeActions) {
+fn attach_user_helper<R: ActionRunner + Clone + Send + Sync + 'static>(
+    m: &mut Machine,
+    clip: &FakeClipboard,
+    actions: &R,
+) {
     let (core_end, helper_end) = duplex_blocking();
     let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
     let audio_clock = Arc::clone(&clock);
     let (clip, actions) = (clip.clone(), actions.clone());
     let deps = HelperDeps::new(
         |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
-        |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+        |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
         || Ok(RecordingInputSink::new()),
         move || Ok(SineSource::new(audio_clock.clone()).realtime()),
         clock,
@@ -55,15 +61,15 @@ fn serve_clipboard(ui: &mut Client, clip: &mut FakeClipboard, window: Duration) 
     }
 }
 
-struct Pair {
-    host: Machine,
-    viewer: Machine,
-    host_ui: Client,
-    viewer_ui: Client,
-    session: u64,
+pub(super) struct Pair {
+    pub(super) host: Machine,
+    pub(super) viewer: Machine,
+    pub(super) host_ui: Client,
+    pub(super) viewer_ui: Client,
+    pub(super) session: u64,
 }
 
-fn open(actions: &FakeActions, host_clip: &FakeClipboard) -> Pair {
+pub(super) fn open<R: ActionRunner + Clone + Send + Sync + 'static>(actions: &R, host_clip: &FakeClipboard) -> Pair {
     let mut host = Machine::new("host-pc");
     let viewer = Machine::new("viewer-pc");
     host.pin(&viewer, WITH_CLIPBOARD);
@@ -87,9 +93,7 @@ fn open(actions: &FakeActions, host_clip: &FakeClipboard) -> Pair {
             })
             .is_ok()
     );
-    let ReplyBody::SessionId(session) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!("not a session id")
-    };
+    let session = viewer_ui.connected(req);
     Pair { host, viewer, host_ui, viewer_ui, session }
 }
 
@@ -167,12 +171,23 @@ fn run_action_replies_when_the_host_did_and_the_action_is_audited_at_the_host() 
     wait_for("the action in the host's audit", || {
         p.host.audit.entries().iter().any(|e| e.event == AuditEvent::ActionRun(Action::Lock)).then_some(())
     });
-    // Refused by the system at the host: the reply says so and nothing is audited as run.
+    // Refused by the system at the host: the reply says so. The entry was written before the runner was asked (it
+    // records the attempt: the log has no event for how it ended).
     assert_eq!(
         p.viewer_ui.call(UiOp::RunAction { session_id: session, action: Action::Restart }).err(),
         Some(ApiCode::NotPermitted)
     );
-    assert_eq!(p.host.audit.entries().iter().filter(|e| matches!(e.event, AuditEvent::ActionRun(_))).count(), 1);
+    let runs: Vec<_> = p
+        .host
+        .audit
+        .entries()
+        .iter()
+        .filter_map(|e| match e.event {
+            AuditEvent::ActionRun(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(runs, vec![Action::Lock, Action::Restart]);
     // A view-only choice of this UI covers actions too.
     assert!(p.viewer_ui.call(UiOp::SetViewOnly { session_id: session, on: true }).is_ok());
     assert_eq!(
@@ -203,4 +218,67 @@ fn a_late_clipboard_reply_is_dropped_quietly_and_a_clipboard_request_from_a_ui_e
     ui.take("the close", |m| matches!(m, Ipc::Bye { .. }).then_some(()));
     drop(ui);
     m.finish();
+}
+
+/// Records, at the moment the runner is called, whether the host's audit log already holds the entry of the action.
+#[derive(Clone)]
+struct AuditProbe {
+    audit: Arc<std::sync::OnceLock<Arc<MemoryAudit>>>,
+    seen: Arc<Mutex<Vec<(Action, bool)>>>,
+}
+
+impl ActionRunner for AuditProbe {
+    fn run(&mut self, action: Action) -> swapdesk_platform::Result<()> {
+        let held =
+            self.audit.get().is_some_and(|a| a.entries().iter().any(|e| e.event == AuditEvent::ActionRun(action)));
+        lock(&self.seen).push((action, held));
+        Ok(())
+    }
+
+    fn keep_awake(&mut self, _on: bool) -> swapdesk_platform::Result<()> {
+        Ok(())
+    }
+}
+
+/// A restart or a suspend can take the machine down inside the runner: the entry is on record before it is called.
+#[test]
+fn the_action_is_audited_before_the_runner_is_called() {
+    let probe = AuditProbe { audit: Arc::default(), seen: Arc::default() };
+    let host_clip = FakeClipboard::new();
+    let mut p = open(&probe, &host_clip);
+    let _ = probe.audit.set(Arc::clone(&p.host.audit));
+    let session = p.session;
+    for action in [Action::Restart, Action::Sleep] {
+        assert!(matches!(p.viewer_ui.call(UiOp::RunAction { session_id: session, action }), Ok(ReplyBody::Done)));
+    }
+    assert_eq!(*lock(&probe.seen), vec![(Action::Restart, true), (Action::Sleep, true)], "held when the runner ran");
+    let entry = p.host.audit.entries().into_iter().find(|e| e.event == AuditEvent::ActionRun(Action::Restart));
+    assert_eq!(entry.expect("the entry").device, DeviceRef::Known(p.viewer.id()), "named by the session's own peer");
+    drop((p.host_ui, p.viewer_ui));
+    p.viewer.finish();
+    p.host.finish();
+}
+
+/// The device comes from the session itself, so a session that already left the live table still has its entry.
+#[test]
+fn an_action_of_a_session_that_is_gone_is_still_audited() {
+    let (actions, host_clip) = (FakeActions::new(), FakeClipboard::new());
+    let p = open(&actions, &host_clip);
+    let gone = p.session + 1000;
+    assert!(p.host.core.host().sessions().iter().all(|s| s.session_id != gone));
+    let hooks = HubClipActions { hub: Arc::downgrade(&p.host.hub.hub) };
+    hooks.action_starting(gone, Some(p.viewer.id()), Action::Restart);
+    let entries = p.host.audit.entries();
+    let entry = entries.iter().find(|e| e.event == AuditEvent::ActionRun(Action::Restart)).expect("the entry");
+    assert_eq!(entry.device, DeviceRef::Known(p.viewer.id()));
+    // No device and no session to find it in: still one entry, from an unnamed peer.
+    hooks.action_starting(gone, None, Action::Sleep);
+    assert!(
+        p.host.audit.entries().iter().any(|e| {
+            e.event == AuditEvent::ActionRun(Action::Sleep) && matches!(e.device, DeviceRef::Unknown { .. })
+        })
+    );
+    drop((p.host_ui, p.viewer_ui));
+    p.viewer.finish();
+    p.host.finish();
 }

@@ -8,35 +8,39 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swapdesk_audio::AudioSender;
 use swapdesk_ipc::{
-    AudioModeKind, Bytes, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, MAX_FAULT_TEXT, Message, Shape, Text,
-    VideoBackend,
+    AudioModeKind, Bytes, FrameReader, FrameWriter, Handshake, IpcError, IpcRole, MAX_FAULT_TEXT, Message, Payload,
+    Shape, Text, VideoBackend,
 };
 use swapdesk_platform::{
-    ActionRunner, AudioSource, CaptureConfig, ClipboardProvider, Clock, DisplayId, DisplayInfo, EncoderConfig,
-    ErrorKind, Frame, InputSink, PlatformError, ScreenSource, VideoEncoder,
+    ActionRunner, AdapterId, AudioSource, CaptureConfig, ClipboardProvider, Clock, DisplayId, DisplayInfo,
+    EncoderConfig, ErrorKind, Frame, InputSink, PlatformError, Rect, ScreenSource, VideoEncoder,
 };
 use swapdesk_proto::{
-    Codec, CursorPosition, CursorShapeHeader, Display, DisplayList, ErrorCode, InputEvent, MAX_VIDEO_PAYLOAD, Preset,
-    VideoHeader,
+    Codec, CursorPosition, CursorShapeHeader, Desktop, Display, DisplayList, ErrorCode, InputEvent, MAX_VIDEO_PAYLOAD,
+    Preset, VideoHeader,
 };
 
 use crate::helper_pty::{PtyFactory, PtyServer};
 use crate::outbox::{DEFAULT_BYTES, Limits, Outbox, TryControl, spawn_writer};
 use crate::proxy::{answer_action, answer_clipboard, no_actions, no_clipboard};
+use crate::retry;
+use crate::scale::SizeDebounce;
 
 /// Longest wait of the capture loop for a frame: also how fast `StopVideo` is noticed.
 const CAPTURE_POLL: Duration = Duration::from_millis(50);
 /// Longest wait of the audio loop for a datagram.
 const AUDIO_POLL: Duration = Duration::from_millis(20);
 /// Pause between `reacquire` attempts and after a transient capture error.
+/// How often a held capture looks whether the service let it go on.
+const FENCE_POLL: Duration = Duration::from_millis(20);
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
 /// Queued input batches before the reader waits (input is never dropped).
 const INPUT_QUEUE: usize = 256;
@@ -45,6 +49,11 @@ const INPUT_QUEUE: usize = 256;
 const DEFAULT_OUTBOX: Limits = Limits::new(16, DEFAULT_BYTES);
 /// Disk calls queued toward the files thread before the reader waits.
 const FS_QUEUE: usize = 64;
+/// How often the file server looks at the set of mounted volumes, while it serves files (FILES-UI.md 7.4).
+/// Moves and trashes the helper runs at once, each on a thread of its own (the service allows 4 changes in flight per
+/// session).
+const MAX_MOVES: usize = 8;
+const VOLUME_POLL: Duration = Duration::from_secs(1);
 /// Most cursor updates read per loop turn.
 const CURSOR_BURST: usize = 8;
 /// L4: how long the screen must stand still before one refinement frame is encoded.
@@ -58,6 +67,9 @@ type AudioFactory<A> = Arc<dyn Fn() -> PResult<A> + Send + Sync>;
 type AudioModeFn<A> = Arc<dyn Fn(&A) -> AudioModeKind + Send + Sync>;
 type ClipFactory = Arc<dyn Fn() -> PResult<Box<dyn ClipboardProvider>> + Send + Sync>;
 type ActionFactory = Arc<dyn Fn() -> PResult<Box<dyn ActionRunner>> + Send + Sync>;
+/// Names the desktop that receives input now: `Default` for the user's own, `Secure` for anything else or anything
+/// that cannot be told (F-UNAT-01; Windows: `swapdesk_sys_win::input_desktop`).
+type DesktopProbe = Arc<dyn Fn() -> Desktop + Send + Sync>;
 
 /// Why `run_helper` failed.
 #[derive(Debug)]
@@ -115,6 +127,10 @@ pub struct HelperDeps<S, E, I, A> {
     pty: Option<PtyFactory>,
     /// The disk the service may reach through this helper (the user helper only), or none.
     fs: Option<Arc<swapdesk_files::FsServer>>,
+    /// Hold capture and input after every desktop switch until the service resumes them (ACCOUNTS.md 5.1).
+    fence: bool,
+    /// Reports the input desktop to the service (`DesktopChanged`) before a picture of it is sent, or none.
+    desktop: Option<DesktopProbe>,
 }
 
 impl<S, E, I, A> HelperDeps<S, E, I, A> {
@@ -142,7 +158,18 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
             actions: None,
             pty: None,
             fs: None,
+            fence: false,
+            desktop: None,
         }
+    }
+
+    /// Reports which desktop receives input, to the service, whenever a capture starts and after every desktop switch,
+    /// always before the first picture of the new desktop (F-UNAT-01): the service pauses the sessions that may not see
+    /// a protected desktop. Without it the helper reports nothing and the sessions stay on what the session events say.
+    #[must_use]
+    pub fn with_desktop_probe(mut self, probe: impl Fn() -> Desktop + Send + Sync + 'static) -> Self {
+        self.desktop = Some(Arc::new(probe));
+        self
     }
 
     /// The user's clipboard, built on the thread that serves `ClipChangeCount`, `ClipRead` and `ClipWrite` (stage 42).
@@ -182,6 +209,13 @@ impl<S, E, I, A> HelperDeps<S, E, I, A> {
     /// Serves the C2.4 disk calls (`FsRequest`) of the service with `server`, on a thread of its own so a slow disk
     /// never holds up the capture or the input. Without it every call is answered `IoFailed`.
     #[must_use]
+    /// Holds capture and input after every desktop switch until the service resumes them (the fence of ACCOUNTS.md
+    /// 5.1; the Windows helper of a machine of several accounts).
+    pub fn with_fence(mut self) -> Self {
+        self.fence = true;
+        self
+    }
+
     pub fn with_fs(mut self, server: Arc<swapdesk_files::FsServer>) -> Self {
         self.fs = Some(server);
         self
@@ -274,6 +308,20 @@ fn to_wire(px: i32, size: u32) -> u16 {
     u16::try_from((px * 65535 + span / 2) / span).unwrap_or(u16::MAX)
 }
 
+/// A display of the wire as the input sink takes it; the sinks never read the adapter.
+fn from_proto(d: &Display) -> DisplayInfo {
+    DisplayInfo {
+        id: DisplayId(d.id),
+        name: d.name.clone(),
+        bounds: Rect { x: d.x, y: d.y, width: d.width, height: d.height },
+        scale_milli: d.scale_milli,
+        refresh_mhz: d.refresh_mhz,
+        rotation: d.rotation,
+        primary: d.primary,
+        adapter: AdapterId(0),
+    }
+}
+
 fn to_proto(d: &DisplayInfo) -> Display {
     Display {
         id: d.id.0,
@@ -296,6 +344,8 @@ struct VideoCtl {
     stop: AtomicBool,
     force_key: AtomicBool,
     rate: Mutex<Option<(u32, u16)>>,
+    /// F-VIEW-06: the size the viewer's window wants (0 in either axis = native), set by `SetScale`.
+    scale: Mutex<(u16, u16)>,
 }
 
 struct VideoRun {
@@ -310,6 +360,8 @@ struct StartParams {
     kbps: u32,
     preset: Preset,
     backend: VideoBackend,
+    /// The codec the encoder is configured with and the video header names (F-VIEW-07).
+    codec: Codec,
 }
 
 struct CaptureEnv<S, E> {
@@ -317,9 +369,108 @@ struct CaptureEnv<S, E> {
     encoder: EncoderFactory<E>,
     clock: Arc<dyn Clock>,
     outbox: Outbox,
-    displays: Vec<DisplayInfo>,
+    /// The displays as they were last listed: at the start, and again whenever a video starts or a capture fails,
+    /// because a monitor can be plugged in or a lid closed at any time (see [`CaptureEnv::refresh_displays`]).
+    displays: Mutex<Vec<DisplayInfo>>,
+    /// Where a new display list goes for the input thread. Emptied when the helper ends: the input thread ends only
+    /// when every sender is gone, and this one lives as long as the last capture thread.
+    input_tx: Mutex<Option<SyncSender<InputCmd>>>,
     /// Bumped on every `AccessLost`; the input thread follows the input desktop when it changes.
     desktop_epoch: Arc<AtomicU64>,
+    /// ACCOUNTS.md 5.1: after a desktop switch, capture and input wait for the service.
+    fence: Arc<Fence>,
+    /// The probe of the input desktop and the last value it reported (held across the send, so two capture threads
+    /// never reorder two reports).
+    desktop_probe: Option<DesktopProbe>,
+    desktop_sent: Mutex<Option<Desktop>>,
+}
+
+/// The fence of ACCOUNTS.md 5.1: after every desktop switch the helper captures and injects nothing until the service
+/// let that switch's generation go on (`ResumeCapture`), so a sign-in that turns the desktop into another account's
+/// never reaches the session of the account before. Off (a helper of one account, the tests that do not ask for it):
+/// nothing is held.
+#[derive(Debug, Default)]
+pub(crate) struct Fence {
+    on: bool,
+    /// The generation of the last switch.
+    held: AtomicU64,
+    /// The last generation the service let go on.
+    resumed: AtomicU64,
+}
+
+impl Fence {
+    fn new(on: bool) -> Self {
+        Self { on, ..Self::default() }
+    }
+
+    /// A switch: the new generation, which holds until it is resumed.
+    fn hold(&self) -> u64 {
+        self.held.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn resume(&self, generation: u64) {
+        self.resumed.fetch_max(generation, Ordering::AcqRel);
+    }
+
+    fn is_held(&self) -> bool {
+        self.on && self.held.load(Ordering::Acquire) > self.resumed.load(Ordering::Acquire)
+    }
+}
+
+impl<S: ScreenSource, E> CaptureEnv<S, E> {
+    fn display(&self, id: u16) -> Option<DisplayInfo> {
+        self.displays.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|d| d.id.0 == id).cloned()
+    }
+
+    /// The displays as they were last listed.
+    fn display_list(&self) -> Vec<DisplayInfo> {
+        self.displays.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Lists the displays again. When the list changed since it was last sent (a monitor plugged or unplugged, the
+    /// lid closed, another primary), the service gets the new list, so it stops asking for a display that is gone and
+    /// streams one that exists, and the input thread gets it, so the pointer lands on the right pixels. A listing
+    /// that fails changes nothing. Returns whether the list changed.
+    fn refresh_displays(&self) -> bool {
+        let listed = (self.screen)(DisplayId(0)).and_then(|mut source| {
+            let list = source.displays();
+            source.close();
+            list
+        });
+        let Ok(list) = listed else { return false };
+        {
+            let mut known = self.displays.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *known == list {
+                return false;
+            }
+            known.clone_from(&list);
+        }
+        let wire = DisplayList { displays: list.iter().take(swapdesk_ipc::MAX_DISPLAYS).map(to_proto).collect() };
+        self.outbox.send_control(Message::Displays(wire));
+        // The queue is the input thread's; a full one drops this copy and the next refresh sends it again only if the
+        // list changes again, so the reader is never held up by it.
+        if let Some(tx) = self.input_tx.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let _ = tx.try_send(InputCmd::Displays(list));
+        }
+        true
+    }
+
+    /// Tells the service which desktop receives input now, when that is not what it was last told (F-UNAT-01). The
+    /// message is a control message: it leaves ahead of any picture queued after it.
+    fn report_desktop(&self) {
+        let Some(probe) = &self.desktop_probe else { return };
+        let now = probe();
+        let mut sent = lock(&self.desktop_sent);
+        if *sent != Some(now) {
+            *sent = Some(now);
+            self.outbox.send_control(Message::DesktopChanged(now));
+        }
+    }
+
+    /// The helper is ending: lets go of the input thread's queue.
+    fn close_input(&self) {
+        self.input_tx.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
 }
 
 fn capture_main<S: ScreenSource, E: VideoEncoder>(
@@ -333,14 +484,55 @@ fn capture_main<S: ScreenSource, E: VideoEncoder>(
     }
 }
 
+/// How often a helper that started with no display lists them again.
+const DISPLAY_WAIT: Duration = Duration::from_secs(1);
+
 fn capture_run<S: ScreenSource, E: VideoEncoder>(
     env: &CaptureEnv<S, E>,
     p: StartParams,
     ctl: &VideoCtl,
     ids: &AtomicU32,
 ) -> PResult<()> {
-    let mut source = (env.screen)(DisplayId(p.display))?;
-    source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps })?;
+    let made = retry::retry(
+        || (env.screen)(DisplayId(p.display)),
+        retry::is_unavailable,
+        |failed, e| {
+            if failed == 1 {
+                note(&env.outbox, format!("video {}: waiting for the display ({e})", p.display));
+            }
+        },
+        |pause| retry::sleep_unless(pause, || ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed()),
+    );
+    let mut source = match made {
+        Some(made) => made?,
+        None => return Ok(()),
+    };
+    // Nothing to capture right now (a Mac whose display sleeps lists none) passes by itself: ask again, quietly, until
+    // the display is there. Any other failure ends the start.
+    let opened = retry::retry(
+        || source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps }),
+        retry::is_unavailable,
+        |failed, e| {
+            if failed == 1 {
+                note(&env.outbox, format!("video {}: waiting for the display ({e})", p.display));
+            }
+        },
+        |pause| retry::sleep_unless(pause, || ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed()),
+    );
+    match opened {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            // The display may have gone between the listing and now: the service learns the displays that exist.
+            env.refresh_displays();
+            return Err(e);
+        }
+        None => {
+            source.close();
+            return Ok(());
+        }
+    }
+    // The service hears which desktop this is before the first picture of it.
+    env.report_desktop();
     let result = capture_loop(env, p, ctl, ids, &mut source);
     source.close();
     result
@@ -353,9 +545,9 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     ids: &AtomicU32,
     source: &mut S,
 ) -> PResult<()> {
-    let info = env.displays.iter().find(|d| d.id.0 == p.display);
-    let adapter = info.map(|d| d.adapter).unwrap_or(swapdesk_platform::AdapterId(0));
-    let mut dims = info.map_or((0, 0), |d| (d.bounds.width, d.bounds.height));
+    let info = env.display(p.display);
+    let adapter = info.as_ref().map(|d| d.adapter).unwrap_or(swapdesk_platform::AdapterId(0));
+    let mut dims = info.as_ref().map_or((0, 0), |d| (d.bounds.width, d.bounds.height));
     let (mut fps, mut kbps) = (p.fps, p.kbps);
     let mut encoder: Option<E> = None;
     let mut config: Option<EncoderConfig> = None;
@@ -365,7 +557,18 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     let mut still = Still::default();
     let mut cursor = CursorState::default();
 
+    // F-VIEW-06: the size encoded at follows the viewer's window, at most once per `RESIZE_DEBOUNCE_US`.
+    let mut sizing = SizeDebounce::default();
+    let mut native = (0, 0);
+    // A smaller size the encoder refused: native is encoded instead until the viewer wants another size.
+    let mut refused: Option<(u32, u32)> = None;
+    let mut relist = Throttle::new(RELIST_EVERY);
     while !ctl.stop.load(Ordering::Acquire) && !env.outbox.is_closed() {
+        // F-VIEW-02: a monitor plugged in or out, or another mode, reaches the viewer within seconds even while this
+        // display streams. A list that no longer holds this display ends this thread: the service restarts the video.
+        if relist.due(Instant::now()) && env.refresh_displays() && env.display(p.display).is_none() {
+            return Ok(());
+        }
         if let Some((k, f)) = lock(&ctl.rate).take() {
             (kbps, fps) = (k, f);
             if let (Some(enc), Some(cfg)) = (encoder.as_mut(), config.as_mut())
@@ -394,21 +597,37 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     }
                     continue;
                 };
-                let size_changed = config.is_some_and(|c| c.width != frame.width || c.height != frame.height);
+                // A display that changed size is followed at once; a new window size waits out the debounce. The
+                // encoder scales the captured frame to the configured size (the codec crates' contract).
+                if native != (frame.width, frame.height) {
+                    native = (frame.width, frame.height);
+                    sizing = SizeDebounce::default();
+                }
+                let wanted = wanted_size(native, *lock(&ctl.scale));
+                let (mut width, mut height) = sizing.apply(wanted, env.clock.now().0);
+                if refused == Some((width, height)) {
+                    (width, height) = native;
+                } else {
+                    refused = None;
+                }
+                let size_changed = config.is_some_and(|c| c.width != width || c.height != height);
                 if encoder.is_none() || size_changed {
-                    let cfg = EncoderConfig {
-                        width: frame.width,
-                        height: frame.height,
-                        fps,
-                        kbps,
-                        preset: p.preset,
-                        adapter,
-                    };
+                    let mut cfg = EncoderConfig { width, height, fps, kbps, preset: p.preset, adapter, codec: p.codec };
                     let enc = match encoder.as_mut() {
                         Some(e) => e,
                         None => encoder.insert((env.encoder)(&frame, &cfg, p.backend)?),
                     };
-                    let info = enc.configure(&cfg)?;
+                    let info = match enc.configure(&cfg) {
+                        Ok(info) => info,
+                        // A scaled size the encoder cannot take: the picture stays native rather than stopping.
+                        Err(e) if (width, height) != native => {
+                            note(&env.outbox, format!("video {}: {width}x{height} refused ({e}), native", p.display));
+                            refused = Some((width, height));
+                            (cfg.width, cfg.height) = native;
+                            enc.configure(&cfg)?
+                        }
+                        Err(e) => return Err(e),
+                    };
                     note(&env.outbox, encoder_note(p.display, &cfg, &info, "encoding with"));
                     config = Some(cfg);
                     discontinuity = true;
@@ -428,6 +647,15 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                 still.refined = false;
             }
             Err(e) if e.kind == ErrorKind::AccessLost => {
+                // The fence: the service hears of the switch before any frame of the new desktop, and nothing is
+                // captured until it lets this generation go on.
+                if env.fence.on {
+                    let generation = env.fence.hold();
+                    env.outbox.send_control(Message::CaptureHeld { generation });
+                }
+                // The switch is named before anything else: the probe opens the input desktop on its own, without
+                // the capture having followed it yet.
+                env.report_desktop();
                 env.desktop_epoch.fetch_add(1, Ordering::AcqRel);
                 loop {
                     if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
@@ -436,13 +664,31 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     match source.reacquire() {
                         Ok(()) => break,
                         Err(e) => {
+                            // A desktop this process cannot capture (a secure one, to a helper below SYSTEM) is
+                            // reported as what it is while the capture waits.
+                            env.report_desktop();
                             if !faulted {
                                 platform_fault(&env.outbox, &format!("video {}: reacquire", p.display), &e);
                                 faulted = true;
                             }
+                            // The display itself may be gone (unplugged, the lid closed): the service then gets the
+                            // displays that exist and starts the video on one of them; this thread has nothing left
+                            // to capture.
+                            if env.refresh_displays() && env.display(p.display).is_none() {
+                                return Ok(());
+                            }
                             std::thread::sleep(RETRY_PAUSE);
                         }
                     }
+                }
+                env.report_desktop();
+                while env.fence.is_held() {
+                    if ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(FENCE_POLL);
+                    // A switch that came in meanwhile (the probe reads the desktop now, not the one of the loss).
+                    env.report_desktop();
                 }
                 faulted = false;
                 discontinuity = true;
@@ -459,6 +705,13 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
         }
     }
     Ok(())
+}
+
+/// F-VIEW-06: the size to encode a `native` capture at for the `SetScale` the service sent; native when none was sent
+/// or when it is not smaller than the capture (the display shrank since).
+pub(crate) fn wanted_size(native: (u32, u32), scale: (u16, u16)) -> (u32, u32) {
+    let (w, h) = (u32::from(scale.0), u32::from(scale.1));
+    if w < 2 || h < 2 || (w >= native.0 && h >= native.1) { native } else { (w & !1, h & !1) }
 }
 
 /// Sends what the encoder produced for one display as video frames, keeping the discontinuity and force-keyframe
@@ -490,10 +743,10 @@ fn emit_frames<S: ScreenSource, E: VideoEncoder>(
             encode_us: if encode_us == 0 { e.encode_us } else { encode_us },
             width: e.width,
             height: e.height,
-            codec: Codec::H264,
+            codec: p.codec,
             payload_len,
         };
-        let sent = env.outbox.send_media(Message::VideoFrame { header, payload: Bytes(e.annex_b) });
+        let sent = env.outbox.send_media(Message::VideoFrame { header, payload: Payload::from(e.annex_b) });
         if sent {
             *discontinuity = false;
         } else {
@@ -614,11 +867,57 @@ fn pump_cursor<S: ScreenSource, E>(
 enum InputCmd {
     Events(Vec<InputEvent>),
     ReleaseAll,
+    /// The displays the pointer is mapped onto: this helper's own listing when it captures, or the media helper's list
+    /// the service relays (the pictures the viewer clicks on are of those displays).
+    Displays(Vec<DisplayInfo>),
 }
 
-fn input_main<I: InputSink>(
+/// How often a streaming display lists the displays again (the viewer learns of a change within 2 s, F-VIEW-02).
+const RELIST_EVERY: Duration = Duration::from_secs(1);
+
+/// Says when a periodic job is due: the first time it is asked, then once per period.
+#[derive(Debug)]
+struct Throttle {
+    every: Duration,
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    fn due(&mut self, now: Instant) -> bool {
+        // The first ask is not due: the video that just started listed the displays itself.
+        let last = *self.last.get_or_insert(now);
+        if now.saturating_duration_since(last) >= self.every {
+            self.last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+
+    #[test]
+    fn a_job_is_due_once_per_period_and_not_on_the_first_ask() {
+        let t0 = Instant::now();
+        let mut t = Throttle::new(Duration::from_secs(1));
+        assert!(!t.due(t0), "the start listed the displays already");
+        assert!(!t.due(t0 + Duration::from_millis(999)));
+        assert!(t.due(t0 + Duration::from_secs(1)));
+        assert!(!t.due(t0 + Duration::from_millis(1500)), "the period restarts at the last due");
+        assert!(t.due(t0 + Duration::from_secs(2)));
+    }
+}
+
+fn input_main<I: InputSink, S: ScreenSource, E>(
     factory: &InputFactory<I>,
-    displays: &[DisplayInfo],
+    env: &CaptureEnv<S, E>,
     rx: &Receiver<InputCmd>,
     outbox: &Outbox,
     epoch: &AtomicU64,
@@ -632,7 +931,9 @@ fn input_main<I: InputSink>(
             return;
         }
     };
-    sink.displays_changed(displays);
+    // The displays the sink was last given.
+    let mut known = env.display_list();
+    sink.displays_changed(&known);
     let mut faulted = false;
     let report = |faulted: &mut bool, what: &str, e: &PlatformError| {
         if !*faulted {
@@ -654,6 +955,8 @@ fn input_main<I: InputSink>(
         }
         let mut failed = None;
         match cmd {
+            // The fence: nothing is injected into a desktop the service has not let go on.
+            InputCmd::Events(_) if env.fence.is_held() => {}
             InputCmd::Events(events) => {
                 for event in &events {
                     let r =
@@ -661,6 +964,12 @@ fn input_main<I: InputSink>(
                     if let Err(e) = r {
                         failed = Some(e);
                     }
+                }
+            }
+            InputCmd::Displays(list) => {
+                if list != known {
+                    known = list;
+                    sink.displays_changed(&known);
                 }
             }
             InputCmd::ReleaseAll => {
@@ -698,7 +1007,22 @@ fn audio_main<A: AudioSource>(env: &AudioEnv<A>, exclude_pid: Option<u32>, stop:
         let mut sender = AudioSender::new(source, exclude_pid).map_err(|e| format!("audio: {e}"))?;
         let mut is_muted = muted.load(Ordering::Acquire);
         sender.set_muted(is_muted).map_err(|e| format!("audio: {e}"))?;
-        sender.set_enabled(true).map_err(|e| format!("audio: {e}"))?;
+        // The capture is not there yet (a Mac whose display sleeps): ask again, quietly, until it is.
+        let enabled = retry::retry(
+            || sender.set_enabled(true),
+            |e| matches!(e, swapdesk_audio::AudioError::Platform(p) if retry::is_unavailable(p)),
+            |failed, e| {
+                if failed == 1 {
+                    note(outbox, format!("audio: waiting for the capture ({e})"));
+                }
+            },
+            |pause| retry::sleep_unless(pause, || stop.load(Ordering::Acquire) || outbox.is_closed()),
+        );
+        match enabled {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(format!("audio: {e}")),
+            None => return Ok(()),
+        }
         outbox.send_control(Message::AudioMode { mode: (env.mode)(sender.source()) });
         let result = loop {
             if stop.load(Ordering::Acquire) || outbox.is_closed() {
@@ -794,6 +1118,7 @@ struct Host<S, E, A> {
     pty: PtyServer,
     /// Disk calls toward the files thread; `None` when this helper serves no disk.
     fs_tx: Option<SyncSender<Message>>,
+    fence: Arc<Fence>,
 }
 
 impl<S, E, A> Host<S, E, A>
@@ -806,13 +1131,18 @@ where
     fn handle(&mut self, msg: Message) -> bool {
         match msg {
             Message::Shutdown | Message::Bye { .. } => return false,
-            Message::StartVideo { display, fps, kbps, quality, backend } => {
-                self.start_video(StartParams { display, fps: fps.max(1), kbps, preset: quality, backend });
+            Message::StartVideo { display, fps, kbps, quality, backend, codec } => {
+                self.start_video(StartParams { display, fps: fps.max(1), kbps, preset: quality, backend, codec });
             }
             Message::StopVideo { display } => self.stop_video(display),
             Message::SetRate { display, kbps, fps } => {
                 if let Some(run) = self.videos.get(&display) {
                     *lock(&run.ctl.rate) = Some((kbps, fps.max(1)));
+                }
+            }
+            Message::SetScale { display, width, height } => {
+                if let Some(run) = self.videos.get(&display) {
+                    *lock(&run.ctl.scale) = (width, height);
                 }
             }
             Message::ForceKeyframe { display } => {
@@ -826,9 +1156,15 @@ where
             Message::ReleaseAll => {
                 let _ = self.input_tx.send(InputCmd::ReleaseAll);
             }
+            // The media helper's displays, relayed by the service: the pointer is mapped onto the displays the viewer
+            // sees, whichever helper captured them (D64).
+            Message::Displays(list) => {
+                let _ = self.input_tx.send(InputCmd::Displays(list.displays.iter().map(from_proto).collect()));
+            }
             Message::StartAudio { exclude_pid } => self.start_audio((exclude_pid != 0).then_some(exclude_pid)),
             Message::StopAudio => self.stop_audio(),
             Message::SetAudioMuted { muted } => self.muted.store(muted, Ordering::Release),
+            Message::ResumeCapture { generation } => self.fence.resume(generation),
             m @ (Message::ClipChangeCount { .. }
             | Message::ClipRead { .. }
             | Message::ClipWrite { .. }
@@ -863,7 +1199,12 @@ where
     }
 
     fn start_video(&mut self, p: StartParams) {
-        if !self.capture.displays.iter().any(|d| d.id.0 == p.display) {
+        // The list sent at the start can be hours old: a monitor plugged in since then changed the ids. A session
+        // that starts now must find the displays of now (the service asks again with the list this sends).
+        self.capture.refresh_displays();
+        // An id the system does not list is refused; a list that is empty (a Mac whose display sleeps lists none)
+        // is no answer yet: the capture thread waits for the display.
+        if self.capture.display(p.display).is_none() && !self.capture.display_list().is_empty() {
             fault(&self.outbox, ErrorCode::NotFound, format!("video {}: no such display", p.display));
             return;
         }
@@ -1012,13 +1353,23 @@ where
         actions,
         pty,
         fs,
+        fence: fence_on,
+        desktop: desktop_probe,
     } = deps;
 
+    // A Mac whose display sleeps lists none: the helper starts with an empty list, and the refresh that comes with
+    // the first video start lists them once the display is back.
     let displays = {
-        let mut source = screen(DisplayId(0)).map_err(HelperError::Platform)?;
-        let list = source.displays().map_err(HelperError::Platform)?;
-        source.close();
-        list
+        let listed = screen(DisplayId(0)).and_then(|mut source| {
+            let list = source.displays();
+            source.close();
+            list
+        });
+        match listed {
+            Ok(list) => list,
+            Err(e) if retry::is_unavailable(&e) => Vec::new(),
+            Err(e) => return Err(HelperError::Platform(e)),
+        }
     };
     let wire_list = DisplayList { displays: displays.iter().take(swapdesk_ipc::MAX_DISPLAYS).map(to_proto).collect() };
 
@@ -1027,14 +1378,39 @@ where
     outbox.send_control(Message::Displays(wire_list));
 
     let desktop_epoch = Arc::new(AtomicU64::new(0));
+    let fence = Arc::new(Fence::new(fence_on));
     let (input_tx, input_rx) = sync_channel(INPUT_QUEUE);
+    // The display list is shared by the capture threads and the input thread: either may find it stale.
+    let capture = Arc::new(CaptureEnv {
+        screen,
+        encoder,
+        clock,
+        outbox: outbox.clone(),
+        displays: Mutex::new(displays),
+        input_tx: Mutex::new(Some(input_tx.clone())),
+        desktop_epoch: Arc::clone(&desktop_epoch),
+        fence: Arc::clone(&fence),
+        desktop_probe,
+        desktop_sent: Mutex::new(None),
+    });
+    // Nothing listed at the start (a Mac whose display sleeps): list again every second until a display is there, so
+    // the service learns it and starts the video it could not ask for. Ends with the helper.
+    if capture.display_list().is_empty() {
+        let env = Arc::clone(&capture);
+        let _ = std::thread::Builder::new().name("helper-displays".into()).spawn(move || {
+            while env.display_list().is_empty() && !env.outbox.is_closed() {
+                std::thread::sleep(DISPLAY_WAIT);
+                env.refresh_displays();
+            }
+        });
+    }
     let input_thread = {
         let outbox = outbox.clone();
         let epoch = Arc::clone(&desktop_epoch);
-        let for_input = displays.clone();
+        let env = Arc::clone(&capture);
         std::thread::Builder::new()
             .name("helper-input".into())
-            .spawn(move || input_main(&input, &for_input, &input_rx, &outbox, &epoch))
+            .spawn(move || input_main(&input, &env, &input_rx, &outbox, &epoch))
             .map_err(HelperError::Spawn)?
     };
 
@@ -1054,9 +1430,52 @@ where
             let thread = std::thread::Builder::new()
                 .name("helper-fs".into())
                 .spawn(move || {
-                    while let Ok(msg) = rx.recv() {
-                        if let Some(reply) = server.serve(msg) {
-                            outbox.send_control(reply);
+                    let mut looked = Instant::now();
+                    let moves = Arc::new(AtomicUsize::new(0));
+                    loop {
+                        match rx.recv_timeout(VOLUME_POLL) {
+                            Ok(Message::FsRequest {
+                                req,
+                                call: call @ (swapdesk_ipc::FsCall::Move { .. } | swapdesk_ipc::FsCall::Trash { .. }),
+                            }) => {
+                                // A move across volumes copies every byte, and the shell's delete may stop on a dialog
+                                // (an item it cannot recycle): each on a thread of its own, so it holds no other call
+                                // (a listing, a transfer's read) and the service's wait for it can be long.
+                                if moves.fetch_add(1, Ordering::SeqCst) >= MAX_MOVES {
+                                    moves.fetch_sub(1, Ordering::SeqCst);
+                                    outbox.send_control(Message::FsReply { req, result: Err(ErrorCode::Busy) });
+                                    continue;
+                                }
+                                let spawned = std::thread::Builder::new().name("helper-fs-long".into()).spawn({
+                                    let (server, outbox, moves) =
+                                        (Arc::clone(&server), outbox.clone(), Arc::clone(&moves));
+                                    move || {
+                                        if let Some(reply) = server.serve(Message::FsRequest { req, call }) {
+                                            outbox.send_control(reply);
+                                        }
+                                        moves.fetch_sub(1, Ordering::SeqCst);
+                                    }
+                                });
+                                if spawned.is_err() {
+                                    moves.fetch_sub(1, Ordering::SeqCst);
+                                    outbox.send_control(Message::FsReply { req, result: Err(ErrorCode::IoFailed) });
+                                }
+                            }
+                            Ok(msg) => {
+                                if let Some(reply) = server.serve(msg) {
+                                    outbox.send_control(reply);
+                                }
+                            }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
+                        // About once a second the volumes are looked at again; a change goes to the service, which
+                        // pushes a fresh `VolumesList` to the viewer.
+                        if server.publishes_volumes() && looked.elapsed() >= VOLUME_POLL {
+                            looked = Instant::now();
+                            if server.poll_volumes_changed() {
+                                outbox.send_control(Message::FsVolumesChanged);
+                            }
                         }
                     }
                 })
@@ -1067,7 +1486,7 @@ where
     };
 
     let mut host = Host {
-        capture: Arc::new(CaptureEnv { screen, encoder, clock, outbox: outbox.clone(), displays, desktop_epoch }),
+        capture,
         audio_env: Arc::new(AudioEnv { source: audio, mode: audio_mode, outbox: outbox.clone() }),
         videos: HashMap::new(),
         frame_ids: HashMap::new(),
@@ -1080,6 +1499,7 @@ where
         outbox: outbox.clone(),
         pty: PtyServer::new(pty, role, &outbox).map_err(HelperError::Spawn)?,
         fs_tx,
+        fence,
     };
 
     let mut result = loop {
@@ -1109,11 +1529,13 @@ where
         muted: _,
         pty,
         fs_tx,
+        fence: _,
     } = host;
     // The terminal server holds a clone of the outbox too: the writer ends only when every clone is gone.
     drop(pty);
     drop(host_outbox);
     drop(input_tx);
+    capture.close_input();
     drop(extras_tx);
     drop(fs_tx);
     if let Some(t) = fs_thread {
@@ -1139,13 +1561,13 @@ where
 }
 
 #[cfg(test)]
-#[path = "helper_refine_tests.rs"]
 mod refine_tests;
 
 #[cfg(test)]
-#[path = "helper_stall_tests.rs"]
 mod stall_tests;
 
 #[cfg(test)]
-#[path = "helper_rate_tests.rs"]
 mod rate_tests;
+
+#[cfg(test)]
+mod codec_tests;

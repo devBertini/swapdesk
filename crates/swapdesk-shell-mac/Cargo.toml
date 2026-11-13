@@ -19,30 +19,37 @@ unimplemented = "warn"
 
 [dependencies]
 swapdesk-ui = { path = "../swapdesk-ui" }
+swapdesk-paint = { path = "../swapdesk-paint" }
+swapdesk-termview = { path = "../swapdesk-termview" }
+# The Trash and the volumes of this computer (`disk`), shared with the agent's file server.
+swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+accesskit.workspace = true
 objc2.workspace = true
 dispatch2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSLocale", "NSNotification", "NSObject", "NSString", "NSTimer", "NSTimeZone", "NSRange", "NSRunLoop", "NSDate", "NSThread", "NSURL", "NSValue"]
+features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSLocale", "NSNotification", "NSObject", "NSString", "NSTimer", "NSTimeZone", "NSUserDefaults", "NSRange", "NSRunLoop", "NSDate", "NSThread", "NSURL", "NSValue", "NSFileManager", "NSError"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true
 features = [
-    "std", "objc2-quartz-core", "objc2-core-foundation", "objc2-core-graphics", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle",
-    "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols",
-    "NSAppearance", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
-    "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
-    "NSPanel", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
+    "std", "objc2-quartz-core", "objc2-core-foundation", "objc2-core-graphics", "NSTextContainer", "NSLayoutManager", "NSParagraphStyle", "NSAttributedString",
+    "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols",
+    "NSAppearance", "NSApplication", "NSBitmapImageRep", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSCursor",
+    "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSOpenPanel",
+    "NSPanel", "NSPasteboard", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
     "NSStackView", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
-    "NSView", "NSVisualEffectView", "NSWindow", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
+    "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
+    # Drag and drop with the Finder (FILES-UI.md 4.2, 4.3).
+    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSPasteboardItem",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 workspace = true
-features = ["std", "CGImage"]
+features = ["std", "CGContext", "CGImage", "CGEvent", "CGEventTypes"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 workspace = true

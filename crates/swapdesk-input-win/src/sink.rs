@@ -2,7 +2,7 @@
 //! release-all, pointer placement), independent of how the events reach the OS. [`crate::WinInputSink`] is this sink
 //! over `SendInput`; the tests below run it over a recording injector.
 
-use crate::plan::{MouseInput, RawInput, key_input, text_inputs, wheel_inputs};
+use crate::plan::{CharKey, MouseInput, RawInput, TypingState, key_input, text_inputs_on, wheel_inputs};
 use crate::pointer::{display_pixel, union_of, virtual_normalized};
 use std::collections::BTreeSet;
 use swapdesk_keys::{PAGE_KEYBOARD, modifier};
@@ -20,7 +20,16 @@ pub trait Injector {
     fn lock_state(&self) -> Option<u8>;
     /// Moves the calling thread to the input desktop.
     fn follow_input_desktop(&mut self) -> Result<()>;
+    /// The key of the keyboard layout in use that types `c` with no modifier but Shift; `None` when there is none or
+    /// it cannot be read (the character then goes as Unicode).
+    fn key_for_char(&self, _c: char) -> Option<CharKey> {
+        None
+    }
 }
+
+/// The Shift keys (usage, set-1 scan code) and the other modifiers, for typing text over what the host holds.
+const SHIFTS: [(u16, u8); 2] = [(0xE1, 0x2A), (0xE5, 0x36)];
+const OTHER_MODIFIERS: [u16; 6] = [0xE0, 0xE2, 0xE3, 0xE4, 0xE6, 0xE7];
 
 pub(crate) fn invalid(op: &'static str, detail: String) -> PlatformError {
     PlatformError { kind: ErrorKind::InvalidInput, op, os_code: None, detail }
@@ -168,7 +177,21 @@ impl<I: Injector> InputSink for InputSinkCore<I> {
                 self.apply_key(*usage_page, *usage, *down, *modifiers, *locks)
             }
             InputEvent::Text(text) => {
-                let inputs: Vec<RawInput> = text_inputs(text).into_iter().map(RawInput::Key).collect();
+                // Caps Lock decides the case of a letter typed by its key: read fresh, since the host's own keyboard
+                // may have toggled it since the last key record.
+                let locks = self.injector.lock_state();
+                if locks.is_some() {
+                    self.known_locks = locks;
+                }
+                let held = |u: u16| self.held_keys.contains(&(PAGE_KEYBOARD, u));
+                let host = TypingState {
+                    caps: locks.map(|l| l & 1 != 0),
+                    shifts_held: SHIFTS.iter().filter(|(u, _)| held(*u)).map(|(_, code)| *code).collect(),
+                    other_modifier_held: OTHER_MODIFIERS.iter().any(|u| held(*u)),
+                };
+                let injector = &self.injector;
+                let inputs: Vec<RawInput> =
+                    text_inputs_on(text, &|c| injector.key_for_char(c), &host).into_iter().map(RawInput::Key).collect();
                 if inputs.is_empty() {
                     return Ok(());
                 }
@@ -258,6 +281,8 @@ pub(crate) mod tests {
         pub locks: Option<u8>,
         pub fail: bool,
         pub reads: std::cell::Cell<u32>,
+        /// The layout `key_for_char` answers from; `None`: no layout (every character goes as Unicode).
+        pub layout: Option<fn(char) -> Option<CharKey>>,
     }
 
     impl Injector for Recorder {
@@ -277,6 +302,9 @@ pub(crate) mod tests {
         }
         fn follow_input_desktop(&mut self) -> Result<()> {
             Ok(())
+        }
+        fn key_for_char(&self, c: char) -> Option<CharKey> {
+            self.layout.and_then(|l| l(c))
         }
     }
 
@@ -424,6 +452,29 @@ pub(crate) mod tests {
         assert_eq!(s.injector().batches[0].len(), 8);
         s.apply(&InputEvent::Text(String::new())).unwrap();
         assert_eq!(s.injector().batches.len(), 1, "empty text sends nothing");
+    }
+
+    /// The defect of 11/11: text typed from a Mac reached this computer as Unicode records, and the `f` one (0x66 in
+    /// its scan code field) was swallowed by a laptop's hotkey hook that showed its microphone. A letter the host's
+    /// layout has goes as its key, with the Shift the viewer holds taken into account and the host's Caps Lock read.
+    #[test]
+    fn text_goes_as_the_layouts_keys_where_it_has_them_over_the_shift_the_viewer_holds() {
+        fn layout(c: char) -> Option<CharKey> {
+            c.eq_ignore_ascii_case(&'f').then_some(CharKey { code: 0x21, shift: c == 'F', letter: true })
+        }
+        let mut s = InputSinkCore::new(Recorder { locks: Some(0), layout: Some(layout), ..Recorder::default() });
+        s.apply(&InputEvent::Text("f".into())).unwrap();
+        assert_eq!(all(&s), vec![scan(0x21, false, false), scan(0x21, false, true)]);
+        s.injector_mut().batches.clear();
+        // Shift went as a key from the viewer, then "F" and "ç" as text.
+        s.apply(&key(0xE1, true, modifier::LSHIFT, 0)).unwrap();
+        s.injector_mut().batches.clear();
+        s.apply(&InputEvent::Text("Fç".into())).unwrap();
+        let unicode = |up| RawInput::Key(KbInput { kind: KbKind::Unicode(0xE7), up });
+        assert_eq!(all(&s), vec![scan(0x21, false, false), scan(0x21, false, true), unicode(false), unicode(true)]);
+        let reads = s.injector().reads.get();
+        s.apply(&InputEvent::Text("f".into())).unwrap();
+        assert_eq!(s.injector().reads.get(), reads + 1, "Caps Lock is read for each text record");
     }
 
     #[test]

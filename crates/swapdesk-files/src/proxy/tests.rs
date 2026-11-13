@@ -109,7 +109,7 @@ fn a_file_is_received_through_the_pipe_and_never_overwrites() {
             inc.write((i * 256 * 1024) as u64, chunk).unwrap();
         }
         let path = inc.finish(&sha).unwrap();
-        let expect = if round == 0 { "report.bin" } else { "report (1).bin" };
+        let expect = if round == 0 { "report.bin" } else { "report (2).bin" };
         assert_eq!(path.file_name().unwrap().to_str().unwrap(), expect, "files never overwrite");
         assert_eq!(std::fs::read(home.join("Downloads").join("Swapdesk").join(expect)).unwrap(), body);
     }
@@ -120,6 +120,41 @@ fn a_file_is_received_through_the_pipe_and_never_overwrites() {
     assert_eq!(left.len(), 2, "no part or meta file is left: {left:?}");
     drop(link);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// Only Windows and the Mac have a mark of the web (plat.rs).
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_file_the_viewer_saves_carries_the_mark_of_the_web() {
+    // The viewer's disk (the UI's token roots) is where a download lands: the finished file is marked as coming from
+    // another machine (Windows: the Zone.Identifier stream, ZoneId=3; Mac: the quarantine attribute), and it is marked
+    // before the last rename, so the finished name is never seen unmarked.
+    let base = temp("motw");
+    let recv = base.join("recv");
+    std::fs::create_dir_all(&recv).unwrap();
+    let tokens = Arc::new(Tokens::new());
+    let r = tokens.receive_into(recv.clone());
+    let link = Link::start(FsServer::new(Roots::Tokens(Arc::clone(&tokens))));
+    let fs: Arc<dyn Fs> = Arc::new(link.fs());
+    let body = data(300_000);
+    let sha: [u8; 32] = digest(&SHA256, &body).as_ref().try_into().unwrap();
+    let dir = PathBuf::from(format!("r{r}"));
+    let mut inc = Incoming::open_with(Arc::clone(&fs), &dir, "setup.exe", body.len() as u64, 7).unwrap();
+    inc.write(0, &body).unwrap();
+    let path = inc.finish(&sha).unwrap();
+    assert_eq!(path, dir.join("setup.exe"));
+    assert_eq!(std::fs::read(recv.join("setup.exe")).unwrap(), body, "the bytes are the file's own");
+    assert!(crate::plat::is_marked_downloaded(&recv.join("setup.exe")), "the received file is marked");
+    // A file the host receives from the viewer is the user's own transfer to their own machine: not marked.
+    let home = temp("motw-host");
+    let host_link = home_link(&home, None);
+    let host_fs: Arc<dyn Fs> = Arc::new(host_link.fs());
+    let mut inc = Incoming::open_with(host_fs, Path::new(""), "up.bin", body.len() as u64, 7).unwrap();
+    inc.write(0, &body).unwrap();
+    inc.finish(&sha).unwrap();
+    assert!(!crate::plat::is_marked_downloaded(&home.join("up.bin")));
+    drop((link, host_link));
+    let _ = (std::fs::remove_dir_all(&base), std::fs::remove_dir_all(&home));
 }
 
 #[test]
@@ -389,4 +424,60 @@ fn a_wrong_shaped_answer_is_an_io_failure() {
     let none = PipeFs::new(Arc::new(|| None));
     assert_eq!(none.part_len(Path::new(""), "a").err(), Some(ErrorCode::IoFailed));
     none.close_read(1);
+}
+
+#[test]
+fn a_move_outlasts_the_generic_call_timeout_and_gets_its_true_answer() {
+    // The generic limit is short, the move's is long: a copy that takes longer than the generic limit must answer what
+    // the helper did, not `IoFailed` while the helper carries on.
+    let pending = Arc::new(Pending::new());
+    let answerer = Arc::clone(&pending);
+    let caller = PipeCaller::new(79, Arc::clone(&pending), move |m| {
+        if let Message::FsRequest { req, call } = m {
+            let answerer = Arc::clone(&answerer);
+            let slow = matches!(call, FsCall::Move { .. });
+            std::thread::spawn(move || {
+                // The move takes four times the generic limit; everything else is never answered.
+                if slow {
+                    std::thread::sleep(Duration::from_millis(200));
+                    answerer.complete(req, Ok(FsAnswer::Done));
+                }
+            });
+        }
+        true
+    })
+    .with_timeout(Duration::from_millis(50))
+    .with_move_timeout(Duration::from_secs(10));
+    let mv = FsCall::Move { from_dir: Text("a".into()), name: Text("n".into()), to_dir: Text("b".into()) };
+    assert_eq!(caller.call(mv).ok(), Some(FsAnswer::Done), "a long move is not a failed one");
+    assert_eq!(
+        caller.call(FsCall::PartLen { dir: Text("".into()), name: Text("a".into()) }).err(),
+        Some(ErrorCode::IoFailed),
+        "every other call keeps the generic limit"
+    );
+}
+
+#[test]
+fn a_receive_folder_that_climbs_out_or_is_relative_names_nothing() {
+    let base = temp("recv-climb");
+    let recv = base.join("recv");
+    std::fs::create_dir_all(&recv).unwrap();
+    std::fs::create_dir_all(base.join("outside")).unwrap();
+    let tokens = Arc::new(Tokens::new());
+    let good = tokens.receive_into(recv.clone());
+    let climbing = tokens.receive_into(recv.join("..").join("outside"));
+    let relative = tokens.receive_into(PathBuf::from("recv"));
+    let link = Link::start(FsServer::new(Roots::Tokens(Arc::clone(&tokens))));
+    let fs = link.fs();
+    assert!(fs.part_create(Path::new(&format!("r{good}")), "ok.txt").is_ok(), "a plain folder still works");
+    for (what, token) in [("climbing", climbing), ("relative", relative)] {
+        assert_eq!(
+            fs.part_create(Path::new(&format!("r{token}")), "x.txt").err(),
+            Some(ErrorCode::InvalidName),
+            "{what}"
+        );
+    }
+    assert!(!base.join("outside").join("x.txt.swapdesk-part").exists());
+    drop(link);
+    let _ = std::fs::remove_dir_all(&base);
 }

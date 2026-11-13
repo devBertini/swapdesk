@@ -92,12 +92,14 @@ impl Write for PipeWriter {
 // ---------- fakes of the host's desktop and of the viewer's decoder ----------
 
 /// A synthetic screen of 64x48 whose cursor starts at the middle and then follows the pointer events the user helper's
-/// sink received.
+/// sink received. After each move the pointer is hidden, as an application does while its user types: Windows then
+/// reports the corner of the display with `visible` off.
 struct FollowingScreen {
     inner: SyntheticScreen,
     input: RecordingInputSink,
     seen: usize,
     started: bool,
+    hide_next: bool,
 }
 
 impl ScreenSource for FollowingScreen {
@@ -118,12 +120,17 @@ impl ScreenSource for FollowingScreen {
             self.started = true;
             return Some(CursorUpdate { display: DisplayId(0), x: 32, y: 24, visible: true, shape: None });
         }
+        if self.hide_next {
+            self.hide_next = false;
+            return Some(CursorUpdate { display: DisplayId(0), x: 0, y: 0, visible: false, shape: None });
+        }
         let events = self.input.events();
         while self.seen < events.len() {
             let event = &events[self.seen];
             self.seen += 1;
             if let InputEvent::Pointer { x, y, .. } = event {
                 let (x, y) = (i32::from(*x) * 64 / 65535, i32::from(*y) * 48 / 65535);
+                self.hide_next = true;
                 return Some(CursorUpdate { display: DisplayId(0), x, y, visible: true, shape: None });
             }
         }
@@ -276,6 +283,7 @@ impl Machine {
                         input: for_screen.clone(),
                         seen: 0,
                         started: false,
+                        hide_next: false,
                     })
                 },
                 |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
@@ -327,8 +335,12 @@ fn ui(
     let serve = std::thread::spawn(move || {
         let (mut reader, mut writer) = (FrameReader::new(server_end.reader), FrameWriter::new(server_end.writer));
         Handshake::server(&mut reader, &mut writer, 1).expect("server handshake");
-        let info =
-            ConnInfo { session_id: 1, user: UserRef { id: "S-1-5-21-1".into(), name: "tester".into() }, admin: false };
+        let info = ConnInfo {
+            session_id: 1,
+            user: UserRef { id: "S-1-5-21-1".into(), name: "tester".into() },
+            admin: false,
+            can_elevate: false,
+        };
         let _ = hub.serve(reader, writer, info);
     });
     let backend = ServiceBackend::start_with_sink(client_end.reader, client_end.writer, Arc::new(NoWake), 4321, sink)
@@ -371,6 +383,10 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         pair_timeout: Duration::from_secs(30),
         session_timeout: Duration::from_secs(40),
         grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
+        chat_say: Some(dir.join("chat-host-say")),
+        swap: false,
+        reconnect: false,
+        audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),
@@ -379,6 +395,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         dir.join("anchor"),
     );
     viewer_cfg.pair_timeout = Duration::from_secs(30);
+    viewer_cfg.chat = Some(dir.clone());
 
     let (host_result, viewer_result) = std::thread::scope(|scope| {
         let host_task = scope.spawn(|| {
@@ -393,6 +410,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         });
         // The orchestrator: codes cross, then the go.
         let (mut sent_host, mut sent_viewer, mut sent_go, mut sent_anchor) = (false, false, false, false);
+        let (mut sent_got, mut sent_say) = (false, false);
         let end = Instant::now() + Duration::from_secs(90);
         while !(host_task.is_finished() && viewer_task.is_finished()) && Instant::now() < end {
             if !sent_viewer && let Some(code) = field(&viewer_lines, "VIEWER_CODE ") {
@@ -418,6 +436,16 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
                 std::fs::write(dir.join("go"), "go").expect("write");
                 sent_go = true;
             }
+            // The chat proof: what the host's interface received goes back to the viewer, and the text the viewer picked
+            // for the host's reply goes into the host's file.
+            if !sent_got && let Some(text) = field(&host_lines, "HOST_CHAT_GOT ") {
+                std::fs::write(dir.join("chat-host-got"), text).expect("write");
+                sent_got = true;
+            }
+            if !sent_say && let Ok(text) = std::fs::read_to_string(dir.join("chat-host-say-text")) {
+                std::fs::write(dir.join("chat-host-say"), text).expect("write");
+                sent_say = true;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         (host_task.join().expect("host task"), viewer_task.join().expect("viewer task"))
@@ -439,7 +467,21 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
     assert!(report.audio_datagrams >= 1, "audio: {report:?}");
     assert_eq!(report.pointer_moves, 8);
     assert!(report.pointer_echo_samples >= 3, "the host's cursor followed: {report:?}");
+    // The walk spans 20 px each way: an update that hides the pointer is not a position and adds nothing to it.
+    assert!(report.pointer_max_deviation_px <= 24, "a hidden pointer counted as a position: {report:?}");
     assert!(report.ended_clean && report.forgotten);
+    assert_eq!(report.chat_failed, None, "chat proof");
+    {
+        let l = viewer_lines.lock().unwrap();
+        for marker in ["CHAT_TO_HOST_OK", "CHAT_READ_BY_HOST_OK"] {
+            assert!(l.iter().any(|x| x == marker), "{marker} in {l:?}");
+        }
+        assert!(l.iter().any(|x| x.starts_with("CHAT_FROM_HOST_OK")), "CHAT_FROM_HOST_OK in {l:?}");
+        let h = host_lines.lock().unwrap();
+        let got = h.iter().find_map(|x| x.strip_prefix("HOST_CHAT_GOT ")).expect("the host's interface got the text");
+        assert!(got.contains('\u{e7}'), "the accents arrived intact: {got}");
+        assert!(h.iter().any(|x| x == "HOST_CHAT_SENT"), "{h:?}");
+    }
     // Nothing stays paired on either side.
     assert_eq!(host.trust.read(|s| s.devices.len()), 0, "host forgot the viewer");
     assert_eq!(viewer.trust.read(|s| s.devices.len()), 0, "viewer forgot the host");
@@ -469,6 +511,10 @@ fn different_codes_end_the_pairing_without_a_device() {
         pair_timeout: Duration::from_secs(20),
         session_timeout: Duration::from_secs(5),
         grants: Permissions::NONE.with(Permission::Control),
+        chat_say: None,
+        swap: false,
+        reconnect: false,
+        audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),

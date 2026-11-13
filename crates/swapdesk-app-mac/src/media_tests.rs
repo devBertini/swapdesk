@@ -27,7 +27,10 @@ const STREAM_B: &[u8] = include_bytes!("../../swapdesk-codec-mac/tests/fixtures/
 
 const SESSION: u64 = 7;
 const DISPLAY: u16 = 3;
-const WAIT: Duration = Duration::from_secs(10);
+/// How long a step may take. Alone these tests decode their first four frames in 1.6 s (2.5 s with the setup); in the
+/// whole Mac suite, while macOS assesses every freshly built test binary (syspolicyd near 100% CPU), the same step
+/// took over 10 s even with the media tests one at a time (11/11/2026). Nothing in the product waits on this bound.
+const WAIT: Duration = Duration::from_secs(30);
 
 fn units(stream: &'static [u8]) -> Vec<&'static [u8]> {
     access_units(stream).into_iter().map(|r| &stream[r]).collect()

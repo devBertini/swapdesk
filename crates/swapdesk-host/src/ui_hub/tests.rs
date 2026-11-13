@@ -19,10 +19,12 @@ use swapdesk_ipc::{
 use swapdesk_platform::MonoMicros;
 use swapdesk_proto::{Desktop, InputEvent, Intent, Os, PermissionSet};
 use swapdesk_trust::{
-    AuditEvent, DeviceId, Identity, MemoryAudit, PairedDevice, SystemWallClock, TrustHandle, UserRef, device_id_hex,
+    AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, Identity, MemoryAudit, PairedDevice, SystemWallClock,
+    TrustHandle, UserRef, device_id_hex,
 };
 use swapdesk_ui::MsgKey;
 
+use super::extras::ENTRY_ID_BIT;
 use super::presence::{FakePresence, PresencePeer};
 use super::store::{MachineSettings, SETTINGS_NAME, load_settings};
 use super::{ConnInfo, DevOptions, HubParams, SystemHooks, UiHub};
@@ -31,10 +33,17 @@ use crate::helper_tests::Passthrough;
 use crate::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use crate::testpipe::{PipeWriter, duplex_blocking};
 
+mod accounts;
+mod banner;
 mod clip_actions;
+mod connect;
+mod elevation;
 mod extras;
 mod files;
+mod grants_sync;
+mod lock_end;
 mod presence;
+mod resume;
 mod security;
 mod terminal;
 
@@ -67,11 +76,23 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 #[derive(Default)]
 struct TestHooks {
     awake: Mutex<Vec<bool>>,
+    /// The counts `hosted_sessions` was told, in order (the host's display is kept on by it).
+    hosted: Mutex<Vec<usize>>,
+    /// The console sessions `lock_screen` was asked to lock, in order.
+    locks: Mutex<Vec<u32>>,
 }
 
 impl SystemHooks for TestHooks {
     fn keep_awake(&self, on: bool) {
         lock(&self.awake).push(on);
+    }
+
+    fn lock_screen(&self, console_session: u32) {
+        lock(&self.locks).push(console_session);
+    }
+
+    fn hosted_sessions(&self, live: usize) {
+        lock(&self.hosted).push(live);
     }
 }
 
@@ -80,7 +101,9 @@ fn user(sid: &str) -> UserRef {
 }
 
 fn info(admin: bool) -> ConnInfo {
-    ConnInfo { session_id: 1, user: user("S-1-5-21-1"), admin }
+    // An elevated token belongs to an administrator account; a plain one is a standard account here (the
+    // elevation tests build the filtered administrator token themselves).
+    ConnInfo { session_id: 1, user: user("S-1-5-21-1"), admin, can_elevate: admin }
 }
 
 /// One machine: a core, its hub and the stores a test looks into.
@@ -114,7 +137,16 @@ impl Machine {
     }
 
     /// `ports`: fixed (session, pairing) ports on 127.0.0.1, for a peer reached through a typed address.
+    /// A machine whose session endpoint announces protocol minor `minor` (0 plays a host of 1.0).
+    fn with_minor(name: &str, minor: u16) -> Self {
+        Self::build_full(name, FakeNetInterfaces::new(Vec::new()), true, None, minor)
+    }
+
     fn build_at(name: &str, interfaces: FakeNetInterfaces, dev: bool, ports: Option<(u16, u16)>) -> Self {
+        Self::build_full(name, interfaces, dev, ports, swapdesk_proto::PROTO_MINOR)
+    }
+
+    fn build_full(name: &str, interfaces: FakeNetInterfaces, dev: bool, ports: Option<(u16, u16)>, minor: u16) -> Self {
         let identity = Arc::new(Identity::generate(0).expect("identity"));
         let secrets = Arc::new(MemorySecretStore::new());
         let trust = TrustHandle::open(secrets.clone()).expect("trust");
@@ -155,6 +187,7 @@ impl Machine {
         let mut cfg = ServiceConfig::new(name, Os::Windows, "11 24H2", deps);
         let session_port = ports.map_or(0, |p| p.0);
         cfg.session_port = session_port;
+        cfg.proto_minor = minor;
         let cfg = if dev { cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port)) } else { cfg };
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
@@ -197,10 +230,17 @@ impl Machine {
                 s.devices.push(d);
             })
             .expect("store");
+        // A real pairing goes through the hub, which then listens and announces (ACCOUNTS.md 6).
+        self.hub.hub.update_receiving();
     }
 
-    /// Shows `other` on the network at its session address.
+    /// Shows `other` on the network at its session address, with a record of 1.0 (no `minor` key).
     fn sees(&self, other: &Machine, pairing_open: bool) {
+        self.sees_minor(other, pairing_open, 0);
+    }
+
+    /// As `sees`, with the protocol minor `other`'s record carries.
+    fn sees_minor(&self, other: &Machine, pairing_open: bool, proto_minor: u16) {
         let SocketAddr::V4(addr) = other.session_addr() else { unreachable!() };
         self.presence.set(vec![PresencePeer {
             device_id: other.id(),
@@ -210,6 +250,7 @@ impl Machine {
             addrs: vec![*addr.ip()],
             session_port: addr.port(),
             pair_port: other.hub.pair_local_addrs().first().map_or(0, SocketAddr::port),
+            proto_minor,
         }]);
     }
 
@@ -233,7 +274,7 @@ impl Machine {
         let input = sink.clone();
         let deps = tune(HelperDeps::new(
             |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
-            |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+            |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
             move || Ok(input.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
             clock,
@@ -348,12 +389,17 @@ impl Client {
     }
 
     /// The first message `f` picks, from what was set aside or what arrives within `WAIT`; the others stay.
-    fn take<T>(&mut self, what: &str, mut f: impl FnMut(&Ipc) -> Option<T>) -> T {
+    fn take<T>(&mut self, what: &str, f: impl FnMut(&Ipc) -> Option<T>) -> T {
+        self.take_within(WAIT, what, f)
+    }
+
+    /// [`Client::take`] with a wait of `limit`.
+    fn take_within<T>(&mut self, limit: Duration, what: &str, mut f: impl FnMut(&Ipc) -> Option<T>) -> T {
         if let Some(i) = self.backlog.iter().position(|m| f(m).is_some()) {
             let m = self.backlog.remove(i);
             return f(&m).expect("picked");
         }
-        let end = Instant::now() + WAIT;
+        let end = Instant::now() + limit;
         loop {
             let left = end.saturating_duration_since(Instant::now());
             match self.inbox.recv_timeout(left) {
@@ -377,6 +423,30 @@ impl Client {
             Some(code) => Err(code),
             None => Ok(ReplyBody::decode(op, &body).expect("the body decodes")),
         }
+    }
+
+    /// The reply to a `Connect` (the id of its entry, which comes at once).
+    fn entry_of(&mut self, req: u32) -> u64 {
+        let ReplyBody::SessionId(entry) = self.reply(req, CONNECT_OP).expect("the connect is taken up") else {
+            panic!("not an entry id")
+        };
+        assert_ne!(entry & ENTRY_ID_BIT, 0, "an entry id has the entry bit: {entry:#x}");
+        entry
+    }
+
+    /// The session a `Connect` opened: the id of the first `Active` this UI hears of, after the entry's reply. The
+    /// notification stays in the backlog for a test that looks at it too.
+    fn connected(&mut self, req: u32) -> u64 {
+        let entry = self.entry_of(req);
+        let (id, msg) = self.take("the session's Active", |m| match m {
+            Ipc::UiNotify(Notify::Session { session_id, state: SessionState::Active { .. }, .. }) => {
+                Some((*session_id, m.clone()))
+            }
+            _ => None,
+        });
+        assert_ne!(id, entry, "the session has its own id, not the entry's");
+        self.backlog.insert(0, msg);
+        id
     }
 
     fn call(&mut self, op: UiOp) -> Result<ReplyBody, ApiCode> {
@@ -460,6 +530,7 @@ fn this_device_network_devices_and_the_manual_address() {
             addrs: vec![Ipv4Addr::new(192, 168, 0, 20)],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         },
         PresencePeer {
             device_id: stranger_id,
@@ -469,6 +540,7 @@ fn this_device_network_devices_and_the_manual_address() {
             addrs: vec![Ipv4Addr::new(192, 168, 0, 21)],
             session_port: 47820,
             pair_port: 47821,
+            proto_minor: 0,
         },
     ]);
     // The presence listener pushed the new list.
@@ -507,12 +579,17 @@ fn the_production_shape_refuses_loopback_ports_and_off_link_addresses() {
     let mut ui = m.client(info(false));
     let add = |ui: &mut Client, text: &str| ui.call(UiOp::AddByAddress { ipv4: text.into() });
     assert_eq!(add(&mut ui, "127.0.0.1").unwrap_err(), ApiCode::Refused, "loopback");
-    assert_eq!(add(&mut ui, "127.0.0.1:47830").unwrap_err(), ApiCode::Invalid, "a port is a development option");
+    assert_eq!(add(&mut ui, "127.0.0.1:47830").unwrap_err(), ApiCode::Refused, "loopback, with a port or without");
+    assert_eq!(add(&mut ui, "192.168.1.50:banana").unwrap_err(), ApiCode::Invalid, "a port is a number");
+    assert_eq!(add(&mut ui, "192.168.1.50:70000").unwrap_err(), ApiCode::Invalid, "a port fits 16 bits");
     assert_eq!(add(&mut ui, "192.168.1.20").unwrap_err(), ApiCode::Refused, "this machine's own address");
     assert_eq!(add(&mut ui, "10.9.9.9").unwrap_err(), ApiCode::Refused, "off-link");
     assert_eq!(add(&mut ui, "192.168.1.50 ").map(|_| ()).err(), None, "on-link, surrounding space ignored");
     let ReplyBody::Devices(list) = ui.call(UiOp::ListDevices).unwrap() else { panic!() };
     assert_eq!(list.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["addr:192.168.1.50"]);
+    // A Swapdesk on another session port (an account's own port, a development instance) is named with it.
+    assert_eq!(device_of(add(&mut ui, "192.168.1.50:47830")).id, "addr:192.168.1.50:47830");
+    assert_eq!(add(&mut ui, "10.9.9.9:47830").unwrap_err(), ApiCode::Refused, "off-link, whatever the port");
     drop(ui);
     m.finish();
 }
@@ -597,11 +674,9 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
         ApiCode::NeedsAdmin
     );
     assert_eq!(m.trust.read(|s| s.devices[0].grants_here), PermissionSet::CONTROL, "nothing changed");
-    // D10: entry without a prompt is the same.
-    assert_eq!(
-        plain.call(UiOp::Connect { device_id: id.clone(), intent: Intent::Control, unattended: true }).unwrap_err(),
-        ApiCode::NeedsAdmin
-    );
+    // Entry without a prompt is no longer an administrator's alone (D10's check on `Connect` went with ACCOUNTS.md
+    // 8.1): any account's connect is taken, the flag is not read, and the host decides.
+    assert!(plain.call(UiOp::Connect { device_id: id.clone(), intent: Intent::Control, unattended: true }).is_ok());
 
     // What needs no administrator goes through.
     let view_files = (PermissionSet::VIEW.union(PermissionSet::FILES)).bits();
@@ -648,6 +723,57 @@ fn grants_are_validated_and_unattended_needs_an_administrator_connection() {
     assert_eq!(plain.call(UiOp::ForgetDevice { device_id: id }).unwrap_err(), ApiCode::NotFound);
 
     drop((plain, admin));
+    m.finish();
+    other.finish();
+}
+
+#[test]
+fn activity_names_a_removed_device_by_no_name_never_by_its_key() {
+    // Defect after 1.0: a forgotten device's lines showed its key in hex. The service now sends an empty name and the
+    // interface writes "Dispositivo removido" in its own language.
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    let mut plain = m.client(info(false));
+    for event in [AuditEvent::Paired, AuditEvent::Swapped] {
+        m.audit.append(AuditEntry { time_ms: 1_000, device: DeviceRef::Known(other.id()), event, duration_s: None });
+    }
+    // A control session from the other machine: one line, with the duration its end recorded.
+    let started = AuditEvent::SessionStarted {
+        direction: swapdesk_trust::Direction::Incoming,
+        mode: swapdesk_proto::GrantMode::Prompted,
+        granted: PermissionSet::VIEW.union(PermissionSet::CONTROL),
+        desktop: Desktop::Default,
+    };
+    let device = DeviceRef::Known(other.id());
+    m.audit.append(AuditEntry { time_ms: 2_000, device, event: started, duration_s: None });
+    let ended = AuditEvent::SessionEnded(swapdesk_proto::ErrorCode::NoError);
+    m.audit.append(AuditEntry { time_ms: 122_000, device, event: ended, duration_s: Some(120) });
+    let lines = |c: &mut Client| {
+        let ReplyBody::Activity(l) = c.call(UiOp::ActivityList { before_ms: None, limit: 10 }).unwrap() else {
+            panic!()
+        };
+        l
+    };
+    let before = lines(&mut plain);
+    assert_eq!(before.len(), 3, "{before:?}");
+    assert_eq!(MsgKey::ALL[usize::from(before[0].what.key)], MsgKey::AuditControlled);
+    assert_eq!(
+        (before[0].at_ms, before[0].duration_s),
+        (2_000, Some(120)),
+        "the line sits at the start, with the end's duration"
+    );
+    assert!(before.iter().all(|l| l.device_name == "other-pc"), "{before:?}");
+
+    assert!(plain.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    let after = lines(&mut plain);
+    assert_eq!(after.len(), 3);
+    for l in &after {
+        assert_eq!(l.device_name, "", "a removed device has no name on the wire: {l:?}");
+        assert!(l.what.args.iter().all(|a| a.0.is_empty()), "nor in its line: {l:?}");
+    }
+
+    drop(plain);
     m.finish();
     other.finish();
 }
@@ -801,7 +927,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert_eq!(incoming.preset, ALL.bits(), "the stored grants are the preset");
     assert!(incoming.timeout_s > 0 && incoming.timeout_s <= 20);
     // A reserved bit is invalid whatever the decision; a UI that is not the console's may not answer.
-    let mut stranger = host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false });
+    let mut stranger =
+        host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false, can_elevate: false });
     assert_eq!(
         stranger
             .call(UiOp::AnswerIncoming {
@@ -832,9 +959,7 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
             .is_ok()
     );
 
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     assert_ne!(session_id, 0);
 
     // Both UIs see it active: the viewer as Viewer, the host's banner as Host.
@@ -851,6 +976,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     });
     assert_eq!((role, granted), (Role::Host, ALL.bits()));
     wait_for("keep awake on the host", || (lock(&host.hooks.awake).last() == Some(&true)).then_some(()));
+    wait_for("one hosted session on the host", || (lock(&host.hooks.hosted).last() == Some(&1)).then_some(()));
+    assert!(lock(&viewer.hooks.hosted).is_empty(), "a viewer hosts nothing");
 
     // Video reaches the viewer's UI as ViewerVideo with the session id; the display list as a notification.
     let header = viewer_ui.take("a ViewerVideo", |m| match m {
@@ -907,6 +1034,17 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert!(viewer_ui.call(UiOp::SetViewOnly { session_id, on: false }).is_ok());
     assert!(viewer_ui.call(UiOp::SelectDisplay { session_id, display: 0 }).is_ok());
     assert!(viewer_ui.call(UiOp::SetQuality { session_id, quality: swapdesk_proto::Preset::Text }).is_ok());
+    // F-VIEW-06: the viewer's area is accepted for the session and for no other.
+    assert!(
+        viewer_ui.call(UiOp::SetViewSize { session_id, width: 32, height: 24, max_fps: 60 }).is_ok(),
+        "SetViewSize answers Done"
+    );
+    assert_eq!(
+        viewer_ui
+            .call(UiOp::SetViewSize { session_id: session_id + 1, width: 32, height: 24, max_fps: 60 })
+            .unwrap_err(),
+        ApiCode::NotFound
+    );
     assert!(viewer_ui.call(UiOp::SetAudio { session_id, on: true }).is_ok());
     assert_eq!(
         viewer_ui.call(UiOp::SelectDisplay { session_id: session_id + 1, display: 0 }).unwrap_err(),
@@ -928,6 +1066,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert_eq!(viewer_ui.notify("Ended on the viewer", ended), None);
     assert_eq!(host_ui.notify("Ended on the host", ended), None);
     wait_for("keep awake off", || (lock(&host.hooks.awake).last() == Some(&false)).then_some(()));
+    wait_for("no hosted session left", || (lock(&host.hooks.hosted).last() == Some(&0)).then_some(()));
+    assert_eq!(*lock(&host.hooks.hosted), vec![1, 0]);
     wait_for("the end in the host's audit", || {
         host.audit.entries().iter().any(|e| matches!(e.event, AuditEvent::SessionEnded(_))).then_some(())
     });
@@ -963,17 +1103,27 @@ fn with_no_ui_at_the_host_a_request_is_declined_at_once() {
     let mut viewer_ui = viewer.client(info(false));
 
     let started = Instant::now();
-    let err =
-        viewer_ui.call(UiOp::Connect { device_id: host.hex(), intent: Intent::View, unattended: false }).unwrap_err();
-    assert!(
-        matches!(err, ApiCode::NotPermitted | ApiCode::Refused),
-        "{err:?}: viewer {:?} host {:?}",
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::View, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let why = viewer_ui.notify("the end of the entry", |n| match n {
+        Notify::Session { session_id, state: SessionState::NotOpened { why }, .. } if *session_id == entry => {
+            Some(*why)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        why,
+        swapdesk_ipc::ConnectWhy::NobodyPresent,
+        "viewer {:?} host {:?}",
         viewer.log.lines(),
         host.log.lines()
     );
     assert!(started.elapsed() < Duration::from_secs(5), "declined without waiting for the 20 s");
     assert!(
-        viewer_ui.nothing_within(Duration::from_millis(100), |m| matches!(m, Ipc::UiNotify(Notify::Session { .. }))),
+        viewer_ui.nothing_within(Duration::from_millis(100), |m| matches!(
+            m,
+            Ipc::UiNotify(Notify::Session { state: SessionState::Active { .. }, .. })
+        )),
         "no session was announced"
     );
 
@@ -1144,11 +1294,317 @@ fn a_just_paired_device_gets_a_valid_preset_that_the_accept_takes() {
             .is_ok(),
         "the preset as it came is accepted"
     );
-    let ReplyBody::SessionId(session_id) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-        panic!()
-    };
+    let session_id = viewer_ui.connected(req);
     assert!(viewer_ui.call(UiOp::Disconnect { session_id }).is_ok());
     drop((host_ui, viewer_ui));
     host.finish();
     viewer.finish();
+}
+
+/// ACCOUNTS.md 15 S2: the three new records of 14.2 read back what they wrote and refuse what breaks their rules.
+#[test]
+fn accounts_index_account_settings_and_peer_ports_round_trip() {
+    use super::store::{AccountEntry, AccountSettings, AccountsIndex, PeerPort, PeerPorts};
+    use swapdesk_proto::Wire;
+    let index = AccountsIndex {
+        accounts: vec![
+            AccountEntry { sid: "S-1-5-21-1-2-3-1001".into(), slot: 0, created_ms: 1_700_000_000_000 },
+            AccountEntry { sid: "S-1-5-21-1-2-3-1002".into(), slot: 1, created_ms: 1_700_000_100_000 },
+        ],
+    };
+    assert_eq!(AccountsIndex::decode(&index.encode().unwrap()).unwrap(), index);
+    let mut twice = index.clone();
+    twice.accounts[1].slot = 0;
+    assert!(AccountsIndex::decode(&twice.encode().unwrap()).is_err(), "a slot twice");
+    let mut big_slot = index.clone();
+    big_slot.accounts[1].slot = 32;
+    assert!(AccountsIndex::decode(&big_slot.encode().unwrap()).is_err(), "slot 32 does not exist");
+
+    let settings =
+        AccountSettings { name: "Sala · Alex".into(), receive: false, lock_on_end: true, keep_awake: false };
+    assert_eq!(AccountSettings::decode(&settings.encode().unwrap()).unwrap(), settings);
+    assert_eq!(
+        AccountSettings::new("Sala"),
+        AccountSettings { name: "Sala".into(), receive: true, lock_on_end: false, keep_awake: true }
+    );
+
+    let ports = PeerPorts {
+        entries: vec![
+            PeerPort { device_id: [1; 16], session_port: 47822, seen_ms: 5 },
+            PeerPort { device_id: [2; 16], session_port: 47820, seen_ms: 6 },
+        ],
+    };
+    assert_eq!(PeerPorts::decode(&ports.encode().unwrap()).unwrap(), ports);
+    let mut dup = ports.clone();
+    dup.entries[1].device_id = [1; 16];
+    assert!(PeerPorts::decode(&dup.encode().unwrap()).is_err(), "a device twice");
+    // A record of another format is refused, never misread.
+    let mut bytes = ports.encode().unwrap();
+    bytes[0] = 9;
+    assert!(PeerPorts::decode(&bytes).is_err());
+
+    // A damaged account.bin reads as the defaults, with a trace line.
+    let secrets = MemorySecretStore::new();
+    let log = LogCapture::new();
+    swapdesk_platform::SecretStore::store(&secrets, super::store::ACCOUNT_SETTINGS_NAME, b"junk").unwrap();
+    let read = super::store::load_account_settings(&secrets, "Sala", &log);
+    assert_eq!(read, AccountSettings::new("Sala"));
+    assert!(log.lines().iter().any(|l| l.text.contains("account.bin")));
+}
+
+/// ACCOUNTS.md 6 and 15 S3: an account with no pairing neither listens on the approved addresses nor announces its
+/// record; it does while its pairing mode is open, and from its first pairing until its last one is forgotten.
+#[test]
+fn an_account_without_pairings_neither_listens_nor_announces() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    assert!(!m.core.receiving(), "nothing paired: no listening");
+    assert_eq!(m.presence.announced(), Some(false), "and no record");
+    let mut ui = m.client(info(false));
+    let ReplyBody::PairingId(id) = ui.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    assert!(m.core.receiving() && m.presence.announced() == Some(true), "pairing mode open");
+    assert!(ui.call(UiOp::PairCancel { pairing_id: id }).is_ok());
+    assert!(!m.core.receiving() && m.presence.announced() == Some(false), "pairing mode closed");
+    m.pin(&other, PermissionSet::CONTROL);
+    assert!(m.core.receiving() && m.presence.announced() == Some(true), "a pairing");
+    assert!(ui.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    assert!(!m.core.receiving() && m.presence.announced() == Some(false), "the last pairing forgotten");
+    drop(ui);
+    m.finish();
+    other.finish();
+}
+
+/// ACCOUNTS.md 5.2 and 15 S3: in production a typed `address:port` reaches an account on another slot, and pairing by
+/// that address goes to the next port; port 0 is not a port.
+#[test]
+fn a_typed_address_with_a_port_is_accepted_in_production_and_pairs_on_the_next_port() {
+    let m = Machine::build("sala", FakeNetInterfaces::windows_typical(), false);
+    let mut ui = m.client(info(false));
+    let typed = device_of(ui.call(UiOp::AddByAddress { ipv4: "192.168.1.50:47822".into() }));
+    assert_eq!(typed.id, "addr:192.168.1.50:47822");
+    let manual = lock(&m.hub.hub.manual).last().cloned().expect("kept");
+    assert_eq!((manual.session_port, manual.pair_port()), (47822, 47823), "pairs on the next port");
+    assert_eq!(
+        ui.call(UiOp::AddByAddress { ipv4: "192.168.1.50:0".into() }).unwrap_err(),
+        ApiCode::Invalid,
+        "port 0 is not a port"
+    );
+    drop(ui);
+    m.finish();
+}
+
+/// ACCOUNTS.md 5.2: a paired device seen on a port other than the default is dialled there when discovery no longer
+/// shows it, also after a restart (the port is kept in `peers.bin`), and forgetting it forgets the port.
+#[test]
+fn a_paired_device_out_of_discovery_is_dialled_at_its_last_seen_port() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL);
+    m.trust.update(|s| s.devices[0].last_addrs = vec![[192, 168, 1, 50]]).unwrap();
+    let id = other.id();
+    assert_eq!(m.hub.hub.address_of(&id).map(|a| a.port()), Some(crate::service::DEFAULT_SESSION_PORT));
+    // Discovery shows it on slot 1 of its machine.
+    let mut seen = other_record(&other);
+    seen.session_port = 47822;
+    seen.addrs = vec![Ipv4Addr::new(192, 168, 1, 50)];
+    m.presence.set(vec![seen]);
+    assert_eq!(m.hub.hub.address_of(&id), Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 50), 47822)));
+    // Out of discovery: the last address at the last port.
+    m.presence.set(Vec::new());
+    assert_eq!(m.hub.hub.address_of(&id), Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 50), 47822)));
+    // Kept on disk: a fresh read of the store finds it.
+    let kept = super::store::load_peer_ports(&*m.secrets);
+    assert_eq!(kept.entries.iter().find(|e| e.device_id == id).map(|e| e.session_port), Some(47822));
+    // Forget: the port goes with the device.
+    let mut ui = m.client(info(false));
+    assert!(ui.call(UiOp::ForgetDevice { device_id: other.hex() }).is_ok());
+    assert!(super::store::load_peer_ports(&*m.secrets).entries.is_empty());
+    drop(ui);
+    m.finish();
+    other.finish();
+}
+
+fn other_record(other: &Machine) -> PresencePeer {
+    PresencePeer {
+        device_id: other.id(),
+        name: "other-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::LOCALHOST],
+        session_port: crate::service::DEFAULT_SESSION_PORT,
+        pair_port: crate::service::DEFAULT_PAIR_PORT,
+        proto_minor: 0,
+    }
+}
+
+/// ACCOUNTS.md 9.2: an elevation the viewer asked for is written to the host's activity as `Elevated`, shown as
+/// "Controle elevado".
+#[test]
+fn an_elevation_is_written_to_the_activity_as_elevated_control() {
+    let m = Machine::new("sala");
+    let other = Machine::new("other");
+    m.pin(&other, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+    let mut plain = m.client(info(false));
+    let granted = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+    m.hub.host_ui().event(swapdesk_session::HostEvent::Elevated { device: other.id(), session_id: 7, granted });
+    let ReplyBody::Activity(lines) = plain.call(UiOp::ActivityList { before_ms: None, limit: 10 }).unwrap() else {
+        panic!()
+    };
+    assert_eq!(MsgKey::ALL[usize::from(lines[0].what.key)], MsgKey::AuditElevated, "{lines:?}");
+    assert!(m.audit.entries().iter().any(|e| e.event == AuditEvent::Elevated));
+    drop(plain);
+    m.finish();
+    other.finish();
+}
+
+/// Review of S3/S4, M6 (ACCOUNTS.md 5.5): when another program holds the account's pairing port, pairing does not
+/// open (a peer's "Parear" would reach that program), and it says so instead of opening on what is left.
+#[test]
+fn pairing_does_not_open_when_its_port_is_held_by_another_program() {
+    // The squatter takes its port from the system and keeps it: no window where another test could take it first.
+    let squatter = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let pair_port = squatter.local_addr().unwrap().port();
+    let session_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+    let m = Machine::build_at("sala", FakeNetInterfaces::new(Vec::new()), true, Some((session_port, pair_port)));
+    let mut ui = m.client(info(false));
+    assert_eq!(ui.call(UiOp::PairOpen { device_id: None }).unwrap_err(), ApiCode::Busy);
+    assert!(m.log.lines().iter().any(|l| l.text.contains("held by another program")));
+    drop(squatter);
+    assert!(ui.call(UiOp::PairOpen { device_id: None }).is_ok(), "free again: pairing opens");
+    drop(ui);
+    m.finish();
+}
+
+/// An HTTP client that never answers (the hub's update tests need no download).
+struct NoNet;
+
+impl swapdesk_update::http::HttpGet for NoNet {
+    fn get(
+        &self,
+        _url: &str,
+        _max: u64,
+        _sink: &mut dyn std::io::Write,
+        _progress: &mut dyn FnMut(u64),
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), swapdesk_update::http::HttpError> {
+        Err(swapdesk_update::http::HttpError::Network("no network in this test".into()))
+    }
+}
+
+struct NoSaved;
+
+impl swapdesk_update::manager::SavedStore for NoSaved {
+    fn load(&self) -> swapdesk_update::manager::Saved {
+        swapdesk_update::manager::Saved::default()
+    }
+
+    fn save(&self, _saved: &swapdesk_update::manager::Saved) {}
+}
+
+struct NoFolder;
+
+impl swapdesk_update::manager::UpdateFolder for NoFolder {
+    fn create(&self, _name: &str) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        Err(std::io::Error::other("no folder in this test"))
+    }
+
+    fn remove(&self, _name: &str) {}
+
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        name.into()
+    }
+
+    fn free_bytes(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// UPDATES.md 10 and 13 (U4): the updater through the hub: the view, the install refused from a UI that is not the
+/// console's and with a live session unless confirmed, the switch only from the console, and nothing without an
+/// updater (a development instance).
+#[test]
+fn the_updater_answers_through_the_hub_with_its_refusals() {
+    use swapdesk_update::manager::{Setup, UpdateManager};
+    let m = Machine::new("sala");
+    let mut ui = m.client(info(false));
+    assert_eq!(ui.call(UiOp::UpdateGet).unwrap_err(), ApiCode::NotFound, "no updater: a development instance");
+    let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let setup = Setup {
+        running: swapdesk_update::Version::parse("1.1.0").unwrap(),
+        target: "windows-x64".into(),
+        base: "https://example.invalid/releases".into(),
+        keys: Vec::new(),
+        dev: false,
+        first_delay_ms: 60_000,
+    };
+    let manager = UpdateManager::new(setup, Arc::new(NoNet), Arc::new(NoSaved), Arc::new(NoFolder), 0);
+    let hooks = super::update::UpdaterHooks {
+        now_ms: Box::new(|| 0),
+        jitter_ms: Box::new(|| 0),
+        live_sessions: {
+            let live = Arc::clone(&live);
+            Box::new(move || live.load(std::sync::atomic::Ordering::SeqCst))
+        },
+        ready: Box::new(|_, _| Ok(())),
+    };
+    m.hub.set_updater(super::update::Updater::new(manager, hooks));
+    let ReplyBody::Update(view) = ui.call(UiOp::UpdateGet).unwrap() else { panic!() };
+    assert_eq!((view.running.as_str(), view.check_on), ("1.1.0", true));
+    let install = || UiOp::UpdateInstall { version: "1.1.1".into(), end_sessions: false };
+    // Not the console's interface: refused, as the switch is.
+    let mut other = m.client(ConnInfo { session_id: 2, ..info(false) });
+    assert_eq!(other.call(install()).unwrap_err(), ApiCode::NotPermitted);
+    assert_eq!(other.call(UiOp::UpdateSetCheck { on: false }).unwrap_err(), ApiCode::NotPermitted);
+    // So are the cancel and the dismissal: another account's interface neither ends the console user's download nor
+    // writes `dismissed` for the whole machine.
+    assert_eq!(other.call(UiOp::UpdateCancel).unwrap_err(), ApiCode::NotPermitted);
+    assert_eq!(other.call(UiOp::UpdateDismiss { version: "1.1.1".into() }).unwrap_err(), ApiCode::NotPermitted);
+    let ReplyBody::Update(after) = ui.call(UiOp::UpdateGet).unwrap() else { panic!() };
+    assert_eq!(after.dismissed, None, "the refused dismissal wrote nothing");
+    // The console's, with a live session and no confirmation: refused until "Encerrar e atualizar".
+    live.store(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ui.call(install()).unwrap_err(), ApiCode::Busy);
+    // The switch from the console: told to the interfaces.
+    assert!(ui.call(UiOp::UpdateSetCheck { on: false }).is_ok());
+    let told = ui.notify("UpdateChanged", |n| match n {
+        Notify::UpdateChanged(v) => Some(v.check_on),
+        _ => None,
+    });
+    assert!(!told);
+    drop((ui, other));
+    m.finish();
+}
+
+/// D65 (owner, 12/11): "Bloquear este dispositivo" blocks the device behind the address by its MAC, read from the
+/// neighbour table; the reply is the list as it now is; Desbloquear removes it; a device whose MAC cannot be learned
+/// is not blocked (its address would later belong to someone else).
+#[test]
+fn a_device_is_blocked_by_its_mac_and_unblocked_from_the_list() {
+    struct Table;
+    impl swapdesk_platform::NeighborTable for Table {
+        fn cached_mac(&self, peer: std::net::IpAddr) -> Option<[u8; 6]> {
+            (peer == std::net::IpAddr::from([192, 168, 0, 57])).then_some([0x02, 0x5a, 0xd0, 0, 0, 0x39])
+        }
+    }
+    let m = Machine::new("sala");
+    let mut ui = m.client(info(false));
+    assert!(matches!(ui.call(UiOp::ListBlocked), Ok(ReplyBody::Blocked(l)) if l.is_empty()));
+    let block = |ipv4: &str| UiOp::BlockDevice { ipv4: ipv4.into(), name: String::new() };
+    assert_eq!(ui.call(block("192.168.0.57")).unwrap_err(), ApiCode::NotFound, "no neighbour table: nothing known");
+
+    m.hub.set_neighbors(Arc::new(Table));
+    let Ok(ReplyBody::Blocked(list)) = ui.call(block("192.168.0.57")) else { panic!("the list after blocking") };
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].mac.as_str(), list[0].last_ipv4.as_str()), ("02:5a:d0:00:00:39", "192.168.0.57"));
+    assert!(m.trust.is_blocked_mac(&[0x02, 0x5a, 0xd0, 0, 0, 0x39]), "kept in the trust handle (blocked.bin)");
+    assert_eq!(ui.call(block("192.168.0.58")).unwrap_err(), ApiCode::NotFound, "a MAC that cannot be learned");
+    assert_eq!(ui.call(block("not an address")).unwrap_err(), ApiCode::Invalid);
+
+    let Ok(ReplyBody::Blocked(list)) = ui.call(UiOp::UnblockDevice { mac: "02:5A:D0:00:00:39".into() }) else {
+        panic!("the list after unblocking")
+    };
+    assert!(list.is_empty() && !m.trust.any_blocked_mac());
+    assert_eq!(ui.call(UiOp::UnblockDevice { mac: "02:5a:d0:00:00:39".into() }).unwrap_err(), ApiCode::NotFound);
+    drop(ui);
+    m.finish();
 }

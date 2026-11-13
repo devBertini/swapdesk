@@ -15,8 +15,12 @@ use swapdesk_platform::TraceSink;
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Command, Ticket, UiBackend, UiEvent};
 
-/// The window's backend while the drive owns the real one: it queues nothing and reports nothing.
-pub struct Silent;
+/// The window's backend while the drive owns the real one: it sends nothing, and it hands the window a copy of every
+/// event the drive drained, so the window shows what a person would see (the host banner among it).
+#[derive(Default)]
+pub struct Silent {
+    mirror: std::sync::Mutex<Vec<UiEvent>>,
+}
 
 impl UiBackend for Silent {
     fn send(&self, _command: Command) -> Ticket {
@@ -24,21 +28,44 @@ impl UiBackend for Silent {
     }
 
     fn drain(&self) -> Vec<UiEvent> {
-        Vec::new()
+        std::mem::take(&mut *self.mirror.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+/// The drive's backend: the real one, with a copy of each drained event put in the window's [`Silent`] and the
+/// window woken for it.
+pub struct Tee {
+    pub real: Arc<ServiceBackend>,
+    pub window: Arc<Silent>,
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl UiBackend for Tee {
+    fn send(&self, command: Command) -> Ticket {
+        self.real.send(command)
+    }
+
+    fn drain(&self) -> Vec<UiEvent> {
+        let events = self.real.drain();
+        if !events.is_empty() {
+            self.window.mirror.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(events.iter().cloned());
+            (self.wake)();
+        }
+        events
     }
 }
 
 #[cfg(not(feature = "dev-harness"))]
-pub fn start(_dir: &Path, _backend: Arc<ServiceBackend>, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(_dir: &Path, _data_dir: &Path, _backend: Tee, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
     Err("--drive-host needs a build with the dev-harness feature (scripts/mac/build-app.sh --dev-harness)".into())
 }
 
 #[cfg(feature = "dev-harness")]
-pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(dir: &Path, data_dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), String> {
     use std::io::Write;
     use std::time::Duration;
 
-    use swapdesk_crossdrive::{HostConfig, host_drive};
+    use swapdesk_crossdrive::{AuditCheck, HostConfig, host_drive};
     use swapdesk_platform::Level;
     use swapdesk_ui::{Permission, Permissions};
 
@@ -49,11 +76,30 @@ pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let term = dir.join("term").exists();
+    let mut grants = Permissions::NONE
+        .with(Permission::Control)
+        .with(Permission::Audio)
+        .with(Permission::Clipboard)
+        .with(Permission::Files);
+    if term {
+        grants = grants.with(Permission::Terminal);
+    }
     let cfg = HostConfig {
         peer_code: dir.join("peer-code.txt"),
         pair_timeout: Duration::from_secs(150),
         session_timeout: Duration::from_secs(180),
-        grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
+        grants,
+        // The chat proof: the host sends the text the orchestrator writes to `<dir>/chat-host-say`. The reconnect proof's
+        // switch is below: the script logs the session's drop and return.
+        chat_say: Some(dir.join("chat-host-say")),
+        // Three switches the orchestrator sets by creating a file in the folder before it starts the app. `swap`: the
+        // host accepts the swap the viewer asks for. `term`: the host grants the terminal and reads its own audit file
+        // once the session is over (the quick action of that proof runs toward a Mac, so its line is waited for).
+        swap: dir.join("swap").exists(),
+        // `reconnect`: the viewer's link drops for about 10 s; the host waits for it to take the lost session back.
+        reconnect: dir.join("reconnect").exists(),
+        audit: term.then(|| AuditCheck { dir: data_dir.to_path_buf(), wait_action: true }),
     };
     std::thread::Builder::new()
         .name("swapdesk-drive-host".into())
@@ -66,7 +112,10 @@ pub fn start(dir: &Path, backend: Arc<ServiceBackend>, trace: Arc<dyn TraceSink>
                 let _ = f.flush();
             };
             log("HOST_DRIVE_START");
-            let (out, result) = host_drive(&*backend, &cfg, &log);
+            let (out, result) = host_drive(&backend, &cfg, &log);
+            // What this host handed to the system for the viewer's keys: the keyboard proof compares it with what
+            // the application in front received.
+            log(&format!("HOST_KEYS posted_presses={}", swapdesk_input_mac::posted_key_presses()));
             let code = match (&result, out.session_active && out.session_ended) {
                 (Ok(()), true) => {
                     log("HOST_RESULT PASS");

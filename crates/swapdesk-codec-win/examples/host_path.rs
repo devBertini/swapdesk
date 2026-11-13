@@ -1,6 +1,6 @@
 //! What the host's video path does on the display it would stream: the encoder `swapdesk-helper` builds for it
 //! (`H264Encoder`, backend Auto, the capture device), the family and MFT it lands on for each viewer preset, and what goes
-//! out at 60 fps while the rate control raises the bitrate by 5 % every second (`RateConfig` defaults: start 20 Mbps,
+//! out at 60 fps while the rate control raises the bitrate by 30 % every second (`RateConfig` defaults: start 20 Mbps,
 //! ceiling 80 Mbps), as `SetRate` does in a session. The Media Foundation backend rows show the path a failed NVENC
 //! open falls back to.
 //!
@@ -121,6 +121,7 @@ mod run {
                         kbps: START_KBPS,
                         preset,
                         adapter: display.adapter,
+                        codec: swapdesk_platform::Codec::H264,
                     };
                     let row = format!(
                         "| {backend:?} | {preset:?} | {} |",
@@ -151,7 +152,7 @@ mod run {
                     for seq in 0..total {
                         let due = start + Duration::from_nanos(1_000_000_000 / FPS * seq);
                         if seq > 0 && seq % FPS == 0 && kbps < MAX_KBPS {
-                            kbps = ((f64::from(kbps) * 1.05).round() as u32).min(MAX_KBPS);
+                            kbps = ((f64::from(kbps) * 1.3).round() as u32).min(MAX_KBPS);
                             if let Err(e) = enc.set_rate(kbps, FPS as u16) {
                                 errors.push(format!("set_rate {kbps}: {e}"));
                             }
@@ -310,8 +311,15 @@ mod run {
         }
         for (label, options, on) in runs {
             let mut enc = H264Encoder::new(options);
-            let cfg =
-                EncoderConfig { width: w, height: h, fps: 60, kbps: START_KBPS, preset: Preset::Auto, adapter: on };
+            let cfg = EncoderConfig {
+                width: w,
+                height: h,
+                fps: 60,
+                kbps: START_KBPS,
+                preset: Preset::Auto,
+                adapter: on,
+                codec: swapdesk_platform::Codec::H264,
+            };
             let info = match enc.configure(&cfg) {
                 Ok(i) => i,
                 Err(e) => {

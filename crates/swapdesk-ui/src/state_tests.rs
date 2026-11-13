@@ -2,7 +2,7 @@
 
 use crate::api::*;
 use crate::interact::{ControlId, UiRole};
-use crate::mock::{AIR, DESKTOP, MAC, Scenario};
+use crate::mock::{AIR, DESKTOP, ENTRY, MAC, Scenario};
 use crate::state::*;
 use crate::strings::MsgKey;
 
@@ -84,17 +84,24 @@ fn connect_buttons_send_the_right_intent() {
     let mut s = base();
     let a = s.activate(ControlId::ViewOnly);
     assert_eq!(a.commands, vec![Command::Connect { device_id: MAC.into(), intent: Intent::View, unattended: false }]);
+    // The card owns the page now: its buttons are gone until it closes.
+    s.track(Ticket(8), &a.commands[0]);
+    s.apply(UiEvent::Reply { ticket: Ticket(8), result: Ok(Reply::SessionId(ENTRY)) });
+    s.activate(ControlId::ConnectCancel);
+    s.apply(session_event(ENTRY, MAC, SessionState::Ended { reason: None }));
     let a = s.activate(ControlId::Control);
     assert_eq!(
         a.commands,
         vec![Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false }]
     );
-    // The SessionId reply opens a connecting session, and the viewer window exists.
+    // The SessionId reply names the entry, which is not a session: no viewer window yet.
     let t = Ticket(9);
     s.track(t, &a.commands[0]);
-    s.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::SessionId(77)) });
-    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
-    assert_eq!(s.viewer_session().unwrap().state, SessionState::Connecting);
+    s.apply(UiEvent::Reply { ticket: t, result: Ok(Reply::SessionId(ENTRY)) });
+    assert_eq!(s.windows(), vec![WindowKind::Main]);
+    assert!(s.viewer_session().is_none());
+    assert_eq!(s.sessions().len(), 1);
+    assert_eq!(s.sessions()[0].id, ENTRY);
 }
 
 #[test]
@@ -231,6 +238,48 @@ fn remembering_unattended_is_a_separate_admin_checked_grant() {
     assert_eq!(s.activate(ControlId::Decline).commands.len(), 1);
 }
 
+/// The owner's defect of 11/11: a Mac paired again (nothing stored for it), the request card accepted with control
+/// and "entrar sem perguntar" ticked; the stored grant was the old store plus Unattended, so View alone, and every
+/// later entry without a prompt could only watch. What is remembered is what this card permitted, plus Unattended.
+#[test]
+fn remembering_unattended_stores_what_the_card_permitted_not_the_old_store() {
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE;
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::Allow(Permission::Terminal));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::Accept);
+    let Command::AnswerIncoming { decision: Decision::Accept { grants: accepted }, .. } = &a.commands[0] else {
+        panic!("{:?}", a.commands)
+    };
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert_eq!(*grants, accepted.with(Permission::Unattended), "the card's grants and Unattended");
+    assert!(grants.has(Permission::Control));
+
+    // "Só deixar ver" with the box ticked remembers watching without a prompt, nothing more.
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE;
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::ViewOnlyAccept);
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert_eq!(*grants, Permissions::NONE.with(Permission::Unattended));
+
+    // What the store held besides (the administrator terminal, granted before) stays.
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    let mut devices = s.devices().to_vec();
+    devices[0].grants_here = Permissions::NONE.with(Permission::AdminTerminal);
+    s.apply(UiEvent::DevicesChanged(devices));
+    s.activate(ControlId::RememberUnattended);
+    let a = s.activate(ControlId::Accept);
+    let Command::SetGrants { grants, .. } = &a.commands[1] else { panic!("{:?}", a.commands) };
+    assert!(
+        grants.has(Permission::AdminTerminal) && grants.has(Permission::Control) && grants.has(Permission::Unattended)
+    );
+}
+
 #[test]
 fn incoming_requests_close_by_event_and_countdown() {
     let mut s = Scenario::PedidoConexao.prepared_state();
@@ -263,16 +312,24 @@ fn the_elevation_step_runs_its_phases() {
     let mut s = Scenario::Elevacao.prepared_state();
     assert_eq!(s.dialog(WindowKind::Main), Some(DialogKind::Elevation));
     let a = s.activate(ControlId::DialogPrimary);
-    let Command::Elevate { action } = a.commands[0].clone() else { panic!() };
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
     assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
     // The wrong action's result is ignored.
-    s.apply(UiEvent::ElevationResult { action: ElevatedAction::OpenAdminTerminal { session_id: 1 }, result: Ok(()) });
+    s.apply(UiEvent::ElevationResult {
+        action: ElevatedAction::OpenAdminTerminal { session_id: 1 },
+        run,
+        result: Ok(()),
+    });
     assert!(s.elevation().is_some());
-    s.apply(UiEvent::ElevationResult { action: action.clone(), result: Err(ApiError::new(ApiCode::Refused)) });
+    s.apply(UiEvent::ElevationResult { action: action.clone(), run, result: Err(ApiError::new(ApiCode::Refused)) });
     assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Refused));
     let a = s.activate(ControlId::DialogPrimary);
-    assert!(matches!(a.commands[0], Command::Elevate { .. }), "retry");
-    s.apply(UiEvent::ElevationResult { action, result: Ok(()) });
+    let Command::Elevate { run: retry, .. } = a.commands[0].clone() else { panic!("retry") };
+    assert_ne!(retry, run, "a retry is a new run");
+    // A late result of the first run does not decide the retry.
+    s.apply(UiEvent::ElevationResult { action: action.clone(), run, result: Ok(()) });
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
+    s.apply(UiEvent::ElevationResult { action, run: retry, result: Ok(()) });
     assert!(s.elevation().is_none());
 
     let mut s = Scenario::Elevacao.prepared_state();
@@ -281,11 +338,98 @@ fn the_elevation_step_runs_its_phases() {
 }
 
 #[test]
+fn a_confirmed_elevation_resends_the_command_that_needed_it() {
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
+    let ElevatedAction::SetGrants { device_id, grants } = action.clone() else { panic!("{action:?}") };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
+    assert!(s.elevation().is_none(), "the step closes");
+    assert_eq!(s.take_followups(), vec![Command::SetGrants { device_id, grants }]);
+    assert!(s.take_followups().is_empty(), "sent once");
+
+    // A failure resends nothing.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Err(ApiError::new(ApiCode::Refused)) });
+    assert!(s.take_followups().is_empty());
+    // The other two actions resend theirs: a_confirmed_elevate_session_sends_elevate_session_again and
+    // a_confirmed_admin_terminal_opens_the_administrator_terminal.
+}
+
+#[test]
+fn a_failed_elevate_reply_shows_in_the_step_not_the_strip() {
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7000), &a.commands[0]);
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Waiting);
+    s.apply(UiEvent::Reply { ticket: Ticket(7000), result: Err(ApiError::new(ApiCode::Timeout)) });
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Timeout));
+    assert!(s.error().is_none(), "no strip over the content");
+
+    // The 120 s of the command run out in the state's own clock: the same.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7001), &a.commands[0]);
+    for _ in 0..120 {
+        s.tick();
+    }
+    assert_eq!(s.elevation().unwrap().phase, ElevPhase::Failed(ApiCode::Timeout));
+    assert!(s.error().is_none());
+
+    // The step was cancelled meanwhile: nothing to show anywhere.
+    let mut s = Scenario::Elevacao.prepared_state();
+    let a = s.activate(ControlId::DialogPrimary);
+    s.track(Ticket(7002), &a.commands[0]);
+    s.activate(ControlId::DialogSecondary);
+    s.apply(UiEvent::Reply { ticket: Ticket(7002), result: Err(ApiError::new(ApiCode::Timeout)) });
+    assert!(s.elevation().is_none() && s.error().is_none());
+}
+
+#[test]
+fn each_failure_code_has_its_line_in_the_step() {
+    let line = |code: ApiCode| {
+        let mut s = Scenario::Elevacao.prepared_state();
+        let a = s.activate(ControlId::DialogPrimary);
+        let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!() };
+        s.apply(UiEvent::ElevationResult { action, run, result: Err(ApiError::new(code)) });
+        let t = s.dialog_texts(&DialogKind::Elevation);
+        assert_eq!(t.title, s.tm(&Msg::new(MsgKey::ElevFailedTitle)));
+        assert_eq!(t.body, vec![s.tm(&Msg::new(MsgKey::ElevFailedBody))], "{code:?}");
+        t.extra
+    };
+    let tm = |key: MsgKey| Some(Scenario::Elevacao.prepared_state().tm(&Msg::new(key)));
+    // D56: a declined confirmation says so.
+    assert_eq!(line(ApiCode::Refused), tm(MsgKey::ElevDeclined));
+    assert_eq!(line(ApiCode::NotPermitted), tm(MsgKey::ElevNotAdmin));
+    assert_eq!(line(ApiCode::Timeout), tm(MsgKey::ElevTimedOut));
+    assert_eq!(line(ApiCode::NotFound), tm(MsgKey::ErrNotFound));
+    assert_eq!(line(ApiCode::Busy), tm(MsgKey::ErrBusy));
+    assert_eq!(line(ApiCode::ServiceDown), tm(MsgKey::ErrServiceDown));
+    assert_eq!(line(ApiCode::Internal), tm(MsgKey::ErrInternal));
+    let all: Vec<_> = [ApiCode::NotPermitted, ApiCode::Timeout, ApiCode::NotFound, ApiCode::Busy, ApiCode::Internal]
+        .into_iter()
+        .map(line)
+        .collect();
+    for (i, a) in all.iter().enumerate() {
+        assert!(a.as_ref().is_some_and(|t| !t.is_empty()));
+        assert!(all[i + 1..].iter().all(|b| b != a), "each code reads its own line");
+    }
+}
+
+#[test]
 fn other_admin_only_commands_also_lead_to_the_elevation_step() {
+    let mut s = viewer();
+    tracked_error(&mut s, &Command::ElevateSession { session_id: 1 }, ApiCode::NeedsAdmin);
+    assert!(matches!(s.elevation().unwrap().action, ElevatedAction::ElevateSession { session_id: 1 }));
+    // ACCOUNTS.md 9: entering without a prompt asks nothing on this machine any more.
     let mut s = viewer();
     let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
     tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
-    assert!(matches!(s.elevation().unwrap().action, ElevatedAction::ConnectUnattended { .. }));
+    assert!(s.elevation().is_none());
     let mut s = viewer();
     tracked_error(&mut s, &Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }, ApiCode::NeedsAdmin);
     assert!(matches!(s.elevation().unwrap().action, ElevatedAction::OpenAdminTerminal { session_id: 1 }));
@@ -307,6 +451,7 @@ fn session_events_open_and_close_the_windows() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
@@ -325,7 +470,12 @@ fn session_events_open_and_close_the_windows() {
     s.apply(UiEvent::Session {
         session_id: 2,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 0, role: Role::Host, granted: Permissions::NONE },
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Host,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     });
     assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
     s.apply(UiEvent::Session {
@@ -357,26 +507,52 @@ fn reconnecting_and_waking_states_show_where_the_design_puts_them() {
 
 #[test]
 fn network_notices_replace_the_content_with_their_card() {
-    for (sc, kind, button) in [
-        (
-            Scenario::EstadoRedePublica,
-            NoticeKind::Public,
-            Command::OpenSystemSettings { target: SettingsTarget::NetworkCategory },
-        ),
-        (
-            Scenario::EstadoServicoMac,
-            NoticeKind::Service,
-            Command::OpenSystemSettings { target: SettingsTarget::LoginItems },
-        ),
-        (Scenario::EstadoPermissoesMac, NoticeKind::MacPerms, Command::RequestOsPermissions),
+    // The Windows notices open Windows' own Network & internet page through the shell, with no command.
+    let mut s = Scenario::EstadoRedePublica.prepared_state();
+    assert_eq!(s.notices(), vec![NoticeKind::Public]);
+    let a = s.activate(ControlId::Notice(NoticeKind::Public));
+    assert!(a.commands.is_empty(), "{:?}", a.commands);
+    assert_eq!(a.effect, Some(Effect::OpenWebPage));
+    assert_eq!(s.take_web_page().as_deref(), Some("ms-settings:network-status"));
+    assert!(crate::state::openable_page("ms-settings:network-status"));
+    assert!(!crate::state::openable_page("ms-settings:windowsupdate"), "only the listed system pages");
+    assert!(!crate::state::openable_page("file:///C:/Windows/System32/cmd.exe"));
+    // The Mac notices are the app's own doing: each click is an effect the shell acts on, never a backend command
+    // (the real backend has no op for one).
+    for (sc, kind, effect) in [
+        (Scenario::EstadoServicoMac, NoticeKind::Service, Effect::OpenLoginItems),
+        (Scenario::EstadoPermissoesMac, NoticeKind::MacPerms, Effect::RequestOsPermissions),
     ] {
         let mut s = sc.prepared_state();
         assert_eq!(s.notices(), vec![kind], "{}", sc.name());
         let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
         assert!(ids.contains(&ControlId::Notice(kind)));
-        assert!(!ids.contains(&ControlId::Tab(DeviceTab::Overview)) || true);
-        assert_eq!(s.activate(ControlId::Notice(kind)).commands, vec![button], "{}", sc.name());
+        let a = s.activate(ControlId::Notice(kind));
+        assert!(a.commands.is_empty(), "{}: {:?}", sc.name(), a.commands);
+        assert_eq!(a.effect, Some(effect), "{}", sc.name());
     }
+    // "Conceder permissões" asks for what the notice lists, in its order, and the first one's pane is a page the
+    // shells may open.
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    let asked = s.take_os_permission_request();
+    assert_eq!(asked, vec![OsPermission::Accessibility, OsPermission::InputMonitoring]);
+    assert!(s.take_os_permission_request().is_empty(), "taken once");
+    for p in [OsPermission::Accessibility, OsPermission::InputMonitoring, OsPermission::ScreenRecording] {
+        assert!(crate::state::openable_page(crate::state::os_permission_page(p)), "{p:?}");
+    }
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::Accessibility),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    );
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::InputMonitoring),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+    );
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::ScreenRecording),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    );
     let s = Scenario::EstadoPermissoesMac.prepared_state();
     let (title, body, _) = s.notice_texts(NoticeKind::MacPerms);
     assert_eq!(title, "Faltam 2 permissões no Mac");
@@ -387,6 +563,95 @@ fn network_notices_replace_the_content_with_their_card() {
     // The macOS permissions come back through a reply too.
     let mut s = Scenario::EstadoPermissoesMac.prepared_state();
     s.apply(reply_ok(Reply::MissingPermissions(Vec::new())));
+    assert!(s.notices().is_empty());
+}
+
+fn network_with(notices: Vec<Notice>) -> NetworkStatus {
+    NetworkStatus {
+        label: "Wi-Fi Casa".into(),
+        address: Some("192.168.0.12".into()),
+        category: Some(NetCategoryView::Private),
+        notices,
+    }
+}
+
+/// WAITING.md row 25: after "Conceder permissões" the notice says it waits for the person in System Settings, until
+/// the list of missing permissions changes or the notice goes.
+#[test]
+fn after_conceder_permissoes_the_notice_waits_until_the_missing_list_changes_or_the_notice_goes() {
+    const WAITING: &str = "Esperando você permitir nos Ajustes do Sistema…";
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    let (title, listed, button) = s.notice_texts(NoticeKind::MacPerms);
+    assert!(listed.contains("Acessibilidade") && !listed.contains(WAITING), "before the click: the list. {listed}");
+    // The click asks macOS and the notice says it waits, keeping its title and its button (a second try is allowed).
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    let (t, body, b) = s.notice_texts(NoticeKind::MacPerms);
+    assert_eq!((t.as_str(), body.as_str(), b.as_str()), (title.as_str(), WAITING, button.as_str()));
+    // The same list again (the Mac re-read the grants on activation and nothing changed): still waiting.
+    s.apply(UiEvent::NetworkChanged(network_with(vec![Notice::MacPermissionsMissing(vec![
+        OsPermission::Accessibility,
+        OsPermission::InputMonitoring,
+    ])])));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::Accessibility, OsPermission::InputMonitoring])));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    // The person allowed one: the list changed, so the notice lists what is still missing and waits no more.
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::InputMonitoring])));
+    let (t, body, _) = s.notice_texts(NoticeKind::MacPerms);
+    assert_eq!(t, "Falta 1 permissão no Mac");
+    assert!(body.contains("Monitoramento de Entrada") && !body.contains(WAITING), "{body}");
+    // Pressing the button again waits again, for the new list.
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    assert_eq!(s.take_os_permission_request(), vec![OsPermission::InputMonitoring]);
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    // The last one allowed: the notice goes, and a notice that comes back later with the same list does not wait.
+    s.apply(reply_ok(Reply::MissingPermissions(Vec::new())));
+    assert!(s.notices().is_empty());
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::InputMonitoring])));
+    assert!(!s.notice_texts(NoticeKind::MacPerms).1.contains(WAITING), "a new notice is not the old wait");
+    // The service's own push (the network status) that drops the notice ends the wait too.
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    s.apply(UiEvent::NetworkChanged(network_with(Vec::new())));
+    assert!(s.notices().is_empty());
+    s.apply(UiEvent::NetworkChanged(network_with(vec![Notice::MacPermissionsMissing(vec![
+        OsPermission::InputMonitoring,
+    ])])));
+    assert!(!s.notice_texts(NoticeKind::MacPerms).1.contains(WAITING));
+}
+
+/// The wait line follows the interface's language.
+#[test]
+fn the_mac_permissions_wait_line_is_in_the_interface_language() {
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    s.set_language(Language::En);
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, "Waiting for you to allow it in System Settings…");
+}
+
+#[test]
+fn a_refused_receiving_folder_shows_a_notice_with_its_name_and_the_button_opens_files_and_folders() {
+    let mut s = Scenario::EstadoPastaRecebimentoMac.prepared_state();
+    assert_eq!(s.notices(), vec![NoticeKind::ReceiveFolder]);
+    let (title, body, button) = s.notice_texts(NoticeKind::ReceiveFolder);
+    assert_eq!(title, "O Swapdesk não pode salvar na pasta de recebimento");
+    assert!(body.contains("Downloads") && !body.contains("{0}"), "{body}");
+    assert_eq!(button, "Abrir Arquivos e Pastas");
+    let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::Notice(NoticeKind::ReceiveFolder)));
+    let a = s.activate(ControlId::Notice(NoticeKind::ReceiveFolder));
+    assert!(a.commands.is_empty(), "{:?}", a.commands);
+    assert_eq!(a.effect, Some(Effect::OpenWebPage));
+    let page = s.take_web_page().expect("a page to open");
+    assert_eq!(page, "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders");
+    assert!(crate::state::openable_page(&page));
+    // Once access works, the status comes again without the notice.
+    s.apply(UiEvent::NetworkChanged(NetworkStatus {
+        label: "Wi-Fi Casa".into(),
+        address: None,
+        category: None,
+        notices: Vec::new(),
+    }));
     assert!(s.notices().is_empty());
 }
 
@@ -442,10 +707,26 @@ fn the_toolbar_sends_session_commands_and_toggles() {
     assert!(matches!(s.activate(ControlId::TbAudio).commands[0], Command::SetAudio { on: false, .. }));
     assert!(!s.audio_on());
     assert!(matches!(s.activate(ControlId::TbGrab).commands[0], Command::SetGrab { on: false, .. }));
-    assert!(matches!(
-        s.activate(ControlId::TbKeys).commands[0],
-        Command::SendKeys { keys: SpecialKeys::CtrlAltDel, .. }
-    ));
+    // The keys button opens the list of keys under itself; the one picked is sent.
+    let a = s.activate(ControlId::TbKeys);
+    assert!(a.commands.is_empty());
+    assert_eq!(a.effect, Some(Effect::Menu(SelectId::SpecialKeys)));
+    assert_eq!(SelectId::SpecialKeys.anchor(), ControlId::TbKeys);
+    let names: Vec<String> = s
+        .select_options(SelectId::SpecialKeys)
+        .into_iter()
+        .map(|(n, on)| {
+            assert!(!on, "a list of actions: nothing is checked");
+            n
+        })
+        .collect();
+    assert_eq!(names.len(), SpecialKeys::ALL.len());
+    assert_eq!(names[0], "Ctrl+Alt+Del");
+    for (i, keys) in SpecialKeys::ALL.iter().enumerate() {
+        let a = s.choose(SelectId::SpecialKeys, i);
+        assert_eq!(a.commands, vec![Command::SendKeys { session_id: 1, keys: *keys }]);
+    }
+    assert!(s.choose(SelectId::SpecialKeys, SpecialKeys::ALL.len()).commands.is_empty(), "past the list: nothing");
     assert!(matches!(s.activate(ControlId::TbDisconnect).commands[0], Command::Disconnect { session_id: 1 }));
     let t = Ticket(8);
     s.track(t, &Command::Disconnect { session_id: 1 });
@@ -461,12 +742,10 @@ fn the_drawer_opens_per_tab_and_asks_for_its_data_once() {
     assert_eq!(s.drawer(), Some(DrawerTab::Terminal));
     s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } });
     assert_eq!(s.term_account(), Some("alex"));
-    s.activate(ControlId::DrawerTab(DrawerTab::Files));
-    assert_eq!(s.drawer(), Some(DrawerTab::Files));
+    s.activate(ControlId::DrawerTab(DrawerTab::Chat));
+    assert_eq!(s.drawer(), Some(DrawerTab::Chat));
     let a = s.activate(ControlId::DrawerTab(DrawerTab::Terminal));
     assert!(a.commands.is_empty(), "the terminal is already open");
-    let a = s.activate(ControlId::FilesChange);
-    assert!(matches!(a.commands[0], Command::FilesList { .. }));
     assert!(matches!(
         s.activate(ControlId::Action(ActionKind::Lock)).commands[0],
         Command::RunAction { action: ActionKind::Lock, .. }
@@ -474,8 +753,10 @@ fn the_drawer_opens_per_tab_and_asks_for_its_data_once() {
     s.activate(ControlId::DrawerClose);
     assert_eq!(s.drawer(), None);
     s.activate(ControlId::TbFiles);
+    assert!(s.explorer_open(), "the folder button opens the Arquivos view");
     s.activate(ControlId::TbFiles);
-    assert_eq!(s.drawer(), None, "the toolbar button toggles the drawer");
+    assert!(!s.explorer_open(), "and closes it");
+    assert_eq!(s.drawer(), None);
     s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Exited { code: Some(0) } });
     assert_eq!(s.term_account(), None);
 }
@@ -523,16 +804,21 @@ fn chat_transfers_and_clipboard_events() {
 fn stats_redraw_only_when_the_option_is_on() {
     let mut s = viewer();
     assert!(s.settings().unwrap().show_stats);
-    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1 } });
+    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1, hevc: false } });
     assert!(c.hits(WindowKind::Viewer));
     assert_eq!(s.viewer_session().unwrap().stats.unwrap().fps, 30);
     let mut s = base();
     s.apply(UiEvent::Session {
         session_id: 1,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     });
-    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1 } });
+    let c = s.apply(UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 5, fps: 30, kbps: 1, hevc: false } });
     assert!(c.is_none(), "no redraw for numbers nobody sees");
 }
 
@@ -554,6 +840,67 @@ fn activity_alert_block_and_export() {
     }));
     assert_eq!(s.activity().len(), rows + 1);
     assert_eq!(s.alert().unwrap().what.args[0], "10.0.0.9");
+}
+
+#[test]
+fn a_removed_device_is_named_removed_never_by_its_key() {
+    // Defect after 1.0: the service sends a device no longer paired with no name; both screens name it in words.
+    let mut s = base();
+    let row = |what: Msg| AuditView { at_ms: 1, device_name: String::new(), what, duration_s: None, alert: false };
+    s.apply(reply_ok(Reply::Activity(vec![
+        row(Msg::new(MsgKey::AuditSwap).with("")),
+        row(Msg::new(MsgKey::AuditPaired)),
+    ])));
+    let lines = match s.home().cards.into_iter().find(|c| matches!(c, crate::home::HomeCard::Recent { .. })) {
+        Some(crate::home::HomeCard::Recent { lines, .. }) => lines,
+        _ => panic!("no recent card"),
+    };
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines.iter().all(|l| l.who == "Dispositivo removido"),
+        "{:?}",
+        lines.iter().map(|l| &l.who).collect::<Vec<_>>()
+    );
+    assert!(lines[0].what.ends_with("dispositivo removido"), "{}", lines[0].what);
+    let swap = s.activity()[0].clone();
+    s.apply(UiEvent::LanguageChanged(Language::En));
+    assert_eq!(s.activity_who(&swap), "Removed device");
+    assert!(s.activity_what(&swap).ends_with("removed device"), "{}", s.activity_what(&swap));
+}
+
+#[test]
+fn a_device_list_push_reads_the_activity_again_once_and_a_closed_alert_stays_closed() {
+    // Defect after 1.0: Início missed a session until the app was reopened. The service logs a session before it pushes
+    // the device list, so each push asks for the activity again (one request at a time).
+    let mut s = Scenario::Atividade.prepared_state();
+    let _ = s.take_followups();
+    s.activate(ControlId::BlockAlert);
+    let _ = s.take_followups();
+    assert!(s.alert().is_none());
+    let devices = s.devices().to_vec();
+    let refresh = Command::ActivityList { before_ms: None, limit: 200 };
+
+    s.apply(UiEvent::DevicesChanged(devices.clone()));
+    assert_eq!(s.take_followups(), vec![refresh.clone()]);
+    s.apply(UiEvent::DevicesChanged(devices.clone()));
+    assert!(s.take_followups().is_empty(), "one refresh at a time");
+
+    let mut rows = s.activity().to_vec();
+    rows.insert(
+        0,
+        AuditView {
+            at_ms: 2,
+            device_name: "MacBook".into(),
+            what: Msg::new(MsgKey::AuditControlled),
+            duration_s: Some(60),
+            alert: false,
+        },
+    );
+    s.apply(reply_ok(Reply::Activity(rows)));
+    assert_eq!(s.activity()[0].what.key, MsgKey::AuditControlled, "the new session shows");
+    assert!(s.alert().is_none(), "the old alert row does not raise the closed alert again");
+    s.apply(UiEvent::DevicesChanged(devices));
+    assert_eq!(s.take_followups(), vec![refresh], "the next push asks again");
 }
 
 #[test]
@@ -904,6 +1251,7 @@ fn a_lost_session_shows_the_attempt_and_says_so_when_the_minute_ends() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::Control),
+            elevation: Default::default(),
         },
     });
     assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbDisconnect));
@@ -1010,7 +1358,12 @@ fn a_display_listing_belongs_to_the_session_its_command_named() {
     s.apply(session_event(
         1,
         MAC,
-        SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     ));
     s.apply(session_event(2, AIR, SessionState::Connecting));
     s.track(Ticket(7), &Command::ListDisplays { session_id: 2 });
@@ -1031,12 +1384,22 @@ fn a_viewer_session_coming_up_sends_the_audio_switch_once() {
     let mut s = base();
     s.apply(session_event(3, MAC, SessionState::Connecting));
     assert!(s.take_followups().is_empty(), "nothing before the session is up");
-    let active = SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE };
+    let active = SessionState::Active {
+        since_ms: 0,
+        role: Role::Viewer,
+        granted: Permissions::NONE,
+        elevation: Default::default(),
+    };
     s.apply(session_event(3, MAC, active.clone()));
     assert_eq!(s.take_followups(), vec![Command::SetAudio { session_id: 3, on: true }]);
     s.apply(session_event(3, MAC, active));
     assert!(s.take_followups().is_empty(), "an update of a live session sends nothing");
-    let host = SessionState::Active { since_ms: 0, role: Role::Host, granted: Permissions::NONE };
+    let host = SessionState::Active {
+        since_ms: 0,
+        role: Role::Host,
+        granted: Permissions::NONE,
+        elevation: Default::default(),
+    };
     s.apply(session_event(4, MAC, host));
     assert!(s.take_followups().is_empty(), "the host side has no audio switch");
 }
@@ -1050,52 +1413,561 @@ fn the_display_listing_is_asked_once_per_viewer_session() {
     s.apply(session_event(
         3,
         MAC,
-        SessionState::Active { since_ms: 0, role: Role::Viewer, granted: Permissions::NONE },
+        SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE,
+            elevation: Default::default(),
+        },
     ));
     assert_eq!(s.take_display_request(), Some(Command::ListDisplays { session_id: 3 }));
     assert!(s.take_display_request().is_none());
 }
 
+fn active(role: Role, granted: Permissions) -> SessionState {
+    SessionState::Active { since_ms: 0, role, granted, elevation: Default::default() }
+}
+
+#[test]
+fn the_first_active_state_of_a_session_asks_to_minimize_the_main_window_once() {
+    for role in [Role::Viewer, Role::Host] {
+        let mut s = base();
+        assert!(!s.take_minimize_request());
+        s.apply(session_event(3, MAC, SessionState::Connecting));
+        assert!(!s.take_minimize_request(), "not before the session is up ({role:?})");
+        s.apply(session_event(3, MAC, active(role, Permissions::NONE)));
+        assert!(s.take_minimize_request(), "asked at the first Active state ({role:?})");
+        assert!(!s.take_minimize_request(), "asked once ({role:?})");
+    }
+}
+
+#[test]
+fn a_reconnect_or_a_grant_change_does_not_ask_again() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
+    assert!(!s.take_minimize_request());
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(!s.take_minimize_request(), "active again after a pause");
+    s.apply(session_event(3, MAC, SessionState::Reconnecting { attempt: 1 }));
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(!s.take_minimize_request(), "active again after a reconnect");
+    let more = Permissions::NONE.with(Permission::Control);
+    s.apply(session_event(3, MAC, active(Role::Viewer, more)));
+    assert!(!s.take_minimize_request(), "a change of granted permissions");
+}
+
+#[test]
+fn a_new_session_asks_again() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    s.apply(session_event(4, MAC, active(Role::Host, Permissions::NONE)));
+    assert!(s.take_minimize_request(), "the session a swap creates is a new one");
+    assert!(!s.take_minimize_request());
+}
+
+/// Owner, 11/11: the main window minimized at a session's start comes back when that session ends, on the computer
+/// that controlled; on the computer that was controlled it stays minimized.
+#[test]
+fn the_end_of_a_session_this_computer_controlled_asks_once_to_restore_the_window() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    assert!(!s.take_restore_request(), "not while the session goes on");
+    s.apply(session_event(3, MAC, SessionState::Paused { desktop: DesktopKind::Locked }));
+    assert!(!s.take_restore_request(), "a pause is no end");
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(s.take_restore_request(), "the session ended");
+    assert!(!s.take_restore_request(), "asked once");
+}
+
+#[test]
+fn the_controlled_computer_keeps_its_window_minimized_after_the_session() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Host, Permissions::NONE)));
+    assert!(s.take_minimize_request(), "it minimizes on both computers (D47)");
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(!s.take_restore_request(), "the controlled computer stays minimized (D60)");
+}
+
+#[test]
+fn the_window_comes_back_only_when_no_session_is_left_and_never_for_one_that_did_not_hide_it() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(4, AIR, active(Role::Viewer, Permissions::NONE)));
+    assert!(s.take_minimize_request());
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: None }));
+    assert!(!s.take_restore_request(), "the other session still goes on");
+    s.apply(session_event(4, AIR, SessionState::Ended { reason: Some(ApiCode::Timeout) }));
+    assert!(s.take_restore_request(), "the last one ended");
+    // A session that never started minimized nothing, so its end restores nothing.
+    s.apply(session_event(5, MAC, SessionState::Prompted { remaining_s: 30 }));
+    s.apply(session_event(5, MAC, SessionState::Ended { reason: Some(ApiCode::Refused) }));
+    assert!(!s.take_minimize_request() && !s.take_restore_request());
+}
+
+#[test]
+fn a_session_that_never_starts_asks_nothing() {
+    let mut s = base();
+    s.apply(session_event(3, MAC, SessionState::Prompted { remaining_s: 30 }));
+    s.apply(session_event(3, MAC, SessionState::Ended { reason: Some(ApiCode::Refused) }));
+    s.apply(session_event(4, MAC, SessionState::Connecting));
+    s.apply(session_event(4, MAC, SessionState::Ended { reason: Some(ApiCode::Timeout) }));
+    assert!(!s.take_minimize_request());
+}
+
 #[test]
 fn the_connect_flow_keeps_connecting_prompted_and_the_ended_reason_until_dismissed() {
     let mut s = base();
-    assert!(s.connect_flow().is_none());
-    s.apply(session_event(7, MAC, SessionState::Prompted { remaining_s: 42 }));
-    let f = s.connect_flow().unwrap();
+    assert!(s.connect_flow(MAC).is_none());
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 42 }));
+    let f = s.connect_flow(MAC).unwrap();
     assert_eq!(f.phase, ConnectPhase::Prompted { remaining_s: 42 });
+    assert_eq!(f.entry, ENTRY);
+    assert!(s.connect_flow(AIR).is_none(), "the flow belongs to its device's page");
     assert!(s.viewer_session().is_none(), "the prompt opens no viewer window");
-    let (title, detail) = s.connect_texts(&f);
-    assert!(title.starts_with("Esperando o ") && title.ends_with(" aceitar"), "{title}");
-    assert_eq!(detail.as_deref(), Some("0:42"));
     s.tick();
-    assert_eq!(s.connect_flow().unwrap().phase, ConnectPhase::Prompted { remaining_s: 41 });
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Prompted { remaining_s: 41 });
 
-    s.apply(session_event(7, MAC, SessionState::Connecting));
-    assert_eq!(s.connect_flow().unwrap().phase, ConnectPhase::Connecting);
+    s.apply(session_event(ENTRY, MAC, SessionState::Connecting));
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Connecting);
 
-    s.apply(session_event(7, MAC, SessionState::Ended { reason: Some(ApiCode::NotPermitted) }));
-    let f = s.connect_flow().unwrap();
-    assert_eq!(f.phase, ConnectPhase::Ended { reason: ApiCode::NotPermitted, in_error_line: false });
-    assert_eq!(f.session_id, 7);
-    assert!(s.error().is_none(), "the state does not show this reason itself");
+    s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why: ConnectWhy::NotPermitted }));
+    let f = s.connect_flow(MAC).unwrap();
+    assert_eq!(f.phase, ConnectPhase::Ended { why: ConnectWhy::NotPermitted });
+    assert_eq!(f.entry, ENTRY);
+    assert!(s.error().is_none(), "the card says it, not the strip");
     assert_eq!(s.dismiss_connect(), Changed::MAIN);
-    assert!(s.connect_flow().is_none());
+    assert!(s.connect_flow(MAC).is_none());
     assert_eq!(s.dismiss_connect(), Changed::NONE);
 
-    // A refusal is in the error line too; closing the line closes both.
-    s.apply(session_event(8, MAC, SessionState::Ended { reason: Some(ApiCode::Refused) }));
-    assert!(matches!(s.connect_flow().unwrap().phase, ConnectPhase::Ended { in_error_line: true, .. }));
-    assert!(s.error().is_some());
-    s.activate(ControlId::ErrorClose);
-    assert!(s.connect_flow().is_none());
-    // A normal end says nothing, and a new attempt replaces an old ending.
-    s.apply(session_event(9, MAC, SessionState::Ended { reason: None }));
-    assert!(s.connect_flow().is_none());
-    s.apply(session_event(10, MAC, SessionState::Ended { reason: Some(ApiCode::Locked) }));
-    s.apply(session_event(11, MAC, SessionState::Connecting));
-    assert_eq!(s.connect_flow().unwrap().phase, ConnectPhase::Connecting);
-    s.apply(session_event(11, MAC, SessionState::Ended { reason: None }));
-    assert!(s.connect_flow().is_none(), "the old ending went with the new attempt");
+    // A normal end of an entry says nothing.
+    s.apply(session_event(ENTRY + 1, MAC, SessionState::Ended { reason: None }));
+    assert!(s.connect_flow(MAC).is_none());
+    // A new attempt replaces an old ending.
+    s.apply(session_event(ENTRY + 2, MAC, SessionState::NotOpened { why: ConnectWhy::Busy }));
+    s.apply(session_event(ENTRY + 3, MAC, SessionState::Connecting));
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Connecting);
+    s.apply(session_event(ENTRY + 3, MAC, SessionState::Ended { reason: None }));
+    assert!(s.connect_flow(MAC).is_none(), "the old ending went with the new attempt");
+}
+
+fn all_whys() -> [ConnectWhy; 8] {
+    [
+        ConnectWhy::Declined,
+        ConnectWhy::TimedOut,
+        ConnectWhy::NobodyPresent,
+        ConnectWhy::Busy,
+        ConnectWhy::Forgotten,
+        ConnectWhy::NotPermitted,
+        ConnectWhy::Unreachable,
+        ConnectWhy::Failed,
+    ]
+}
+
+fn mac_name(s: &UiState) -> String {
+    s.device_by_id(MAC).unwrap().name.clone()
+}
+
+/// The service answers the click's `Connect` with the entry's id.
+fn reply_entry(s: &mut UiState, a: &Activation) {
+    s.track(Ticket(70), &a.commands[0]);
+    s.apply(UiEvent::Reply { ticket: Ticket(70), result: Ok(Reply::SessionId(ENTRY)) });
+}
+
+/// A state where `Controlar` was pressed on the Mac and the service answered with `ENTRY`.
+fn connecting() -> UiState {
+    let mut s = base();
+    let a = s.activate(ControlId::Control);
+    s.track(Ticket(40), &a.commands[0]);
+    s.apply(UiEvent::Reply { ticket: Ticket(40), result: Ok(Reply::SessionId(ENTRY)) });
+    s
+}
+
+#[test]
+fn controlar_shows_the_connect_card_at_once_and_sends_one_connect() {
+    let mut s = base();
+    let a = s.activate(ControlId::Control);
+    // In the frame of the click, before any reply: one Connect, the card, and the focus on Cancelar.
+    assert_eq!(
+        a.commands,
+        vec![Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: false }]
+    );
+    assert_eq!(a.effect, Some(Effect::Focus(ControlId::ConnectCancel)));
+    assert!(a.changed.hits(WindowKind::Main));
+    let card = s.wait_card(MAC).expect("the card shows before the reply");
+    assert_eq!(card.phase, WaitPhase::Connecting);
+    assert_eq!(card.icon, WaitIcon::Clock);
+    assert_eq!(card.title, format!("Conectando ao {}", mac_name(&s)));
+    assert_eq!(card.body, "Abrindo a conexão pela rede local.");
+    assert_eq!(card.bar, Some(WaitBar { fraction: 0.0, text: None }), "the track alone while there is no deadline");
+    assert_eq!(
+        card.buttons,
+        vec![WaitButton {
+            id: ControlId::ConnectCancel,
+            label: "Cancelar".into(),
+            side: ButtonSide::Left,
+            primary: false
+        }]
+    );
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Connecting);
+    assert_eq!(s.connect_flow(MAC).unwrap().entry, 0, "no id until the reply");
+    assert_eq!(s.windows(), vec![WindowKind::Main]);
+
+    // The page: only the card's controls, none of the buttons, tabs or the rename the card replaces.
+    let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::ConnectCancel));
+    for gone in [ControlId::Control, ControlId::ViewOnly, ControlId::Wake, ControlId::RenameDevice] {
+        assert!(!ids.contains(&gone), "{gone:?} stays off while the card shows");
+    }
+    assert!(!ids.iter().any(|i| matches!(i, ControlId::Tab(_))));
+    let d = s.device_by_id(MAC).unwrap().clone();
+    assert!(!s.rename_available(&d));
+
+    // The reply gives the entry its id.
+    s.track(Ticket(41), &a.commands[0]);
+    s.apply(UiEvent::Reply { ticket: Ticket(41), result: Ok(Reply::SessionId(ENTRY)) });
+    assert_eq!(s.connect_flow(MAC).unwrap().entry, ENTRY);
+    assert_eq!(s.sessions().len(), 1);
+}
+
+#[test]
+fn a_second_press_while_waiting_sends_nothing() {
+    let mut s = base();
+    let first = s.activate(ControlId::Control);
+    assert_eq!(first.commands.len(), 1);
+    s.track(Ticket(71), &first.commands[0]);
+    for id in [ControlId::Control, ControlId::ViewOnly] {
+        let again = s.activate(id);
+        assert!(again.commands.is_empty(), "{id:?} while the first connect waits");
+    }
+    s.apply(UiEvent::Reply { ticket: Ticket(71), result: Ok(Reply::SessionId(ENTRY)) });
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 20 }));
+    assert!(s.activate(ControlId::Control).commands.is_empty());
+    assert_eq!(s.sessions().len(), 1, "one entry, not two");
+}
+
+#[test]
+fn the_entry_counts_the_hosts_seconds_down() {
+    let mut s = connecting();
+    assert!(s.needs_tick(), "the interface's own give-up counts from the start");
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 20 }));
+    let card = s.wait_card(MAC).unwrap();
+    assert_eq!(card.phase, WaitPhase::Prompted);
+    assert_eq!(card.title, format!("Esperando o {} aceitar", mac_name(&s)));
+    assert!(card.body.starts_with(&format!("O {} está mostrando o seu pedido.", mac_name(&s))), "{}", card.body);
+    assert_eq!(card.bar, Some(WaitBar { fraction: 0.0, text: Some("0:20".into()) }));
+    for _ in 0..6 {
+        s.tick();
+    }
+    let bar = s.wait_card(MAC).unwrap().bar.unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:14"));
+    assert!((bar.fraction - 0.3).abs() < 1e-6, "{}", bar.fraction);
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Prompted { remaining_s: 14 });
+    for _ in 0..14 {
+        s.tick();
+    }
+    let bar = s.wait_card(MAC).unwrap().bar.unwrap();
+    assert_eq!((bar.text.as_deref(), bar.fraction), (Some("0:00"), 1.0), "it stops at zero and waits for the service");
+}
+
+#[test]
+fn no_viewer_window_opens_while_the_entry_waits() {
+    let mut s = connecting();
+    assert_eq!(s.windows(), vec![WindowKind::Main]);
+    s.apply(session_event(ENTRY, MAC, SessionState::Connecting));
+    assert!(s.viewer_session().is_none());
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 20 }));
+    assert!(s.viewer_session().is_none());
+    assert_eq!(s.windows(), vec![WindowKind::Main]);
+    assert!(!s.take_minimize_request());
+    assert!(s.take_display_request().is_none());
+}
+
+#[test]
+fn an_accepted_connect_opens_the_viewer_and_the_card_goes() {
+    let mut s = connecting();
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 12 }));
+    // The session's own Active comes first, under its own id, then the entry ends.
+    s.apply(session_event(9, MAC, active(Role::Viewer, Permissions::NONE.with(Permission::Control))));
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Viewer], "the window opens on Active");
+    assert_eq!(s.viewer_session().unwrap().id, 9);
+    assert!(s.wait_card(MAC).is_some(), "the card is still there until the entry ends");
+    s.apply(session_event(ENTRY, MAC, SessionState::Ended { reason: None }));
+    assert!(s.wait_card(MAC).is_none() && s.connect_flow(MAC).is_none());
+    assert!(s.error().is_none());
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
+    assert_eq!(s.sessions().len(), 1);
+    let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(!ids.contains(&ControlId::ConnectCancel));
+}
+
+#[test]
+fn each_why_reads_its_own_line() {
+    let mut lines = Vec::new();
+    for why in all_whys() {
+        let mut s = connecting();
+        s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 9 }));
+        s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why }));
+        assert!(s.sessions().is_empty(), "the entry went ({why:?})");
+        assert!(s.error().is_none(), "no strip over the card ({why:?})");
+        assert!(!s.needs_tick(), "nothing counts once it ended ({why:?})");
+        let card = s.wait_card(MAC).unwrap_or_else(|| panic!("an end card for {why:?}"));
+        assert_eq!((card.phase, card.icon, card.bar.is_none()), (WaitPhase::Ended, WaitIcon::ShieldAlert, true));
+        assert_eq!(card.title, format!("Não deu para conectar ao {}", mac_name(&s)));
+        assert_eq!(
+            card.buttons,
+            vec![
+                WaitButton {
+                    id: ControlId::ConnectClose,
+                    label: "Fechar".into(),
+                    side: ButtonSide::Left,
+                    primary: false
+                },
+                WaitButton {
+                    id: ControlId::ConnectRetry,
+                    label: "Tentar de novo".into(),
+                    side: ButtonSide::Right,
+                    primary: true
+                },
+            ]
+        );
+        assert_eq!(
+            s.take_focus_request(),
+            Some(ControlId::ConnectClose),
+            "focus goes to Fechar, not to Tentar de novo"
+        );
+        assert_eq!(s.take_focus_request(), None);
+        lines.push(card.body);
+    }
+    let name = |t: &str| t.replace("{0}", &mac_name(&connecting()));
+    assert_eq!(lines[0], name("O {0} recusou."));
+    assert_eq!(lines[1], name("O {0} não respondeu em 20 segundos."));
+    assert_eq!(lines[2], name("Não há ninguém no {0} agora."));
+    assert_eq!(lines[3], name("O {0} já está em outra sessão. Tente de novo quando ela terminar."));
+    assert_eq!(lines[4], name("O {0} não reconhece mais este computador. Pareie os dois de novo."));
+    assert_eq!(lines[5], name("O {0} não permite esta conexão."));
+    assert_eq!(lines[6], name("O {0} não respondeu pela rede. Confira se ele está ligado e nesta mesma rede."));
+    assert_eq!(lines[7], "Erro interno.");
+    let mut sorted = lines.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 8, "every line differs: {lines:?}");
+}
+
+#[test]
+fn cancel_sends_disconnect_for_the_entry() {
+    let mut s = connecting();
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 15 }));
+    let a = s.activate(ControlId::ConnectCancel);
+    assert_eq!(a.commands, vec![Command::Disconnect { session_id: ENTRY }]);
+    assert_eq!(a.effect, Some(Effect::Focus(ControlId::Control)), "focus goes back to the button that started it");
+    // The service ends the entry normally: the page is the normal page at once, with no card.
+    s.apply(session_event(ENTRY, MAC, SessionState::Ended { reason: None }));
+    assert!(s.wait_card(MAC).is_none() && s.error().is_none());
+    assert!(s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::Control));
+
+    // A view-only connect gives focus back to Assistir.
+    let mut s = base();
+    let a = s.activate(ControlId::ViewOnly);
+    reply_entry(&mut s, &a);
+    assert_eq!(s.activate(ControlId::ConnectCancel).effect, Some(Effect::Focus(ControlId::ViewOnly)));
+}
+
+#[test]
+fn a_cancel_before_the_reply_is_sent_when_the_id_arrives() {
+    let mut s = base();
+    let a = s.activate(ControlId::Control);
+    s.track(Ticket(50), &a.commands[0]);
+    let c = s.activate(ControlId::ConnectCancel);
+    assert!(c.commands.is_empty(), "there is no id to cancel yet");
+    s.apply(UiEvent::Reply { ticket: Ticket(50), result: Ok(Reply::SessionId(ENTRY)) });
+    assert_eq!(s.take_followups(), vec![Command::Disconnect { session_id: ENTRY }]);
+}
+
+#[test]
+fn escape_cancels_the_wait_and_closes_the_end_card() {
+    let mut s = base();
+    assert_eq!(s.escape_target(WindowKind::Main), None);
+    s.activate(ControlId::Control);
+    assert_eq!(s.escape_target(WindowKind::Main), Some(ControlId::ConnectCancel));
+    assert_eq!(s.escape_target(WindowKind::Viewer), None, "the main window only");
+    s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(s.escape_target(WindowKind::Main), Some(ControlId::ConnectClose));
+    // The ended card closes, and the page is whole again.
+    let a = s.activate(ControlId::ConnectClose);
+    assert!(a.commands.is_empty());
+    assert_eq!(a.effect, Some(Effect::Focus(ControlId::Control)));
+    assert!(s.wait_card(MAC).is_none());
+    assert_eq!(s.escape_target(WindowKind::Main), None);
+    // A dialog over the window takes Esc itself.
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    s.apply(session_event(ENTRY, MAC, SessionState::Connecting));
+    assert_eq!(s.escape_target(WindowKind::Main), None);
+}
+
+#[test]
+fn the_interface_gives_up_after_60_s_without_news() {
+    let mut s = connecting();
+    s.apply(session_event(ENTRY, MAC, SessionState::Connecting));
+    for _ in 0..59 {
+        s.tick();
+    }
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Connecting);
+    assert!(s.take_followups().is_empty());
+    s.tick();
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Ended { why: ConnectWhy::Failed });
+    assert!(s.sessions().is_empty());
+    assert_eq!(s.wait_card(MAC).unwrap().phase, WaitPhase::Ended);
+    assert_eq!(s.take_followups(), vec![Command::Disconnect { session_id: ENTRY }], "a silent service is told to stop");
+    assert!(s.error().is_none());
+    assert!(!s.needs_tick());
+
+    // The seconds of a prompt count as waiting too.
+    let mut s = connecting();
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 20 }));
+    for _ in 0..60 {
+        s.tick();
+    }
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Ended { why: ConnectWhy::Failed });
+}
+
+#[test]
+fn a_connect_the_service_does_not_answer_in_5_s_ends_the_card() {
+    let mut s = base();
+    let a = s.activate(ControlId::Control);
+    s.track(Ticket(60), &a.commands[0]);
+    for _ in 0..4 {
+        s.tick();
+    }
+    assert_eq!(s.wait_card(MAC).unwrap().phase, WaitPhase::Connecting);
+    s.tick();
+    assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Ended { why: ConnectWhy::Failed });
+    assert!(s.sessions().is_empty() && s.error().is_none());
+}
+
+#[test]
+fn an_early_refusal_of_the_connect_ends_the_card_with_its_why() {
+    for (code, why) in [
+        (ApiCode::NotFound, ConnectWhy::Unreachable),
+        (ApiCode::Internal, ConnectWhy::Failed),
+        (ApiCode::ServiceDown, ConnectWhy::Failed),
+        (ApiCode::NotPermitted, ConnectWhy::Failed),
+    ] {
+        let mut s = base();
+        let a = s.activate(ControlId::Control);
+        tracked_error(&mut s, &a.commands[0], code);
+        assert!(s.sessions().is_empty(), "{code:?}");
+        assert_eq!(s.connect_flow(MAC).unwrap().phase, ConnectPhase::Ended { why }, "{code:?}");
+        assert!(s.error().is_none(), "the card says it ({code:?})");
+    }
+    // ACCOUNTS.md 9: entering without a prompt never asks for an administrator on this machine (the elevation step
+    // comes later, inside the session).
+    let mut s = base();
+    let cmd = Command::Connect { device_id: MAC.into(), intent: Intent::Control, unattended: true };
+    tracked_error(&mut s, &cmd, ApiCode::NeedsAdmin);
+    assert!(s.elevation().is_none());
+}
+
+#[test]
+fn tentar_de_novo_sends_the_same_intent_again() {
+    for (button, intent) in [(ControlId::ViewOnly, Intent::View), (ControlId::Control, Intent::Control)] {
+        let mut s = base();
+        let a = s.activate(button);
+        reply_entry(&mut s, &a);
+        s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why: ConnectWhy::TimedOut }));
+        let a = s.activate(ControlId::ConnectRetry);
+        assert_eq!(a.commands, vec![Command::Connect { device_id: MAC.into(), intent, unattended: false }]);
+        assert_eq!(a.effect, Some(Effect::Focus(ControlId::ConnectCancel)));
+        assert_eq!(s.wait_card(MAC).unwrap().phase, WaitPhase::Connecting, "the card is back at once");
+        assert!(s.activate(ControlId::ConnectRetry).commands.is_empty(), "nothing to retry while it waits");
+    }
+}
+
+#[test]
+fn the_end_card_stays_until_closed_retried_or_another_device_is_picked() {
+    let mut s = base();
+    s.activate(ControlId::Control);
+    s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why: ConnectWhy::Busy }));
+    s.tick();
+    assert!(s.wait_card(MAC).is_some(), "time does not close it");
+    s.select_device(DESKTOP);
+    assert!(s.wait_card(MAC).is_none(), "another device's page drops it");
+    s.select_device(MAC);
+    assert!(s.wait_card(MAC).is_none());
+}
+
+#[test]
+fn the_sidebar_row_says_connecting_and_waiting() {
+    let mut s = base();
+    let online = s.device_status_line(s.device_by_id(MAC).unwrap());
+    assert!(online.starts_with("Online"), "{online}");
+    let row = |s: &UiState| {
+        s.controls(WindowKind::Main).into_iter().find(|c| c.id == ControlId::Device(0)).map(|c| c.label).unwrap()
+    };
+    assert_eq!(s.devices()[0].id, MAC);
+    s.activate(ControlId::Control);
+    let status = |s: &UiState| s.device_status_line(s.device_by_id(MAC).unwrap());
+    assert_eq!(status(&s), "Conectando…");
+    assert!(row(&s).ends_with(", Conectando…"), "{}", row(&s));
+    s.apply(session_event(ENTRY, MAC, SessionState::Prompted { remaining_s: 20 }));
+    assert_eq!(status(&s), "Esperando aceitar");
+    assert!(row(&s).ends_with(", Esperando aceitar"), "{}", row(&s));
+    // Other devices keep their own line.
+    assert_eq!(s.device_status_line(s.device_by_id(DESKTOP).unwrap()).split(',').next(), Some("Dormindo"));
+    s.apply(session_event(ENTRY, MAC, SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(status(&s), online);
+    // Waking says so too.
+    s.apply(session_event(ENTRY + 1, DESKTOP, SessionState::Waking { remaining_s: 60 }));
+    assert_eq!(s.device_status_line(s.device_by_id(DESKTOP).unwrap()), "Acordando…");
+}
+
+#[test]
+fn a_waking_card_fills_its_bar_against_the_minute_a_wake_lasts_whatever_value_it_saw_first() {
+    // The scenario's first news of the wake is "36 s left": the bar is 24 of 60 full, not empty.
+    let state = crate::mock::Scenario::EstadoAcordando.prepared_state();
+    let card = state.selected_wait_card().expect("the waking card");
+    let bar = card.bar.expect("a wake counts down");
+    assert_eq!(bar.text.as_deref(), Some("0:36"));
+    assert!((bar.fraction - 0.4).abs() < 0.01, "{}", bar.fraction);
+}
+
+#[test]
+fn a_wakes_connect_phase_reads_the_entrys_end_the_new_way() {
+    let mut s = base();
+    s.select_device(DESKTOP);
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::Waking { remaining_s: 60 }));
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::Waking { remaining_s: 41 }));
+    let card = s.wait_card(DESKTOP).unwrap();
+    assert_eq!((card.phase, card.icon), (WaitPhase::Waking, WaitIcon::Power));
+    assert_eq!(card.title, "Acordando o Desktop do escritório");
+    assert_eq!(card.body, s.t(MsgKey::WakingBody));
+    let bar = card.bar.unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:41"), "the waking card has the countdown row too");
+    assert!((bar.fraction - 19.0 / 60.0).abs() < 1e-6);
+    assert_eq!(card.buttons.len(), 1);
+    assert_eq!(card.buttons[0].id, ControlId::WakeCancel);
+    // The device appeared: the same entry connects, then waits for the person, then ends with its reason.
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::Connecting));
+    let card = s.wait_card(DESKTOP).unwrap();
+    assert_eq!(card.phase, WaitPhase::Connecting);
+    assert_eq!(card.buttons[0].id, ControlId::ConnectCancel);
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::Prompted { remaining_s: 20 }));
+    assert_eq!(s.wait_card(DESKTOP).unwrap().bar.unwrap().text.as_deref(), Some("0:20"), "the bar restarts from 20 s");
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::NotOpened { why: ConnectWhy::NobodyPresent }));
+    assert!(s.waking_session().is_none() && s.error().is_none());
+    let card = s.wait_card(DESKTOP).unwrap();
+    assert_eq!(card.phase, WaitPhase::Ended);
+    assert_eq!(card.body, "Não há ninguém no Desktop do escritório agora.");
+    // The entry's cancel sends Disconnect for the entry in any phase.
+    let mut s = base();
+    s.select_device(DESKTOP);
+    s.apply(session_event(ENTRY, DESKTOP, SessionState::Connecting));
+    assert_eq!(s.activate(ControlId::ConnectCancel).commands, vec![Command::Disconnect { session_id: ENTRY }]);
 }
 
 #[test]
@@ -1219,7 +2091,7 @@ fn the_administrator_terminal_is_offered_only_with_its_grant_and_is_labelled() {
     s.apply(UiEvent::Session {
         session_id: 1,
         device_id: MAC.into(),
-        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted },
+        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted, elevation: Default::default() },
     });
     assert!(s.admin_terminal_offered());
     let cmds = open_terminal(&mut s);
@@ -1352,7 +2224,7 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
     let mut s = Scenario::Banner.prepared_state();
     let has = |s: &UiState, w, id| s.controls(w).iter().any(|c| c.id == id);
     assert!(has(&s, WindowKind::Banner, ControlId::BannerSwap));
-    // The same session with a Mac: no button, and an activation that still arrives does nothing.
+    // The same session with a Mac: offered too since 1.1 (F-XSWAP-01).
     s.apply(UiEvent::Session {
         session_id: 2,
         device_id: MAC.into(),
@@ -1360,18 +2232,17 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
             since_ms: 0,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
-    assert!(!has(&s, WindowKind::Banner, ControlId::BannerSwap));
+    assert!(has(&s, WindowKind::Banner, ControlId::BannerSwap));
     assert!(
         has(&s, WindowKind::Banner, ControlId::BannerDisconnect) && has(&s, WindowKind::Banner, ControlId::BannerChat)
     );
-    let a = s.activate(ControlId::BannerSwap);
-    assert!(a.commands.is_empty() && s.swap().is_none());
 
-    // The viewer toolbar: Mac peer none, Windows peer present.
+    // The viewer toolbar: a Mac peer and a Windows peer both offer the swap (1.1, F-XSWAP-01).
     let v = viewer();
-    assert!(!has(&v, WindowKind::Viewer, ControlId::TbSwap) && has(&v, WindowKind::Viewer, ControlId::TbDisconnect));
+    assert!(has(&v, WindowKind::Viewer, ControlId::TbSwap) && has(&v, WindowKind::Viewer, ControlId::TbDisconnect));
     let mut v = viewer();
     v.apply(UiEvent::Session {
         session_id: 1,
@@ -1380,6 +2251,7 @@ fn swap_is_offered_only_toward_a_machine_of_this_os() {
             since_ms: 0,
             role: Role::Viewer,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert!(has(&v, WindowKind::Viewer, ControlId::TbSwap));
@@ -1398,6 +2270,7 @@ fn the_banner_timer_is_due_at_the_next_minute_boundary_and_only_while_hosting() 
             since_ms: since,
             role: Role::Host,
             granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
         },
     });
     assert_eq!(s.banner_minute_delay_ms(since), Some(60_000), "on the boundary the next one is a minute away");
@@ -1588,4 +2461,672 @@ fn a_first_start_without_ui_bin_keeps_the_system_language() {
     s.load_prefs(Box::new(MemPrefs::default()));
     assert_eq!(s.user_prefs().language, Language::En);
     assert_eq!(s.user_prefs().theme, Theme::System);
+}
+
+#[test]
+fn pairing_texts_never_point_at_a_time_the_screen_does_not_show() {
+    // Owner, 09/11: "dentro desse tempo" with no time shown.
+    let s = Scenario::ParearEsteComputador.prepared_state();
+    let specs = s.controls(WindowKind::Main);
+    let body = specs.iter().position(|c| c.label.contains("tempo abaixo")).expect("the body");
+    let timer = &specs[body + 1];
+    assert_eq!(timer.role, UiRole::Progress, "the time follows the text that refers to it: {timer:?}");
+    let left = timer.value.clone().expect("the time drawn large");
+    assert!(left.contains(':') && timer.label.contains(&left), "{timer:?}");
+
+    // An unpaired device's panel has no countdown: its text names no time.
+    let mut s = Scenario::Dispositivos.prepared_state();
+    let unpaired = s.devices().iter().position(|d| !d.paired).expect("an unpaired device in the scenario");
+    s.activate(ControlId::Device(unpaired as u16));
+    let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    assert!(texts.iter().any(|t| t.starts_with("Este computador ainda não está pareado")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("desse tempo") || t.contains("tempo abaixo")), "{texts:?}");
+}
+
+#[test]
+fn the_login_item_the_system_reports_shows_in_the_switch_and_is_kept() {
+    let mem = MemPrefs::default();
+    let mut s = UiState::new(Language::PtBr, false);
+    s.load_prefs(Box::new(mem.clone()));
+    // Before the settings arrive: the shell found the login item registered.
+    s.set_open_at_login(true);
+    let saved = UserPrefs::decode(&mem.read().unwrap().expect("written")).expect("a valid record");
+    assert!(saved.open_at_login);
+    // The service answers its default (off) for the per-user field; the switch stays on.
+    let from_service = Settings { open_at_login: false, ..base().settings().unwrap().clone() };
+    s.apply(UiEvent::SettingsChanged(from_service));
+    assert!(s.settings().unwrap().open_at_login);
+    // With the settings already there, the switch follows at once.
+    s.set_open_at_login(false);
+    assert!(!s.settings().unwrap().open_at_login);
+    assert!(!UserPrefs::decode(&mem.read().unwrap().unwrap()).unwrap().open_at_login);
+    // The person turns it on in the window: the command carries it, for the shell to act on.
+    let act = s.activate(ControlId::OpenAtLogin);
+    assert!(
+        matches!(act.commands.as_slice(), [Command::SetSettings { settings }] if settings.open_at_login),
+        "{:?}",
+        act.commands
+    );
+}
+
+// ---------- the other waits (docs/WAITING.md section 4, rows 7, 8, 9, 14, 21, 22) ----------
+
+#[test]
+fn a_hosted_session_that_reconnects_keeps_the_banner_and_opens_no_viewer() {
+    let mut s = base();
+    s.apply(session_event(2, MAC, active(Role::Host, Permissions::NONE.with(Permission::Control))));
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
+    for lost in [SessionState::Reconnecting { attempt: 0 }, SessionState::Paused { desktop: DesktopKind::Locked }] {
+        s.apply(session_event(2, MAC, lost.clone()));
+        assert!(s.viewer_session().is_none(), "no viewer window opens on the host ({lost:?})");
+        assert_eq!(s.host_session().map(|h| h.id), Some(2), "the banner stays ({lost:?})");
+        assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner], "{lost:?}");
+        assert!(!s.controls(WindowKind::Banner).is_empty(), "{lost:?}");
+    }
+    // While it reconnects the banner says so, in the existing text.
+    s.apply(session_event(2, MAC, SessionState::Reconnecting { attempt: 1 }));
+    let h = s.host_session().unwrap().clone();
+    let (who, since) = s.banner_parts("MacBook", &h);
+    assert_eq!(who, "Reconectando ao MacBook");
+    assert!(since.is_empty());
+    assert_eq!(s.banner_text("MacBook", &h), "Reconectando ao MacBook");
+    // Back: the banner is as before.
+    s.apply(session_event(2, MAC, active(Role::Host, Permissions::NONE)));
+    assert_eq!(s.windows(), vec![WindowKind::Main, WindowKind::Banner]);
+    // A viewer session that reconnects keeps its window and no banner appears.
+    let mut v = viewer();
+    v.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    assert_eq!(v.windows(), vec![WindowKind::Main, WindowKind::Viewer]);
+    assert!(v.host_session().is_none());
+}
+
+#[test]
+fn reconnecting_counts_the_minute_down() {
+    let mut s = viewer();
+    // Attempt 0 (the loss was just seen): the track alone, nothing counted yet.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 0 }));
+    assert_eq!(s.reconnect_wait(), Some(WaitBar { fraction: 0.0, text: None }));
+    assert!(s.needs_tick());
+    s.tick();
+    s.tick();
+    assert_eq!(s.reconnect_wait().unwrap().text, None, "the minute starts at the first attempt");
+    // The first attempt starts the 60 s.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!((bar.text.as_deref(), bar.fraction), (Some("1:00"), 0.0));
+    for _ in 0..15 {
+        s.tick();
+    }
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:45"));
+    assert!((bar.fraction - 0.25).abs() < 1e-6, "{}", bar.fraction);
+    // A later attempt does not restart it.
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 2 }));
+    assert_eq!(s.reconnect_wait().unwrap().text.as_deref(), Some("0:45"));
+    // It stops at zero.
+    for _ in 0..70 {
+        s.tick();
+    }
+    let bar = s.reconnect_wait().unwrap();
+    assert_eq!((bar.text.as_deref(), bar.fraction), (Some("0:00"), 1.0));
+    // The accessibility tree reads the time too.
+    assert!(
+        s.controls(WindowKind::Viewer).iter().any(|c| c.role == UiRole::Progress && c.value.as_deref() == Some("0:00"))
+    );
+    // Back, and lost again: a new minute.
+    s.apply(session_event(1, MAC, active(Role::Viewer, Permissions::NONE)));
+    assert_eq!(s.reconnect_wait(), None);
+    s.apply(session_event(1, MAC, SessionState::Reconnecting { attempt: 1 }));
+    assert_eq!(s.reconnect_wait().unwrap().text.as_deref(), Some("1:00"));
+}
+
+#[test]
+fn asking_to_swap_shows_who_is_asked_and_counts_22_s() {
+    let mut s = Scenario::InverterAguardando.prepared_state();
+    assert!(s.swap_requested());
+    let w = s.swap_wait().expect("the card shows while the request waits");
+    assert_eq!(w.session_id, 1);
+    assert_eq!(w.title, "Esperando o Desktop do escritório aceitar a inversão");
+    assert!(w.body.contains("Desktop do escritório") && w.body.contains("20 segundos"), "{}", w.body);
+    // The scenario ran 6 of the 22 seconds.
+    assert_eq!(w.bar.text.as_deref(), Some("0:16"));
+    assert!((w.bar.fraction - 6.0 / 22.0).abs() < 1e-6, "{}", w.bar.fraction);
+    // No button but the toolbar's, whose swap button waits.
+    let ids: Vec<_> = s.controls(WindowKind::Viewer).into_iter().map(|c| (c.id, c.disabled)).collect();
+    assert!(ids.contains(&(ControlId::TbSwap, true)));
+    assert!(!ids.iter().any(|(id, _)| *id == ControlId::SwapDeclinedClose));
+    assert!(s.needs_tick());
+    // It counts to the end and stops there.
+    for _ in 0..30 {
+        s.tick();
+    }
+    let w = s.swap_wait().unwrap();
+    assert_eq!((w.bar.text.as_deref(), w.bar.fraction), (Some("0:00"), 1.0));
+    // The outcome closes it.
+    s.apply(UiEvent::Swap { session_id: 1, event: SwapEvent::Declined { why: SwapWhy::TimedOut } });
+    assert!(s.swap_wait().is_none());
+
+    // A fresh request counts from 22 again.
+    let mut s = Scenario::Inverter.prepared_state();
+    assert!(s.swap_wait().is_none(), "the confirm card is not the wait");
+    s.activate(ControlId::DialogPrimary);
+    assert_eq!(s.swap_wait().unwrap().bar.text.as_deref(), Some("0:22"));
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.role == UiRole::Progress));
+
+    // The host's banner says it in its own line, and the viewer card is not shown there.
+    let mut h = Scenario::Banner.prepared_state();
+    let before = h.banner_text("Desktop", h.host_session().unwrap());
+    assert!(before.contains("controla"), "{before}");
+    h.activate(ControlId::BannerSwap);
+    assert!(h.swap_wait().is_none());
+    let session = h.host_session().unwrap().clone();
+    assert_eq!(h.banner_parts("Desktop", &session).0, "Esperando o Desktop aceitar a inversão");
+    assert_eq!(h.banner_text("Desktop", &session), "Esperando o Desktop aceitar a inversão");
+    assert!(h.needs_tick());
+    h.apply(UiEvent::Swap { session_id: 2, event: SwapEvent::Declined { why: SwapWhy::Declined } });
+    assert!(h.banner_text("Desktop", &session).contains("controla"));
+}
+
+#[test]
+fn after_the_codes_match_the_card_says_it_waits_and_offers_cancel() {
+    let s = Scenario::Pareamento.prepared_state();
+    assert!(s.pair_wait().is_none());
+    let ids = |s: &UiState| s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect::<Vec<_>>();
+    assert!(ids(&s).contains(&ControlId::PairSame) && ids(&s).contains(&ControlId::PairDifferent));
+    let text = labels(&s, WindowKind::Main);
+    assert!(text.contains("Se forem diferentes"), "{text}");
+
+    let s = Scenario::PareamentoConfirmando.prepared_state();
+    let w = s.pair_wait().expect("the card waits");
+    assert_eq!(w.body, "O outro lado precisa confirmar o código. Isso leva alguns segundos.");
+    assert_eq!(
+        w.buttons,
+        vec![WaitButton {
+            id: ControlId::PairCancel,
+            label: "Cancelar".into(),
+            side: ButtonSide::Left,
+            primary: false
+        }]
+    );
+    let text = labels(&s, WindowKind::Main);
+    assert!(text.contains("O outro lado precisa confirmar") && !text.contains("Se forem diferentes"), "{text}");
+    assert!(text.contains("482 913"), "the code stays on screen: {text}");
+    assert_eq!(
+        s.controls(WindowKind::Main).iter().filter(|c| c.role == UiRole::Button).map(|c| c.id).collect::<Vec<_>>(),
+        vec![ControlId::PairCancel]
+    );
+    // Cancel after the confirmation closes the card and tells the service.
+    let mut s = s;
+    let a = s.activate(ControlId::PairCancel);
+    assert_eq!(a.commands, vec![Command::PairCancel { pairing_id: 1 }]);
+    assert!(s.pairing().is_none() && s.pair_wait().is_none());
+    // The other side's answer (Done or Failed) ends the step too.
+    let mut s = Scenario::PareamentoConfirmando.prepared_state();
+    s.apply(UiEvent::Pairing { pairing_id: 1, state: PairingState::Failed { reason: ApiCode::Refused } });
+    assert!(s.pair_wait().is_none());
+}
+
+#[test]
+fn a_pending_action_disables_the_actions_and_says_so() {
+    let mut s = viewer();
+    s.activate(ControlId::TbTerminal);
+    let action_buttons = |s: &UiState| {
+        s.controls(WindowKind::Viewer)
+            .into_iter()
+            .filter(|c| matches!(c.id, ControlId::Action(_)))
+            .map(|c| c.disabled)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(action_buttons(&s), vec![false; 4]);
+    assert!(s.action_wait().is_none() && !s.actions_disabled());
+    let a = s.activate(ControlId::Action(ActionKind::Sleep));
+    assert_eq!(a.commands, vec![Command::RunAction { session_id: 1, action: ActionKind::Sleep }]);
+    s.track(Ticket(40), &a.commands[0]);
+    assert_eq!(action_buttons(&s), vec![true; 4], "every quick action waits");
+    assert!(s.actions_disabled());
+    let w = s.action_wait().expect("the line shows");
+    assert_eq!(w.session_id, 1);
+    assert!(w.line.starts_with("Esperando o ") && w.line.ends_with("executar a ação…"), "{}", w.line);
+    assert!(labels(&s, WindowKind::Viewer).contains("executar a ação"));
+    assert!(s.activate(ControlId::Action(ActionKind::Lock)).commands.is_empty(), "one action at a time");
+    // The answer frees them, a failure included.
+    s.apply(UiEvent::Reply { ticket: Ticket(40), result: Ok(Reply::Done) });
+    assert_eq!(action_buttons(&s), vec![false; 4]);
+    assert!(s.action_wait().is_none());
+    let a = s.activate(ControlId::Action(ActionKind::Lock));
+    s.track(Ticket(41), &a.commands[0]);
+    assert!(s.actions_disabled());
+    s.apply(UiEvent::Reply { ticket: Ticket(41), result: Err(ApiError::new(ApiCode::NotPermitted)) });
+    assert!(!s.actions_disabled() && s.action_wait().is_none());
+    // The interface's own 30 s limit frees them as well.
+    let a = s.activate(ControlId::Action(ActionKind::Lock));
+    s.track(Ticket(42), &a.commands[0]);
+    for _ in 0..30 {
+        s.tick();
+    }
+    assert!(!s.actions_disabled());
+}
+
+#[test]
+fn the_elevated_window_answers_only_by_its_buttons_and_declines_when_the_time_runs_out() {
+    let make = || UiState::for_elevated_confirm(Language::PtBr, false, "Permitir X".into(), 3);
+    let s = make();
+    assert_eq!(s.dialog(WindowKind::Main), Some(DialogKind::ElevatedConfirm));
+    let t = s.dialog_texts(&DialogKind::ElevatedConfirm);
+    assert_eq!(t.title, "Confirmação de administrador");
+    assert_eq!(t.body, ["Permitir X", "Confirme como administrador para aplicar esta mudança."]);
+    assert_eq!((t.secondary.as_deref(), t.primary.as_deref()), (Some("Cancelar"), Some("Confirmar")));
+    assert_eq!(s.confirm_answer(), None);
+    assert!(s.needs_tick());
+    // "Confirmar" approves, and the first answer stands.
+    let mut s = make();
+    assert!(s.activate(ControlId::DialogPrimary).commands.is_empty());
+    assert_eq!(s.confirm_answer(), Some(true));
+    s.activate(ControlId::DialogSecondary);
+    assert_eq!(s.confirm_answer(), Some(true));
+    assert!(!s.needs_tick());
+    // "Cancelar", which is also what Esc means there, declines.
+    let mut s = make();
+    assert_eq!(s.escape_target(WindowKind::Main), Some(ControlId::DialogSecondary));
+    s.activate(ControlId::DialogSecondary);
+    assert_eq!(s.confirm_answer(), Some(false));
+    // The ticket's time running out declines.
+    let mut s = make();
+    s.tick();
+    s.tick();
+    assert_eq!(s.confirm_answer(), None);
+    s.tick();
+    assert_eq!(s.confirm_answer(), Some(false));
+    // The normal interface never has one.
+    assert!(UiState::new(Language::PtBr, false).elevated_confirm().is_none());
+    assert_eq!(base().escape_target(WindowKind::Main), None);
+}
+
+// ---------- WAITING.md 4, rows 11 and 12: the host asks its user about the terminal or the files ----------
+
+fn consent_pending(feature: Feature, remaining_s: u16) -> UiEvent {
+    UiEvent::ConsentPending { session_id: 1, feature, remaining_s }
+}
+
+#[test]
+fn the_terminal_says_that_the_host_asks_its_user_and_counts_down_until_the_answer() {
+    let mut s = viewer();
+    let cmds = open_terminal(&mut s);
+    assert_eq!(s.consent_wait(Feature::Terminal), None, "nobody is asked yet");
+    s.apply(consent_pending(Feature::Terminal, 20));
+    let bar = s.consent_wait(Feature::Terminal).expect("the question shows");
+    assert_eq!((bar.fraction, bar.text.as_deref()), (0.0, Some("0:20")));
+    assert_eq!(s.consent_wait(Feature::Files), None, "only for the feature asked about");
+    for _ in 0..5 {
+        s.tick();
+    }
+    let bar = s.consent_wait(Feature::Terminal).unwrap();
+    assert_eq!(bar.text.as_deref(), Some("0:15"));
+    assert!((bar.fraction - 0.25).abs() < 1e-6);
+    // The person said yes: the shell opens and the line goes.
+    answer_open(&mut s, &cmds, 7);
+    assert_eq!(s.consent_wait(Feature::Terminal), None);
+}
+
+#[test]
+fn a_refused_terminal_ends_the_question_and_a_question_of_another_session_is_ignored() {
+    let mut s = viewer();
+    let cmds = open_terminal(&mut s);
+    s.apply(UiEvent::ConsentPending { session_id: 99, feature: Feature::Terminal, remaining_s: 20 });
+    assert_eq!(s.consent_wait(Feature::Terminal), None, "not this window's session");
+    s.apply(consent_pending(Feature::Terminal, 20));
+    tracked_error(&mut s, &cmds[0], ApiCode::Refused);
+    assert_eq!(s.consent_wait(Feature::Terminal), None);
+    assert!(matches!(s.term_phase(), TermPhase::Failed { .. }));
+}
+
+#[test]
+fn the_files_say_that_the_host_asks_its_user_until_the_listing_comes() {
+    let mut s = viewer();
+    s.activate(ControlId::TbFiles);
+    s.apply(consent_pending(Feature::Files, 20));
+    assert_eq!(s.consent_wait(Feature::Files).unwrap().text.as_deref(), Some("0:20"));
+    s.apply(reply_ok(Reply::Listing(Listing { path: String::new(), entries: Vec::new(), truncated: false })));
+    assert_eq!(s.consent_wait(Feature::Files), None);
+    // The first listing waits for the 20 s question and then lists: its limit covers both.
+    assert_eq!(Command::FilesList { session_id: 1, path: None }.timeout_s(), 25);
+    // A send whose transfer starts was answered too.
+    s.apply(consent_pending(Feature::Files, 20));
+    s.apply(UiEvent::Transfer {
+        transfer_id: 1,
+        session_id: 1,
+        name: "a.bin".into(),
+        outgoing: true,
+        state: TransferState::Queued,
+    });
+    assert!(s.consent_wait(Feature::Files).is_some(), "queued: still asked");
+    s.apply(UiEvent::Transfer {
+        transfer_id: 1,
+        session_id: 1,
+        name: "a.bin".into(),
+        outgoing: true,
+        state: TransferState::Failed { reason: ApiCode::Refused },
+    });
+    assert_eq!(s.consent_wait(Feature::Files), None);
+}
+
+/// WAITING.md 4, row 23: the link to the service broke and is open again. The sessions of the old service ended with
+/// it, and the interface asks for its data again.
+#[test]
+fn a_reconnected_service_ends_the_old_sessions_and_the_data_is_asked_for_again() {
+    let mut s = viewer();
+    assert!(s.viewer_session().is_some());
+    s.take_followups();
+    s.apply(UiEvent::ServiceReconnected);
+    assert!(s.viewer_session().is_none(), "the session of the old service is gone");
+    let again = s.take_followups();
+    for c in [Command::GetThisDevice, Command::GetNetwork, Command::ListDevices, Command::GetSettings] {
+        assert!(again.contains(&c), "{c:?} is asked again: {again:?}");
+    }
+}
+
+/// Review of the elevation, findings 1 and 8: the confirmation names every machine-level permission the change
+/// leaves, and a device name cannot carry control or direction-override characters into it.
+#[test]
+fn the_confirmation_names_every_machine_level_permission_and_a_clean_device_name() {
+    use crate::interact::{elevation_action_text, shown_name};
+    let both = Permissions(Permission::Unattended.bit() | Permission::AdminTerminal.bit() | Permission::View.bit());
+    let action = ElevatedAction::SetGrants { device_id: MAC.into(), grants: both };
+    let text = elevation_action_text(Language::PtBr, &action, "Mac");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("Entrar sem perguntar") && lines[1].contains("terminal de administrador"), "{text}");
+    let only_terminal = ElevatedAction::SetGrants {
+        device_id: MAC.into(),
+        grants: Permissions(Permission::AdminTerminal.bit() | Permission::View.bit()),
+    };
+    assert_eq!(elevation_action_text(Language::PtBr, &only_terminal, "Mac").lines().count(), 1);
+    assert_eq!(shown_name("Mac\u{202e}cod.exe\n\u{2066}x\u{7}"), "Maccod.exex");
+    let named = elevation_action_text(Language::PtBr, &action, "Ma\u{202e}c");
+    assert!(!named.contains('\u{202e}'), "{named:?}");
+}
+
+/// ELEVATION-MAC.md M5: a Mac serves no administrator terminal in this version (D32), so on a Mac its switch is off,
+/// disabled and does nothing, with the line that says why; on Windows it is a switch like the others.
+#[test]
+fn on_a_mac_the_administrator_terminal_switch_is_off_and_inert_with_its_line() {
+    let mut s = Scenario::PermissoesNoMac.prepared_state();
+    assert!(!s.grant_available(Permission::AdminTerminal));
+    assert!(s.grant_available(Permission::Unattended), "only the administrator terminal");
+    let row = s
+        .controls(WindowKind::Main)
+        .into_iter()
+        .find(|c| c.id == ControlId::Grant(Permission::AdminTerminal))
+        .expect("the row is there");
+    assert!(row.disabled && row.toggled == Some(false), "{row:?}");
+    assert_eq!(row.description.as_deref(), Some("Indisponível no macOS nesta versão"));
+    let a = s.activate(ControlId::Grant(Permission::AdminTerminal));
+    assert!(a.commands.is_empty(), "nothing is sent");
+
+    let s = Scenario::Permissoes.prepared_state();
+    assert!(s.grant_available(Permission::AdminTerminal), "Windows serves it");
+}
+
+/// GRANTS-SYNC.md 8 S7: opening Permissões of a paired device asks the service to refresh what the other side
+/// allows, once per opening; a device that is not paired has no such column.
+#[test]
+fn opening_permissions_asks_the_service_to_refresh_that_device() {
+    let mut s = base();
+    s.take_followups();
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    let device = s.selected_device().unwrap().id.clone();
+    assert_eq!(s.take_followups(), vec![Command::RefreshGrants { device_id: device }]);
+    // Already on the tab: nothing more.
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    assert!(s.take_followups().is_empty());
+    // Away and back: once more.
+    s.activate(ControlId::Tab(DeviceTab::Overview));
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    assert_eq!(s.take_followups().len(), 1);
+}
+
+/// ELEVATION.md slice 7: a confirmed "Elevar controle" sends op 50 again, once.
+#[test]
+fn a_confirmed_elevate_session_sends_elevate_session_again() {
+    let mut s = viewer();
+    tracked_error(&mut s, &Command::ElevateSession { session_id: 1 }, ApiCode::NeedsAdmin);
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!("{:?}", a.commands) };
+    assert_eq!(action, ElevatedAction::ElevateSession { session_id: 1 });
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
+    assert!(s.elevation().is_none());
+    assert_eq!(s.take_followups(), vec![Command::ElevateSession { session_id: 1 }]);
+    assert!(s.take_followups().is_empty());
+}
+
+/// ELEVATION.md slice 7: a confirmed administrator terminal opens it in that session's panel.
+#[test]
+fn a_confirmed_admin_terminal_opens_the_administrator_terminal() {
+    let mut s = viewer();
+    tracked_error(&mut s, &Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }, ApiCode::NeedsAdmin);
+    let a = s.activate(ControlId::DialogPrimary);
+    let Command::Elevate { action, run, .. } = a.commands[0].clone() else { panic!("{:?}", a.commands) };
+    let _ = s.take_followups();
+    s.apply(UiEvent::ElevationResult { action, run, result: Ok(()) });
+    assert_eq!(s.take_followups(), vec![Command::TermOpen { session_id: 1, admin: true, cols: 80, rows: 24 }]);
+    assert_eq!(s.term_phase(), &TermPhase::Opening { admin: true });
+}
+
+/// ACCOUNTS.md 9 and D55: a session that entered without a prompt offers "Elevar controle" on its bar and, paused at
+/// a protected screen, on a card over the picture; both send op 50. A prompted session offers neither.
+#[test]
+fn an_unattended_session_offers_elevar_controle_on_the_bar_and_on_the_paused_card() {
+    let mut s = Scenario::VisualizadorElevar.prepared_state();
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate));
+    let a = s.activate(ControlId::TbElevate);
+    assert_eq!(a.commands, vec![Command::ElevateSession { session_id: 1 }]);
+    assert!(s.toolbar_hint(ControlId::TbElevate).is_some_and(|h| h.contains("tela de entrada")));
+
+    let mut s = Scenario::VisualizadorPausadoElevar.prepared_state();
+    let (body, button) = s.paused_card().expect("the card");
+    assert!(body.contains("tela protegida") && button);
+    let a = s.activate(ControlId::PausedElevate);
+    assert_eq!(a.commands, vec![Command::ElevateSession { session_id: 1 }]);
+
+    // The account left the console: the card says so, with nothing to press.
+    let s = Scenario::VisualizadorContaAusente.prepared_state();
+    let (body, button) = s.paused_card().expect("the card");
+    assert!(body.contains("Esta conta não está mais na tela") && !button);
+    assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate), "nothing to elevate");
+
+    // A prompted session: no button. Paused at a Mac's lock screen, the card says the Mac is locked and nobody can
+    // unlock it from here (D24), with nothing to press.
+    let mut s = viewer();
+    assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.id == ControlId::TbElevate));
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: MAC.into(),
+        state: SessionState::Paused { desktop: DesktopKind::Locked },
+    });
+    let (body, button) = s.paused_card().expect("the Mac's lock card");
+    assert!(body.contains("bloqueado") && !button, "{body}");
+    assert!(s.activate(ControlId::TbElevate).commands.is_empty());
+}
+
+/// ACCOUNTS.md 9.2: the host's banner says that the session was elevated.
+#[test]
+fn the_banner_of_an_elevated_session_says_controle_elevado() {
+    let s = Scenario::BannerElevado.prepared_state();
+    let h = s.host_session().unwrap().clone();
+    assert_eq!(s.banner_text("Mesa", &h), "Mesa controla este computador · Controle elevado");
+    let s = Scenario::Banner.prepared_state();
+    let h = s.host_session().unwrap().clone();
+    assert!(!s.banner_text("Mesa", &h).contains("Controle elevado"));
+}
+
+/// D56: the confirmation of a standard account says Windows will ask for an administrator's name and password; an
+/// administrator account keeps the body of 1.0.
+#[test]
+fn a_standard_accounts_confirmation_asks_for_an_administrators_name_and_password() {
+    let body = |admin: bool| {
+        let mut s = Scenario::Elevacao.prepared_state();
+        s.set_admin_account(admin);
+        s.dialog_texts(&DialogKind::Elevation).body.join(" ")
+    };
+    assert!(body(false).contains("nome e a senha de um administrador"), "{}", body(false));
+    assert!(!body(true).contains("nome e a senha"), "{}", body(true));
+}
+
+/// F-VIEW-02: the toolbar's screen button lists the other computer's displays, the shown one checked, and a pick
+/// asks the host to switch.
+#[test]
+fn the_screen_button_lists_the_hosts_displays_and_a_pick_switches() {
+    let mut s = viewer();
+    let d = |id: u16, name: &str, primary: bool| DisplayView {
+        id,
+        name: name.into(),
+        width: 2560,
+        height: 1440,
+        scale_milli: 1500,
+        primary,
+    };
+    let a = s.activate(ControlId::TbScreen);
+    assert!(matches!(a.commands[0], Command::ListDisplays { session_id: 1 }));
+    assert_eq!(a.effect, None, "nothing known yet: the list is asked");
+    s.track(Ticket(77), &Command::ListDisplays { session_id: 1 });
+    s.apply(UiEvent::Reply {
+        ticket: Ticket(77),
+        result: Ok(Reply::Displays(vec![d(1, "", true), d(2, "LG", false)])),
+    });
+    let a = s.activate(ControlId::TbScreen);
+    assert_eq!(a.effect, Some(Effect::Menu(SelectId::HostDisplay)));
+    assert_eq!(SelectId::HostDisplay.anchor(), ControlId::TbScreen);
+    let opts = s.select_options(SelectId::HostDisplay);
+    assert_eq!(opts[0], ("Tela 1 (principal), 2560 × 1440".to_string(), true));
+    assert_eq!(opts[1], ("LG, 2560 × 1440".to_string(), false));
+    let a = s.choose(SelectId::HostDisplay, 1);
+    assert_eq!(a.commands, vec![Command::SelectDisplay { session_id: 1, display_id: 2 }]);
+    assert!(s.select_options(SelectId::HostDisplay)[1].1, "the pick is checked");
+}
+
+/// D65: Ajustes lists the devices blocked by MAC, each with Desbloquear; unblocking takes the row away at once and
+/// asks the service, whose reply is the list as it then is.
+#[test]
+fn ajustes_lists_the_blocked_devices_and_unblocking_one_takes_it_away() {
+    use crate::api::BlockedItem;
+    let mut s = Scenario::Ajustes.prepared_state();
+    let item = |mac: &str, ip: &str| BlockedItem {
+        mac: mac.into(),
+        last_ipv4: ip.into(),
+        name: String::new(),
+        blocked_at_ms: 0,
+    };
+    s.apply(UiEvent::Reply {
+        ticket: crate::api::Ticket(0),
+        result: Ok(Reply::Blocked(vec![
+            item("02:00:00:00:00:01", "192.168.0.57"),
+            item("02:00:00:00:00:02", "192.168.0.9"),
+        ])),
+    });
+    let ids: Vec<ControlId> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::Unblock(0)) && ids.contains(&ControlId::Unblock(1)));
+    let rows = s.blocked_rows();
+    assert_eq!(rows[0].0, "Dispositivo sem nome");
+    assert!(rows[0].1.starts_with("02:00:00:00:00:01 · último endereço 192.168.0.57"), "{}", rows[0].1);
+
+    let a = s.activate(ControlId::Unblock(0));
+    assert_eq!(a.commands, vec![Command::UnblockDevice { mac: "02:00:00:00:00:01".into() }]);
+    assert_eq!(s.blocked_rows().len(), 1, "the row goes at once");
+    s.apply(UiEvent::Reply { ticket: crate::api::Ticket(0), result: Ok(Reply::Blocked(Vec::new())) });
+    let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    assert!(texts.contains(&"Nenhum dispositivo bloqueado.".to_owned()), "{texts:?}");
+}
+
+/// F-VIEW-06: the viewer window's area reaches the host as `SetViewSize`, once per change; 1:1 mode reports native.
+#[test]
+fn the_viewer_area_is_reported_in_physical_pixels_in_fit_and_as_native_in_one_to_one() {
+    let mut s = viewer();
+    let set =
+        |id: u64, w: u16, h: u16, hz: u16| Command::SetViewSize { session_id: id, width: w, height: h, max_fps: hz };
+
+    assert_eq!(s.set_view_area(1280, 720, 144), vec![set(1, 1280, 720, 144)], "Fit reports the area");
+    assert_eq!(s.set_view_area(1280, 720, 144), vec![], "nothing when the size is unchanged");
+    assert_eq!(s.set_view_area(1000, 720, 144), vec![set(1, 1000, 720, 144)], "a resize");
+    assert_eq!(s.set_view_area(1000, 720, 60), vec![set(1, 1000, 720, 60)], "the monitor's refresh changed");
+
+    // 1:1 reports 0x0 at once, and the resizes that follow are not reported.
+    let a = s.activate(ControlId::TbFit);
+    assert!(!s.fit());
+    assert!(a.commands.contains(&set(1, 0, 0, 60)), "{:?}", a.commands);
+    assert_eq!(s.set_view_area(800, 600, 60), vec![], "1:1 stays native whatever the window does");
+
+    // Back to Fit: the latest area.
+    let a = s.activate(ControlId::TbFit);
+    assert!(s.fit());
+    assert!(a.commands.contains(&set(1, 800, 600, 60)), "{:?}", a.commands);
+}
+
+#[test]
+fn no_viewer_session_reports_no_area() {
+    let mut s = UiState::default();
+    assert_eq!(s.set_view_area(1280, 720, 60), vec![]);
+}
+
+// ---------- the first-run guide card (F-UI-04) ----------
+
+#[test]
+fn an_empty_prefs_store_shows_the_first_run_guide_card() {
+    let mut s = UiState::new(Language::PtBr, false);
+    assert!(s.guide_card().is_none(), "before the store is read nothing shows");
+    s.load_prefs(Box::new(MemPrefs::default()));
+    let (title, body) = s.guide_card().expect("an empty store is a first start");
+    assert_eq!(title, "Bem-vindo ao Swapdesk");
+    assert!(!body.is_empty());
+}
+
+#[test]
+fn guide_skip_and_guide_done_each_close_the_card_and_write_the_record_and_it_never_comes_back() {
+    for id in [ControlId::GuideSkip, ControlId::GuideDone] {
+        let mem = MemPrefs::default();
+        let mut s = UiState::new(Language::PtBr, false);
+        s.load_prefs(Box::new(mem.clone()));
+        assert!(s.guide_card().is_some());
+        assert_eq!(mem.read().unwrap(), None, "showing the card writes nothing");
+        s.activate(id);
+        assert!(s.guide_card().is_none(), "{id:?} closes the guide");
+        let bytes = mem.read().unwrap().expect("closing writes the record");
+        assert!(UserPrefs::decode(&bytes).is_ok(), "a valid record");
+        // A second start over the same store: no card.
+        let mut next = UiState::new(Language::PtBr, false);
+        next.load_prefs(Box::new(mem.clone()));
+        assert!(next.guide_card().is_none(), "{id:?}: the guide is dismissed for good");
+    }
+}
+
+// ---------- the stats line names the codec (F-VIEW-07) ----------
+
+/// The overlay shall name the codec in use: the toolbar's session line (also read with the toolbar) ends with the
+/// numbers and "HEVC" when the session's pictures come in HEVC, "H.264" otherwise, and shows no codec when Ajustes
+/// hides the numbers.
+#[test]
+fn the_toolbar_session_line_names_the_codec_hevc_or_h264() {
+    let line = |s: &UiState| s.viewer_session_line(&s.viewer_session().unwrap().clone());
+    let stats = |hevc| UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 18, fps: 60, kbps: 9000, hevc } };
+
+    let mut s = viewer();
+    assert!(s.settings().unwrap().show_stats);
+    s.apply(stats(true));
+    let l = line(&s);
+    assert!(l.ends_with("18 ms, 60 qps, HEVC"), "{l}");
+    s.apply(stats(false));
+    let l = line(&s);
+    assert!(l.ends_with("18 ms, 60 qps, H.264") && !l.contains("HEVC"), "{l}");
+
+    // Read with the toolbar: the same text is in the accessible list.
+    s.apply(stats(true));
+    let in_bar = s.controls(WindowKind::Viewer).into_iter().any(|c| c.label.ends_with("HEVC"));
+    assert!(in_bar, "the toolbar's text names the codec");
+
+    // Ajustes hides the numbers: no codec either.
+    let mut hidden = viewer();
+    hidden.activate(ControlId::ShowStats);
+    hidden.apply(stats(true));
+    assert!(!hidden.settings().unwrap().show_stats);
+    assert!(!line(&hidden).contains("HEVC") && !line(&hidden).contains("H.264"), "{}", line(&hidden));
 }

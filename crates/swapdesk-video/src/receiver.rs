@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use quinn::{Connection, RecvStream, VarInt};
 use swapdesk_proto::{ErrorCode, KeyframeRequest, ReceiverReport, VIDEO_HEADER_LEN, VideoHeader, Wire};
 use tokio::sync::{Notify, mpsc};
@@ -87,6 +88,7 @@ impl std::fmt::Debug for Queued {
 /// A frame ready for the decoder.
 pub struct ReceivedFrame {
     pub header: VideoHeader,
+    /// In a buffer of exactly its length.
     pub payload: Vec<u8>,
     /// When the last byte arrived (the transport's own latency is this minus the host's capture time).
     pub received_at: Instant,
@@ -290,6 +292,69 @@ async fn ticker(me: Weak<Inner>, wake: Arc<Notify>, tx: mpsc::Sender<ReceivedFra
     }
 }
 
+/// Pieces of a stream taken per read (one lock of the connection each).
+const PIECES_PER_READ: usize = 32;
+/// The most a frame's buffer reserves ahead of its bytes. A frame up to this size is read into one buffer of exactly
+/// its length; a larger one into buffers of this size, made as the bytes come and joined once at the end.
+const RESERVE_AHEAD: usize = 256 * 1024;
+
+/// A frame's payload while its stream is read: owned bytes only, so nothing of QUIC's is kept, in buffers that are
+/// made at their final size and never grow.
+struct Assembly {
+    want: usize,
+    have: usize,
+    /// Full buffers of a frame larger than [`RESERVE_AHEAD`].
+    full: Vec<Vec<u8>>,
+    /// The buffer being filled; its capacity is the room it was made with.
+    open: Vec<u8>,
+    /// Bytes `open` was made for.
+    room: usize,
+}
+
+impl Assembly {
+    fn new(want: usize) -> Self {
+        let room = want.min(RESERVE_AHEAD);
+        Self { want, have: 0, full: Vec::new(), open: Vec::with_capacity(room), room }
+    }
+
+    fn len(&self) -> usize {
+        self.have
+    }
+
+    /// Copies `piece` in; `false` when the payload would run past its declared length (nothing is copied then).
+    fn push(&mut self, mut piece: &[u8]) -> bool {
+        if piece.len() > self.want - self.have {
+            return false;
+        }
+        while !piece.is_empty() {
+            if self.open.len() == self.room {
+                self.room = (self.want - self.have).min(RESERVE_AHEAD);
+                self.full.push(std::mem::replace(&mut self.open, Vec::with_capacity(self.room)));
+            }
+            let n = piece.len().min(self.room - self.open.len());
+            self.open.extend_from_slice(&piece[..n]);
+            self.have += n;
+            piece = &piece[n..];
+        }
+        true
+    }
+
+    /// The payload in one buffer of exactly its length, or `None` when bytes are missing.
+    fn finish(self) -> Option<Vec<u8>> {
+        if self.have != self.want {
+            return None;
+        }
+        if self.full.is_empty() {
+            return Some(self.open);
+        }
+        let mut out = Vec::with_capacity(self.want);
+        for part in self.full.iter().chain(std::iter::once(&self.open)) {
+            out.extend_from_slice(part);
+        }
+        Some(out)
+    }
+}
+
 fn stop(recv: &mut RecvStream, code: u32) {
     let _ = recv.stop(VarInt::from_u32(code));
 }
@@ -441,30 +506,35 @@ impl Inner {
         }
     }
 
-    /// Reads exactly `payload_len` bytes in bounded chunks and then the end of the stream. Memory grows with what
-    /// arrives, never with the declared length.
+    /// Reads exactly `payload_len` bytes and then the end of the stream, several pieces per look at the connection.
+    /// Each piece is copied into the frame's own buffer as it comes ([`Assembly`]), so what is held is what is
+    /// counted: memory follows the bytes that arrived, never the declared length, and no buffer grows on the way.
     async fn read_payload(&self, recv: &mut RecvStream, header: &VideoHeader, id: u64, cancel: &Notify) -> ReadEnd {
         let want = header.payload_len as usize;
-        let mut out: Vec<u8> = Vec::with_capacity(want.min(256 * 1024));
+        let mut frame = Assembly::new(want);
+        let mut batch: [Bytes; PIECES_PER_READ] = std::array::from_fn(|_| Bytes::new());
         let deadline = tokio::time::Instant::now() + self.cfg.frame_timeout;
         loop {
-            // One byte more than needed, so a payload that runs past its length is seen.
-            let max = (want - out.len().min(want) + 1).min(256 * 1024);
-            let read = select2(cancel.notified(), tokio::time::timeout_at(deadline, recv.read_chunk(max, true))).await;
-            let chunk = match read {
+            let read =
+                select2(cancel.notified(), tokio::time::timeout_at(deadline, recv.read_chunks(&mut batch))).await;
+            let filled = match read {
                 Either::Left(()) => return ReadEnd::Cancelled,
                 Either::Right(Err(_)) => return ReadEnd::Timeout,
                 Either::Right(Ok(Err(_))) => return ReadEnd::Reset,
-                Either::Right(Ok(Ok(c))) => c,
+                Either::Right(Ok(Ok(n))) => n,
             };
-            let Some(chunk) = chunk else {
-                return if out.len() == want { ReadEnd::Done(out) } else { ReadEnd::Malformed };
+            let Some(filled) = filled else {
+                return frame.finish().map_or(ReadEnd::Malformed, ReadEnd::Done);
             };
-            if out.len() + chunk.bytes.len() > want {
-                return ReadEnd::Malformed;
+            let before = frame.len();
+            for piece in &mut batch[..filled] {
+                // The piece is let go here: it keeps the whole datagram it came in alive, which no budget counts.
+                if !frame.push(&std::mem::take(piece)) {
+                    // A payload that runs past its length.
+                    return ReadEnd::Malformed;
+                }
             }
-            out.extend_from_slice(&chunk.bytes);
-            self.account(id, chunk.bytes.len());
+            self.account(id, frame.len() - before);
         }
     }
 
@@ -501,6 +571,80 @@ impl Inner {
         }
         drop(t);
         self.count(|s| s.budget_stops += stopped);
+    }
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    use super::*;
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// `bytes` fed in pieces of `step`.
+    fn fed(want: usize, bytes: &[u8], step: usize) -> Assembly {
+        let mut frame = Assembly::new(want);
+        for piece in bytes.chunks(step) {
+            assert!(frame.push(piece));
+        }
+        frame
+    }
+
+    #[test]
+    fn an_ordinary_frame_is_read_into_one_buffer_of_exactly_its_length() {
+        let bytes = pattern(80_667);
+        let frame = fed(bytes.len(), &bytes, 1163);
+        // One buffer, made before the first byte and never moved.
+        let at = frame.open.as_ptr();
+        assert!(frame.full.is_empty());
+        let out = frame.finish().expect("complete");
+        assert_eq!((out.as_ptr(), out.capacity()), (at, bytes.len()));
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn a_large_frame_is_read_in_buffers_that_follow_its_bytes_and_joined_at_its_exact_length() {
+        for len in [RESERVE_AHEAD, RESERVE_AHEAD + 1, 3 * RESERVE_AHEAD, 3 * RESERVE_AHEAD + 4567] {
+            let bytes = pattern(len);
+            for step in [1163, RESERVE_AHEAD - 1, RESERVE_AHEAD, len] {
+                let mut frame = Assembly::new(len);
+                let mut reserved_most = 0;
+                for piece in bytes.chunks(step) {
+                    assert!(frame.push(piece));
+                    // Never more than one buffer's room ahead of the bytes that arrived, whatever the length says.
+                    let reserved = frame.full.iter().map(Vec::capacity).sum::<usize>() + frame.open.capacity();
+                    reserved_most = reserved_most.max(reserved - frame.len());
+                }
+                assert!(reserved_most <= RESERVE_AHEAD, "{reserved_most} bytes reserved ahead");
+                assert_eq!(frame.len(), len);
+                let out = frame.finish().expect("complete");
+                assert_eq!(out.capacity(), len, "a frame of {len} bytes in pieces of {step}");
+                assert!(out == bytes, "a frame of {len} bytes in pieces of {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_payload_past_its_length_is_refused_and_a_short_one_is_not_a_frame() {
+        let bytes = pattern(1000);
+        let mut frame = fed(1000, &bytes, 300);
+        assert!(!frame.push(&[1]), "one byte too many");
+        assert_eq!(frame.len(), 1000, "the refused piece was not taken");
+        assert_eq!(frame.finish(), Some(bytes.clone()));
+        // A piece that would cross the end is refused whole.
+        let mut frame = fed(1000, &bytes[..900], 300);
+        assert!(!frame.push(&[0; 101]));
+        assert_eq!(frame.len(), 900);
+        assert_eq!(frame.finish(), None, "bytes are missing");
+        // No payload at all.
+        let mut empty = Assembly::new(0);
+        assert!(empty.push(&[]));
+        assert!(!empty.push(&[1]));
+        assert_eq!(empty.finish(), Some(Vec::new()));
+        // A header that declares 8 MiB reserves one buffer's room and no more until bytes come.
+        let big = Assembly::new(8 * 1024 * 1024);
+        assert_eq!(big.open.capacity(), RESERVE_AHEAD);
     }
 }
 

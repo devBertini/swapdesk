@@ -28,8 +28,9 @@ pub const ALPN: &[u8] = b"swapdesk/1";
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Protocol minor version sent in `Hello` and `HelloAck` (section 1). A peer sends a message type or enum value
-/// introduced in minor N only when the other side's minor is at least N.
-pub const PROTO_MINOR: u16 = 0;
+/// introduced in minor N only when the other side's minor is at least N ([`Message::min_minor`]). Minor 1 adds
+/// `StoredGrants`, `Elevate`, `GrantsSync`, `ErrorCode::AccountAway` and `Desktop::AccountAway`.
+pub const PROTO_MINOR: u16 = 2;
 
 /// UDP port of the session endpoint (section 1; a GUESS, configurable).
 pub const SESSION_PORT: u16 = 47820;

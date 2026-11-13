@@ -15,7 +15,7 @@ pub enum Role {
 /// True for the messages only the session core handles: the handshake, keepalive, errors and the messages that
 /// carry state the core owns. A feature crate cannot register these.
 pub fn is_core_type(type_id: u16) -> bool {
-    matches!(type_id, 0x0001..=0x000A | 0x0701..=0x0705 | 0x0F01 | 0x0F02 | 0x0FFF)
+    matches!(type_id, 0x0001..=0x000C | 0x0701..=0x0705 | 0x0801 | 0x0F01 | 0x0F02 | 0x0FFF)
 }
 
 /// Whether `role` may receive `msg` from its peer at all (direction of 5.3). A message that fails this is a
@@ -31,9 +31,8 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | FileResume(_) | FileCancel(_) => true,
         // Viewer to host.
         Hello(_) | SelectDisplay(_) | VideoSettings(_) | KeyframeRequest(_) | ReceiverReport(_) | AudioControl(_)
-        | SendSpecial(_) | DirRequest(_) | FileGet(_) | TermOpen(_) | TermResize(_) | TermClose(_) | QuickAction(_) => {
-            role == Role::Host
-        }
+        | SendSpecial(_) | DirRequest(_) | FileGet(_) | TermOpen(_) | TermResize(_) | TermClose(_) | QuickAction(_)
+        | DirPage(_) | VolumesRequest(_) | FsOp(_) => role == Role::Host,
         // Host to viewer.
         HelloAck(_)
         | PromptPending(_)
@@ -46,12 +45,21 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | StreamStats(_)
         | HostMute(_)
         | DirListing(_)
+        | DirPageListing(_)
+        | VolumesList(_)
+        | FsOpResult(_)
         | TermOpened(_)
         | TermExited(_)
         | QuickActionResult(_)
         | WakeInfo(_) => role == Role::Viewer,
         // The pairing endpoint only.
         PairHello(_) | PairNonce(_) | PairReveal(_) | PairConfirm(_) | PairResult(_) => false,
+        // Minor 1. What the other side has stored for this device, either way.
+        StoredGrants(_) => true,
+        // Minor 1, viewer to host: the session asks for the machine-level bits.
+        Elevate(_) => role == Role::Host,
+        // A grants sync connection only, never inside a session.
+        GrantsSync(_) => false,
     }
 }
 
@@ -77,7 +85,11 @@ pub fn required(msg: &Message) -> PermissionSet {
         SendSpecial(_) => PermissionSet::UNATTENDED,
         ClipboardSync(_) | ClipboardSkipped(_) => PermissionSet::CLIPBOARD,
         FileOffer(_) | FileAccept(_) | FileDecline(_) | FileDone(_) | FileVerified(_) | FilePause(_)
-        | FileResume(_) | FileCancel(_) | DirRequest(_) | FileGet(_) => PermissionSet::FILES,
+        | FileResume(_) | FileCancel(_) | DirRequest(_) | FileGet(_) | DirPage(_) | VolumesRequest(_) => {
+            PermissionSet::FILES
+        }
+        // A change of the host's files also needs control (FILES-UI.md 3.3): the viewer could do it by hand.
+        FsOp(_) => PermissionSet::FILES.union(PermissionSet::CONTROL),
         TermOpen(m) if m.admin => PermissionSet::ADMIN_TERMINAL,
         TermOpen(_) | TermResize(_) | TermClose(_) => PermissionSet::TERMINAL,
         QuickAction(_) => PermissionSet::CONTROL,
@@ -121,6 +133,9 @@ pub fn about_id(msg: &Message) -> u32 {
         FileCancel(m) => m.transfer_id,
         FileGet(m) => m.transfer_id,
         DirRequest(m) => m.req_id,
+        DirPage(m) => m.req_id,
+        VolumesRequest(m) => m.req_id,
+        FsOp(m) => m.op_id,
         TermOpen(m) => m.term_id,
         TermResize(m) => m.term_id,
         TermClose(m) => m.term_id,
@@ -170,9 +185,20 @@ fn without(set: PermissionSet, mask: u16) -> PermissionSet {
 
 /// `UNATTENDED` entry (F-SESS-02): only when the viewer asked for it and the device holds it; the grant is the
 /// stored grants intersected with what was requested.
-pub fn unattended_grant(stored: PermissionSet, requested: PermissionSet) -> Option<PermissionSet> {
-    (requested.contains(PermissionSet::UNATTENDED) && stored.contains(PermissionSet::UNATTENDED))
-        .then(|| stored & requested)
+///
+/// A viewer of protocol minor 1 or newer enters without the two machine-level bits, `UNATTENDED` and
+/// `ADMIN_TERMINAL`: it is in the session without a prompt, with what its user may do on the host's desktop, and
+/// asks for the rest with `Elevate` after the confirmation on its own machine. A viewer of minor 0 has no such
+/// step, so it gets the grant of 1.0, both bits included.
+pub fn unattended_grant(stored: PermissionSet, requested: PermissionSet, viewer_minor: u16) -> Option<PermissionSet> {
+    (requested.contains(PermissionSet::UNATTENDED) && stored.contains(PermissionSet::UNATTENDED)).then(|| {
+        let grant = stored & requested;
+        if viewer_minor >= 1 {
+            without(grant, PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL)
+        } else {
+            grant
+        }
+    })
 }
 
 /// A prompted session (D8, F-SESS-01): what the host's user picked, but never `UNATTENDED` (entry without a prompt
@@ -214,9 +240,10 @@ pub fn without_revoked(granted: PermissionSet, seen: PermissionSet, now: Permiss
     PermissionSet::closure(bits)
 }
 
-/// A swap (6.3 step 5): the stored grants for that device, never `UNATTENDED` entry; limited to what was requested.
+/// A swap (6.3 step 5): the stored grants for that device, limited to what was requested and never elevated:
+/// neither `UNATTENDED` nor `ADMIN_TERMINAL`, whatever the new viewer's `Hello` asks for.
 pub fn swap_grant(stored: PermissionSet, requested: PermissionSet) -> PermissionSet {
-    without(stored & requested, PermissionSet::BIT_UNATTENDED)
+    without(stored & requested, PermissionSet::BIT_UNATTENDED | PermissionSet::BIT_ADMIN_TERMINAL)
 }
 
 /// A resumed session (6.4): the original grants intersected with the grants still stored, so a per-session addition
@@ -270,6 +297,8 @@ mod tests {
             Message::Bye(Bye { code: ErrorCode::NoError }),
             Message::HostState(HostState { desktop: Desktop::Default, paused: false }),
             Message::ConsentPending(ConsentPending { feature: Feature::Files, timeout_s: 20 }),
+            Message::StoredGrants(StoredGrants { grants: PermissionSet::VIEW }),
+            Message::Elevate(Elevate {}),
             Message::DisplayList(DisplayList { displays: vec![] }),
             Message::SelectDisplay(SelectDisplay { display: 0 }),
             Message::VideoSettings(VideoSettings {
@@ -311,6 +340,19 @@ mod tests {
             Message::DirRequest(DirRequest { req_id: 1, path: None }),
             Message::DirListing(DirListing { req_id: 1, path: String::new(), entries: vec![], truncated: false }),
             Message::FileGet(FileGet { transfer_id: 1, path: String::new() }),
+            Message::DirPage(DirPage { req_id: 1, path: String::new(), start: 0, max: 100 }),
+            Message::DirPageListing(DirPageListing {
+                req_id: 1,
+                path: String::new(),
+                start: 0,
+                entries: vec![],
+                next: None,
+                free_bytes: None,
+            }),
+            Message::VolumesRequest(VolumesRequest { req_id: 1 }),
+            Message::VolumesList(VolumesList { req_id: 0, home: String::new(), places: vec![], volumes: vec![] }),
+            Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: vec![] } }),
+            Message::FsOpResult(FsOpResult { op_id: 1, results: vec![] }),
             Message::TermOpen(TermOpen { term_id: 1, cols: 80, rows: 24, admin: false }),
             Message::TermOpened(TermOpened { term_id: 1, account: String::new() }),
             Message::TermResize(TermResize { term_id: 1, cols: 80, rows: 24 }),
@@ -336,6 +378,7 @@ mod tests {
             Message::PairReveal(PairReveal { nonce_i: [0; 32] }),
             Message::PairConfirm(PairConfirm { matches: true }),
             Message::PairResult(PairResult { ok: true, code: ErrorCode::NoError }),
+            Message::GrantsSync(GrantsSync { proto_minor: 1, grants: PermissionSet::VIEW }),
             Message::Ping(Ping { nonce: 1, t_send_us: 0 }),
             Message::Pong(Pong { nonce: 1, t_send_us: 0, t_peer_us: 0 }),
             Message::Error(ErrorMessage { code: ErrorCode::Internal, fatal: false, about_type: 0, about_id: 0 }),
@@ -358,10 +401,25 @@ mod tests {
             let host = may_receive(Role::Host, &m);
             let viewer = may_receive(Role::Viewer, &m);
             match m.type_id() {
-                // Pairing messages never travel on a session.
-                0x0701..=0x0705 => assert!(!host && !viewer, "{m:?}"),
+                // Pairing messages never travel on a session, nor does the message of a grants sync connection.
+                0x0701..=0x0705 | 0x0801 => assert!(!host && !viewer, "{m:?}"),
+                // Minor 1: `StoredGrants` goes both ways, `Elevate` to the host.
+                0x000B => assert!(host && viewer, "{m:?}"),
+                0x000C => assert!(host && !viewer, "{m:?}"),
                 // Viewer to host only.
-                0x0001 | 0x0102..=0x0105 | 0x0107 | 0x0109 | 0x0409 | 0x040B | 0x0501 | 0x0503 | 0x0504 | 0x0601 => {
+                0x0001
+                | 0x0102..=0x0105
+                | 0x0107
+                | 0x0109
+                | 0x0409
+                | 0x040B
+                | 0x040C
+                | 0x040E
+                | 0x0410
+                | 0x0501
+                | 0x0503
+                | 0x0504
+                | 0x0601 => {
                     assert!(host && !viewer, "{m:?}")
                 }
                 // Host to viewer only.
@@ -373,6 +431,9 @@ mod tests {
                 | 0x0106
                 | 0x0108
                 | 0x040A
+                | 0x040D
+                | 0x040F
+                | 0x0411
                 | 0x0502
                 | 0x0505
                 | 0x0602
@@ -392,7 +453,8 @@ mod tests {
                 0x0107 => PermissionSet::AUDIO,
                 0x0109 => PermissionSet::UNATTENDED,
                 0x0303 | 0x0304 => PermissionSet::CLIPBOARD,
-                0x0401..=0x0408 | 0x0409 | 0x040B => PermissionSet::FILES,
+                0x0401..=0x0408 | 0x0409 | 0x040B | 0x040C | 0x040E => PermissionSet::FILES,
+                0x0410 => PermissionSet::FILES.union(PermissionSet::CONTROL),
                 0x0501 | 0x0503 | 0x0504 => PermissionSet::TERMINAL,
                 0x0601 => PermissionSet::CONTROL,
                 _ => PermissionSet::EMPTY,
@@ -413,8 +475,8 @@ mod tests {
     #[test]
     fn core_types_are_the_handshake_keepalive_and_state_messages() {
         for id in [
-            0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x0701, 0x0F01, 0x0F02,
-            0x0FFF,
+            0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x0701,
+            0x0801, 0x0F01, 0x0F02, 0x0FFF,
         ] {
             assert!(is_core_type(id), "{id:#x}");
         }
@@ -523,21 +585,66 @@ mod tests {
         assert!(permitted(PermissionSet::TERMINAL, PermissionSet::EMPTY, &plain));
     }
 
+    /// The entry rule by minor: a 1.1 viewer is let in without a prompt but without the machine-level bits, which
+    /// it asks for with `Elevate`; a 1.0 viewer has no such step and keeps the grant of 1.0.
+    #[test]
+    fn a_minor_1_viewer_enters_unattended_without_the_unattended_and_admin_terminal_bits() {
+        let everything = PermissionSet::UNATTENDED
+            | PermissionSet::ADMIN_TERMINAL
+            | PermissionSet::CONTROL
+            | PermissionSet::AUDIO
+            | PermissionSet::FILES
+            | PermissionSet::CLIPBOARD;
+        let plain = PermissionSet::CONTROL
+            | PermissionSet::AUDIO
+            | PermissionSet::FILES
+            | PermissionSet::CLIPBOARD
+            | PermissionSet::TERMINAL;
+        for minor in [1u16, 2, u16::MAX] {
+            let got = unattended_grant(everything, everything, minor).expect("the device holds UNATTENDED");
+            assert_eq!(got, plain, "minor {minor}: everything stored and asked for but the two bits");
+            assert!(!got.contains(PermissionSet::UNATTENDED) && !got.contains(PermissionSet::ADMIN_TERMINAL));
+            // Only what was asked for, as before.
+            let asked = PermissionSet::UNATTENDED | PermissionSet::VIEW;
+            assert_eq!(unattended_grant(everything, asked, minor), Some(PermissionSet::VIEW));
+        }
+    }
+
+    #[test]
+    fn a_minor_0_viewer_gets_unattended_at_entry_as_in_1_0() {
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        assert_eq!(unattended_grant(stored, stored, 0), Some(stored), "1.0 has no elevation step: the grant is whole");
+        let asked = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+        assert_eq!(unattended_grant(stored, asked, 0), Some(asked));
+    }
+
     #[test]
     fn unattended_swap_and_resumed_grants() {
         let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES;
         assert_eq!(
-            unattended_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL),
+            unattended_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL, 0),
             Some(PermissionSet::UNATTENDED | PermissionSet::CONTROL)
         );
-        assert_eq!(unattended_grant(stored, PermissionSet::CONTROL), None, "the viewer did not ask for UNATTENDED");
-        assert_eq!(
-            unattended_grant(PermissionSet::CONTROL, PermissionSet::UNATTENDED),
-            None,
-            "the device does not hold UNATTENDED"
-        );
+        for minor in [0, 1] {
+            assert_eq!(
+                unattended_grant(stored, PermissionSet::CONTROL, minor),
+                None,
+                "the viewer did not ask for UNATTENDED"
+            );
+            assert_eq!(
+                unattended_grant(PermissionSet::CONTROL, PermissionSet::UNATTENDED, minor),
+                None,
+                "the device does not hold UNATTENDED"
+            );
+        }
         let swap = swap_grant(stored, PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::FILES);
         assert!(!swap.contains(PermissionSet::UNATTENDED), "a swap never grants UNATTENDED entry");
+        let elevated = PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        assert_eq!(
+            swap_grant(stored | elevated, elevated),
+            PermissionSet::CONTROL | PermissionSet::TERMINAL,
+            "nor the administrator terminal, even when the new viewer asks for it and it is stored"
+        );
         assert!(swap.contains(PermissionSet::CONTROL) && swap.contains(PermissionSet::FILES));
         assert_eq!(
             resumed_grant(PermissionSet::CONTROL | PermissionSet::FILES, PermissionSet::CONTROL),

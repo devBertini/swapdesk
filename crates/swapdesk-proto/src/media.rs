@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn video_header_rejects_what_7_1_forbids() {
         let good = sample_video().encode().unwrap();
-        for (off, val) in [(0, 2u8), (1, 0b1000), (24, 2), (25, 1), (27, 1)] {
+        for (off, val) in [(0, 2u8), (1, 0b1000), (24, 3), (25, 1), (27, 1)] {
             let mut b = good.clone();
             b[off] = val;
             assert!(VideoHeader::decode(&b).is_err(), "offset {off}");

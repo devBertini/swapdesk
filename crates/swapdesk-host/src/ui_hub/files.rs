@@ -11,6 +11,11 @@
 //!   from its verified length; "Retomar" does the same for one transfer when the live connection no longer holds it.
 //! * **Listings** are answered when the host's `DirListing` arrives (up to 8 s: the host answers a refused or failed
 //!   request with nothing the protocol lets this side tell from silence).
+//! * **The explorer** (ops 46 to 48, minor 2): a page, a change and the volume list go to the host as `DirPage`,
+//!   `FsOp` and `VolumesRequest` and are answered when its message comes back (a change waits as long as the host may take, see `op_wait`). Toward a
+//!   host of minor below 2 each answers `Invalid` at once, which is how the interface learns the peer is a 1.0 host.
+//!   A volume list the host pushes unasked becomes the notification of kind 22. The host side's audit events of the
+//!   explorer (a change done, a new kind of volume reached) are written here too: counts and kinds only.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,9 +24,11 @@ use std::time::{Duration, Instant};
 
 use swapdesk_files::{Command, Event};
 use swapdesk_ipc::{
-    ApiCode, FileEntry, FileListing, FilePick, FilesNote, FilesOp, Message as Ipc, Notify, ReplyBody, Text,
-    TransferWire,
+    ApiCode, FileEntry, FileListing, FileListing2, FilePick, FilesNote, FilesOp, FsChange, FsEntry2View, FsPage,
+    Message as Ipc, Notify, OpResultView, PlaceView, ReplyBody, Text, TransferWire, VolumeView, VolumesView,
 };
+use swapdesk_proto::{FsName, FsOpKind};
+use swapdesk_trust::{AuditEntry, AuditEvent, DeviceRef};
 
 use super::ops::reply;
 use super::views::api_of;
@@ -34,6 +41,22 @@ const MAX_TRANSFERS: usize = 8;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How long a listing waits for the host.
 const LIST_WAIT: Duration = Duration::from_secs(8);
+/// Slack on top of what the host may take, for the trip and the queue.
+const OP_SLACK: Duration = Duration::from_secs(10);
+
+/// How long a change waits for the host's answer (FILES-UI.md 7.4): what the host may take for every name (each its own
+/// call, so `CALL_TIMEOUT`, or `MOVE_CALL_TIMEOUT` for a move) plus some slack. The host always answers inside that, with
+/// the true result, so `Timeout` means the host went silent, never "a long move is still running".
+fn op_wait(op: &FsOpKind) -> Duration {
+    let (each, n) = match op {
+        FsOpKind::Move { names, .. } => (swapdesk_files::MOVE_CALL_TIMEOUT, names.len()),
+        FsOpKind::Trash { names, .. } => (swapdesk_files::CALL_TIMEOUT, names.len()),
+        FsOpKind::MakeDir { .. } | FsOpKind::Rename { .. } => (swapdesk_files::CALL_TIMEOUT, 1),
+    };
+    each.saturating_mul(u32::try_from(n.max(1)).unwrap_or(u32::MAX)).saturating_add(OP_SLACK)
+}
+/// The first protocol minor that has the explorer's messages.
+const EXPLORER_MINOR: u16 = 2;
 /// How many times a reissue looks for the new connection's handler, and the pause between looks.
 const REISSUE_TRIES: u32 = 100;
 const REISSUE_PAUSE: Duration = Duration::from_millis(50);
@@ -67,9 +90,19 @@ struct Rec {
     last_sent_done: u64,
 }
 
+/// What an answer from the host is waited for as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Waits {
+    Dir,
+    Page,
+    Op,
+    Volumes,
+}
+
 struct ListWait {
     conn: Arc<Conn>,
     req: u32,
+    what: Waits,
 }
 
 /// The hub's file transfers, by session and transfer number, and the listings waiting for their answer.
@@ -79,8 +112,10 @@ pub(crate) struct FilesTable {
     lists: HashMap<u32, ListWait>,
 }
 
+/// The last component of a host path. Both separators split it: the name of a file is never a path, and a name
+/// with a `\` in it is a host's trick, not a file (`validate_name` refuses it too).
 fn last_component(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
 impl Hub {
@@ -130,14 +165,105 @@ impl Hub {
             FilesOp::Pause { transfer_id } => self.transfer_pause(conn, req, transfer_id),
             FilesOp::Resume { transfer_id } => self.transfer_resume(conn, req, transfer_id),
             FilesOp::Cancel { transfer_id } => self.transfer_cancel(conn, req, transfer_id),
+            FilesOp::ListPage { session_id, path, start } => self.files_page(conn, req, session_id, path.0, start),
+            FilesOp::Change { session_id, change } => self.files_change(conn, req, session_id, change),
+            FilesOp::Volumes { session_id } => self.files_volumes(conn, req, session_id),
         }
+    }
+
+    /// The viewer session and its handle for an explorer op: `NotFound` for a session this connection does not own,
+    /// `Invalid` toward a host of minor below 2.
+    fn explorer_handle(&self, conn: &Conn, req: u32, session_id: u64) -> Option<ViewerHandle> {
+        let Some(handle) = self.viewer_of(conn, session_id) else {
+            reply(conn, req, Err(ApiCode::NotFound));
+            return None;
+        };
+        if handle.ctx().peer_minor() < EXPLORER_MINOR {
+            reply(conn, req, Err(ApiCode::Invalid));
+            return None;
+        }
+        Some(handle)
+    }
+
+    /// Sends `cmd` to the session's engine and answers `Busy` when it takes none; otherwise the answer waits for the
+    /// host's message, or `Timeout` after `wait`.
+    fn explorer_ask(
+        self: &Arc<Self>,
+        conn: &Arc<Conn>,
+        req: u32,
+        handle: &ViewerHandle,
+        what: Waits,
+        wait: Duration,
+        cmd: impl FnOnce(u32) -> Command,
+    ) {
+        let req_id = self.fresh_id();
+        lock(&self.files).lists.insert(req_id, ListWait { conn: Arc::clone(conn), req, what });
+        if !handle.files().command(cmd(req_id)) {
+            lock(&self.files).lists.remove(&req_id);
+            return reply(conn, req, Err(ApiCode::Busy));
+        }
+        if let Some(rt) = self.rt() {
+            let me = Arc::clone(self);
+            rt.spawn(async move {
+                tokio::time::sleep(wait).await;
+                if let Some(w) = lock(&me.files).lists.remove(&req_id) {
+                    reply(&w.conn, w.req, Err(ApiCode::Timeout));
+                }
+            });
+        }
+    }
+
+    /// `FilesListPage` (46): a page of a folder of the host, a 1.1 path.
+    pub fn files_page(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64, path: String, start: u32) {
+        let Some(handle) = self.explorer_handle(conn, req, session_id) else { return };
+        self.explorer_ask(conn, req, &handle, Waits::Page, LIST_WAIT, |req_id| Command::DirPage {
+            req_id,
+            path,
+            start,
+            max: 2000,
+        });
+    }
+
+    /// `FilesOp` (47): a change of the host's files, answered when the host's `FsOpResult` arrives.
+    pub fn files_change(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64, change: FsChange) {
+        let Some(handle) = self.explorer_handle(conn, req, session_id) else { return };
+        let op = op_of(change);
+        let wait = op_wait(&op);
+        self.explorer_ask(conn, req, &handle, Waits::Op, wait, |op_id| Command::FsOp { op_id, op });
+    }
+
+    /// `FilesVolumes` (48): the host's home, places and volumes.
+    pub fn files_volumes(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64) {
+        let Some(handle) = self.explorer_handle(conn, req, session_id) else { return };
+        self.explorer_ask(conn, req, &handle, Waits::Volumes, LIST_WAIT, |req_id| Command::Volumes { req_id });
+    }
+
+    /// The device of host session `session_id`, for the audit.
+    fn host_session_device(&self, session_id: u64) -> Option<swapdesk_trust::DeviceId> {
+        self.core()?.host().sessions().into_iter().find(|s| s.session_id == session_id).map(|s| s.device)
+    }
+
+    fn file_audit(&self, session_id: u64, event: AuditEvent) {
+        let Some(device) = self.host_session_device(session_id) else { return };
+        self.p.audit.append(AuditEntry {
+            time_ms: self.p.wall.unix_ms(),
+            device: DeviceRef::Known(device),
+            event,
+            duration_s: None,
+        });
+    }
+
+    /// The waiter of `req_id` when it waits for `what`; one that waits for something else stays.
+    fn take_wait(&self, req_id: u32, what: Waits) -> Option<ListWait> {
+        let mut t = lock(&self.files);
+        if t.lists.get(&req_id).is_some_and(|w| w.what == what) { t.lists.remove(&req_id) } else { None }
     }
 
     /// `FilesList`: the folder of the host, answered when its listing arrives.
     pub fn files_list(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64, path: Option<String>) {
         let Some(handle) = self.viewer_of(conn, session_id) else { return reply(conn, req, Err(ApiCode::NotFound)) };
         let req_id = self.fresh_id();
-        lock(&self.files).lists.insert(req_id, ListWait { conn: Arc::clone(conn), req });
+        lock(&self.files).lists.insert(req_id, ListWait { conn: Arc::clone(conn), req, what: Waits::Dir });
         if !handle.files().command(Command::Dir { req_id, path }) {
             lock(&self.files).lists.remove(&req_id);
             return reply(conn, req, Err(ApiCode::Busy));
@@ -258,7 +384,11 @@ impl Hub {
 
     /// `TransferResume` ("Retomar"): the live connection continues it, or, when that connection no longer holds it
     /// (the link broke and came back), it is offered again and the receiver continues from its verified length.
-    pub fn transfer_resume(&self, conn: &Conn, req: u32, id: u32) {
+    ///
+    /// Right after a reconnect the session reports it is back a moment before the new connection's handler is in
+    /// place (see [`Hub::files_reissue`]): a click in that moment waits for the handler as the reissue does, instead
+    /// of being refused as busy while nothing is.
+    pub fn transfer_resume(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, id: u32) {
         let Some((session_id, handle)) = self.local_rec(conn, id) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
@@ -271,12 +401,27 @@ impl Hub {
             r.user_paused = false;
             r.start.clone()
         };
-        let ok = if handle.files().knows(id) {
-            handle.files().command(Command::Resume(id))
-        } else {
-            handle.files().command(command_of(id, &start))
+        let attempt = move || {
+            if handle.files().knows(id) {
+                handle.files().command(Command::Resume(id))
+            } else {
+                handle.files().command(command_of(id, &start))
+            }
         };
-        reply(conn, req, if ok { Ok(ReplyBody::Done) } else { Err(ApiCode::Busy) });
+        if attempt() {
+            return reply(conn, req, Ok(ReplyBody::Done));
+        }
+        let Some(rt) = self.rt() else { return reply(conn, req, Err(ApiCode::Busy)) };
+        let conn = Arc::clone(conn);
+        rt.spawn(async move {
+            for _ in 0..REISSUE_TRIES {
+                tokio::time::sleep(REISSUE_PAUSE).await;
+                if attempt() {
+                    return reply(&conn, req, Ok(ReplyBody::Done));
+                }
+            }
+            reply(&conn, req, Err(ApiCode::Busy));
+        });
     }
 
     /// `TransferCancel`.
@@ -388,6 +533,7 @@ impl Hub {
                     self.files_note(session_id, FilesNote::SavedAs { session_id, transfer_id: id, name: Text(saved) });
                 }
                 self.transfer_note(session_id, id, &name, outgoing, TransferWire::Done);
+                self.receive_access_changed();
             }
             Event::Sent { id } => {
                 let (name, outgoing) = {
@@ -415,7 +561,11 @@ impl Hub {
                     TransferWire::Paused { done, total, why: ApiCode::Timeout },
                 );
             }
-            Event::Failed { id, code } => self.finish_failed(session_id, id, api_of(code)),
+            Event::Failed { id, code } => {
+                self.finish_failed(session_id, id, api_of(code));
+                // A refused receive may be the missing macOS grant (F-FILE-03): ask the platform now.
+                self.receive_access_changed();
+            }
             Event::Cancelled { id } => {
                 // The user's own cancel removed the record already; this is the other side cancelling.
                 let known = lock(&self.files).recs.contains_key(&(session_id, id));
@@ -423,8 +573,8 @@ impl Hub {
                     self.finish_failed(session_id, id, ApiCode::Refused);
                 }
             }
-            Event::Listing { req_id, path, entries, truncated } => {
-                let Some(w) = lock(&self.files).lists.remove(&req_id) else { return };
+            Event::Listing { req_id, path, entries, truncated, .. } => {
+                let Some(w) = self.take_wait(req_id, Waits::Dir) else { return };
                 let listing = FileListing {
                     path: Text(path),
                     entries: entries
@@ -434,6 +584,49 @@ impl Hub {
                     truncated,
                 };
                 reply(&w.conn, w.req, Ok(ReplyBody::Listing(listing)));
+            }
+            Event::PageListing { req_id, path, start, entries, next, free_bytes, .. } => {
+                let Some(w) = self.take_wait(req_id, Waits::Page) else { return };
+                let page = FsPage {
+                    entries: entries
+                        .into_iter()
+                        .map(|e| FsEntry2View {
+                            name: Text(e.name),
+                            kind: e.kind,
+                            size: e.size,
+                            mtime_ms: e.mtime_ms,
+                            flags: e.flags,
+                        })
+                        .collect(),
+                    next,
+                    free: free_bytes,
+                };
+                reply(&w.conn, w.req, Ok(ReplyBody::Listing2(FileListing2 { path: Text(path), start, page })));
+            }
+            Event::Volumes(list) => {
+                let req_id = list.req_id;
+                let view = volumes_view(list);
+                if req_id == 0 {
+                    // The host's set changed and it said so unasked.
+                    self.files_note(session_id, FilesNote::Volumes { session_id, volumes: view });
+                } else if let Some(w) = self.take_wait(req_id, Waits::Volumes) {
+                    reply(&w.conn, w.req, Ok(ReplyBody::Volumes(view)));
+                }
+            }
+            Event::OpResult { op_id, results } => {
+                let Some(w) = self.take_wait(op_id, Waits::Op) else { return };
+                let results = results.into_iter().map(|i| OpResultView { name: Text(i.name), code: i.code }).collect();
+                reply(&w.conn, w.req, Ok(ReplyBody::OpResults(results)));
+            }
+            // The host side's audit (FILES-UI.md 8.3): counts and kinds, never a name.
+            // The same facts go to the console UI for the session banner (FILES-UI.md 6): counts, never a name.
+            Event::Changed { op, count, area } => {
+                self.files_note(session_id, FilesNote::Changed { session_id, op, count });
+                self.file_audit(session_id, AuditEvent::FilesChanged { op, count, area })
+            }
+            Event::Reach { kinds } => {
+                self.files_note(session_id, FilesNote::Reach { session_id });
+                self.file_audit(session_id, AuditEvent::FilesReach { kinds })
             }
         }
     }
@@ -474,6 +667,40 @@ impl Hub {
     }
 }
 
+/// The wire's change for the interface's.
+fn op_of(change: FsChange) -> FsOpKind {
+    let names = |v: Vec<swapdesk_ipc::FsNameView>| v.into_iter().map(|n| FsName { name: n.name.0 }).collect();
+    match change {
+        FsChange::MakeDir { parent, name } => FsOpKind::MakeDir { parent: parent.0, name: name.0 },
+        FsChange::Rename { dir, name, new_name } => FsOpKind::Rename { dir: dir.0, name: name.0, new_name: new_name.0 },
+        FsChange::Move { from_dir, names: n, to_dir } => {
+            FsOpKind::Move { from_dir: from_dir.0, names: names(n), to_dir: to_dir.0 }
+        }
+        FsChange::Trash { dir, names: n } => FsOpKind::Trash { dir: dir.0, names: names(n) },
+    }
+}
+
+/// The host's volume list for the interface.
+fn volumes_view(list: swapdesk_proto::VolumesList) -> VolumesView {
+    VolumesView {
+        home: Text(list.home),
+        places: list.places.into_iter().map(|p| PlaceView { kind: p.kind, path: Text(p.path) }).collect(),
+        volumes: list
+            .volumes
+            .into_iter()
+            .map(|v| VolumeView {
+                id: v.id,
+                kind: v.kind,
+                label: Text(v.label),
+                letter: v.letter,
+                total_bytes: v.total_bytes,
+                free_bytes: v.free_bytes,
+                has_bin: v.has_bin,
+            })
+            .collect(),
+    }
+}
+
 fn command_of(id: u32, start: &Start) -> Command {
     match start {
         Start::Send { path, dest } => Command::SendFile { id, path: PathBuf::from(path), dest: dest.clone() },
@@ -482,5 +709,42 @@ fn command_of(id: u32, start: &Start) -> Command {
         }
         // Never reissued: the filter keeps these out.
         Start::Theirs => Command::Cancel(id),
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn names(n: usize) -> Vec<FsName> {
+        (0..n).map(|i| FsName { name: format!("n{i}") }).collect()
+    }
+
+    #[test]
+    fn a_change_is_waited_for_longer_than_the_host_may_take_for_it() {
+        let mv = |n| FsOpKind::Move { from_dir: String::new(), names: names(n), to_dir: String::new() };
+        assert!(op_wait(&mv(1)) > swapdesk_files::MOVE_CALL_TIMEOUT, "a long move is not a timeout");
+        assert!(op_wait(&mv(64)) > swapdesk_files::MOVE_CALL_TIMEOUT * 64, "each name has its own call");
+        let trash = FsOpKind::Trash { dir: String::new(), names: names(3) };
+        assert!(op_wait(&trash) > swapdesk_files::CALL_TIMEOUT * 3);
+        let dir = FsOpKind::MakeDir { parent: String::new(), name: "x".into() };
+        assert!(op_wait(&dir) > swapdesk_files::CALL_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::last_component;
+
+    #[test]
+    fn the_name_of_a_path_is_what_follows_either_separator() {
+        assert_eq!(last_component("Docs/a.txt"), "a.txt");
+        assert_eq!(last_component("a.txt"), "a.txt");
+        assert_eq!(last_component(""), "");
+        // A host path that smuggles a backslash is split there too: the drag-out slots and the removal of a failed
+        // file match by this name, so `..\..\thesis.docx` must be `thesis.docx`, never a path.
+        assert_eq!(last_component(r"Docs/..\..\..\thesis.docx"), "thesis.docx");
+        assert_eq!(last_component(r"C:\Users\x\thesis.docx"), "thesis.docx");
+        assert_eq!(last_component("Docs/"), "");
     }
 }

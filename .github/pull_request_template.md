@@ -7,7 +7,7 @@
 - [ ] `cargo clippy` and `cargo fmt` are clean.
 - [ ] No `unsafe` outside `*-win` or `*-mac` crates.
 - [ ] No new dependency (or it was discussed and recorded in `docs/DECISIONS.md`).
-- [ ] Nothing leaves the LAN, and nothing secret is logged.
+- [ ] No session, pairing or discovery traffic leaves the LAN (the update check to GitHub is the only request beyond it), and nothing secret is logged.
 - [ ] User-facing strings are only in `swapdesk-ui`.
 - [ ] Documents that the change affects are updated (`docs/SPEC.md`, `docs/PROTOCOL.md`, `docs/CONTRACTS.md`).
 - [ ] I submit this under the project's licenses (MIT OR Apache-2.0).

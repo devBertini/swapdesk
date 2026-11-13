@@ -2,13 +2,13 @@
 //! `swapdesk-lan`, so tests script the answer.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use swapdesk_lan::discovery::{Config, Discovery, DiscoveryError, DiscoveryEvent};
+use swapdesk_lan::discovery::{Config, Discovery, DiscoveryError, DiscoveryEvent, Peer};
 use swapdesk_lan::txt::Txt;
 use swapdesk_platform::NetInterfaces;
 use swapdesk_proto::Os;
@@ -29,6 +29,8 @@ pub struct PresencePeer {
     /// The peer's pairing endpoint port. The record does not carry it: discovery assumes the next port of the
     /// session endpoint (PROTOCOL.md 1: 47820 and 47821).
     pub pair_port: u16,
+    /// The protocol minor of its record (`minor` TXT key, GRANTS-SYNC.md 4.5); 0 when absent: a 1.0 peer.
+    pub proto_minor: u16,
 }
 
 /// Presence of the other devices and the announcement of this one.
@@ -41,6 +43,13 @@ pub trait Presence: Send + Sync {
     fn refresh(&self);
     /// `f` runs (on any thread) whenever the set of peers changes.
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>);
+    /// Announces this account's record, or withdraws it while the others are still browsed (ACCOUNTS.md 6: an
+    /// account that receives no connections announces nothing).
+    fn set_announced(&self, _on: bool) {}
+    /// A contact the pinned key of `device` authenticated (a `HelloAck` or a `GrantsSync` answer) came from `at`: a
+    /// record of that device at another address does not move it away from there, and a record of another device
+    /// does not evict it from there (a forged record cannot hide or redirect a paired device).
+    fn authenticated(&self, _device: DeviceId, _at: SocketAddrV4) {}
 }
 
 /// No discovery: nobody is ever seen.
@@ -64,7 +73,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// [`Presence`] over `swapdesk_lan::Discovery` (mDNS on the approved interfaces only).
 pub struct DnsSdPresence {
     discovery: Arc<Discovery>,
-    peers: Arc<Mutex<HashMap<DeviceId, PresencePeer>>>,
+    peers: Arc<Mutex<PeerBook>>,
     listener: Listener,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -74,7 +83,7 @@ impl DnsSdPresence {
     /// Announces `own` and starts browsing.
     pub fn start(nets: Arc<dyn NetInterfaces>, own: Txt, config: Config) -> Result<Self, DiscoveryError> {
         let discovery = Arc::new(Discovery::start(nets, own, config)?);
-        let peers: Arc<Mutex<HashMap<DeviceId, PresencePeer>>> = Arc::default();
+        let peers: Arc<Mutex<PeerBook>> = Arc::default();
         let listener: Listener = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
@@ -86,21 +95,10 @@ impl DnsSdPresence {
                     while !stop.load(Ordering::Acquire) {
                         let Some(event) = discovery.next_event(Duration::from_millis(500)) else { continue };
                         let changed = {
-                            let mut map = lock(&peers);
+                            let mut book = lock(&peers);
                             match event {
-                                DiscoveryEvent::Found(p) => {
-                                    let peer = PresencePeer {
-                                        device_id: p.txt.fingerprint,
-                                        name: p.txt.name.clone(),
-                                        os: p.txt.os,
-                                        pairing_open: p.txt.pairing,
-                                        addrs: p.links.iter().map(|l| l.remote).collect(),
-                                        session_port: p.port,
-                                        pair_port: p.port.wrapping_add(1),
-                                    };
-                                    map.insert(peer.device_id, peer.clone()).as_ref() != Some(&peer)
-                                }
-                                DiscoveryEvent::Lost { fingerprint } => map.remove(&fingerprint).is_some(),
+                                DiscoveryEvent::Found(p) => book.found(presence_peer(&p)),
+                                DiscoveryEvent::Lost { fingerprint } => book.lost(&fingerprint),
                             }
                         };
                         if changed && let Some(f) = lock(&listener).clone() {
@@ -114,9 +112,106 @@ impl DnsSdPresence {
     }
 }
 
+/// What the device list keeps of a peer discovery found.
+fn presence_peer(p: &Peer) -> PresencePeer {
+    PresencePeer {
+        device_id: p.txt.fingerprint,
+        name: p.txt.name.clone(),
+        os: p.txt.os,
+        pairing_open: p.txt.pairing,
+        addrs: p.links.iter().map(|l| l.remote).collect(),
+        session_port: p.port,
+        pair_port: p.port.wrapping_add(1),
+        proto_minor: p.minor,
+    }
+}
+
+/// The devices discovery found, and which of them a contact proved with the key pinned for them.
+///
+/// A record is the word of whoever answered on the network: anyone on the LAN can announce any fingerprint. A contact
+/// that the pinned key authenticated (a `HelloAck`, a `GrantsSync` answer) proves that device answers at that address
+/// and port, which no record can undo; only the device's own record going away ends the proof.
+#[derive(Default)]
+pub(crate) struct PeerBook {
+    peers: HashMap<DeviceId, PresencePeer>,
+    /// Where each proven device answered.
+    proven: HashMap<DeviceId, SocketAddrV4>,
+    /// The newest record of a proven device that does not say where it was proven: it takes the place when the proof
+    /// ends (the device really moved), and shows nothing before.
+    held: HashMap<DeviceId, PresencePeer>,
+}
+
+impl PeerBook {
+    /// The devices now listed.
+    pub(crate) fn list(&self) -> Vec<PresencePeer> {
+        self.peers.values().cloned().collect()
+    }
+
+    /// A peer announced itself: it replaces its own old record and any other device's record at one of its addresses
+    /// and its port. On a LAN an IPv4 address is one machine at a time, so an older record there is a machine that is
+    /// gone (Swapdesk reinstalled with a new key, or another computer that took the address) and must not stand for
+    /// that address: "Adicionar por endereço" would pick it and pairing would fail against the real key. Two
+    /// exceptions, both for a device a contact proved: its record elsewhere does not replace the proven one (it waits
+    /// aside), and no record evicts it from the address and port it was proven at. `true` when the list changed.
+    pub(crate) fn found(&mut self, mut peer: PresencePeer) -> bool {
+        let id = peer.device_id;
+        if let Some(at) = self.proven.get(&id) {
+            if !(peer.addrs.contains(at.ip()) && peer.session_port == at.port()) {
+                self.held.insert(id, peer);
+                return false;
+            }
+            self.held.remove(&id);
+            put_first(&mut peer.addrs, *at.ip());
+        }
+        let before = self.peers.len();
+        let proven = &self.proven;
+        self.peers.retain(|qid, q| {
+            qid == &id
+                || q.session_port != peer.session_port
+                || !q.addrs.iter().any(|a| peer.addrs.contains(a))
+                || proven.get(qid).is_some_and(|at| at.port() == peer.session_port && peer.addrs.contains(at.ip()))
+        });
+        let replaced = self.peers.len() != before;
+        let new = self.peers.insert(id, peer.clone()).as_ref() != Some(&peer);
+        replaced || new
+    }
+
+    /// The device's record went away: its proof ends with it, and a record that waited aside takes its place.
+    pub(crate) fn lost(&mut self, id: &DeviceId) -> bool {
+        let removed = self.peers.remove(id).is_some();
+        self.proven.remove(id);
+        match self.held.remove(id) {
+            Some(next) => self.found(next) || removed,
+            None => removed,
+        }
+    }
+
+    /// A contact the pinned key of `id` authenticated came from `at`. Counts only for the record now listed for `id`
+    /// at that address and port. `true` when the order of its addresses changed (the proven one now comes first).
+    pub(crate) fn authenticate(&mut self, id: DeviceId, at: SocketAddrV4) -> bool {
+        let Some(peer) = self.peers.get_mut(&id) else { return false };
+        if !(peer.addrs.contains(at.ip()) && peer.session_port == at.port()) {
+            return false;
+        }
+        self.proven.insert(id, at);
+        put_first(&mut peer.addrs, *at.ip())
+    }
+}
+
+/// Moves `ip` to the front of `addrs`. `true` when that changed the order.
+fn put_first(addrs: &mut [Ipv4Addr], ip: Ipv4Addr) -> bool {
+    match addrs.iter().position(|a| a == &ip) {
+        Some(i) if i > 0 => {
+            addrs[..=i].rotate_right(1);
+            true
+        }
+        _ => false,
+    }
+}
+
 impl Presence for DnsSdPresence {
     fn peers(&self) -> Vec<PresencePeer> {
-        let mut v: Vec<PresencePeer> = lock(&self.peers).values().cloned().collect();
+        let mut v = lock(&self.peers).list();
         v.sort_by(|a, b| a.name.cmp(&b.name).then(a.device_id.cmp(&b.device_id)));
         v
     }
@@ -132,6 +227,18 @@ impl Presence for DnsSdPresence {
 
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.listener) = Some(f);
+    }
+
+    fn set_announced(&self, on: bool) {
+        // A failed re-announcement leaves the record as it was: the next network change retries.
+        let _ = self.discovery.set_announced(on);
+    }
+
+    fn authenticated(&self, device: DeviceId, at: SocketAddrV4) {
+        let changed = lock(&self.peers).authenticate(device, at);
+        if changed && let Some(f) = lock(&self.listener).clone() {
+            f();
+        }
     }
 }
 
@@ -150,6 +257,10 @@ pub struct FakePresence {
     peers: Mutex<Vec<PresencePeer>>,
     listener: Listener,
     pairing: AtomicBool,
+    /// `Some(on)` once the hub said whether to announce.
+    announced: Mutex<Option<bool>>,
+    /// The authenticated contacts the hub reported.
+    contacts: Mutex<Vec<(DeviceId, SocketAddrV4)>>,
 }
 
 impl FakePresence {
@@ -168,6 +279,16 @@ impl FakePresence {
     pub fn pairing_announced(&self) -> bool {
         self.pairing.load(Ordering::SeqCst)
     }
+
+    /// What the hub last said about announcing the record (`None`: it never said).
+    pub fn announced(&self) -> Option<bool> {
+        *lock(&self.announced)
+    }
+
+    /// The authenticated contacts the hub reported, oldest first.
+    pub fn contacts(&self) -> Vec<(DeviceId, SocketAddrV4)> {
+        lock(&self.contacts).clone()
+    }
 }
 
 impl Presence for FakePresence {
@@ -180,5 +301,109 @@ impl Presence for FakePresence {
     fn refresh(&self) {}
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.listener) = Some(f);
+    }
+    fn set_announced(&self, on: bool) {
+        *lock(&self.announced) = Some(on);
+    }
+    fn authenticated(&self, device: DeviceId, at: SocketAddrV4) {
+        lock(&self.contacts).push((device, at));
+    }
+}
+
+/// The presence of one account on a machine with several: the records of this machine's other accounts are not
+/// peers (ACCOUNTS.md 6, "this machine's other accounts are not listed").
+pub struct FilteredPresence {
+    inner: Arc<dyn Presence>,
+    own: Arc<Mutex<Vec<DeviceId>>>,
+}
+
+impl FilteredPresence {
+    /// `own`: the device IDs of this machine's accounts, kept up to date by the machine as accounts appear.
+    pub fn new(inner: Arc<dyn Presence>, own: Arc<Mutex<Vec<DeviceId>>>) -> Self {
+        Self { inner, own }
+    }
+}
+
+impl Presence for FilteredPresence {
+    fn peers(&self) -> Vec<PresencePeer> {
+        let own = lock(&self.own).clone();
+        self.inner.peers().into_iter().filter(|p| !own.contains(&p.device_id)).collect()
+    }
+    fn set_pairing(&self, on: bool) {
+        self.inner.set_pairing(on);
+    }
+    fn refresh(&self) {
+        self.inner.refresh();
+    }
+    fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        self.inner.set_listener(f);
+    }
+    fn set_announced(&self, on: bool) {
+        self.inner.set_announced(on);
+    }
+    fn authenticated(&self, device: DeviceId, at: SocketAddrV4) {
+        self.inner.authenticated(device, at);
+    }
+}
+
+#[cfg(test)]
+mod found_tests {
+    use super::*;
+
+    fn peer(id: u8, ip: [u8; 4], port: u16) -> PresencePeer {
+        PresencePeer {
+            device_id: [id; 16],
+            name: format!("p{id}"),
+            os: swapdesk_proto::Os::MacOs,
+            pairing_open: false,
+            addrs: vec![Ipv4Addr::from(ip)],
+            session_port: port,
+            pair_port: port + 1,
+            proto_minor: 0,
+        }
+    }
+
+    #[test]
+    fn a_new_key_at_an_address_replaces_the_old_record_there() {
+        let mut book = PeerBook::default();
+        assert!(book.found(peer(1, [192, 168, 1, 3], 47820)));
+        assert!(book.found(peer(9, [192, 168, 1, 7], 47820)));
+        assert!(!book.found(peer(1, [192, 168, 1, 3], 47820)), "the same record again changes nothing");
+        // Swapdesk reinstalled on 192.168.1.3: a new key there.
+        assert!(book.found(peer(2, [192, 168, 1, 3], 47820)));
+        let mut ids: Vec<u8> = book.list().iter().map(|p| p.device_id[0]).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2, 9], "the old record at that address is gone, the other machine stays");
+        // A second instance on another port of the same machine is another endpoint: both stay.
+        assert!(book.found(peer(3, [192, 168, 1, 3], 50000)));
+        assert_eq!(book.list().len(), 3);
+    }
+
+    #[test]
+    fn a_discovered_peers_minor_reaches_presence_peer_proto_minor() {
+        let found_peer = |minor| Peer {
+            txt: Txt { name: "m".into(), os: swapdesk_proto::Os::MacOs, fingerprint: [4; 16], pairing: false },
+            port: 47820,
+            minor,
+            links: Vec::new(),
+        };
+        assert_eq!(presence_peer(&found_peer(0)).proto_minor, 0);
+        assert_eq!(presence_peer(&found_peer(1)).proto_minor, 1);
+        // A record that gains `minor` is a change of the set.
+        let mut book = PeerBook::default();
+        assert!(book.found(presence_peer(&found_peer(0))));
+        assert!(book.found(presence_peer(&found_peer(1))));
+        assert!(!book.found(presence_peer(&found_peer(1))));
+    }
+
+    #[test]
+    fn a_scripted_peers_minor_is_what_the_fake_presence_reports() {
+        let fake = FakePresence::new();
+        fake.set(vec![
+            PresencePeer { proto_minor: 1, ..peer(1, [192, 168, 1, 3], 47820) },
+            peer(2, [192, 168, 1, 4], 47820),
+        ]);
+        let minors: Vec<u16> = fake.peers().iter().map(|p| p.proto_minor).collect();
+        assert_eq!(minors, [1, 0]);
     }
 }

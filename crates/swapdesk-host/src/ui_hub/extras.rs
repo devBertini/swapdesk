@@ -9,7 +9,7 @@
 //!   answered with the message as stored.
 //! * **Wake.** The device's stored MACs and last address make the route (`wake_route`), the socket is bound to it
 //!   with TTL 1, and the attempt runs off every thread of the UI path until the device appears, the minute ends, or
-//!   the user cancels; on `Appeared` the hub connects as `Connect` would.
+//!   the user cancels; on `Appeared` the hub connects as `Connect` would, as the same entry.
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -31,11 +31,12 @@ use tokio::task::AbortHandle;
 
 use super::ops::reply;
 use super::views::parse_device_id;
-use super::{Conn, Hub, Viewer, lock};
+use super::{Conn, Hub, VideoPrefs, Viewer, lock};
 use crate::service::{ChatNote, ConnectError, ExtrasHooks, ViewerHandle, ViewerMessages};
 
-/// The waking entries get ids with this bit set so they never meet a session id the host picked at random in practice.
-const WAKE_ID_BIT: u64 = 1 << 63;
+/// The entries (a waking attempt, a connect that waits for the host) get ids with this bit set so they never meet a
+/// session id the host picked at random in practice.
+pub(super) const ENTRY_ID_BIT: u64 = 1 << 63;
 
 /// A swap question waiting for this machine's user.
 pub(crate) struct PendingSwap {
@@ -45,11 +46,12 @@ pub(crate) struct PendingSwap {
     session_id: u64,
 }
 
-/// A Wake-on-LAN attempt in flight.
-pub(crate) struct WakeRun {
-    abort: AbortHandle,
-    conn: u64,
-    device_hex: String,
+/// A connect attempt in flight, from a click on "Controlar" or "Acordar" until its session opens or it ends: the
+/// interface shows it as a card and may cancel it.
+pub(crate) struct Entry {
+    pub(super) abort: AbortHandle,
+    pub(super) conn: u64,
+    pub(super) device_hex: String,
 }
 
 /// How the hub opens the socket of a Wake-on-LAN attempt and how long it runs. The default is the real thing (a UDP
@@ -128,33 +130,14 @@ impl Hub {
 
     // ---------- swap ----------
 
-    /// Swap between Windows and macOS is not in 1.0: a swap is for two machines of the same OS. A device that is not
-    /// in the trust store (nothing to compare) does not count as another OS.
-    fn other_os(&self, device: &DeviceId) -> bool {
-        self.p.trust.read(|s| s.find_by_id(device).is_some_and(|d| d.os != self.p.os))
-    }
-
-    /// The device on the other side of session `session_id`, either role.
-    fn peer_of_session(&self, session_id: u64) -> Option<DeviceId> {
-        for c in self.conns() {
-            if let Some(v) = lock(&c.viewers).get(&session_id) {
-                return Some(v.device);
-            }
-        }
-        self.core()?.host().sessions().into_iter().find(|s| s.session_id == session_id).map(|s| s.device)
-    }
-
     /// The question for this machine's user. It goes to the console session's UI only, whichever way the swap turns:
     /// when the machine is the viewer now it would become the host, and only the person at the console may agree to
     /// that (the swap token then skips the host's prompt and presence check). A UI of another session, even the one
     /// that owns the viewer session, never hears it.
     fn swap_ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        // Another OS: declined without bothering the user (the asking side hears a refusal).
-        if self.other_os(&prompt.device) {
-            self.log(Level::Debug, format_args!("refused: a swap asked from a device of another OS"));
-            return rx;
-        }
+        // Since 1.1 a swap works between Windows and macOS too (F-XSWAP-01); a 1.0 peer still declines one across
+        // systems on its own side, and the asker hears that refusal.
         let conns = self.console_conns();
         if conns.is_empty() {
             // Nobody to ask: the sender goes, which declines.
@@ -209,9 +192,6 @@ impl Hub {
         if let Err(code) = self.require_console(conn, "a swap request from a UI that is not the console's") {
             return reply(conn, req, Err(code));
         }
-        if self.peer_of_session(session_id).is_some_and(|d| self.other_os(&d)) {
-            return reply(conn, req, Err(self.api_error(ApiCode::NotPermitted, "a swap request toward another OS")));
-        }
         let (Some(core), Some(rt)) = (self.core(), self.rt()) else {
             return reply(conn, req, Err(ApiCode::ServiceDown));
         };
@@ -256,10 +236,20 @@ impl Hub {
             duration_s: None,
         });
         handle.files().bind(conn.fs.clone());
-        lock(&conn.viewers)
-            .insert(session_id, Viewer { handle: handle.clone(), device, view_only: false, displays: Vec::new() });
+        lock(&conn.viewers).insert(
+            session_id,
+            Viewer {
+                handle: handle.clone(),
+                device,
+                view_only: false,
+                displays: Vec::new(),
+                video: VideoPrefs::default(),
+            },
+        );
         let me = Arc::clone(self);
-        rt.spawn(async move { me.pump_viewer(conn, session_id, device, handle, messages, GrantMode::Swap).await });
+        rt.spawn(
+            async move { me.pump_viewer(conn, session_id, device, handle, messages, GrantMode::Swap, None).await },
+        );
     }
 
     // ---------- chat ----------
@@ -357,14 +347,14 @@ impl Hub {
             }
         };
         let Some(rt) = self.rt() else { return reply(conn, req, Err(ApiCode::ServiceDown)) };
-        let wake_id = WAKE_ID_BIT | u64::from(self.fresh_id());
+        let wake_id = ENTRY_ID_BIT | u64::from(self.fresh_id());
         reply(conn, req, Ok(ReplyBody::SessionId(wake_id)));
         let (me, c, macs) = (Arc::clone(self), Arc::clone(conn), dev.wol_macs.clone());
         // The entry is registered under the lock the task ends with, so a fast end cannot leave a stale one.
-        let mut wakes = lock(&self.wakes);
+        let mut entries = lock(&self.entries);
         let task =
             rt.spawn(async move { me.run_wake(c, wake_id, id, macs, route, BoxedWake(socket), cfg, intent).await });
-        wakes.insert(wake_id, WakeRun { abort: task.abort_handle(), conn: conn.id, device_hex: device_id_hex(&id) });
+        entries.insert(wake_id, Entry { abort: task.abort_handle(), conn: conn.id, device_hex: device_id_hex(&id) });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -393,44 +383,45 @@ impl Hub {
         })
         .await;
         let reason = match outcome {
-            Ok(WakeOutcome::Appeared) => {
-                // Connecting waits for the host's user (up to 20 s): a thread of its own, like `Connect`.
-                let (tx, rx) = oneshot::channel();
-                let (me, c, hex) = (Arc::clone(&self), Arc::clone(&conn), hex.clone());
-                match std::thread::Builder::new().name("ui-hub-wake-connect".into()).spawn(move || {
-                    let _ = tx.send(me.connect(&c, &hex, intent, false));
-                }) {
-                    Ok(_) => match rx.await {
-                        Ok(Ok(_)) => None,
-                        Ok(Err(code)) => Some(code),
-                        Err(_) => Some(ApiCode::Internal),
-                    },
-                    Err(_) => Some(ApiCode::Internal),
-                }
-            }
+            // The same entry goes on as a connect: it ends with the session's start or with why it did not open, and
+            // a cancel in any phase drops this task, which tells the host.
+            Ok(WakeOutcome::Appeared) => return self.run_connect(conn, wake_id, id, intent).await,
             Ok(WakeOutcome::GaveUp) => Some(ApiCode::Timeout),
             Err(WakeError::NoMacs) => Some(ApiCode::Invalid),
             Err(WakeError::Send(_)) => Some(ApiCode::Internal),
         };
-        lock(&self.wakes).remove(&wake_id);
-        state(SessionState::Ended { reason });
+        if lock(&self.entries).remove(&wake_id).is_some() {
+            state(SessionState::Ended { reason });
+        }
     }
 
-    /// "Cancelar" on the waking card: the attempt stops and its entry ends (a normal end).
-    pub fn cancel_wake(&self, conn: &Conn, wake_id: u64) -> bool {
-        let mut wakes = lock(&self.wakes);
-        if wakes.get(&wake_id).is_none_or(|w| w.conn != conn.id) {
+    /// "Cancelar" on a card of the device's page (waking, or a connect waiting for the host): the attempt stops, which
+    /// closes the host's question, and its entry ends (a normal end).
+    pub fn cancel_entry(&self, conn: &Conn, entry_id: u64) -> bool {
+        let mut entries = lock(&self.entries);
+        if entries.get(&entry_id).is_none_or(|e| e.conn != conn.id) {
             return false;
         }
-        let Some(run) = wakes.remove(&wake_id) else { return false };
-        drop(wakes);
-        run.abort.abort();
+        let Some(entry) = entries.remove(&entry_id) else { return false };
+        drop(entries);
+        entry.abort.abort();
         conn.queue.control(Ipc::UiNotify(Notify::Session {
-            session_id: wake_id,
-            device_id: run.device_hex,
+            session_id: entry_id,
+            device_id: entry.device_hex,
             state: SessionState::Ended { reason: None },
         }));
         true
+    }
+
+    /// The UI connection is gone: its attempts stop (nobody is left to show them) and none stays in the map.
+    pub(super) fn abort_entries_of(&self, conn: &Conn) {
+        let mut entries = lock(&self.entries);
+        let ids: Vec<u64> = entries.iter().filter(|(_, e)| e.conn == conn.id).map(|(id, _)| *id).collect();
+        for id in ids {
+            if let Some(entry) = entries.remove(&id) {
+                entry.abort.abort();
+            }
+        }
     }
 }
 

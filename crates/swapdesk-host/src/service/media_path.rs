@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use quinn::Connection;
 use swapdesk_proto::{CursorPosition, CursorShape, PermissionSet, StreamKind, VideoHeader, Wire};
 use swapdesk_session::SessionCtx;
@@ -29,7 +30,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 struct Stamped {
     header: VideoHeader,
-    payload: Vec<u8>,
+    payload: Bytes,
     at: Instant,
 }
 
@@ -67,6 +68,9 @@ pub(crate) struct VideoPath {
     stale: AtomicU64,
     awaiting_key: AtomicU64,
     asked: AtomicU64,
+    /// The session the frames are for: a frame is never sent while its session is paused or lacks `VIEW`, whatever the
+    /// sender's own flag says (the relay sets that one a moment after the session changes; F-UNAT-01).
+    gate: Mutex<Option<SessionCtx>>,
 }
 
 impl VideoPath {
@@ -81,7 +85,18 @@ impl VideoPath {
             stale: AtomicU64::new(0),
             awaiting_key: AtomicU64::new(0),
             asked: AtomicU64::new(0),
+            gate: Mutex::new(None),
         })
+    }
+
+    /// Names the session whose pause and grants gate every frame.
+    pub fn set_gate(&self, ctx: SessionCtx) {
+        *lock(&self.gate) = Some(ctx);
+    }
+
+    /// Whether the session forbids a picture now: paused on a desktop it may not see, or no `VIEW`.
+    fn shut(&self) -> bool {
+        lock(&self.gate).as_ref().is_some_and(|c| c.is_paused() || !c.granted().contains(PermissionSet::VIEW))
     }
 
     /// The capture that runs now (`None`: none). Whatever waited in the slot belonged to the old one.
@@ -108,7 +123,7 @@ impl VideoPath {
     }
 
     /// A frame from the helper: never waits. It replaces the one still in the slot (newest wins).
-    pub fn offer(&self, header: VideoHeader, payload: Vec<u8>) {
+    pub fn offer(&self, header: VideoHeader, payload: Bytes) {
         match &*lock(&self.run) {
             Some(run) if run.display == header.display_id => {}
             _ => return,
@@ -194,7 +209,13 @@ impl VideoPath {
                 self.wake.notified().await;
                 continue;
             };
-            if let Some(frame) = self.admit(stamped, lost) {
+            if self.shut() {
+                // Dropped here, so the stream has a gap: a keyframe is asked for, and the P-frames that follow are
+                // dropped until it comes.
+                if let Some(run) = lock(&self.run).clone() {
+                    self.want_key(&run);
+                }
+            } else if let Some(frame) = self.admit(stamped, lost) {
                 let _ = sender.send(frame).await;
             }
             self.poll_keyframe(&sender);

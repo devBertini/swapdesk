@@ -10,14 +10,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use swapdesk_proto::{ErrorCode, FileDataHeader, Message, PermissionSet, StreamKind, Wire};
+use swapdesk_proto::{ErrorCode, FileDataHeader, FsOpKind, Message, PermissionSet, StreamKind, Wire};
 use swapdesk_session::{ChannelHandler, IncomingStream, Role, SessionCtx, SessionEnd};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::disk::Fs;
-use crate::engine::{Engine, Event, FilesConfig, Out, Side};
+use crate::engine::{Engine, Event, FilesConfig, MAX_FS_OPS, Out, Side, busy_result, failed_result};
 use crate::local::LocalFs;
 use crate::send::ChunkReader;
 
@@ -29,9 +30,38 @@ pub trait FilesSink: Send + Sync + 'static {
 /// What the local user asks of the session's file feature.
 #[derive(Debug, Clone)]
 pub enum Command {
-    SendFile { id: u32, path: PathBuf, dest: Option<String> },
-    Get { id: u32, path: String, save_dir: PathBuf },
-    Dir { req_id: u32, path: Option<String> },
+    SendFile {
+        id: u32,
+        path: PathBuf,
+        dest: Option<String>,
+    },
+    Get {
+        id: u32,
+        path: String,
+        save_dir: PathBuf,
+    },
+    Dir {
+        req_id: u32,
+        path: Option<String>,
+    },
+    /// Viewer: a page of a folder of the host (a 1.1 path, minor 2).
+    DirPage {
+        req_id: u32,
+        path: String,
+        start: u32,
+        max: u16,
+    },
+    /// Viewer: the host's home, places and volumes (minor 2).
+    Volumes {
+        req_id: u32,
+    },
+    /// Viewer: a change of the host's files (minor 2).
+    FsOp {
+        op_id: u32,
+        op: FsOpKind,
+    },
+    /// Host: send the viewer a fresh volume list (`req_id` 0). Internal: see [`FilesHandler::push_volumes`].
+    PushVolumes,
     Pause(u32),
     Resume(u32),
     Cancel(u32),
@@ -115,10 +145,41 @@ impl WorkQueue {
     }
 }
 
+/// The `FsOp` messages of a session admitted and not yet answered: at most [`MAX_FS_OPS`] (FILES-UI.md 8.4).
+#[derive(Default)]
+struct OpSlots(AtomicUsize);
+
+impl OpSlots {
+    /// Takes a place; false when all are taken (the message is answered `BUSY` and never queued).
+    fn take(&self) -> bool {
+        if self.0.fetch_add(1, Ordering::SeqCst) >= MAX_FS_OPS {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    fn give(&self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The pushed volume lists of one session: at most one a second, the last change always going out.
+#[derive(Default)]
+struct PushState {
+    last: Option<Instant>,
+    trailing: bool,
+}
+
+const PUSH_EVERY: Duration = Duration::from_secs(1);
+
 struct Live {
     session_id: u64,
+    ctx: SessionCtx,
     work: WorkQueue,
     engine: Arc<Mutex<Engine>>,
+    ops: Arc<OpSlots>,
+    push: Arc<Mutex<PushState>>,
 }
 
 pub struct FilesHandler {
@@ -167,6 +228,50 @@ impl FilesHandler {
         lock(&self.live).as_ref().is_some_and(|l| l.work.command(cmd))
     }
 
+    /// Host: tells the viewer the set of volumes changed, with a fresh `VolumesList` (`req_id` 0). Only toward a viewer
+    /// of minor 2 or more that still holds `FILES`; at most one a second (a change inside the second goes out when it
+    /// ends). The caller (the D13 gate) says whether the session may be told anything.
+    pub fn push_volumes(&self) -> bool {
+        let Some((ctx, work, state)) =
+            lock(&self.live).as_ref().map(|l| (l.ctx.clone(), l.work.clone(), Arc::clone(&l.push)))
+        else {
+            return false;
+        };
+        if ctx.peer_minor() < 2 || !ctx.granted().contains(PermissionSet::FILES) {
+            return false;
+        }
+        let wait = {
+            let mut st = lock(&state);
+            match st.last.map(|at| PUSH_EVERY.saturating_sub(at.elapsed())) {
+                Some(wait) if !wait.is_zero() => {
+                    if st.trailing {
+                        return true;
+                    }
+                    st.trailing = true;
+                    Some(wait)
+                }
+                _ => {
+                    st.last = Some(Instant::now());
+                    None
+                }
+            }
+        };
+        match wait {
+            None => work.command(Command::PushVolumes),
+            Some(wait) => {
+                ctx.spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let mut st = lock(&state);
+                    st.trailing = false;
+                    st.last = Some(Instant::now());
+                    drop(st);
+                    work.command(Command::PushVolumes);
+                });
+                true
+            }
+        }
+    }
+
     /// Does the live session's engine hold transfer `id`? After a lost link it holds none: the transfer is offered
     /// again (the receiver resumes from its verified length).
     pub fn knows(&self, id: u32) -> bool {
@@ -185,7 +290,10 @@ impl ChannelHandler for FilesHandler {
     }
 
     fn messages(&self) -> &'static [u16] {
-        &[0x0401, 0x0402, 0x0403, 0x0404, 0x0405, 0x0406, 0x0407, 0x0408, 0x0409, 0x040A, 0x040B]
+        &[
+            0x0401, 0x0402, 0x0403, 0x0404, 0x0405, 0x0406, 0x0407, 0x0408, 0x0409, 0x040A, 0x040B, 0x040C, 0x040D,
+            0x040E, 0x040F, 0x0410, 0x0411,
+        ]
     }
 
     fn streams(&self) -> &'static [StreamKind] {
@@ -203,13 +311,47 @@ impl ChannelHandler for FilesHandler {
         let engine = Arc::new(Mutex::new(Engine::with_fs(cfg, Arc::clone(&self.fs))));
         let (tx, rx) = WorkQueue::new();
         let streams = Arc::new(Mutex::new(HashMap::new()));
-        ctx.spawn(worker(ctx.clone(), Arc::clone(&engine), Arc::clone(&self.sink), tx.clone(), rx, streams));
-        *lock(&self.live) = Some(Live { session_id: ctx.session_id(), work: tx, engine });
+        let ops = Arc::new(OpSlots::default());
+        ctx.spawn(worker(
+            ctx.clone(),
+            Arc::clone(&engine),
+            Arc::clone(&self.sink),
+            tx.clone(),
+            rx,
+            streams,
+            Arc::clone(&ops),
+        ));
+        *lock(&self.live) =
+            Some(Live { session_id: ctx.session_id(), ctx: ctx.clone(), work: tx, engine, ops, push: Arc::default() });
     }
 
     fn on_message(&self, ctx: &SessionCtx, msg: Message) {
-        let admitted = lock(&self.live).as_ref().map(|l| l.work.peer_message(msg));
-        if admitted == Some(Admit::Flood) {
+        // The explorer's requests exist from minor 2 on: a viewer that announced less cannot have sent them.
+        let explorer = matches!(msg, Message::DirPage(_) | Message::VolumesRequest(_) | Message::FsOp(_));
+        if explorer && ctx.peer_minor() < 2 {
+            return;
+        }
+        let live = lock(&self.live);
+        let Some(l) = live.as_ref() else { return };
+        let is_op = matches!(msg, Message::FsOp(_));
+        if let Message::FsOp(op) = &msg
+            && !l.ops.take()
+        {
+            // One too many: every name is `BUSY`, nothing is queued.
+            let busy = busy_result(op);
+            drop(live);
+            let sender = ctx.clone();
+            ctx.spawn(async move {
+                let _ = sender.send(busy).await;
+            });
+            return;
+        }
+        let admitted = l.work.peer_message(msg);
+        if is_op && admitted != Admit::Queued {
+            l.ops.give();
+        }
+        drop(live);
+        if admitted == Admit::Flood {
             ctx.bye(ErrorCode::Busy);
         }
     }
@@ -295,6 +437,7 @@ async fn worker(
     work_tx: WorkQueue,
     mut rx: mpsc::Receiver<Work>,
     streams: Streams,
+    ops: Arc<OpSlots>,
 ) {
     while let Some(w) = rx.recv().await {
         let outs = match w {
@@ -304,8 +447,37 @@ async fn worker(
             }
             Work::Msg(m) => {
                 work_tx.peer.fetch_sub(1, Ordering::SeqCst);
-                let e = Arc::clone(&engine);
-                blocking(move || lock(&e).on_message(m)).await.unwrap_or_default()
+                if let Message::FsOp(op) = m {
+                    // A change of the files never runs on this worker: a long one (a copy across volumes) would hold
+                    // every other file message of the session behind it. It takes its place in `ops` (at most
+                    // MAX_FS_OPS, already counted by `on_message`) and gives it back with its answer.
+                    let e = Arc::clone(&engine);
+                    match blocking(move || lock(&e).begin_op(op)).await {
+                        Some(Ok(job)) => {
+                            // The change belongs to the permissions that allowed it (FILES and CONTROL, FILES-UI.md
+                            // 3.3): when either is withdrawn, or the session ends, the task is stopped and the names it
+                            // has not begun are never touched. It does not start at all when they are not held now.
+                            let refused = failed_result(job.op(), ErrorCode::NotPermitted);
+                            let task = run_op(Arc::clone(&engine), work_tx.clone(), Arc::clone(&ops), job);
+                            if ctx.spawn_gated(PermissionSet::FILES.union(PermissionSet::CONTROL), task) {
+                                continue;
+                            }
+                            ops.give();
+                            vec![Out::Msg(refused)]
+                        }
+                        Some(Err(outs)) => {
+                            ops.give();
+                            outs
+                        }
+                        None => {
+                            ops.give();
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    let e = Arc::clone(&engine);
+                    blocking(move || lock(&e).on_message(m)).await.unwrap_or_default()
+                }
             }
             Work::Cmd(c, place) => {
                 drop(place);
@@ -316,6 +488,10 @@ async fn worker(
                         Command::SendFile { id, path, dest } => e.send_file(id, &path, dest),
                         Command::Get { id, path, save_dir } => e.request_get(id, path, save_dir),
                         Command::Dir { req_id, path } => e.request_dir(req_id, path),
+                        Command::DirPage { req_id, path, start, max } => e.request_page(req_id, path, start, max),
+                        Command::Volumes { req_id } => e.request_volumes(req_id),
+                        Command::FsOp { op_id, op } => e.request_op(op_id, op),
+                        Command::PushVolumes => e.volumes_push(),
                         Command::Pause(id) => e.pause(id),
                         Command::Resume(id) => e.resume(id),
                         Command::Cancel(id) => e.cancel(id),
@@ -351,6 +527,46 @@ async fn worker(
             }
         }
     }
+}
+
+/// Raises a change's cancel flag when the task that waits for the change is dropped before it ends (aborted: a
+/// permission withdrawn, the session over).
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// One change of the host's files, off the worker, run under the permissions that allow it (the caller starts this with
+/// `spawn_gated`). The disk work and its answer are a task of their own that no abort reaches, so the name being worked
+/// on always finishes (a move that began ends copied, verified, source to the bin, or takes its copy away, never half)
+/// and the viewer's audit hears what was done; this task only waits for it. When this task is aborted, its guard raises
+/// the change's cancel flag: the names not begun are not touched, and the slot is given back all the same.
+async fn run_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, job: crate::engine::OpJob) {
+    let job = Arc::new(job);
+    let guard = CancelOnDrop(job.cancel_flag());
+    let task = tokio::spawn(do_op(engine, work, ops, job));
+    let _ = task.await;
+    // Finished on its own: raising the flag now touches nothing.
+    drop(guard);
+}
+
+/// The disk work of one change on a blocking thread without the engine's lock, then the answer and the audit events
+/// through the worker's queue, so the viewer always hears what became of it.
+async fn do_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, job: Arc<crate::engine::OpJob>) {
+    let j = Arc::clone(&job);
+    let outs = match blocking(move || j.run()).await {
+        Some(results) => {
+            let (e, j) = (Arc::clone(&engine), Arc::clone(&job));
+            blocking(move || lock(&e).finish_op(&j, results)).await
+        }
+        None => None,
+    };
+    let outs = outs.unwrap_or_else(|| vec![Out::Msg(failed_result(job.op(), ErrorCode::Internal))]);
+    work.outs(outs).await;
+    ops.give();
 }
 
 /// The sending side of one data stream: header, the bytes from `from`, finish, then `FileDone` through the engine.
@@ -506,6 +722,43 @@ mod tests {
         let Ok(Work::Cmd(_, place)) = rx.try_recv() else { panic!("the first item is a command") };
         drop(place);
         assert!(queue.command(Command::Pause(2)));
+    }
+
+    #[test]
+    fn an_fs_op_beyond_four_in_flight_answers_busy_for_every_name() {
+        let slots = OpSlots::default();
+        for i in 0..MAX_FS_OPS {
+            assert!(slots.take(), "op {i} gets a place");
+        }
+        assert!(!slots.take(), "the fifth does not");
+        assert!(!slots.take(), "and neither does a sixth: a refusal takes nothing");
+        slots.give();
+        assert!(slots.take(), "a place freed by an answer is taken again");
+        // The answer a refused one gets: BUSY for each name, in the message's order.
+        let op = swapdesk_proto::FsOp {
+            op_id: 9,
+            op: FsOpKind::Trash {
+                dir: String::new(),
+                names: ["a", "b", "c"].map(|n| swapdesk_proto::FsName { name: n.to_string() }).to_vec(),
+            },
+        };
+        let Message::FsOpResult(r) = busy_result(&op) else { panic!("an FsOpResult") };
+        assert_eq!(r.op_id, 9);
+        let seen: Vec<_> = r.results.iter().map(|i| (i.name.as_str(), i.code)).collect();
+        assert_eq!(seen, [("a", ErrorCode::Busy), ("b", ErrorCode::Busy), ("c", ErrorCode::Busy)]);
+    }
+
+    #[test]
+    fn the_explorer_messages_are_registered() {
+        let h = FilesHandler::new(PathBuf::new(), None, Arc::new(NoSink));
+        for t in 0x040C..=0x0411u16 {
+            assert!(h.messages().contains(&t), "{t:#x}");
+        }
+    }
+
+    struct NoSink;
+    impl FilesSink for NoSink {
+        fn event(&self, _event: Event) {}
     }
 
     #[test]

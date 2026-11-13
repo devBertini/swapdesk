@@ -185,8 +185,9 @@ fn tone_level(blocks: &[Vec<f32>], freq: f64) -> f64 {
 }
 
 /// Renders a very quiet 1.234 kHz tone (peak 0.005, -46 dBFS) from this process while capturing for about a second,
-/// and returns only the tone's level in what was captured. The captured samples are analysed in memory and dropped.
-fn capture_level_with_own_tone(exclude: Option<u32>, amp: f32) -> f64 {
+/// and returns the tone's level in what was captured and, as the floor to judge it against, the level at a frequency
+/// nothing played (2.345 kHz). The captured samples are analysed in memory and dropped.
+fn capture_level_with_own_tone(exclude: Option<u32>, amp: f32) -> (f64, f64) {
     let mut sink = WasapiRenderSink::new();
     let mut src = WasapiLoopbackSource::new();
     sink.start().unwrap();
@@ -208,7 +209,7 @@ fn capture_level_with_own_tone(exclude: Option<u32>, amp: f32) -> f64 {
         }
     }
     // Skip the first 20 blocks: the render stream needs a moment to reach the mixer.
-    tone_level(&captured[20..], 1_234.0)
+    (tone_level(&captured[20..], 1_234.0), tone_level(&captured[20..], 2_345.0))
 }
 
 #[test]
@@ -217,11 +218,13 @@ fn process_exclusion_really_leaves_this_process_out() {
         println!("process loopback unavailable here: exclusion not checked");
         return;
     }
-    let plain = capture_level_with_own_tone(None, 0.005);
-    let excluded = capture_level_with_own_tone(Some(std::process::id()), 0.005);
+    let (plain, floor) = capture_level_with_own_tone(None, 0.005);
+    let (excluded, _) = capture_level_with_own_tone(Some(std::process::id()), 0.005);
     println!(
-        "own 1.234 kHz tone in plain loopback {plain:.5}, with this process excluded {excluded:.5} (rendered peak 0.005)"
+        "own 1.234 kHz tone in plain loopback {plain:.5} (floor {floor:.5}), with this process excluded {excluded:.5} (rendered peak 0.005)"
     );
-    assert!(plain > 0.001, "plain loopback should hear the tone: {plain}");
+    // The level that reaches the loopback depends on the mixer and the moment's load: the tone is judged against the
+    // floor of the same capture, not against a fixed number.
+    assert!(plain > 10.0 * floor.max(1e-6), "plain loopback should hear the tone: {plain} over a floor of {floor}");
     assert!(excluded < plain * 0.2, "excluded {excluded} vs plain {plain}");
 }

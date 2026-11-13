@@ -46,6 +46,10 @@ pub struct Shared {
     /// The display the last picture came from.
     pub display: AtomicU16,
     pub last_error: Mutex<Option<String>>,
+    /// Development: the last pointer shape the video view took (host size and hot spot, the view cursor in points).
+    pub cursor_note: Mutex<Option<String>>,
+    /// Development: where the renderer's layers are (`MacRenderer::geometry_note`), after the last picture.
+    pub geometry_note: Mutex<Option<String>>,
     pub audio_underruns: Arc<AtomicU32>,
 }
 

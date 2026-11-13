@@ -1,7 +1,9 @@
 //! The reconnect policy (F-NET-01, PROTOCOL.md 6.4). When a session ends as `Lost` (network drop, sleep, IP change),
 //! the viewer shows "Reconectando" with the attempt number and dials again with `Hello { resume }` until the host
-//! takes it back or 60 s (the token's life) have passed. The attempts back off 0.2 s, 0.4 s, ... up to 2 s so a
-//! network that returns is noticed inside budget B5 (3 s).
+//! takes it back or 60 s (the token's life) have passed. The attempts back off 0.2 s, 0.4 s, ... up to 0.5 s and each
+//! one's handshake is bounded to [`ReconnectPolicy::dial_limit`], so a network that returns is noticed within 1.5 s,
+//! inside budget B5 (3 s): a dial left to QUIC's own retransmissions (after 1 s, 3 s, 7 s) can miss the return by
+//! the length of a gap (3.2 s found over a link that came back at 10.1 s).
 //!
 //! Nothing here opens sockets: the caller passes a `dial` closure (the service's connect with the stored address),
 //! so the policy runs the same over QUIC, over the in-memory link of the tests, and for an unattended host that
@@ -20,6 +22,10 @@ pub struct ReconnectPolicy {
     pub window: Duration,
     pub first_delay: Duration,
     pub max_delay: Duration,
+    /// How long one attempt's QUIC handshake may take before a fresh attempt starts (the caller's `dial` applies it,
+    /// e.g. through `ViewerSession::connect_within`). A LAN handshake takes milliseconds; the first retransmission of
+    /// QUIC's first packet comes after 1 s, so a longer limit only waits for the next gap.
+    pub dial_limit: Duration,
 }
 
 impl Default for ReconnectPolicy {
@@ -27,7 +33,8 @@ impl Default for ReconnectPolicy {
         Self {
             window: Duration::from_secs(60),
             first_delay: Duration::from_millis(200),
-            max_delay: Duration::from_secs(2),
+            max_delay: Duration::from_millis(500),
+            dial_limit: Duration::from_secs(1),
         }
     }
 }
@@ -116,8 +123,16 @@ mod tests {
     fn delays_double_up_to_the_cap() {
         let p = ReconnectPolicy::default();
         let ms: Vec<u128> = (1..=6).map(|n| p.delay_after(n).as_millis()).collect();
-        assert_eq!(ms, [200, 400, 800, 1600, 2000, 2000]);
-        assert_eq!(p.delay_after(u32::MAX), Duration::from_secs(2));
+        assert_eq!(ms, [200, 400, 500, 500, 500, 500]);
+        assert_eq!(p.delay_after(u32::MAX), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_returning_network_waits_at_most_one_attempt_and_one_delay_inside_budget_b5() {
+        // The worst case: the link returns just after an attempt started, so the next one is a limit plus a delay away.
+        let p = ReconnectPolicy::default();
+        assert!(p.dial_limit + p.max_delay <= Duration::from_millis(1500));
+        assert!(p.dial_limit < Duration::from_secs(1) + Duration::from_millis(1), "before QUIC's first retransmission");
     }
 
     #[test]

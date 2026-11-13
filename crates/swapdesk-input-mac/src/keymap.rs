@@ -97,6 +97,23 @@ pub fn is_local_escape(kvk: u16, flags: Modifiers) -> bool {
     kvk == KVK_Q && flags.contains(Modifiers::COMMAND) && !flags.contains(Modifiers::CONTROL)
 }
 
+/// The `modifierKeyState` argument of `UCKeyTranslate` for the flags of a key event: the Carbon `EventModifiers` bits
+/// shifted right by 8 (`UnicodeUtilities.h`: "modifierKeyState = ((EventRecord.modifiers) >> 8) & 0xFF"), with
+/// `cmdKey` bit 8, `shiftKey` 9, `alphaLock` 10, `optionKey` 11 and `controlKey` 12 (`HIToolbox/Events.h`, macOS 27.2
+/// SDK, read 2026-11-10). The fn key has no bit there.
+pub fn carbon_modifier_state(flags: Modifiers) -> u32 {
+    [
+        (Modifiers::COMMAND, 1u32 << 0),
+        (Modifiers::SHIFT, 1 << 1),
+        (Modifiers::CAPS_LOCK, 1 << 2),
+        (Modifiers::OPTION, 1 << 3),
+        (Modifiers::CONTROL, 1 << 4),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| flags.contains(*flag))
+    .fold(0, |state, (_, bit)| state | bit)
+}
+
 /// The text of a key press when it is something to type. AppKit gives arrows, function keys and the like as private
 /// use characters (`NSUpArrowFunctionKey` is U+F700 and so on, `NSEvent.h`): those are keys, not text.
 pub fn typed_text(characters: Option<&str>) -> Option<&str> {
@@ -197,6 +214,16 @@ mod tests {
         assert!(is_local_escape(KVK_Q, Modifiers::COMMAND.union(Modifiers::SHIFT)));
         assert!(!is_local_escape(KVK_Q, none));
         assert!(!is_local_escape(KVK_Q, Modifiers::COMMAND.union(Modifiers::CONTROL)));
+    }
+
+    #[test]
+    fn the_carbon_modifier_state_is_the_event_modifiers_shifted_by_eight() {
+        assert_eq!(carbon_modifier_state(Modifiers::default()), 0);
+        assert_eq!(carbon_modifier_state(Modifiers::COMMAND), 0x100 >> 8);
+        assert_eq!(carbon_modifier_state(Modifiers::SHIFT), 0x200 >> 8);
+        assert_eq!(carbon_modifier_state(Modifiers::CAPS_LOCK), 0x400 >> 8);
+        assert_eq!(carbon_modifier_state(Modifiers::OPTION.union(Modifiers::SHIFT)), (0x800 | 0x200) >> 8);
+        assert_eq!(carbon_modifier_state(Modifiers::CONTROL.union(Modifiers::FUNCTION)), 0x1000 >> 8);
     }
 
     #[test]

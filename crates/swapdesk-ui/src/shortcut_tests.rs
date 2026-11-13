@@ -25,7 +25,7 @@ fn the_windows_list_is_exactly_the_five_chords_of_d30() {
         keys_of(&s),
         vec![
             ("Liberar o teclado".to_owned(), "Ctrl+Alt".to_owned()),
-            ("Mostrar a barra da sessão".to_owned(), "Ctrl+Alt+B".to_owned()),
+            ("Mostrar ou recolher a barra da sessão".to_owned(), "Ctrl+Alt+B".to_owned()),
             ("Tela cheia".to_owned(), "F11".to_owned()),
             ("Enviar Ctrl+Alt+Del".to_owned(), "Ctrl+Alt+End".to_owned()),
             ("Desconectar".to_owned(), "Ctrl+Alt+Q".to_owned()),
@@ -50,31 +50,61 @@ fn the_english_names_follow_the_language() {
     s.choose(SelectId::Language, 1);
     let rows = keys_of(&s);
     assert_eq!(rows[0], ("Release the keyboard".to_owned(), "Ctrl+Alt".to_owned()));
-    assert_eq!(rows[1].0, "Show the session bar");
+    assert_eq!(rows[1].0, "Show or collapse the session bar");
     assert_eq!(rows[2], ("Full screen".to_owned(), "F11".to_owned()));
     s.choose(SelectId::ReleaseKey, 1);
     assert_eq!(s.shortcut_keys(ViewerAction::ReleaseKeyboard), "Right Ctrl");
 }
 
 #[test]
-fn the_toolbar_tooltip_lists_every_shortcut_and_says_they_hold_with_the_system_capture_on() {
-    let s = viewer();
-    let tip = s.shortcuts_tooltip();
-    for line in [
-        "Atalhos",
-        "Liberar o teclado: Ctrl+Alt",
-        "Mostrar a barra da sessão: Ctrl+Alt+B",
-        "Tela cheia: F11",
-        "Enviar Ctrl+Alt+Del: Ctrl+Alt+End",
-        "Desconectar: Ctrl+Alt+Q",
-        "Valem também com “Capturar atalhos do sistema” ligado.",
-    ] {
-        assert!(tip.lines().any(|l| l == line), "{line:?} missing in {tip:?}");
-    }
-    // The same text is the keys button's description for a screen reader.
+fn each_button_of_the_session_bar_has_a_hint_of_its_own_that_says_what_it_does() {
+    // A session toward a machine of this system: its bar has every button, "Inverter" included.
+    let mut s = viewer();
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: crate::mock::DESKTOP.into(),
+        state: SessionState::Active {
+            since_ms: 0,
+            role: Role::Viewer,
+            granted: Permissions::NONE.with(Permission::View),
+            elevation: Default::default(),
+        },
+    });
+    let expected = [
+        (ControlId::TbScreen, "Escolher qual tela do outro computador aparece"),
+        (ControlId::TbFit, "Ajustar a imagem ao tamanho da janela"),
+        (ControlId::TbAudio, "Ouvir o som do outro computador"),
+        (ControlId::TbGrab, "Enviar os atalhos do sistema ao outro computador"),
+        (ControlId::TbKeys, "Enviar Ctrl+Alt+Del e outras teclas"),
+        (ControlId::TbTerminal, "Abrir um terminal no outro computador"),
+        (ControlId::TbFiles, "Enviar e receber arquivos"),
+        (ControlId::TbChat, "Conversar com quem está no outro computador"),
+        (ControlId::TbSwap, "Inverter o controle: o outro computador passa a controlar este"),
+        (ControlId::TbDisconnect, "Encerrar a sessão (Ctrl+Alt+Q)"),
+        (ControlId::TbCollapse, "Recolher a barra num puxador no topo (Ctrl+Alt+B a traz de volta)"),
+    ];
     let specs = s.controls(WindowKind::Viewer);
-    let keys = specs.iter().find(|c| c.id == ControlId::TbKeys).unwrap();
-    assert_eq!(keys.description.as_deref(), Some(tip.as_str()));
+    let bar: Vec<_> = specs.iter().filter(|c| c.region == Region::Toolbar && c.id.focusable()).collect();
+    assert_eq!(bar.len(), expected.len(), "every button of the bar is in the table");
+    for (id, text) in expected {
+        let hint = s.toolbar_hint(id).unwrap_or_else(|| panic!("{id:?} has no hint"));
+        assert_eq!(hint, text, "{id:?}");
+        // One line about that button: never the shortcut list, which is in the settings.
+        assert!(!hint.contains('\n') && !hint.contains("Atalhos"), "{id:?}: {hint:?}");
+        // A screen reader hears it as the button's description, where it says more than the button's name.
+        let c = bar.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id:?} is not in the bar"));
+        assert_eq!(c.description, (hint != c.label).then_some(hint), "{id:?}");
+    }
+    assert!(s.toolbar_hint(ControlId::DrawerClose).is_none(), "only the bar's buttons have one");
+    // The keys in a hint are the viewer's own: a Mac says Control+Option.
+    let mut mac = viewer();
+    mac.set_viewer_os(ViewerOs::MacOs);
+    assert_eq!(mac.toolbar_hint(ControlId::TbDisconnect).as_deref(), Some("Encerrar a sessão (Control+Option+Q)"));
+    // And in English.
+    let mut en = viewer();
+    en.set_language(Language::En);
+    assert_eq!(en.toolbar_hint(ControlId::TbAudio).as_deref(), Some("Hear the other computer's sound"));
+    assert_eq!(en.toolbar_hint(ControlId::TbDisconnect).as_deref(), Some("End the session (Ctrl+Alt+Q)"));
 }
 
 #[test]
@@ -83,7 +113,7 @@ fn settings_list_the_shortcuts_and_the_release_key_choice() {
     let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
     assert!(texts.contains(&"Tecla que libera o teclado".to_owned()), "{texts:?}");
     assert!(texts.contains(&"Tela cheia: F11".to_owned()));
-    assert!(texts.contains(&"Mostrar a barra da sessão: Ctrl+Alt+B".to_owned()));
+    assert!(texts.contains(&"Mostrar ou recolher a barra da sessão: Ctrl+Alt+B".to_owned()));
     assert_eq!(s.select_options(SelectId::ReleaseKey).len(), 3, "exactly three chords");
     assert_eq!(s.select_value(SelectId::ReleaseKey), "Ctrl+Alt");
     assert_eq!(s.activate(ControlId::Select(SelectId::ReleaseKey)).effect, Some(Effect::Menu(SelectId::ReleaseKey)));
@@ -132,13 +162,36 @@ fn full_screen_hides_the_session_bar_until_ctrl_alt_b_shows_it() {
     assert!(!s.session_bar_visible(), "the next full screen starts with the bar hidden");
 }
 
+/// B22 (owner, 12/11): the session bar can be made small and tucked away and brought back: its collapse button or
+/// Ctrl+Alt+B leave a handle at the top of the picture; the handle or the shortcut bring the bar back; a new session
+/// starts with the bar open.
 #[test]
-fn the_bar_toggle_does_nothing_in_a_window() {
+fn the_bar_collapses_to_a_handle_and_comes_back() {
+    let ids = |s: &UiState| s.controls(WindowKind::Viewer).into_iter().map(|c| c.id).collect::<Vec<_>>();
     let mut s = viewer();
+    assert!(ids(&s).contains(&ControlId::TbCollapse) && !ids(&s).contains(&ControlId::TbExpand));
+
+    s.activate(ControlId::TbCollapse);
+    assert!(!s.session_bar_visible() && s.bar_handle_visible());
+    assert_eq!(toolbar_controls(&s), 0, "the bar's buttons are gone with it");
+    let handle = s.controls(WindowKind::Viewer).into_iter().find(|c| c.id == ControlId::TbExpand).expect("the handle");
+    assert_eq!(handle.label, "Mostrar a barra da sessão (Ctrl+Alt+B)", "the handle says how to bring the bar back");
+
+    s.activate(ControlId::TbExpand);
+    assert!(s.session_bar_visible() && !s.bar_handle_visible());
+
+    // The shortcut does the same in a window.
     s.run_shortcut(ViewerAction::ToggleBar);
-    assert!(s.session_bar_visible() && !s.fullscreen());
+    assert!(s.bar_handle_visible());
+    s.run_shortcut(ViewerAction::ToggleBar);
+    assert!(s.session_bar_visible());
+
+    // In full screen the picture starts clear (D30); a collapsed bar brought up there comes back whole.
+    s.run_shortcut(ViewerAction::ToggleBar);
     s.run_shortcut(ViewerAction::FullScreen);
-    assert!(!s.session_bar_visible(), "an earlier toggle in the window did not leave the bar on");
+    assert!(!s.session_bar_visible() && !s.bar_handle_visible(), "nothing over the picture in full screen");
+    s.run_shortcut(ViewerAction::ToggleBar);
+    assert!(s.session_bar_visible(), "the shortcut brings the bar back whole");
 }
 
 #[test]
@@ -188,4 +241,52 @@ fn the_full_screen_monitor_is_a_choice_among_the_monitors_the_shell_found() {
     s.choose(SelectId::FullscreenMonitor, 3);
     s.set_local_monitors(2);
     assert_eq!(s.fullscreen_monitor(), None, "a monitor that went away is forgotten");
+}
+
+/// F-UI-05: "the choice holds until the session ends": a collapsed bar is open again in the next session.
+#[test]
+fn a_collapsed_bar_is_open_again_in_the_next_session() {
+    let mut s = viewer();
+    let first = s.viewer_session().expect("a session").clone();
+    s.activate(ControlId::TbCollapse);
+    assert!(!s.session_bar_visible() && s.bar_handle_visible());
+
+    s.apply(UiEvent::Session {
+        session_id: first.id,
+        device_id: first.device_id.clone(),
+        state: SessionState::Ended { reason: None },
+    });
+    assert!(s.viewer_session().is_none(), "the session ended");
+
+    s.apply(UiEvent::Session {
+        session_id: first.id + 1,
+        device_id: first.device_id.clone(),
+        state: first.state.clone(),
+    });
+    assert!(s.viewer_session().is_some(), "another session started");
+    assert!(s.session_bar_visible() && !s.bar_handle_visible(), "the new session starts with the bar open");
+    assert!(toolbar_controls(&s) > 0);
+}
+
+/// F-UI-05: the collapsed handle is a button for the keyboard and screen readers, and the session line is read
+/// with the toolbar.
+#[test]
+fn the_handle_is_a_button_and_the_session_line_is_in_the_toolbars_accessible_text() {
+    let mut s = viewer();
+    let session = s.viewer_session().expect("a session").clone();
+    let line = s.viewer_session_line(&session);
+    assert!(!line.is_empty());
+    let specs = s.controls(WindowKind::Viewer);
+    let in_bar = specs
+        .iter()
+        .find(|c| c.region == Region::Toolbar && c.role == crate::interact::UiRole::Text && c.label == line)
+        .expect("the session line is a text of the toolbar");
+    let first_button = specs.iter().position(|c| c.region == Region::Toolbar && c.id == ControlId::TbScreen).unwrap();
+    let line_at = specs.iter().position(|c| std::ptr::eq(c, in_bar)).unwrap();
+    assert!(line_at < first_button, "read with the toolbar, before its buttons");
+
+    s.activate(ControlId::TbCollapse);
+    let handle = s.controls(WindowKind::Viewer).into_iter().find(|c| c.id == ControlId::TbExpand).expect("the handle");
+    assert_eq!(handle.role, crate::interact::UiRole::Button);
+    assert!(!handle.disabled && !handle.label.is_empty());
 }

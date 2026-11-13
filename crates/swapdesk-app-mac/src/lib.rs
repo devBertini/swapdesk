@@ -9,23 +9,31 @@
 //! - the OS-free half of the pipeline is `swapdesk-app`'s `shared` module (mailbox, feedback, cursor, audio player,
 //!   output side), the same one `Swapdesk.exe` uses.
 //!
-//! Built on every host: [`cli`], [`handoff`], [`layout_state`], [`pipe`], [`prefs`], [`service`], [`trace`] (so the
-//! Windows gate type-checks and tests them). macOS only: [`decode`], [`main_side`], [`pipeline`], [`slot`], [`app`],
+//! Built on every host: [`cli`], [`elevate`] (the administrator confirmation; only its system dialog is macOS), [`handoff`], [`layout_state`], [`lock_end`], [`login_switch`], [`pipe`], [`prefs`], [`screen_lock`] (the screen state it follows is read on macOS only), [`service`], [`trace`] and the
+//! command language of [`ui_script`] (so the Windows gate type-checks and tests them). macOS only: [`decode`], [`main_side`], [`pipeline`], [`slot`], [`app`],
 //! [`selftest`].
 //!
 //! The crate holds the one `unsafe` of this lane (a decoded picture moved to the main thread, [`main_side::MainFrame`])
-//! and the `atexit` registration of [`app`].
+//! and the `atexit` registration of [`app`], and the three IOKit power calls of [`display_awake`].
 
 pub mod cli;
+pub mod display_awake;
+pub mod elevate;
 pub mod handoff;
 pub mod layout_state;
+pub mod lock_end;
+pub mod login_switch;
 pub mod pipe;
 pub mod prefs;
+pub mod screen_lock;
 pub mod service;
 pub mod trace;
+pub mod ui_script;
 
 #[cfg(target_os = "macos")]
 pub mod app;
+#[cfg(target_os = "macos")]
+pub mod app_active;
 #[cfg(target_os = "macos")]
 pub mod decode;
 #[cfg(target_os = "macos")]
@@ -41,8 +49,16 @@ pub mod pipeline;
 #[cfg(target_os = "macos")]
 pub mod selftest;
 #[cfg(target_os = "macos")]
+pub mod session_notices;
+#[cfg(target_os = "macos")]
 pub mod slot;
+#[cfg(target_os = "macos")]
+pub mod system_disk;
+#[cfg(target_os = "macos")]
+pub mod update;
 
+#[cfg(all(test, target_os = "macos"))]
+mod host_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod input_tests;
 #[cfg(all(test, target_os = "macos"))]

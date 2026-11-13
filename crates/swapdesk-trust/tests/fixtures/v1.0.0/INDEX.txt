@@ -1,0 +1,11 @@
+# name	family	what
+identity_ascending_key	identity	SPKI, device ID, device ID hex
+identity_zero_key	identity	SPKI, device ID, device ID hex
+identity_ff_key	identity	SPKI, device ID, device ID hex
+identity_rfc8032_test1_key	identity	SPKI, device ID, device ID hex
+pairing_hashes_ascending	pairing-math	commit hash, SAS hash, six digits
+pairing_hashes_zero	pairing-math	commit hash, SAS hash, six digits
+pairing_hashes_same_devices_swapped_roles	pairing-math	commit hash, SAS hash, six digits
+sha256_empty	pairing-math	SHA-256 of 0 byte(s)
+sha256_abc	pairing-math	SHA-256 of 3 byte(s)
+sha256_commit_label	pairing-math	SHA-256 of 18 byte(s)

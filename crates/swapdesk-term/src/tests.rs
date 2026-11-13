@@ -301,7 +301,7 @@ fn qa(kind: Action) -> QuickAction {
 }
 
 fn actx(granted: PermissionSet, user_present: bool) -> ActionContext {
-    ActionContext { granted, user_present }
+    ActionContext { granted, user_present, paused: false }
 }
 
 #[test]
@@ -317,6 +317,25 @@ fn quick_actions_run_through_the_runner_and_report_success() {
         assert_eq!(relay.handle(&qa(a), &actx(PermissionSet::CONTROL, true)).result.code, ErrorCode::NoError);
     }
     assert_eq!(fake.ran(), vec![Action::Lock, Action::Sleep, Action::Restart, Action::TaskMonitor]);
+}
+
+/// A paused session (the host at its lock, sign-in or secure desktop, the session without `UNATTENDED`) may not
+/// restart, suspend or lock the computer: its input is dropped there, and so are its actions.
+#[test]
+fn a_paused_session_runs_no_quick_action() {
+    let fake = FakeActions::new();
+    let mut relay = ActionRelay::new(fake.clone());
+    for a in [Action::Restart, Action::Sleep, Action::Lock, Action::TaskMonitor] {
+        for user_present in [true, false] {
+            let ctx = ActionContext { granted: PermissionSet::CONTROL, user_present, paused: true };
+            let done = relay.handle(&qa(a), &ctx);
+            assert_eq!((done.result.code, done.ran), (ErrorCode::Unavailable, false), "{a:?}");
+        }
+    }
+    assert!(fake.ran().is_empty(), "nothing reached the runner");
+    // The same session, back on the user's desktop, runs them.
+    let done = relay.handle(&qa(Action::Restart), &actx(PermissionSet::CONTROL, true));
+    assert_eq!((done.result.code, done.ran), (ErrorCode::NoError, true));
 }
 
 #[test]
@@ -355,6 +374,31 @@ fn a_runner_failure_is_reported_as_a_code() {
     assert_eq!(relay.runner().awake_calls(), vec![true]);
 }
 
+/// What must be on record before an action can take the machine down is written before the runner is called, and only
+/// for a request the relay lets through.
+#[test]
+fn the_before_hook_runs_before_the_runner_and_only_for_a_request_that_reaches_it() {
+    let fake = FakeActions::new();
+    let mut relay = ActionRelay::new(fake.clone());
+    let seen = std::cell::RefCell::new(Vec::new());
+    let probe = fake.clone();
+    let done = relay.handle_with(&qa(Action::Restart), &actx(PermissionSet::CONTROL, true), |a| {
+        seen.borrow_mut().push((a, probe.ran().len()));
+    });
+    assert_eq!(done.result.code, ErrorCode::NoError);
+    assert_eq!(*seen.borrow(), vec![(Action::Restart, 0)], "called with nothing run yet");
+    // Refused first (no CONTROL, paused): the hook is not called.
+    relay.handle_with(&qa(Action::Sleep), &actx(PermissionSet::VIEW, true), |_| panic!("not CONTROL"));
+    let paused = ActionContext { granted: PermissionSet::CONTROL, user_present: true, paused: true };
+    relay.handle_with(&qa(Action::Sleep), &paused, |_| panic!("paused"));
+    // A failure of the runner still had its hook call: the entry was written before the outcome was known.
+    fake.refuse(Action::Lock, ErrorKind::Os);
+    let called = std::cell::Cell::new(false);
+    let done = relay.handle_with(&qa(Action::Lock), &actx(PermissionSet::CONTROL, true), |_| called.set(true));
+    assert!(called.get());
+    assert_eq!(done.result.code, ErrorCode::IoFailed);
+}
+
 // ---------- D13 ----------
 
 struct Asker {
@@ -370,7 +414,13 @@ impl ConsentAsker for Asker {
 }
 
 fn facts<'a>(unattended: bool, granter: Option<&'a str>, user: Option<&'a str>) -> ConsentFacts<'a> {
-    ConsentFacts { session_unattended: unattended, granted_by: granter, console_user: user, admin_terminal: false }
+    ConsentFacts {
+        account: None,
+        session_unattended: unattended,
+        granted_by: granter,
+        console_user: user,
+        admin_terminal: false,
+    }
 }
 
 #[test]
@@ -405,4 +455,28 @@ fn the_consent_step_asks_once_and_obeys_the_answer() {
         Err(ErrorCode::NobodyPresent)
     );
     assert!(never.asked.is_empty(), "nothing is asked when the answer is already known");
+}
+
+/// ACCOUNTS.md 5.4: on a machine of several accounts the terminal and the files run only as the session's own
+/// account; nobody is asked, nobody logged in is "unavailable", and the administrator terminal still opens.
+#[test]
+fn terminal_and_files_never_run_as_another_account() {
+    let at = |console: Option<&'static str>, admin: bool| ConsentFacts {
+        session_unattended: true,
+        granted_by: Some("S-1-5-21-1"),
+        console_user: console,
+        admin_terminal: admin,
+        account: Some("S-1-5-21-1"),
+    };
+    assert_eq!(consent_need(&at(Some("S-1-5-21-1"), false)), ConsentNeed::NotNeeded, "its own account");
+    assert_eq!(consent_need(&at(Some("s-1-5-21-1"), false)), ConsentNeed::NotNeeded, "SIDs compare without case");
+    assert_eq!(consent_need(&at(Some("S-1-5-21-2"), false)), ConsentNeed::Refuse(ErrorCode::AccountAway));
+    assert_eq!(consent_need(&at(None, false)), ConsentNeed::Refuse(ErrorCode::Unavailable));
+    assert_eq!(consent_need(&at(None, true)), ConsentNeed::NotNeeded, "the administrator terminal");
+    // Never a question: no fact ever gives `Ask`.
+    for console in [None, Some("S-1-5-21-1"), Some("S-1-5-21-2")] {
+        for admin in [false, true] {
+            assert_ne!(consent_need(&at(console, admin)), ConsentNeed::Ask);
+        }
+    }
 }

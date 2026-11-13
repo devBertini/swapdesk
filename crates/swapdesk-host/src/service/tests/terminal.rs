@@ -130,7 +130,10 @@ impl Rig {
             .core
             .connect_asking(self.host.addr(), self.host.device(), Intent::Control, true, PermissionSet::TERMINAL)
             .expect("the unattended session opens");
-        assert!(handle.granted().contains(PermissionSet::UNATTENDED), "no card: {:?}", handle.granted());
+        assert_eq!(handle.mode(), swapdesk_proto::GrantMode::Unattended, "no card: {:?}", handle.granted());
+        // This viewer speaks minor 1: it is in without a prompt and without the machine-level bit, and D13 still
+        // knows nobody accepted the session.
+        assert!(!handle.granted().contains(PermissionSet::UNATTENDED), "{:?}", handle.granted());
         assert_eq!(self.host.ui.prompts.load(Ordering::SeqCst), 0, "entered without a prompt");
         (handle, Seen::new(msgs))
     }
@@ -430,7 +433,8 @@ fn d13_a_prompted_session_and_the_administrator_terminal_never_ask() {
     assert_eq!(rig.open(&handle, 1, false).as_deref(), Ok(FAKE_USER));
     assert_eq!(rig.consents(), 0);
     rig.finish();
-    // The administrator terminal holds no user's data: unattended, with another user logged in, it opens unasked.
+    // The administrator terminal holds no user's data, so D13 never asks about it. A viewer of minor 1 that entered
+    // without a prompt does not hold it yet (it comes with Elevate): the open is refused, and nobody is asked.
     let rig =
         Rig::build(TERM.union(PermissionSet::UNATTENDED).union(PermissionSet::ADMIN_TERMINAL), Some(SID_B), true, true);
     rig.host
@@ -452,8 +456,24 @@ fn d13_a_prompted_session_and_the_administrator_terminal_never_ask() {
             PermissionSet::TERMINAL.union(PermissionSet::ADMIN_TERMINAL),
         )
         .expect("the unattended session opens");
-    assert_eq!(rig.open(&handle, 1, true).as_deref(), Ok("SYSTEM"));
+    assert_eq!(handle.mode(), swapdesk_proto::GrantMode::Unattended);
+    assert_eq!(rig.open(&handle, 1, true), Err(ErrorCode::NotPermitted));
+    // "Elevar controle" (ACCOUNTS.md 9): the session gains it, and the administrator terminal opens, as SYSTEM in the
+    // service with another user logged in, without asking anybody.
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Ok(()));
+    assert!(handle.granted().contains(PermissionSet::UNATTENDED.union(PermissionSet::ADMIN_TERMINAL)));
+    assert!(rig.open(&handle, 2, true).is_ok(), "the administrator terminal opens after the elevation");
     assert_eq!(rig.consents(), 0);
+    rig.finish();
+}
+
+/// ACCOUNTS.md 9.3, the viewer's side: `elevate` sends nothing for a session that entered with a prompt.
+#[test]
+fn a_prompted_session_cannot_be_elevated() {
+    let rig = Rig::build(TERM, Some(SID_B), true, true);
+    let (handle, _seen) = rig.prompted();
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Err(ErrorCode::NotPermitted));
+    assert!(!handle.granted().contains(PermissionSet::UNATTENDED));
     rig.finish();
 }
 
@@ -467,6 +487,7 @@ fn the_consent_step_follows_run_consent() {
         granted_by,
         console_user,
         admin_terminal: admin,
+        account: None,
     };
     assert_eq!(consent_need(&facts(false, Some(SID_A), Some(SID_B), false)), ConsentNeed::NotNeeded);
     assert_eq!(consent_need(&facts(true, Some(SID_A), Some(SID_A), false)), ConsentNeed::NotNeeded);
@@ -478,4 +499,48 @@ fn the_consent_step_follows_run_consent() {
     );
     assert_eq!(consent_need(&facts(true, Some(SID_A), None, false)), ConsentNeed::Refuse(ErrorCode::NobodyPresent));
     assert_eq!(consent_need(&facts(true, Some(SID_A), Some(SID_B), true)), ConsentNeed::NotNeeded);
+}
+
+/// Review of S4, L10 (ACCOUNTS.md 5.1): while the session's account is away from the console, another account is
+/// at the keyboard: not even an elevated session opens the administrator terminal. Back at the console, it does.
+#[test]
+fn the_administrator_terminal_never_opens_while_the_account_is_away() {
+    let rig =
+        Rig::build(TERM.union(PermissionSet::UNATTENDED).union(PermissionSet::ADMIN_TERMINAL), Some(SID_B), true, true);
+    rig.host
+        .trust
+        .update(|s| {
+            s.devices
+                .iter_mut()
+                .for_each(|d| d.unattended_granted_by = Some(UserRef { id: SID_A.into(), name: "someone".into() }))
+        })
+        .expect("store");
+    let (handle, _msgs) = rig
+        .viewer
+        .core
+        .connect_asking(
+            rig.host.addr(),
+            rig.host.device(),
+            Intent::Control,
+            true,
+            PermissionSet::TERMINAL.union(PermissionSet::ADMIN_TERMINAL),
+        )
+        .expect("the unattended session opens");
+    assert_eq!(rig.viewer.core.runtime().block_on(handle.elevate()), Ok(()));
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::AccountAway);
+    assert_eq!(rig.open(&handle, 1, true), Err(ErrorCode::AccountAway));
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::Default);
+    assert!(rig.open(&handle, 2, true).is_ok());
+    rig.finish();
+}
+
+/// Review of S6, finding 4: a terminal that runs when the session's account leaves the console ends then.
+#[test]
+fn a_running_terminal_ends_when_the_account_leaves_the_console() {
+    let rig = Rig::new(TERM);
+    let (handle, mut seen) = rig.prompted();
+    assert!(rig.open(&handle, 1, false).is_ok());
+    rig.host.core.host().set_desktop(swapdesk_proto::Desktop::AccountAway);
+    assert_eq!(exited(&mut seen, 1), None, "the host ended it");
+    rig.finish();
 }

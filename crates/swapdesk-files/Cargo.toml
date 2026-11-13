@@ -24,3 +24,11 @@ swapdesk-netsim = { path = "../swapdesk-netsim" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+# The calls `std` lacks (a rename and a copy that never replace, the mark of a downloaded file): the glue crates of the
+# two systems, which hold the `unsafe` this crate forbids. Workspace crates, not third-party ones.
+[target.'cfg(windows)'.dependencies]
+swapdesk-sys-win = { path = "../swapdesk-sys-win" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+swapdesk-sys-mac = { path = "../swapdesk-sys-mac" }

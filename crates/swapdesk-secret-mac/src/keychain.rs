@@ -11,6 +11,7 @@
 
 use std::ffi::CString;
 use std::ptr::NonNull;
+use std::sync::{Mutex, PoisonError};
 
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType, Type, kCFBooleanTrue,
@@ -24,6 +25,21 @@ use objc2_security::{
 use swapdesk_platform::{ErrorKind, PlatformError, Result};
 
 type Dict = CFDictionary<CFString, CFType>;
+
+/// The throwaway keychain files this process created ([`create_file`]), with their passwords.
+///
+/// A new keychain locks itself after 300 s without use and when the Mac sleeps (`security show-keychain-info` on a
+/// fresh one: `lock-on-sleep timeout=300s`, macOS 27.2), and a call on a locked keychain waits for a prompt: a
+/// development run of the app that lasted over five minutes took minutes to quit, stuck in `SecItemDelete`
+/// (10/11/2026). Its settings cannot be changed without that prompt either (`SecKeychainSetSettings` answers
+/// errSecInteractionNotAllowed with no GUI session). Unlocking with the password needs no prompt, so every call on
+/// one of these files unlocks it first ([`open`]).
+static THROWAWAY: Mutex<Vec<(CString, String)>> = Mutex::new(Vec::new());
+
+fn throwaway_password(path: &CString) -> Option<String> {
+    let list = THROWAWAY.lock().unwrap_or_else(PoisonError::into_inner);
+    list.iter().find(|(p, _)| p == path).map(|(_, password)| password.clone())
+}
 
 /// Which keychain a call addresses.
 #[derive(Debug, Clone)]
@@ -59,7 +75,17 @@ fn open(target: &Target) -> Result<Option<CFRetained<SecKeychain>>> {
     }
     let ptr = NonNull::new(keychain).ok_or_else(|| status_error("SecKeychainOpen", -2))?;
     // SAFETY: on success `keychain` is a +1 retained SecKeychainRef that this call owns (Create rule).
-    Ok(Some(unsafe { CFRetained::from_raw(ptr) }))
+    let keychain = unsafe { CFRetained::from_raw(ptr) };
+    if let Some(password) = throwaway_password(path)
+        && let Ok(length) = u32::try_from(password.len())
+    {
+        // A throwaway keychain of this process may have locked itself: see `THROWAWAY`. A failure here is not
+        // reported: the call that follows says what is wrong.
+        // SAFETY: `keychain` is a valid reference and `password` a buffer of `length` bytes alive for the call.
+        #[allow(deprecated)]
+        let _ = unsafe { SecKeychain::unlock(Some(&keychain), length, password.as_ptr().cast(), true) };
+    }
+    Ok(Some(keychain))
 }
 
 /// The attributes that name one item (or, without an account, every item of the service).
@@ -203,7 +229,24 @@ pub fn create_file(path: &CString, password: &str) -> Result<()> {
         // SAFETY: on success `keychain` is a +1 retained SecKeychainRef that this call owns; dropping releases it.
         drop(unsafe { CFRetained::from_raw(ptr) });
     }
+    THROWAWAY.lock().unwrap_or_else(PoisonError::into_inner).push((path.clone(), password.to_owned()));
     Ok(())
+}
+
+/// Locks a keychain file, as macOS does by itself after five minutes without use (tests).
+pub fn lock_file(path: &CString) -> Result<()> {
+    // Opened without the unlock of `open`: the point is to leave it locked.
+    let mut keychain: *mut SecKeychain = std::ptr::null_mut();
+    // SAFETY: `path` is a NUL-terminated string alive for the call; `keychain` is a valid out-pointer.
+    #[allow(deprecated)]
+    let status = unsafe { SecKeychain::open(NonNull::from(path.as_c_str()).cast(), NonNull::from(&mut keychain)) };
+    let ptr = NonNull::new(keychain).filter(|_| status == 0).ok_or_else(|| status_error("SecKeychainOpen", status))?;
+    // SAFETY: on success `keychain` is a +1 retained SecKeychainRef that this call owns.
+    let keychain = unsafe { CFRetained::from_raw(ptr) };
+    // SAFETY: `keychain` is a valid reference.
+    #[allow(deprecated)]
+    let status = unsafe { SecKeychain::lock(Some(&keychain)) };
+    if status == 0 { Ok(()) } else { Err(status_error("SecKeychainLock", status)) }
 }
 
 /// Deletes a keychain file made by [`create_file`] (and removes it from any search list).
@@ -215,5 +258,6 @@ pub fn delete_file(path: &CString) -> Result<()> {
     if status != 0 {
         return Err(status_error("SecKeychainDelete", status));
     }
+    THROWAWAY.lock().unwrap_or_else(PoisonError::into_inner).retain(|(p, _)| p != path);
     Ok(())
 }

@@ -9,29 +9,34 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use swapdesk_capture_win::QpcClock;
+use swapdesk_host::accounts::{Account, AccountFactory, AccountSeat, Accounts, PORT_HELD};
 use swapdesk_host::netcache::CachedInterfaces;
-use swapdesk_host::service::TerminalEnv;
+use swapdesk_host::service::{ConsoleRead, SpecialVerdict, TerminalEnv, special_verdict};
 use swapdesk_host::service::{
-    CoreEvent, DEFAULT_PAIR_PORT, DEFAULT_SESSION_PORT, ServiceConfig, ServiceCore, ServiceDeps,
+    CoreEvent, DEFAULT_SESSION_PORT, MachineShared, ServiceConfig, ServiceCore, ServiceDeps, ServiceError,
 };
+use swapdesk_host::ui_hub::presence::FilteredPresence;
 use swapdesk_host::ui_hub::store::{FileAuditLog, load_settings};
 use swapdesk_host::ui_hub::{DevOptions, DnsSdPresence, HubParams, NoPresence, Presence, SystemHooks, UiHub};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
 use swapdesk_net_win::{NetworkWatcher, WindowsNetInterfaces};
-use swapdesk_platform::{Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink};
-use swapdesk_proto::{Os, PermissionSet};
+use swapdesk_platform::{
+    ActionRunner, Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink,
+};
+use swapdesk_proto::{Action, Os, Special};
 use swapdesk_secret_win::{FolderSpec, WinSecretStore};
+use swapdesk_sys_win::actions::WinActions;
 use swapdesk_sys_win::pty::{ConPtySpawner, Shell};
 use swapdesk_sys_win::{
     FileTrace, InstallPolicy, KeepAwake, ServiceContext, active_console_session, console_state, current_user_sid,
-    send_sas, session_user_sid,
+    sas_policy_allows_service, send_sas, session_user_sid,
 };
 use swapdesk_trust::{Identity, SystemWallClock, TrustHandle, WallClock};
 
-use crate::helpers::{HowToStart, Launch, Supervisor};
+use crate::helpers::{CoreOf, HowToStart, Launch, Supervisor};
 use crate::options::Options;
-use crate::ui_pipe::{Mode, UiPipes};
+use crate::ui_pipe::{Mode, Route, UiPipes};
 
 /// The service's name with the SCM.
 pub const SERVICE_NAME: &str = "SwapdeskService";
@@ -99,6 +104,31 @@ impl TerminalEnv for WinTerminalEnv {
 struct WinHooks {
     awake: Mutex<Option<KeepAwake>>,
     trace: Arc<dyn TraceSink>,
+    /// The service's own quick-action runner (`WinActions::service()`): what "Bloquear a tela" runs when no user helper
+    /// is attached. `LockWorkStation` locks the calling process's session, which is session 0 for the service, so
+    /// the console session is locked the way the runner does it (`WTSDisconnectSession` to the logon screen).
+    locker: Arc<Mutex<Box<dyn ActionRunner + Send>>>,
+}
+
+impl WinHooks {
+    fn new(trace: Arc<dyn TraceSink>) -> Self {
+        Self::with_locker(trace, WinActions::service())
+    }
+
+    fn with_locker(trace: Arc<dyn TraceSink>, locker: impl ActionRunner + Send + 'static) -> Self {
+        Self { awake: Mutex::new(None), trace, locker: Arc::new(Mutex::new(Box::new(locker))) }
+    }
+}
+
+/// Locks the console session `session` with the quick action `Lock` of `runner`: the one function the lock of "Bloquear
+/// a tela" and the lock on the end of a session share. A failure is logged, not returned: the session is over.
+fn lock_console(runner: &mut dyn ActionRunner, trace: &dyn TraceSink, session: u32) {
+    match runner.run(Action::Lock) {
+        Ok(()) => trace.log(Level::Info, "service", format_args!("lock on end: console session {session} locked")),
+        Err(e) => {
+            trace.log(Level::Warn, "service", format_args!("lock on end: console session {session} not locked: {e}"));
+        }
+    }
 }
 
 impl SystemHooks for WinHooks {
@@ -117,13 +147,16 @@ impl SystemHooks for WinHooks {
         }
     }
 
-    fn lock_screen(&self) {
-        // The workstation lock is an action of the user helper (stage 20's ActionRunner); nothing in this build runs it.
-        self.trace.log(
-            Level::Warn,
-            "service",
-            format_args!("lock on end was asked; the lock action is not wired in this build"),
-        );
+    fn lock_screen(&self, console_session: u32) {
+        // The end of a session is judged on the core's thread: the lock is a system call that may wait, so it runs
+        // on its own thread.
+        let (locker, trace) = (Arc::clone(&self.locker), Arc::clone(&self.trace));
+        let spawned = std::thread::Builder::new().name("lock-on-end".into()).spawn(move || {
+            lock_console(&mut **lock(&locker), &*trace, console_session);
+        });
+        if let Err(e) = spawned {
+            self.trace.log(Level::Warn, "service", format_args!("lock on end: no thread to lock with: {e}"));
+        }
     }
 
     fn service_enabled(&self, on: bool) {
@@ -147,7 +180,6 @@ impl NetInterfaces for LoopbackOnly {
 /// The stores and the trace of this run.
 struct Env {
     store: Arc<WinSecretStore>,
-    dir: PathBuf,
     trace: Arc<dyn TraceSink>,
 }
 
@@ -172,17 +204,66 @@ fn open_env(opts: &Options) -> Result<Env, String> {
         Arc::new(FileTrace::open(&trace_dir, "trace.log", level).map_err(|e| format!("trace log: {e}"))?);
     // D12: a panic leaves its record in the same folder as the trace.
     swapdesk_sys_win::install_panic_hook(&trace_dir, "swapdesk-service");
-    Ok(Env { store: Arc::new(store), dir, trace })
+    Ok(Env { store: Arc::new(store), trace })
+}
+
+/// The discovery record of an account (ACCOUNTS.md 6, GRANTS-SYNC.md 4.5): its slot's session port, and the `minor`
+/// key every 1.1 record carries.
+pub(crate) fn account_discovery(seat: &AccountSeat) -> DnsSdConfig {
+    DnsSdConfig { service_port: seat.session_port, ..DnsSdConfig::default() }
+}
+
+/// The name a peer sees of an account until its user changes it (D55): "<computer> · <Windows account>", the
+/// computer's name alone when the account's name cannot be read.
+fn default_account_name(sid: &str) -> String {
+    account_name(&computer_name(), swapdesk_sys_win::account_name_of_sid(sid).ok().as_deref())
+}
+
+/// "<computer> · <account>", within the name's limit (64 bytes, cut at a character).
+pub(crate) fn account_name(computer: &str, account: Option<&str>) -> String {
+    let mut name = match account.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{computer} · {a}"),
+        None => computer.to_string(),
+    };
+    while name.len() > 64 {
+        name.pop();
+    }
+    name
 }
 
 fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Swapdesk PC".to_string())
 }
 
+/// Sends the secure attention sequence for a viewer's `SendSpecial` (F-UNAT-01). The session's gate (`UNATTENDED`, the
+/// account at the console) was passed before this runs. `SendSAS(FALSE)` works only from this service process, and
+/// only when the machine's policy `SoftwareSASGeneration` lets services simulate it: a policy that reads as off is
+/// logged at every request (the values are GUESS until the owner's proof, so the call is still made).
+fn send_sas_now(trace: &dyn TraceSink) -> Result<(), String> {
+    if !sas_policy_allows_service() {
+        trace.log(
+            Level::Warn,
+            "service",
+            format_args!(
+                "SoftwareSASGeneration does not let services simulate Ctrl+Alt+Del (install with -EnableSas): the                  key may be ignored by Windows"
+            ),
+        );
+    }
+    send_sas().map_err(|e| e.to_string())
+}
+
 fn sas(core: &ServiceCore, trace: &dyn TraceSink) {
-    // A helper asked for Ctrl+Alt+Del: only an UNATTENDED session may have it (D11).
-    if core.host().sessions().iter().any(|s| s.granted.contains(PermissionSet::UNATTENDED)) {
-        match send_sas() {
+    // A helper asked for Ctrl+Alt+Del: the same gate as a viewer's `SendSpecial` (D11). Some session must hold
+    // `UNATTENDED`, and the account must be the one at the console: otherwise the sequence would land on another
+    // account's session.
+    let desktop = core.host().desktop_now();
+    let allowed = core
+        .host()
+        .sessions()
+        .iter()
+        .any(|s| special_verdict(Special::SecureAttention, s.granted, desktop) == SpecialVerdict::Send);
+    if allowed {
+        match send_sas_now(trace) {
             Ok(()) => trace.log(Level::Info, "service", format_args!("the secure attention sequence was sent")),
             Err(e) => trace.log(Level::Warn, "service", format_args!("SendSAS failed: {e}")),
         }
@@ -191,7 +272,7 @@ fn sas(core: &ServiceCore, trace: &dyn TraceSink) {
             Level::Warn,
             "service",
             format_args!(
-                "a helper asked for the secure attention sequence in a session that is not UNATTENDED; ignored"
+                "a helper asked for the secure attention sequence in a session that is not UNATTENDED, or while                  another account is at the console; ignored"
             ),
         );
     }
@@ -217,10 +298,425 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     }
 }
 
+/// What 1.1 reads of the machine's root folder at start (ACCOUNTS.md 10.2, D55): the base port of the slots and
+/// whether a 1.0 install left its key there (for the one-time note). The 1.0 key, trust store, logs and every other
+/// setting are never read: no account receives any 1.0 data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RootFacts {
+    pub port: u16,
+    pub had_1_0: bool,
+}
+
+pub(crate) fn root_facts(root: &WinSecretStore) -> Result<RootFacts, String> {
+    let settings = load_settings(root, "")?;
+    // Only whether the file is there: the 1.0 key is never loaded.
+    let had_1_0 = root.dir().join(swapdesk_trust::identity::IDENTITY_NAME).exists();
+    Ok(RootFacts { port: settings.port, had_1_0 })
+}
+
+/// An account's own data (ACCOUNTS.md 10.1), all from its own folder: a new account gets a new key, an empty trust
+/// store and default settings at its slot's ports.
+pub(crate) struct AccountData {
+    pub store: Arc<WinSecretStore>,
+    pub identity: Arc<Identity>,
+    pub trust: Arc<TrustHandle>,
+    pub settings: swapdesk_host::ui_hub::MachineSettings,
+}
+
+pub(crate) fn open_account_data(
+    root: &WinSecretStore,
+    seat: &AccountSeat,
+    default_name: &str,
+    now_ms: u64,
+    trace: &dyn TraceSink,
+) -> Result<AccountData, String> {
+    let store = Arc::new(root.open_account(&seat.sid, Some(trace)).map_err(|e| format!("account folder: {e}"))?);
+    let identity = Arc::new(Identity::load_or_create(&*store, now_ms).map_err(|e| format!("identity: {e}"))?);
+    let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
+    let mut settings = load_settings(&*store, default_name)?;
+    settings.port = seat.session_port;
+    settings.pair_port = seat.pair_port;
+    Ok(AccountData { store, identity, trust, settings })
+}
+
+/// The machine's updater (UPDATES.md 2.2, 13), or none for a development instance. Its folder is `update` inside the
+/// protected folder (only SYSTEM and Administrators open it, 6.3), its state `update-state.txt` beside it.
+fn machine_updater(
+    store: &Arc<WinSecretStore>,
+    dev: bool,
+    (live_sessions, ui_sessions): (LiveSessions, UiSessions),
+    trace: Arc<dyn TraceSink>,
+) -> Option<Arc<swapdesk_host::ui_hub::update::Updater>> {
+    use swapdesk_update::manager::{FIRST_DELAY_MS, PERIOD_JITTER_MS, Setup, UpdateManager};
+    if dev {
+        return None;
+    }
+    let running = match swapdesk_update::Version::parse(env!("CARGO_PKG_VERSION")) {
+        Ok(v) => v,
+        Err(e) => {
+            trace.log(Level::Warn, "update", format_args!("this build's version does not read ({e:?}): no updater"));
+            return None;
+        }
+    };
+    let dir = store.dir().join("update");
+    // A cheap random number for the first delay and the jitter: the low bits of the clock (spreading, not secrecy).
+    let spread =
+        || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as u64);
+    let setup = Setup {
+        running,
+        target: "windows-x64".into(),
+        base: "https://github.com/devBertini/swapdesk/releases".into(),
+        keys: swapdesk_update::keys::RELEASE_KEYS.to_vec(),
+        dev: false,
+        first_delay_ms: FIRST_DELAY_MS.0 + spread() % (FIRST_DELAY_MS.1 - FIRST_DELAY_MS.0),
+    };
+    let now = || SystemWallClock.unix_ms();
+    let manager = UpdateManager::new(
+        setup,
+        Arc::new(swapdesk_sys_win::http::WinHttp::new()),
+        Arc::new(StateFile(dir.join("update-state.txt"))),
+        Arc::new(UpdateDir(dir.clone())),
+        now(),
+    );
+    let (ready_trace, update_dir) = (Arc::clone(&trace), dir);
+    let hooks = swapdesk_host::ui_hub::update::UpdaterHooks {
+        now_ms: Box::new(now),
+        jitter_ms: Box::new(move || (spread() % (2 * PERIOD_JITTER_MS)) as i64 - PERIOD_JITTER_MS as i64),
+        live_sessions: Box::new(move || live_sessions.get().map_or(0, |count| count())),
+        ready: Box::new(move |path, version| {
+            // The applier stops this service: while it runs, this call waits. Its return means the applier ended with
+            // the service still up (it refused, or could not write its journal), which is told as a failed install.
+            // The sessions whose interface closes now get it back after the update (UPDATES.md 6.2 step 7).
+            let sessions = ui_sessions.get().map_or_else(Vec::new, |s| s());
+            let listed = sessions.iter().map(|s| format!("{s}\n")).collect::<String>();
+            let _ = std::fs::write(update_dir.join(UI_SESSIONS), listed);
+            let ended = run_applier(&update_dir, &path, &running_version(), version);
+            if let Err(e) = &ended {
+                ready_trace.log(Level::Error, "update", format_args!("the update to {version} did not run: {e}"));
+            }
+            // The folder or the applier failed: told as a folder that could not be written.
+            ended.map_err(|_| swapdesk_update::manager::InstallFailure::Disk)
+        }),
+    };
+    Some(swapdesk_host::ui_hub::update::Updater::new(manager, hooks))
+}
+
+/// This build's version (a release always has one that reads).
+fn running_version() -> swapdesk_update::Version {
+    swapdesk_update::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(swapdesk_update::Version {
+        major: 0,
+        minor: 0,
+        patch: 0,
+        pre: None,
+    })
+}
+
+/// Live sessions of the whole machine, known once the accounts exist (after the updater is built).
+type LiveSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> usize + Send + Sync>>>;
+
+/// The Windows sessions with an interface connected, known once the pipes exist.
+type UiSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> Vec<u32> + Send + Sync>>>;
+
+/// The file in the update folder that lists the sessions whose interface closed for an update.
+const UI_SESSIONS: &str = "ui-sessions.txt";
+
+/// Starts `Swapdesk.exe` in `session` as that session's user: the user helper's token path, from an install folder the
+/// install policy already checked. Used after an update and when a session finds its banner's window missing.
+fn launch_interface(exe: &swapdesk_sys_win::VerifiedExe, session: u32) -> Result<(), String> {
+    swapdesk_sys_win::launch_helper(swapdesk_sys_win::HelperRole::User, exe, &[], session)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The launcher the account hubs use when a hosted session has no window to show its banner (F-SESS-03): the same
+/// start as after an update, with the install policy checked at every call (the folder is not trusted once).
+fn window_launcher() -> swapdesk_host::ui_hub::WindowLauncher {
+    Arc::new(|session| {
+        let exe = std::env::current_exe()
+            .map(|e| e.with_file_name("Swapdesk.exe"))
+            .map_err(|e| format!("this service's image: {e}"))?;
+        let verified = InstallPolicy::production()
+            .map_err(|e| e.to_string())
+            .and_then(|p| p.verify(&exe).map_err(|e| e.to_string()))?;
+        launch_interface(&verified, session)
+    })
+}
+
+/// UPDATES.md 6.2 step 7: after a commit, `Swapdesk.exe` opens again in each session that had it, as that session's
+/// user (the user helper's token path), from the install folder checked by the install policy. The list goes.
+fn reopen_interfaces(update: &std::path::Path, trace: &dyn TraceSink) {
+    let list = update.join(UI_SESSIONS);
+    let text = std::fs::read_to_string(&list).unwrap_or_default();
+    let _ = std::fs::remove_file(&list);
+    let exe = match std::env::current_exe().map(|e| e.with_file_name("Swapdesk.exe")) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let verified = match InstallPolicy::production()
+        .map_err(|e| e.to_string())
+        .and_then(|p| p.verify(&exe).map_err(|e| e.to_string()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            trace.log(Level::Warn, "update", format_args!("the interface is not reopened: {e}"));
+            return;
+        }
+    };
+    for session in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+        match launch_interface(&verified, session) {
+            Ok(()) => trace.log(Level::Info, "update", format_args!("the interface reopened in session {session}")),
+            Err(e) => {
+                trace.log(Level::Warn, "update", format_args!("the interface did not reopen in session {session}: {e}"))
+            }
+        }
+    }
+}
+
+/// UPDATES.md 6.2 step 4: stages the verified package (deleted once staged), then starts the applier and waits for it.
+/// An `Ok` never comes back in practice: the applier stops this service. An `Err` says why nothing was replaced.
+fn run_applier(
+    update: &std::path::Path,
+    package: &std::path::Path,
+    old: &swapdesk_update::Version,
+    new: &swapdesk_update::Version,
+) -> Result<(), String> {
+    use swapdesk_sys_win::update_apply::{Layout, stage};
+    let bytes = std::fs::read(package).map_err(|e| format!("reading the package: {e}"));
+    let _ = std::fs::remove_file(package);
+    let pkg = swapdesk_update::package::Package::read(&bytes?).map_err(|e| format!("the package: {e:?}"))?;
+    let layout = Layout { install: PathBuf::new(), update: update.to_path_buf() };
+    stage(&pkg, &layout.staging())?;
+    let ended = spawn_applier(update, &["--apply-update", &old.to_string(), &new.to_string()])
+        .and_then(|mut child| child.wait().map_err(|e| format!("waiting for the applier: {e}")))
+        .map(|status| format!("the applier ended ({status}) with this service still running"));
+    // Nothing was replaced: the staged files go, and "Tentar de novo" downloads the package again.
+    let _ = std::fs::remove_dir_all(layout.staging());
+    Err(match ended {
+        Ok(why) | Err(why) => why,
+    })
+}
+
+/// Copies this service's image to the applier folder and starts it there with `args`, as SYSTEM, without a window and
+/// outside any job of the service.
+fn spawn_applier(update: &std::path::Path, args: &[&str]) -> Result<std::process::Child, String> {
+    use std::os::windows::process::CommandExt;
+    let dir = update.join(swapdesk_sys_win::update_apply::APPLIER);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("the applier folder: {e}"))?;
+    let applier = dir.join("swapdesk-service.exe");
+    let me = std::env::current_exe().map_err(|e| format!("this service's image: {e}"))?;
+    std::fs::copy(&me, &applier).map_err(|e| format!("copying the applier: {e}"))?;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let start = |flags: u32| {
+        std::process::Command::new(&applier)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    // A job that refuses breakaway refuses the flag: then the service is in no job that ends its children with it
+    // (the helpers' job holds the helpers only), and a plain start does.
+    start(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+        .or_else(|_| start(CREATE_NO_WINDOW))
+        .map_err(|e| format!("starting the applier: {e}"))
+}
+
+/// How the last update ended, told once by the first start after it.
+enum UpdateEnded {
+    /// This version came by it.
+    Updated,
+    /// The version that started, did not commit and was rolled back to this one (not offered again by itself).
+    RolledBack(swapdesk_update::Version),
+    /// The version the applier never got to start (a file held open, a step that failed): this one runs, and that one
+    /// stays on offer.
+    Refused(swapdesk_update::Version),
+}
+
+/// What a starting service does with the update journal (UPDATES.md 6.2 step 6, 6.4; the decision is
+/// `swapdesk_update::apply::at_start`). Returns how the last update ended, once. The journal goes with the cleaning.
+fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> Option<UpdateEnded> {
+    use swapdesk_sys_win::update_apply::{
+        APPLIER, Layout, ROLLBACK, append_journal, complete, programs_inside, read_journal,
+    };
+    use swapdesk_update::apply::{AtStart, Journal, at_start};
+    let me = running_version();
+    let layout = Layout { install: PathBuf::new(), update: update.to_path_buf() };
+    let last = read_journal(&layout.journal());
+    let applier_alive = !programs_inside(&layout.applier()).is_empty();
+    match at_start(last.as_ref(), &me, applier_alive, complete(&layout.staging())) {
+        AtStart::Nothing => None,
+        AtStart::Commit => match append_journal(&layout.journal(), &Journal::Committed { new: me.clone() }) {
+            Ok(()) => {
+                trace.log(Level::Info, "update", format_args!("updated to {me}: committed"));
+                Some(UpdateEnded::Updated)
+            }
+            Err(e) => {
+                trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}"));
+                None
+            }
+        },
+        AtStart::Finish { old, new } | AtStart::RollBack { old, new } => {
+            let finish = complete(&layout.staging());
+            let what =
+                if finish { "the applier runs again" } else { "its files are gone: the old version is restored" };
+            trace.log(Level::Warn, "update", format_args!("the update from {old} to {new} was cut short; {what}"));
+            let mode = if finish { "--apply-update" } else { "--roll-back" };
+            // Not waited for: the applier stops this service.
+            if let Err(e) = spawn_applier(update, &[mode, &old.to_string(), &new.to_string()]) {
+                trace.log(Level::Error, "update", format_args!("the applier did not start again: {e}"));
+            }
+            None
+        }
+        AtStart::Clean { rolled_back } => {
+            let _ = std::fs::remove_dir_all(update.join(ROLLBACK));
+            let _ = std::fs::remove_dir_all(update.join(APPLIER));
+            let _ = std::fs::remove_dir_all(layout.staging());
+            let _ = std::fs::remove_dir_all(layout.swap());
+            let _ = std::fs::remove_file(layout.journal());
+            // After a commit the "updated" card was told at the commit's own start; a rollback is told here, once.
+            rolled_back.map(|new| {
+                trace.log(Level::Warn, "update", format_args!("{new} did not start; {me} was restored"));
+                UpdateEnded::RolledBack(new)
+            })
+        }
+        AtStart::Refused { new, why } => {
+            let _ = std::fs::remove_dir_all(update.join(ROLLBACK));
+            let _ = std::fs::remove_dir_all(update.join(APPLIER));
+            let _ = std::fs::remove_dir_all(layout.staging());
+            let _ = std::fs::remove_dir_all(layout.swap());
+            let _ = std::fs::remove_file(layout.journal());
+            trace.log(
+                Level::Warn,
+                "update",
+                format_args!("{new} was not installed: {why}; {me} keeps running and {new} stays on offer"),
+            );
+            Some(UpdateEnded::Refused(new))
+        }
+        AtStart::Broken { old, new } => {
+            // The rollback folder stays: the way out is install.cmd from the release zip (UPDATES.md 6.4).
+            trace.log(
+                Level::Error,
+                "update",
+                format_args!(
+                    "{new} did not start and {old} could not be restored: its files wait in {}; run install.cmd from the release zip",
+                    update.join(ROLLBACK).join(old.to_string()).display()
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// The applier (`--apply-update <old> <new>` or `--roll-back <old> <new>`, UPDATES.md 6.2 step 5 to 7, 6.4): accepted
+/// only as SYSTEM and only from the applier folder inside the protected data folder. Replaces `old` with `new`, staged
+/// by the service (or puts `old` back); the outcome goes to `update\applier.log` and the journal. Exit codes: 0
+/// committed, 1 rolled back, 3 broken, 2 refused.
+pub fn apply_update(old: &str, new: &str, roll_back: bool) -> u8 {
+    use swapdesk_sys_win::update_apply::{Layout, Scm, WinMachine};
+    use swapdesk_update::apply::{Outcome, apply, roll_back_only};
+    let Some(program_data) = std::env::var_os("ProgramData") else { return 2 };
+    let update = PathBuf::from(program_data).join("Swapdesk").join("update");
+    let log = |line: &str| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(update.join("applier.log")) {
+            let _ = writeln!(f, "{} {line}", SystemWallClock.unix_ms());
+        }
+    };
+    if current_user_sid().ok().as_deref() != Some("S-1-5-18") {
+        eprintln!("swapdesk-service: the applier runs only as SYSTEM, started by the service");
+        return 2;
+    }
+    let expected = update.join(swapdesk_sys_win::update_apply::APPLIER).join("swapdesk-service.exe");
+    let same = |a: &std::path::Path, b: &std::path::Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+    if !std::env::current_exe().is_ok_and(|me| same(&me, &expected)) {
+        log("refused: not started from the applier folder");
+        return 2;
+    }
+    let (Ok(old), Ok(new)) = (swapdesk_update::Version::parse(old), swapdesk_update::Version::parse(new)) else {
+        log("refused: a version does not read");
+        return 2;
+    };
+    let (Ok(policy), Ok(program_files)) = (InstallPolicy::production(), swapdesk_sys_win::launch::program_files())
+    else {
+        log("refused: the install policy could not be read");
+        return 2;
+    };
+    let mut machine = WinMachine::new(
+        Layout { install: program_files.join("Swapdesk"), update: update.clone() },
+        Box::new(Scm { name: SERVICE_NAME.into() }),
+        policy,
+    );
+    log(&format!("{} {old} -> {new}", if roll_back { "rolling back" } else { "applying" }));
+    let outcome = if roll_back { roll_back_only(&mut machine, &old, &new) } else { apply(&mut machine, &old, &new) };
+    log(&format!("{outcome:?}"));
+    match outcome {
+        Outcome::Committed => 0,
+        Outcome::RolledBack(_) | Outcome::Refused(_) => 1,
+        Outcome::Broken(_) => 3,
+    }
+}
+
+/// The updater's state file.
+struct StateFile(PathBuf);
+
+impl swapdesk_update::manager::SavedStore for StateFile {
+    fn load(&self) -> swapdesk_update::manager::Saved {
+        std::fs::read_to_string(&self.0).map(|t| swapdesk_update::manager::Saved::from_text(&t)).unwrap_or_default()
+    }
+
+    fn save(&self, saved: &swapdesk_update::manager::Saved) {
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&self.0, saved.to_text());
+    }
+}
+
+/// The updater's folder inside the protected folder.
+struct UpdateDir(PathBuf);
+
+impl swapdesk_update::manager::UpdateFolder for UpdateDir {
+    fn create(&self, name: &str) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        std::fs::create_dir_all(&self.0)?;
+        Ok(Box::new(std::fs::File::create(self.0.join(name))?))
+    }
+
+    fn remove(&self, name: &str) {
+        let _ = std::fs::remove_file(self.0.join(name));
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    fn free_bytes(&self) -> Option<u64> {
+        // The folder is made by the first `create`: ask about the nearest folder that exists.
+        self.0.ancestors().find(|p| p.is_dir()).and_then(swapdesk_sys_win::free_bytes)
+    }
+}
+
+/// Who is at the console session now (ACCOUNTS.md 5.1). In development the current user stands for a logged-in user.
+/// A logged-in user whose SID cannot be read is `Unreadable`, never nobody: that fails closed.
+fn read_console(dev: bool) -> ConsoleRead {
+    let Ok(state) = console_state() else { return ConsoleRead::Unreadable };
+    if state.user.is_none() {
+        return ConsoleRead::Nobody;
+    }
+    let sid = if dev { current_user_sid().ok() } else { state.session_id.and_then(|s| session_user_sid(s).ok()) };
+    sid.map_or(ConsoleRead::Unreadable, ConsoleRead::User)
+}
+
+/// How often a console user that could not be read is read again.
+const CONSOLE_RETRY: Duration = Duration::from_secs(1);
+
+/// The event channel of every account's core, with its core.
+type CoreEvents = Arc<Mutex<Vec<(Arc<ServiceCore>, std::sync::mpsc::Receiver<CoreEvent>)>>>;
+
 fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String> {
     let ServiceContext { mut watcher, events: ctx_events, stop } = ctx;
-    let Env { store, dir, trace } = env;
-    let wall = SystemWallClock;
+    let Env { store, trace } = env;
     trace.log(
         Level::Info,
         "service",
@@ -231,95 +727,194 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             opts.dev_loopback
         ),
     );
-
-    let identity = Arc::new(Identity::load_or_create(&*store, wall.unix_ms()).map_err(|e| format!("identity: {e}"))?);
-    let trust = TrustHandle::open(store.clone()).map_err(|e| format!("trust store: {e}"))?;
-    let mut settings = load_settings(&*store, &computer_name())?;
-    if opts.instance.is_some() {
-        settings.port = DEFAULT_SESSION_PORT + opts.port_offset();
-        settings.pair_port = DEFAULT_PAIR_PORT + opts.port_offset();
+    // F-UNAT-01: the policy that lets a service simulate Ctrl+Alt+Del is off unless the install turned it on; a viewer's
+    // Ctrl+Alt+Del does nothing then, and the log says why.
+    if !opts.console && !sas_policy_allows_service() {
+        trace.log(
+            Level::Info,
+            "service",
+            format_args!(
+                "SoftwareSASGeneration is not set to let services simulate Ctrl+Alt+Del: a viewer's Ctrl+Alt+Del is                  off until Swapdesk is installed with -EnableSas"
+            ),
+        );
     }
-    let audit =
-        Arc::new(FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?);
+
+    // What 1.1 reads of the root folder (ACCOUNTS.md 10.2): the base of the port slots and whether 1.0 data is there.
+    let mut machine = root_facts(&store)?;
+    if opts.instance.is_some() {
+        machine.port = DEFAULT_SESSION_PORT + opts.port_offset();
+    }
     // The interface list is read at most once a second and again at once when the network changes: the LAN guard asks
     // for it on every incoming connection, pairing and presence on every event.
     let inner: Arc<dyn NetInterfaces> =
         if opts.dev_loopback { Arc::new(LoopbackOnly) } else { Arc::new(WindowsNetInterfaces) };
     let cached = Arc::new(CachedInterfaces::new(inner));
     let interfaces: Arc<dyn NetInterfaces> = cached.clone();
-    let presence: Arc<dyn Presence> = if opts.dev_loopback {
-        Arc::new(NoPresence)
-    } else {
-        let own =
-            Txt { name: settings.name.clone(), os: Os::Windows, fingerprint: identity.device_id(), pairing: false };
-        match DnsSdPresence::start(
-            Arc::clone(&interfaces),
-            own,
-            DnsSdConfig { service_port: settings.port, ..DnsSdConfig::default() },
-        ) {
-            Ok(p) => Arc::new(p),
-            Err(e) => {
-                trace.log(Level::Warn, "service", format_args!("discovery is off: {e}"));
-                Arc::new(NoPresence)
-            }
-        }
-    };
     let clock = Arc::new(QpcClock);
-    let lo = |port: u16| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let hub = UiHub::new(HubParams {
-        os: Os::Windows,
-        // No safe call gives the build number; a version query belongs in `swapdesk-sys-win`.
-        os_version: "Windows".into(),
-        identity: Arc::clone(&identity),
-        trust: Arc::clone(&trust),
-        secrets: store.clone(),
-        settings: settings.clone(),
-        interfaces: Arc::clone(&interfaces),
-        presence,
-        audit,
-        clock: clock.clone(),
-        wall: Arc::new(SystemWallClock),
-        trace: Arc::clone(&trace),
-        hooks: Arc::new(WinHooks { awake: Mutex::new(None), trace: Arc::clone(&trace) }),
-        dev: opts.dev_loopback.then(|| DevOptions { pair_listen: vec![lo(settings.pair_port)] }),
-    });
+    let session = active_console_session();
+    let term_env = WinTerminalEnv::new(opts.console, session);
+    // Each account's core reports its events here: the loop below reads them all.
+    let core_events: CoreEvents = Arc::default();
+
+    // ACCOUNTS.md 15 S3: one identity, trust store, hub and core per account, built the first time the account needs
+    // one (its user opens Swapdesk), and at start for every account the machine knows.
+    // UPDATES.md 2.2 and 13: one updater for the machine, in the service, shared by the account hubs. A development
+    // instance never checks and never installs.
+    let live_sessions: LiveSessions = Arc::default();
+    let ui_sessions: UiSessions = Arc::default();
+    let updater = machine_updater(
+        &store,
+        opts.console || opts.instance.is_some(),
+        (Arc::clone(&live_sessions), Arc::clone(&ui_sessions)),
+        Arc::clone(&trace),
+    );
+    let factory: AccountFactory = {
+        let (root, trace, interfaces, clock, term_env) =
+            (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
+        let (core_events, events, had_1_0) = (Arc::clone(&core_events), ctx_events.clone(), machine.had_1_0);
+        let updater = updater.clone();
+        let (dev_loopback, dev_mode) = (opts.dev_loopback, opts.console);
+        Box::new(move |seat: &AccountSeat, shared: &MachineShared, own: Arc<Mutex<Vec<swapdesk_trust::DeviceId>>>| {
+            let wall = SystemWallClock;
+            let AccountData { store, identity, trust, settings } =
+                open_account_data(&root, seat, &default_account_name(&seat.sid), wall.unix_ms(), &*trace)?;
+            let dir = store.dir().to_path_buf();
+            let audit = Arc::new(
+                FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("audit log: {e}"))?,
+            );
+            let presence: Arc<dyn Presence> = if dev_loopback {
+                Arc::new(NoPresence)
+            } else {
+                let own_txt = Txt {
+                    name: settings.name.clone(),
+                    os: Os::Windows,
+                    fingerprint: identity.device_id(),
+                    pairing: false,
+                };
+                let config = account_discovery(seat);
+                match DnsSdPresence::start(Arc::clone(&interfaces), own_txt, config) {
+                    Ok(p) => Arc::new(FilteredPresence::new(Arc::new(p), own)),
+                    Err(e) => {
+                        trace.log(Level::Warn, "service", format_args!("discovery is off for an account: {e}"));
+                        Arc::new(NoPresence)
+                    }
+                }
+            };
+            let lo = |port: u16| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+            let hub = UiHub::new(HubParams {
+                os: Os::Windows,
+                // No safe call gives the build number; a version query belongs in `swapdesk-sys-win`.
+                os_version: "Windows".into(),
+                identity: Arc::clone(&identity),
+                trust: Arc::clone(&trust),
+                secrets: store.clone(),
+                settings: settings.clone(),
+                interfaces: Arc::clone(&interfaces),
+                presence,
+                audit,
+                clock: clock.clone(),
+                wall: Arc::new(SystemWallClock),
+                trace: Arc::clone(&trace),
+                hooks: Arc::new(WinHooks::new(Arc::clone(&trace))),
+                dev: dev_loopback.then(|| DevOptions { pair_listen: vec![lo(seat.pair_port)] }),
+            });
+            let receiving = trust.read(|s| !s.devices.is_empty());
+            let deps = ServiceDeps {
+                identity: Arc::clone(&identity),
+                trust,
+                clock: clock.clone(),
+                trace: Arc::clone(&trace),
+                ui: hub.host_ui(),
+                interfaces: Arc::clone(&interfaces),
+            };
+            // D65: a device blocked by its MAC is refused by the gate and the pairing filter under any address.
+            let neighbors: Arc<dyn swapdesk_platform::NeighborTable> = Arc::new(swapdesk_net_win::WindowsNeighborTable);
+            hub.set_neighbors(Arc::clone(&neighbors));
+            let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps).with_neighbors(neighbors);
+            cfg.session_port = seat.session_port;
+            cfg.pair_port = seat.pair_port;
+            cfg.win_session = active_console_session().unwrap_or(0);
+            cfg.machine = Some(shared.clone());
+            cfg.receiving = receiving;
+            // A quick action with no user helper attached runs here: lock, sleep and restart as system calls.
+            cfg = cfg.with_service_actions(swapdesk_sys_win::actions::WinActions::service());
+            if dev_loopback {
+                cfg = cfg.dev_loopback(lo(seat.session_port));
+            } else {
+                // ACCOUNTS.md 5.5: the slot's port, exclusively on every address, from the start.
+                cfg.wildcard = Some(Arc::new(|port| {
+                    swapdesk_sys_win::udp::bind_exclusive(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+                }));
+            }
+            let core = match ServiceCore::start(cfg) {
+                Ok(c) => Arc::new(c),
+                // The slot's port is held: name the holder, and the machine gives the account the next free slot.
+                Err(ServiceError::Bind { addr, error }) => {
+                    let holder = swapdesk_sys_win::udp::udp_port_owner(addr.port()).map_or_else(
+                        || "a program that could not be named".to_string(),
+                        |(pid, name)| format!("{} (process {pid})", name.unwrap_or_else(|| "a program".into())),
+                    );
+                    return Err(format!("{PORT_HELD}{} by {holder} ({error})", addr.port()));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            hub.set_account(&seat.sid);
+            hub.set_had_1_0(had_1_0);
+            if let Some(u) = &updater {
+                hub.set_updater(Arc::clone(u));
+            }
+            core.set_account(&seat.sid);
+            hub.bind_core(&core);
+            core.set_terminal_env(term_env.clone());
+            hub.set_console_session(active_console_session());
+            hub.set_console_user(read_console(dev_mode).hub_user());
+            // F-SESS-03: the installed service starts the user's window when a session has none to show the banner.
+            // The development console runs as the user, who starts the window by hand.
+            if !dev_mode {
+                hub.set_window_launcher(window_launcher());
+            }
+            core.set_console_probe(Arc::new(move || read_console(dev_mode)));
+            // Ctrl+Alt+Del for a viewer's `SendSpecial`: only the installed service process can send it (the
+            // development console runs as a user and never does; its `SendSpecial` is answered UNAVAILABLE).
+            if !dev_mode {
+                let trace = Arc::clone(&trace);
+                core.set_sas_sender(Arc::new(move || send_sas_now(&*trace)));
+            }
+            let rx = core.take_events().ok_or("the core's events were taken")?;
+            // The loop sleeps until something wakes it: the core says so after each event it queues.
+            core.set_event_waker({
+                let events = events.clone();
+                Arc::new(move || events.wake())
+            });
+            lock(&core_events).push((Arc::clone(&core), rx));
+            Ok(Account { seat: seat.clone(), device_id: identity.device_id(), hub, core })
+        })
+    };
+    let accounts = Arc::new(Accounts::new(
+        machine.port,
+        store.clone(),
+        factory,
+        Box::new(|| SystemWallClock.unix_ms()),
+        Arc::clone(&trace),
+    ));
+    for (sid, why) in accounts.start_known() {
+        trace.log(Level::Warn, "service", format_args!("an account could not start ({}): {why}", sid.len()));
+    }
 
     let console = console_state().map_err(|e| format!("console state: {e}"))?;
-    let session = active_console_session();
-    let deps = ServiceDeps {
-        identity,
-        trust,
-        clock,
-        trace: Arc::clone(&trace),
-        ui: hub.host_ui(),
-        interfaces: Arc::clone(&interfaces),
-    };
-    let mut cfg = ServiceConfig::new(&settings.name, Os::Windows, "Windows", deps);
-    cfg.session_port = settings.port;
-    cfg.pair_port = settings.pair_port;
-    cfg.win_session = session.unwrap_or(0);
-    // A quick action with no user helper attached runs here: lock, sleep and restart as system calls (stage 42).
-    cfg = cfg.with_service_actions(swapdesk_sys_win::actions::WinActions::service());
-    if opts.dev_loopback {
-        cfg = cfg.dev_loopback(lo(settings.port));
-    }
-    let core = Arc::new(ServiceCore::start(cfg).map_err(|e| e.to_string())?);
-    hub.bind_core(&core);
-    let term_env = WinTerminalEnv::new(opts.console, session);
-    core.set_terminal_env(term_env.clone());
-    hub.set_console_session(session);
-    let core_events = core.take_events().ok_or("the core's events were taken")?;
-    // The loop below sleeps until something wakes it: the core says so after each event it queues.
-    core.set_event_waker({
-        let events = ctx_events.clone();
-        Arc::new(move || events.wake())
-    });
-
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mode = if opts.console { Mode::Dev } else { Mode::Production };
-    let pipes = UiPipes::new(hub.clone(), Arc::clone(&trace), mode, opts.suffix(), Arc::clone(&stop_flag));
+    let route: Route = {
+        let accounts = Arc::clone(&accounts);
+        Arc::new(move |sid: &str| accounts.account(sid).map(|a| a.hub.clone()))
+    };
+    let pipes = UiPipes::routed(route, Arc::clone(&trace), mode, opts.suffix(), Arc::clone(&stop_flag));
     if let Some(s) = session {
         pipes.ensure(s);
+    }
+    {
+        let pipes = Arc::clone(&pipes);
+        let _ = ui_sessions.set(Box::new(move || pipes.sessions_with_ui()));
     }
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("swapdesk-helper.exe");
@@ -331,8 +926,17 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     if !exe.exists() {
         trace.log(Level::Error, "service", format_args!("{} does not exist: no helper can start", exe.display()));
     }
+    // The helpers attach to the account of the user at the console; with one account only, to that one (the sign-in
+    // screen of a single-user machine). S4 of ACCOUNTS.md binds this to the console with the fence.
+    let core_of: CoreOf = {
+        let (accounts, dev) = (Arc::clone(&accounts), opts.console);
+        Arc::new(move || {
+            let sid = read_console(dev).hub_user();
+            accounts.host_core(sid.as_deref())
+        })
+    };
     let mut supervisor = Supervisor::new(
-        Arc::clone(&core),
+        core_of,
         Arc::clone(&trace),
         HowToStart { launch, suffix: opts.suffix(), exe },
         (session, console.user.is_some()),
@@ -342,6 +946,21 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         },
     );
     trace.log(Level::Info, "service", format_args!("running; console session {session:?}"));
+    // The pipes and endpoints are up: an update that started this version is committed (UPDATES.md 6.2 step 6).
+    if !(opts.console || opts.instance.is_some()) {
+        let ended = update_journal_at_start(&store.dir().join("update"), &*trace);
+        if matches!(ended, Some(UpdateEnded::Updated)) {
+            reopen_interfaces(&store.dir().join("update"), &*trace);
+        }
+        if let Some(u) = &updater {
+            match ended {
+                Some(UpdateEnded::Updated) => u.updated(),
+                Some(UpdateEnded::RolledBack(v)) => u.rolled_back(&v),
+                Some(UpdateEnded::Refused(v)) => u.refused(&v),
+                None => {}
+            }
+        }
+    }
 
     // The OS tells when an adapter or an address changes; the watcher turns a burst of notices into one event. Not in
     // `--dev-loopback`, which has no network.
@@ -365,36 +984,49 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut last_net = interfaces.list().ok();
     let mut next_net = Instant::now() + reconcile;
     let mut next_watchdog = Instant::now() + WATCHDOG;
+    let mut console_retry: Option<Instant> = None;
+    {
+        let accounts = Arc::clone(&accounts);
+        let _ = live_sessions.set(Box::new(move || accounts.all().iter().map(|a| a.hub.live_sessions()).sum()));
+    }
+    let every_hub = |f: &dyn Fn(&UiHub)| {
+        for a in accounts.all() {
+            f(&a.hub);
+        }
+    };
     while !stop.is_set() {
         // Sleep until the earliest of: a restart that is due, the next network look, the watchdog. A session event, a
         // core event, a finished helper start or the network watcher wakes the loop sooner.
-        let deadline = [supervisor.next_wake(), Some(next_net), Some(next_watchdog)].into_iter().flatten().min();
+        let deadline =
+            [supervisor.next_wake(), Some(next_net), Some(next_watchdog), console_retry].into_iter().flatten().min();
         let timeout = deadline.map_or(WATCHDOG, |d| d.saturating_duration_since(Instant::now()));
         match watcher.next_event(timeout) {
             Ok(Some(SessionEvent::ConsoleChanged(state))) => {
-                hub.set_console_session(state.session_id);
+                let read = read_console(opts.console);
+                console_retry = (read == ConsoleRead::Unreadable).then(|| Instant::now() + CONSOLE_RETRY);
+                let user = read.hub_user();
+                every_hub(&|h| {
+                    h.set_console_session(state.session_id);
+                    h.set_console_user(user.clone());
+                });
                 term_env.set_session(state.session_id);
-                if let Some(s) = state.session_id {
-                    pipes.ensure(s);
-                }
+                // Also a logon or logoff of any session: a session id that changed hands needs a pipe for its new user.
+                pipes.sync(state.session_id);
                 supervisor.console_changed(state.session_id, state.user.is_some());
             }
-            Ok(Some(SessionEvent::DesktopSwitched(d))) => {
-                hub.set_desktop(d);
-                core.host().set_desktop(d);
-            }
+            Ok(Some(SessionEvent::DesktopSwitched(d))) => every_hub(&|h| h.set_desktop(d)),
             Ok(Some(SessionEvent::NetworkChanged)) => {
                 cached.invalidate();
                 last_net = interfaces.list().ok();
                 next_net = Instant::now() + reconcile;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
             Ok(Some(SessionEvent::Resumed)) => {
                 trace.log(Level::Info, "service", format_args!("resumed from sleep"));
                 cached.invalidate();
                 last_net = interfaces.list().ok();
                 next_net = Instant::now() + reconcile;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
             Ok(Some(SessionEvent::Suspending)) => trace.log(Level::Info, "service", format_args!("suspending")),
             Ok(Some(SessionEvent::DisplaysChanged)) => {
@@ -404,14 +1036,31 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             // The watcher closed: the service is stopping.
             Err(_) => break,
         }
-        while let Ok(ev) = core_events.try_recv() {
+        let pending: Vec<(Arc<ServiceCore>, CoreEvent)> = lock(&core_events)
+            .iter()
+            .flat_map(|(core, rx)| rx.try_iter().map(|ev| (Arc::clone(core), ev)).collect::<Vec<_>>())
+            .collect();
+        for (core, ev) in pending {
             match ev {
                 CoreEvent::HelperGone { pid, .. } => supervisor.helper_gone(pid),
                 CoreEvent::SasRequested { .. } => sas(&core, &*trace),
                 CoreEvent::HelperAttached { .. } | CoreEvent::HelperFault { .. } => {}
             }
         }
+        // A logged-in user that could not be read keeps every account away (fails closed) until it can be.
+        if console_retry.is_some_and(|t| Instant::now() >= t) {
+            let read = read_console(opts.console);
+            console_retry = (read == ConsoleRead::Unreadable).then(|| Instant::now() + CONSOLE_RETRY);
+            if read != ConsoleRead::Unreadable {
+                let user = read.hub_user();
+                every_hub(&|h| h.set_console_user(user.clone()));
+            }
+        }
         supervisor.tick();
+        // The update schedule (UPDATES.md 2.2): the first check minutes after the start, then every day.
+        if let Some(u) = &updater {
+            u.tick();
+        }
         let now = Instant::now();
         if now >= next_net {
             next_net = now + reconcile;
@@ -420,7 +1069,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             let fresh = interfaces.list().ok();
             if fresh != last_net {
                 last_net = fresh;
-                hub.network_changed();
+                every_hub(&|h| h.network_changed());
             }
         }
         if now >= next_watchdog {
@@ -430,13 +1079,19 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     drop(net_watcher);
 
     trace.log(Level::Info, "service", format_args!("stopping"));
-    hub.shutdown();
+    every_hub(&|h| h.shutdown());
     supervisor.stop_all();
     pipes.stop_all();
     drop(supervisor);
-    // The last handle: the core ends its sessions and its runtime.
-    drop(core);
-    drop(hub);
+    // The last handles: each core ends its sessions and its runtime.
+    lock(&core_events).clear();
+    drop(accounts);
     trace.log(Level::Info, "service", format_args!("stopped"));
     Ok(())
 }
+
+#[cfg(test)]
+mod first_start_tests;
+
+#[cfg(test)]
+mod lock_end_tests;

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use quinn::{Connection, VarInt};
 use swapdesk_proto::{
-    Bye, Desktop, DisplayList, ErrorCode, ErrorMessage, HelloAck, HostState, Message, PROTO_MINOR, PermissionSet,
+    Bye, Desktop, DisplayList, ErrorCode, ErrorMessage, HelloAck, HostState, Message, PermissionSet,
     PermissionsChanged, Ping, Pong, SessionGrant, SessionRefused, WakeInfo,
 };
 use swapdesk_trust::DeviceId;
@@ -34,6 +34,16 @@ use crate::viewer::{GrantInfo, OpenError, ViewerEvent};
 
 /// How often the state machine looks at its timers.
 const TICK: Duration = Duration::from_millis(250);
+/// How long a host session waits for its account to come back to the console before it ends with `ACCOUNT_AWAY`
+/// (ACCOUNTS.md 5.1, GUESS).
+pub const ACCOUNT_AWAY_LIMIT: Duration = Duration::from_secs(60);
+
+/// Whether a host session is paused on `desktop`: always while its account is away from the console; on a secure
+/// desktop unless it holds `UNATTENDED`.
+fn paused_for(desktop: Desktop, granted: PermissionSet, serves_other: bool) -> bool {
+    desktop == Desktop::AccountAway
+        || (desktop != Desktop::Default && (!serves_other || !granted.contains(PermissionSet::UNATTENDED)))
+}
 /// How long a closing session waits to hand its last message (`Bye`, `Error`) to the peer.
 const SAY_LIMIT: Duration = Duration::from_millis(500);
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
@@ -59,6 +69,8 @@ pub(crate) enum Side {
         deadline: Instant,
         peer: Option<HelloAck>,
         on_prompt: Option<Arc<dyn Fn(u16) + Send + Sync>>,
+        /// The minor this viewer announced in its `Hello` (a test may play a 1.0 viewer).
+        own_minor: u16,
     },
 }
 
@@ -150,6 +162,12 @@ fn app_code(code: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(code.tag()))
 }
 
+/// The QUIC application close code a peer of `peer_minor` is sent: like the code of a `Bye`, one that peer knows
+/// (PROTOCOL.md 1; a 1.0 peer is not sent `ACCOUNT_AWAY`).
+fn close_code(code: ErrorCode, peer_minor: u16) -> VarInt {
+    app_code(code.for_minor(peer_minor))
+}
+
 pub(crate) struct Actor {
     side: Side,
     ctx: SessionCtx,
@@ -162,6 +180,15 @@ pub(crate) struct Actor {
     ping_nonce: u32,
     /// The grants the viewer was last told (host side): a difference from `ctx.granted()` is a change to report.
     reported: PermissionSet,
+    /// The stored grants last told to the peer with `StoredGrants` (`None`: nothing told yet).
+    stored_told: Option<PermissionSet>,
+    /// When the session's account left the console (host side; `None` while it is there).
+    away_since: Option<Instant>,
+    /// When the banner's window of the session's account went missing (host side; `None` while it is connected or none
+    /// is required): the session is paused meanwhile and ends after `HostConfig::banner_wait`.
+    banner_missing_since: Option<Instant>,
+    /// An `Elevate` was accepted and its grant change is on its way (host side).
+    elevating: bool,
     /// The desktop the state machine last applied (host side).
     applied_desktop: Option<Desktop>,
     /// Messages that must arrive, waiting for room in the outgoing queue.
@@ -246,6 +273,10 @@ impl Actor {
             helpers,
             ping_nonce: 0,
             reported: PermissionSet::EMPTY,
+            stored_told: None,
+            away_since: None,
+            banner_missing_since: None,
+            elevating: false,
             applied_desktop: None,
             pending: VecDeque::new(),
             stalled_since: None,
@@ -370,6 +401,11 @@ impl Actor {
         {
             return Some(f);
         }
+        if self.phase == Phase::Active
+            && let Some(f) = self.tell_stored()
+        {
+            return Some(f);
+        }
         if self.phase == Phase::Active && self.role() == Role::Host {
             let granted = self.ctx.granted();
             if granted != self.reported {
@@ -428,6 +464,14 @@ impl Actor {
     fn on_tick(&mut self) -> Option<Finish> {
         let at = now();
         if let Some(f) = self.flush_pending() {
+            return Some(f);
+        }
+        if self.away_since.is_some_and(|t| at.saturating_duration_since(t) >= ACCOUNT_AWAY_LIMIT) {
+            return Some(Finish::local_bye(ErrorCode::AccountAway));
+        }
+        if self.phase == Phase::Active
+            && let Some(f) = self.check_banner(at)
+        {
             return Some(f);
         }
         match self.phase {
@@ -525,13 +569,14 @@ impl Actor {
                 let Side::Host { service, hello: slot, .. } = &mut self.side else { return None };
                 let cfg = &service.cfg;
                 let ack = HelloAck {
-                    proto_minor: PROTO_MINOR,
+                    proto_minor: cfg.proto_minor,
                     app_version: cfg.app_version.clone(),
                     name: cfg.name.clone(),
                     os: cfg.os,
                     os_version: cfg.os_version.clone(),
                 };
                 let caps = cfg.capabilities.clone();
+                self.ctx.set_peer_minor(hello.proto_minor);
                 *slot = Some(hello);
                 if let Some(f) = self.emit(ack, false) {
                     return Some(f);
@@ -545,7 +590,10 @@ impl Actor {
                 let Some(hello) = hello.take() else { return Some(Finish::violation(ErrorCode::Internal)) };
                 // The decision task has its own timers (the prompt, the wait for an old connection); this is the net
                 // under it, for a task that crashed and will never answer.
-                *deadline = now() + service.cfg.prompt_timeout + service.cfg.resume_wait + DECISION_MARGIN;
+                *deadline = now()
+                    + service.cfg.prompt_timeout.max(service.cfg.banner_wait)
+                    + service.cfg.resume_wait
+                    + DECISION_MARGIN;
                 let (service, device, ctx, ev) =
                     (Arc::clone(service), *device, self.ctx.clone(), self.ctx.inner.ev.clone());
                 let task = tokio::spawn(async move {
@@ -577,11 +625,20 @@ impl Actor {
             }
         };
         let info = service.ui.start_info();
-        let paused = info.desktop != Desktop::Default && !committed.granted.contains(PermissionSet::UNATTENDED);
+        // F-SESS-03: a session whose banner cannot be shown starts paused and the window is asked for.
+        if !service.ui.banner_ready() {
+            self.banner_missing_since = Some(now());
+            service.ui.start_banner_window();
+        }
+        let paused = self.paused_now(info.desktop, committed.granted);
         self.ctx.inner.state.send_replace(DesktopState { desktop: info.desktop, paused });
         // What the viewer is about to be told; a change after the commit is reported right behind it.
         self.reported = committed.granted;
         self.applied_desktop = Some(info.desktop);
+        // Committed while its account is away (the console changed after the decision): the minute counts from now.
+        if info.desktop == Desktop::AccountAway {
+            self.away_since = Some(now());
+        }
         // The grant is live before the viewer hears of it: its first stream may arrive right behind the message.
         self.ctx.inner.active.send_replace(true);
         self.phase = Phase::Active;
@@ -608,6 +665,10 @@ impl Actor {
         {
             return Some(f);
         }
+        // Minor 1: what this host stored for the viewer, in the grant's batch and before any stream.
+        if let Some(f) = self.tell_stored() {
+            return Some(f);
+        }
         service.ui.event(HostEvent::SessionStarted {
             device,
             session_id: committed.session_id,
@@ -620,8 +681,98 @@ impl Actor {
         None
     }
 
-    /// A request in a live session: direction was checked; now the permission, the handler and the caps.
+    /// `StoredGrants` (GRANTS-SYNC.md 3.2): what this side stored for the peer's device, told once the session is
+    /// granted and again when it changes, latest value wins. Only when both sides speak minor 1: a 1.0 peer would end
+    /// the session on a type it does not know, and a peer of minor 1 ends it on one from a side that said minor 0.
+    fn tell_stored(&mut self) -> Option<Finish> {
+        if self.phase != Phase::Active {
+            return None;
+        }
+        let want = self.ctx.own_stored()?;
+        if self.stored_told == Some(want) {
+            return None;
+        }
+        let own = match &self.side {
+            Side::Host { service, .. } => service.cfg.proto_minor,
+            Side::Viewer { own_minor, .. } => *own_minor,
+        };
+        let msg = Message::from(swapdesk_proto::StoredGrants { grants: want });
+        if own.min(self.ctx.peer_minor()) < Message::type_min_minor(msg.type_id()) {
+            return None;
+        }
+        self.stored_told = Some(want);
+        self.emit(msg, true)
+    }
+
+    /// The messages of protocol minor 1 that a session takes after the grant, on either side. `None`: not one of them.
+    fn minor_1_message(&mut self, msg: &Message) -> Option<Option<Finish>> {
+        if !matches!(msg, Message::StoredGrants(_) | Message::Elevate(_)) {
+            return None;
+        }
+        // A peer that announced minor 0 cannot have sent it (PROTOCOL.md 5.3).
+        if self.ctx.peer_minor() < Message::type_min_minor(msg.type_id()) {
+            return Some(Some(Finish::violation(ErrorCode::UnsupportedVersion)));
+        }
+        Some(match msg {
+            // What the other side stored for this device: display only, for the column "Este computador pode, no X".
+            // It never touches this session's grants.
+            Message::StoredGrants(s) => {
+                match &self.side {
+                    Side::Host { service, device, .. } => {
+                        service.ui.event(HostEvent::PeerGrants { device: *device, grants: s.grants });
+                    }
+                    Side::Viewer { events, .. } => {
+                        let _ = events.try_send(ViewerEvent::PeerGrants(s.grants));
+                    }
+                }
+                None
+            }
+            // ACCOUNTS.md 9.3: the viewer confirmed on its own machine; the host checks and adds the elevated bits.
+            _ => self.on_elevate(msg.type_id()),
+        })
+    }
+
+    fn on_elevate(&mut self, type_id: u16) -> Option<Finish> {
+        let refuse = |code| ErrorMessage { code, fatal: false, about_type: type_id, about_id: 0 };
+        let Side::Host { service, device, .. } = &self.side else {
+            return self.reply(refuse(ErrorCode::NotPermitted));
+        };
+        let (service, device) = (Arc::clone(service), *device);
+        // Decided inside the grant change, from the store as it is then (review of S6, finding 3).
+        let mut outcome = Err(ErrorCode::NotPermitted);
+        let ctx = self.ctx.clone();
+        self.elevating = true;
+        self.ctx.modify_granted(|current| match service.elevated_grant(&ctx, &device, current) {
+            Ok(new) => {
+                outcome = Ok(new != current);
+                new
+            }
+            Err(code) => {
+                outcome = Err(code);
+                current
+            }
+        });
+        match outcome {
+            Ok(true) => {
+                service.forget_resume(self.ctx.session_id());
+                None
+            }
+            // Already elevated: the same answer again.
+            Ok(false) => {
+                self.elevating = false;
+                self.emit(PermissionsChanged { granted: self.ctx.granted() }, true)
+            }
+            Err(code) => {
+                self.elevating = false;
+                self.reply(refuse(code))
+            }
+        }
+    }
+
     fn host_active(&mut self, msg: Message) -> Option<Finish> {
+        if let Some(done) = self.minor_1_message(&msg) {
+            return done;
+        }
         let type_id = msg.type_id();
         // The handshake does not repeat: a second `Hello` or `Capabilities` is a violation, not a request.
         if policy::is_core_type(type_id) {
@@ -646,7 +797,7 @@ impl Actor {
 
     fn on_grants_changed(&mut self, old: PermissionSet, new: PermissionSet) -> Option<Finish> {
         let desktop = self.ctx.desktop_state().desktop;
-        let paused = desktop != Desktop::Default && !new.contains(PermissionSet::UNATTENDED);
+        let paused = self.paused_now(desktop, new);
         if let Some(f) = self.emit(PermissionsChanged { granted: new }, true) {
             return Some(f);
         }
@@ -657,12 +808,13 @@ impl Actor {
             }
         }
         if let Side::Host { service, device, .. } = &self.side {
-            service.ui.event(HostEvent::GrantsChanged {
-                device: *device,
-                session_id: self.ctx.session_id(),
-                from: old,
-                to: new,
-            });
+            let session_id = self.ctx.session_id();
+            let event = if std::mem::take(&mut self.elevating) && new.contains(PermissionSet::UNATTENDED) {
+                HostEvent::Elevated { device: *device, session_id, granted: new }
+            } else {
+                HostEvent::GrantsChanged { device: *device, session_id, from: old, to: new }
+            };
+            service.ui.event(event);
         }
         for h in self.registry.handlers() {
             h.on_permissions(&self.ctx, old, new);
@@ -670,8 +822,68 @@ impl Actor {
         None
     }
 
+    /// Whether this side's host serves desktops other than `Default` (the viewer side: always, it never pauses).
+    fn serves_other_desktops(&self) -> bool {
+        match &self.side {
+            Side::Host { service, .. } => service.ui.serves_other_desktops(),
+            _ => true,
+        }
+    }
+
+    /// Whether the host side is paused on `desktop` with `granted`: by the desktop (`paused_for`), or because the
+    /// banner's window is missing (F-SESS-03).
+    fn paused_now(&self, desktop: Desktop, granted: PermissionSet) -> bool {
+        paused_for(desktop, granted, self.serves_other_desktops()) || self.banner_missing_since.is_some()
+    }
+
+    /// F-SESS-03, "banner during every session": while the window of the account that shows it is not connected the
+    /// session is paused (no picture, input dropped), the window is asked for, and the session ends with `TIMEOUT`
+    /// after `HostConfig::banner_wait` if it does not come back. It goes on when the window is connected again.
+    fn check_banner(&mut self, at: Instant) -> Option<Finish> {
+        let Side::Host { service, .. } = &self.side else { return None };
+        let (ui, limit) = (Arc::clone(&service.ui), service.cfg.banner_wait);
+        match (ui.banner_ready(), self.banner_missing_since) {
+            (true, None) => None,
+            (true, Some(_)) => {
+                self.banner_missing_since = None;
+                self.repause()
+            }
+            (false, None) => {
+                self.banner_missing_since = Some(at);
+                ui.start_banner_window();
+                self.repause()
+            }
+            (false, Some(since)) => {
+                (at.saturating_duration_since(since) >= limit).then(|| Finish::local_bye(ErrorCode::Timeout))
+            }
+        }
+    }
+
+    /// Applies a change of `banner_missing_since` to the pause the viewer and the handlers see.
+    fn repause(&mut self) -> Option<Finish> {
+        let desktop = self.ctx.desktop_state().desktop;
+        let paused = self.paused_now(desktop, self.ctx.granted());
+        if paused == self.ctx.is_paused() {
+            return None;
+        }
+        self.ctx.inner.state.send_replace(DesktopState { desktop, paused });
+        if let Some(f) = self.emit(HostState { desktop, paused }, true) {
+            return Some(f);
+        }
+        for h in self.registry.handlers() {
+            h.on_state(&self.ctx, desktop, paused);
+        }
+        None
+    }
+
     fn on_desktop(&mut self, desktop: Desktop) -> Option<Finish> {
-        let paused = desktop != Desktop::Default && !self.ctx.granted().contains(PermissionSet::UNATTENDED);
+        let paused = self.paused_now(desktop, self.ctx.granted());
+        // ACCOUNTS.md 5.1: another account took the console. The session waits for it to come back, then ends.
+        if desktop == Desktop::AccountAway {
+            self.away_since.get_or_insert_with(now);
+        } else {
+            self.away_since = None;
+        }
         self.ctx.inner.state.send_replace(DesktopState { desktop, paused });
         if let Some(f) = self.emit(HostState { desktop, paused }, true) {
             return Some(f);
@@ -687,6 +899,7 @@ impl Actor {
     fn viewer_message(&mut self, msg: Message) -> Option<Finish> {
         match (self.phase, msg) {
             (Phase::AwaitAck, Message::HelloAck(ack)) => {
+                self.ctx.set_peer_minor(ack.proto_minor);
                 if let Side::Viewer { peer, .. } = &mut self.side {
                     *peer = Some(ack);
                 }
@@ -721,23 +934,35 @@ impl Actor {
         }
     }
 
+    /// What this viewer holds of the set the host granted: the host's set intersected with what the viewer asked for.
+    /// Everything that leaves the viewer (clipboard, input, file data) is gated on it.
+    fn viewer_holds(&self, host_granted: PermissionSet) -> PermissionSet {
+        host_granted & self.ctx.requested()
+    }
+
     fn viewer_granted(&mut self, g: SessionGrant) -> Option<Finish> {
+        // What the host's user grants beyond the request (D8) is theirs to give, never a flow out of this viewer.
+        let granted = self.viewer_holds(g.granted);
         let Side::Viewer { opened, peer, .. } = &mut self.side else { return None };
         let Some(peer) = peer.clone() else { return Some(Finish::violation(ErrorCode::Internal)) };
         self.ctx.inner.session_id.store(g.session_id, std::sync::atomic::Ordering::SeqCst);
-        self.ctx.set_granted(g.granted);
+        self.ctx.set_granted(granted);
         self.ctx.inner.active.send_replace(true);
         self.phase = Phase::Active;
         self.liveness = Liveness::new(self.live_cfg, now());
         let info = GrantInfo {
             session_id: g.session_id,
-            granted: g.granted,
+            granted,
             mode: g.mode,
             resume: swapdesk_proto::Resume { session_id: g.session_id, token: g.resume_token },
             host: peer,
         };
         if let Some(tx) = opened.take() {
             let _ = tx.send(Ok(info));
+        }
+        // Minor 1: what this viewer's account stored for the host, as soon as the session is granted.
+        if let Some(f) = self.tell_stored() {
+            return Some(f);
         }
         for h in self.registry.handlers() {
             h.on_start(&self.ctx);
@@ -746,15 +971,19 @@ impl Actor {
     }
 
     fn viewer_active(&mut self, msg: Message) -> Option<Finish> {
+        if let Some(done) = self.minor_1_message(&msg) {
+            return done;
+        }
         let Side::Viewer { events, .. } = &self.side else { return None };
         let events = events.clone();
         match msg {
             Message::PermissionsChanged(p) => {
                 let old = self.ctx.granted();
-                self.ctx.set_granted(p.granted);
-                let _ = events.try_send(ViewerEvent::PermissionsChanged(p.granted));
+                let granted = self.viewer_holds(p.granted);
+                self.ctx.set_granted(granted);
+                let _ = events.try_send(ViewerEvent::PermissionsChanged(granted));
                 for h in self.registry.handlers() {
-                    h.on_permissions(&self.ctx, old, p.granted);
+                    h.on_permissions(&self.ctx, old, granted);
                 }
                 None
             }
@@ -839,8 +1068,46 @@ impl Actor {
             if said {
                 let _ = tokio::time::timeout(LINGER_LIMIT, conn.closed()).await;
             }
-            conn.close(app_code(f.close), b"");
+            conn.close(close_code(f.close, self.ctx.peer_minor()), b"");
         }
         end
+    }
+}
+
+#[cfg(test)]
+mod close_code_tests {
+    use super::*;
+
+    /// F7: a peer of minor 0 is not sent a close code of a later minor, as the `Bye` it is sent is mapped too.
+    #[test]
+    fn a_minor_0_peer_is_closed_with_nobody_present_for_account_away() {
+        let nobody = VarInt::from_u32(u32::from(ErrorCode::NobodyPresent.tag()));
+        assert_eq!(u64::from(ErrorCode::NobodyPresent.tag()), 5);
+        assert_eq!(close_code(ErrorCode::AccountAway, 0), nobody);
+        // A peer of minor 1 hears the real code; every other code is the same for every minor.
+        assert_eq!(close_code(ErrorCode::AccountAway, 1), app_code(ErrorCode::AccountAway));
+        assert_eq!(close_code(ErrorCode::AccountAway, 1).into_inner(), 22);
+        assert_eq!(close_code(ErrorCode::ProtocolViolation, 0), app_code(ErrorCode::ProtocolViolation));
+        assert_eq!(close_code(ErrorCode::NoError, 0), app_code(ErrorCode::NoError));
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_that_cannot_serve_its_lock_screen_pauses_even_an_unattended_session() {
+        let unattended = PermissionSet::VIEW | PermissionSet::UNATTENDED;
+        let prompted = PermissionSet::VIEW;
+        // Windows (D11): an unattended session goes on at the lock screen; a prompted one pauses.
+        assert!(!paused_for(Desktop::Locked, unattended, true));
+        assert!(paused_for(Desktop::Locked, prompted, true));
+        // The Mac (D24): the lock screen cannot be seen or controlled, so every session pauses there.
+        assert!(paused_for(Desktop::Locked, unattended, false));
+        assert!(paused_for(Desktop::LoginWindow, unattended, false));
+        assert!(!paused_for(Desktop::Default, unattended, false));
+        // Another account at the console pauses everything, everywhere.
+        assert!(paused_for(Desktop::AccountAway, unattended, true));
     }
 }

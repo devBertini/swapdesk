@@ -21,6 +21,7 @@ use swapdesk_platform::{ActionRunner, ErrorKind, PlatformError};
 use swapdesk_proto::{Action, ClipSkip, ErrorCode, Message, PermissionSet};
 use swapdesk_session::{ChannelHandler, HostService, HostUi, SessionCtx};
 use swapdesk_term::{ActionContext, ActionRelay};
+use swapdesk_trust::DeviceId;
 use tokio::sync::oneshot;
 
 use super::routing::HelperKind;
@@ -42,8 +43,11 @@ pub trait ClipActionHooks: Send + Sync + 'static {
     /// An item of the clipboard was not synced in session `session_id`, here or at the peer.
     fn clipboard_skipped(&self, session_id: u64, reason: ClipSkip);
 
-    /// A quick action `action` ran on this host for session `session_id` (the audit log's `ActionRun`).
-    fn action_ran(&self, session_id: u64, action: Action);
+    /// A quick action `action` is about to run on this host for session `session_id`, whose peer is `device` (the
+    /// audit log's `ActionRun`). It is called before the runner, so the entry is on disk even when the action takes
+    /// the machine down (restart, sleep) or the session is gone by the time it returns; `device` is the session's own
+    /// peer, known whether or not the session is still in a live table.
+    fn action_starting(&self, session_id: u64, device: Option<DeviceId>, action: Action);
 }
 
 /// The hooks, set once after the core starts.
@@ -189,7 +193,7 @@ struct ActionsInner {
 }
 
 /// The host's side of `QuickAction` (0x0601): `CONTROL` is required, the runner runs off the executor, the answer goes
-/// back as `QuickActionResult` and an action that ran is audited.
+/// back as `QuickActionResult`; an action is audited before it runs.
 pub(crate) struct ActionsHost {
     inner: Arc<ActionsInner>,
 }
@@ -227,13 +231,19 @@ impl ChannelHandler for ActionsHost {
         let (inner, ctx) = (Arc::clone(&self.inner), ctx.clone());
         // The runner may wait for the helper's pipe (a suspend takes seconds): a blocking thread, never the executor.
         drop(self.inner.shared.rt.spawn_blocking(move || {
-            let facts = ActionContext { granted: ctx.granted(), user_present: inner.ui.somebody_present() };
-            let done = lock(&inner.relay).handle(&req, &facts);
-            let ok = done.result.code == ErrorCode::NoError;
+            let facts = ActionContext {
+                granted: ctx.granted(),
+                user_present: inner.ui.somebody_present(),
+                paused: ctx.is_paused(),
+            };
+            // The audit entry goes first: a restart or a suspend may not leave time for it afterwards, and the session
+            // may be gone by then. The outcome is the viewer's answer; the log has no event for a failed run.
+            let done = lock(&inner.relay).handle_with(&req, &facts, |action| {
+                if let Some(h) = inner.hooks.get() {
+                    h.action_starting(ctx.session_id(), ctx.device(), action);
+                }
+            });
             let _ = ctx.try_send(done.result);
-            if let (true, Some(h)) = (done.ran && ok, inner.hooks.get()) {
-                h.action_ran(ctx.session_id(), done.action);
-            }
         }));
     }
 }

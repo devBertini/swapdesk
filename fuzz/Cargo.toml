@@ -1,0 +1,81 @@
+# Coverage-guided fuzzing of the parsers a peer feeds (D40: libfuzzer-sys for development only, in this separate
+# workspace that no shipped crate depends on). Run on Linux with a nightly toolchain:
+#   cargo +nightly fuzz run <target> -- -max_total_time=30
+# (scripts/dev/fuzz.sh runs every target in a container on Windows.)
+[package]
+name = "swapdesk-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: the product's workspace does not see it.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+swapdesk-files = { path = "../crates/swapdesk-files" }
+swapdesk-ipc = { path = "../crates/swapdesk-ipc" }
+swapdesk-proto = { path = "../crates/swapdesk-proto" }
+swapdesk-term = { path = "../crates/swapdesk-term" }
+swapdesk-termview = { path = "../crates/swapdesk-termview" }
+swapdesk-update = { path = "../crates/swapdesk-update" }
+
+[[bin]]
+name = "proto_control"
+path = "fuzz_targets/proto_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_media"
+path = "fuzz_targets/proto_media.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_message"
+path = "fuzz_targets/ipc_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_op"
+path = "fuzz_targets/ipc_op.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "term_feed"
+path = "fuzz_targets/term_feed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_name"
+path = "fuzz_targets/file_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "annex_b"
+path = "fuzz_targets/annex_b.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_manifest"
+path = "fuzz_targets/update_manifest.rs"
+test = false
+doc = false
+bench = false

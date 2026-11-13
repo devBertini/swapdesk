@@ -103,9 +103,16 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
 }
 
 /// Creates a throwaway keychain file for development and tests, protected by `password` and unlocked; it is not in the
-/// user's search list, so it needs no GUI session. Pair it with [`delete_keychain_file`].
+/// user's search list, so it needs no GUI session. macOS locks such a keychain after five minutes without use: every
+/// call of this process on it unlocks it again with the password, without a prompt. Pair it with
+/// [`delete_keychain_file`].
 pub fn create_keychain_file(path: &Path, password: &str) -> Result<()> {
     keychain::create_file(&c_path(path)?, password)
+}
+
+/// Locks a keychain file, as macOS does by itself after five minutes without use (for tests).
+pub fn lock_keychain_file(path: &Path) -> Result<()> {
+    keychain::lock_file(&c_path(path)?)
 }
 
 /// Deletes a keychain file made by [`create_keychain_file`].

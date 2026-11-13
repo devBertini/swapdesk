@@ -120,6 +120,23 @@ pub enum AuditEvent {
     /// a stall). It is the kind an unauthenticated peer can produce at will, and the one the audit rate limit covers;
     /// `PairFailed` is reserved for attempts that reached step 2.
     PairRefused(ErrorCode),
+    /// ACCOUNTS.md 14.2, tag 18: the session of the entry before it was elevated (`UNATTENDED` and a stored
+    /// `ADMIN_TERMINAL` added to it). Written only to the per-account logs, which 1.0 never reads.
+    Elevated,
+    /// FILES-UI.md 8.3, tag 19: one change message of the explorer done on this computer's files, counts and kinds
+    /// only (never a name or path). `op`: 0 new folder, 1 rename, 2 move, 3 to the bin. `count`: the names done.
+    /// `area`: 0 the home folder, 1 elsewhere on the system volume, 2 another volume.
+    FilesChanged {
+        op: u8,
+        count: u32,
+        area: u8,
+    },
+    /// FILES-UI.md 8.3, tag 20: the viewer reached a new kind of volume (bit 0 the system volume outside the home
+    /// folder, 1 fixed, 2 removable, 3 network, 4 optical or image); `kinds` holds every bit reached so far in the
+    /// session.
+    FilesReach {
+        kinds: u8,
+    },
 }
 
 impl Wire for AuditEvent {
@@ -193,6 +210,17 @@ impl Wire for AuditEvent {
                 w.put_u8(17);
                 c.put(w, 0)?;
             }
+            Self::Elevated => w.put_u8(18),
+            Self::FilesChanged { op, count, area } => {
+                w.put_u8(19);
+                w.put_u8(*op);
+                w.put_u32(*count);
+                w.put_u8(*area);
+            }
+            Self::FilesReach { kinds } => {
+                w.put_u8(20);
+                w.put_u8(*kinds);
+            }
         }
         Ok(())
     }
@@ -226,6 +254,9 @@ impl Wire for AuditEvent {
             15 => Self::AddressBlocked(r.array()?),
             16 => Self::KeyReplaced { old: r.array()? },
             17 => Self::PairRefused(ErrorCode::get(r, 0)?),
+            18 => Self::Elevated,
+            19 => Self::FilesChanged { op: r.u8()?, count: r.u32()?, area: r.u8()? },
+            20 => Self::FilesReach { kinds: r.u8()? },
             tag => return Err(CodecError::UnknownTag { what: "AuditEvent", tag: u64::from(tag) }),
         })
     }
@@ -395,6 +426,48 @@ mod tests {
         assert_eq!(read.entries, want);
         assert_eq!(read.valid_len, file.len());
         assert!(!read.truncated_tail);
+    }
+
+    /// ACCOUNTS.md 15 S2: tag 18 `Elevated` reads back, and a log of 1.0 events (none carries it) still reads as it
+    /// did.
+    #[test]
+    fn audit_tag_18_round_trips_and_a_1_0_log_still_reads() {
+        let elevated =
+            AuditEntry { time_ms: 7, device: DeviceRef::Known([3; 16]), event: AuditEvent::Elevated, duration_s: None };
+        let rec = elevated.encode_record().unwrap();
+        assert!(rec.contains(&18), "the tag is 18");
+        let mut file = Vec::new();
+        let old: Vec<AuditEntry> = every_event()
+            .into_iter()
+            .map(|event| AuditEntry { time_ms: 1, device: DeviceRef::Known([1; 16]), event, duration_s: None })
+            .collect();
+        for e in &old {
+            file.extend_from_slice(&e.encode_record().unwrap());
+        }
+        assert_eq!(decode_log(&file).unwrap().entries, old, "a 1.0 log");
+        file.extend_from_slice(&rec);
+        let read = decode_log(&file).unwrap();
+        assert_eq!(read.entries.last(), Some(&elevated));
+        assert_eq!(read.entries.len(), old.len() + 1);
+    }
+
+    /// FILES-UI.md 8.3: tags 19 and 20 carry counts and kinds only, and a log without them still reads.
+    #[test]
+    fn audit_tags_19_and_20_carry_counts_and_kinds_only() {
+        let changed = AuditEvent::FilesChanged { op: 2, count: 5, area: 1 };
+        let reach = AuditEvent::FilesReach { kinds: 0b1_0100 };
+        let mut file = Vec::new();
+        for event in [changed.clone(), reach.clone()] {
+            let e = AuditEntry { time_ms: 9, device: DeviceRef::Known([2; 16]), event, duration_s: None };
+            file.extend_from_slice(&e.encode_record().unwrap());
+        }
+        let read = decode_log(&file).unwrap();
+        assert_eq!(read.entries.iter().map(|e| e.event.clone()).collect::<Vec<_>>(), [changed, reach]);
+        let tags: Vec<u8> = read.entries.iter().map(|e| e.event.encode().unwrap()[0]).collect();
+        assert_eq!(tags, [19, 20]);
+        // Nothing but the kind byte, the count and the area byte travels: a record has no room for a name.
+        assert_eq!(AuditEvent::FilesChanged { op: 0, count: 0, area: 0 }.encode().unwrap().len(), 1 + 1 + 4 + 1);
+        assert_eq!(AuditEvent::FilesReach { kinds: 0 }.encode().unwrap().len(), 2);
     }
 
     #[test]

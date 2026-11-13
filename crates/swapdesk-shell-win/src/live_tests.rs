@@ -15,12 +15,12 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::WindowsProgramming::QueryThreadCycleTime;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, IsWindow, PostMessageW, SendMessageW, WM_APP, WM_CLOSE, WM_GETTEXTLENGTH, WM_MOUSEMOVE,
+    GetClientRect, IsIconic, IsWindow, PostMessageW, SendMessageW, WM_APP, WM_CLOSE, WM_GETTEXTLENGTH, WM_MOUSEMOVE,
 };
 
 use crate::offscreen::render;
 use crate::system::Waker;
-use crate::view::Interaction;
+use swapdesk_paint::Interaction;
 
 /// A running shell: the window thread and what is needed to read its CPU time.
 struct Live {
@@ -31,14 +31,21 @@ struct Live {
 
 impl Live {
     fn start(scenario: Scenario) -> Live {
+        Live::start_with(move |w| {
+            let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(w.clone()));
+            crate::run(scenario.prepared_state(), backend, w, Vec::new()).expect("shell");
+        })
+    }
+
+    /// Starts the shell with `run` on the window thread; `run` gets the waker the window will be set on.
+    fn start_with(run: impl FnOnce(Arc<Waker>) + Send + 'static) -> Live {
         let waker = Arc::new(Waker::new());
         let (tx, rx) = std::sync::mpsc::channel();
         let w = Arc::clone(&waker);
         let join = std::thread::spawn(move || {
             // SAFETY: a plain query of this thread's id.
             tx.send(unsafe { GetCurrentThreadId() }).expect("thread id");
-            let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(w.clone()));
-            crate::run(scenario.prepared_state(), backend, w, Vec::new()).expect("shell");
+            run(w);
         });
         let thread_id = rx.recv().expect("thread id");
         let live = Live { waker, thread_id, join: Some(join) };
@@ -98,9 +105,9 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        // SAFETY: closing our window ends the message loop of its thread.
+        // SAFETY: our window; the message ends the run and the message loop of its thread.
         unsafe {
-            let _ = PostMessageW(Some(self.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(self.hwnd()), crate::system::WM_QUIT_APP, WPARAM(0), LPARAM(0));
         }
         if let Some(j) = self.join.take() {
             let _ = j.join();
@@ -236,4 +243,484 @@ fn hover_cpu_of_the_window_thread() {
             per_ms
         );
     }
+}
+
+/// A backend that answers nothing and delivers the events a test pushes.
+#[derive(Default)]
+struct Scripted(std::sync::Mutex<Vec<swapdesk_ui::UiEvent>>);
+
+impl Scripted {
+    fn push(&self, e: swapdesk_ui::UiEvent) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(e);
+    }
+}
+
+impl UiBackend for Scripted {
+    fn send(&self, _command: swapdesk_ui::Command) -> swapdesk_ui::Ticket {
+        swapdesk_ui::Ticket(0)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+/// The viewer pipeline's hooks of a real run, doing nothing.
+struct NoHost;
+
+impl crate::ViewerHost for NoHost {
+    fn opened(&self, _surface: swapdesk_platform::NativeSurface, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn resized(&self, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn closed(&self) {}
+    fn focus(&self, _focused: bool) {}
+    fn mouse(&self, _msg: crate::MouseMsg) -> bool {
+        false
+    }
+    fn captures_keyboard(&self) -> bool {
+        false
+    }
+    fn key(&self, _msg: &crate::KeyMsg) -> bool {
+        false
+    }
+    fn pointer_shape(&self) -> Option<Arc<swapdesk_platform::CursorShape>> {
+        None
+    }
+}
+
+fn session(id: u64, state: swapdesk_ui::SessionState) -> swapdesk_ui::UiEvent {
+    swapdesk_ui::UiEvent::Session { session_id: id, device_id: swapdesk_ui::mock::DESKTOP.into(), state }
+}
+
+fn active(role: swapdesk_ui::Role) -> swapdesk_ui::SessionState {
+    swapdesk_ui::SessionState::Active {
+        since_ms: 0,
+        role,
+        granted: swapdesk_ui::Permissions::NONE,
+        elevation: Default::default(),
+    }
+}
+
+fn iconic(live: &Live) -> bool {
+    // SAFETY: a plain query of our window.
+    unsafe { IsIconic(live.hwnd()) }.as_bool()
+}
+
+/// Waits up to two seconds for the main window to be (or not to be) minimized.
+fn settles_iconic(live: &Live, want: bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        if iconic(live) == want {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    iconic(live) == want
+}
+
+/// D32 with the notification area (B16): in a real run a person's close hides the main window and the run goes on;
+/// an update about to be installed still ends the run (a close that only hid the window would keep the process alive
+/// and block the applier).
+#[test]
+fn closing_the_main_window_of_a_real_run_hides_it_and_an_update_still_ends_the_run() {
+    use swapdesk_ui::UiWaker;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let backend = Arc::new(Scripted::default());
+    let b = Arc::clone(&backend);
+    let mut live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    let hwnd = live.hwnd();
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    // SAFETY: plain queries of our window.
+    assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool(), "the close keeps the window");
+    assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "the close hides it into the notification area");
+    assert!(!live.join.as_ref().expect("running").is_finished(), "the run goes on");
+
+    backend.push(swapdesk_ui::UiEvent::UpdateRestarting);
+    live.waker.wake();
+    let join = live.join.take().expect("running");
+    let started = Instant::now();
+    while !join.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(5), "the update's restart did not end the run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    join.join().expect("the shell thread");
+}
+
+/// F-UI-04: the notification area menu's two entries reach the window as commands: "Abrir" shows the hidden main
+/// window and "Sair" ends the run.
+#[test]
+fn the_tray_menu_open_shows_the_main_window_and_quit_ends_the_run() {
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, WM_COMMAND};
+    let backend = Arc::new(Scripted::default());
+    let b = Arc::clone(&backend);
+    let mut live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    let hwnd = live.hwnd();
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "the close hid the window");
+
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(crate::tray::CMD_OPEN), LPARAM(0));
+    }
+    let started = Instant::now();
+    while !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        assert!(started.elapsed() < Duration::from_secs(5), "Open did not show the main window");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!live.join.as_ref().expect("running").is_finished(), "Open keeps the run going");
+
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(crate::tray::CMD_QUIT), LPARAM(0));
+    }
+    let join = live.join.take().expect("running");
+    let started = Instant::now();
+    while !join.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(5), "Quit did not end the run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    join.join().expect("the shell thread");
+}
+
+#[test]
+fn the_main_window_minimizes_when_a_session_starts_and_not_in_a_mock_run() {
+    use swapdesk_ui::{Role, SessionState, UiWaker};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, ShowWindow};
+
+    // A mock run holds sessions already Active, and keeps its window (captures show it).
+    for scenario in [Scenario::Banner, Scenario::Visualizador] {
+        let mock = Live::start(scenario);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!iconic(&mock), "a mock run never minimizes ({scenario:?})");
+    }
+
+    // A real run (with the viewer pipeline's hooks): this machine is controlled, then it controls.
+    let backend = Arc::new(Scripted::default());
+    backend.push(session(1, active(Role::Host)));
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    assert!(settles_iconic(&live, true), "the first Active state of a session minimizes the main window");
+
+    // The person brings it back: a pause and an Active state of the same session leave it where it is.
+    // SAFETY: our window.
+    unsafe {
+        let _ = ShowWindow(live.hwnd(), SW_RESTORE);
+    }
+    assert!(settles_iconic(&live, false), "the window was restored");
+    backend.push(session(1, SessionState::Paused { desktop: swapdesk_ui::DesktopKind::Locked }));
+    backend.push(session(1, active(Role::Host)));
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!iconic(&live), "the same session never minimizes twice");
+
+    // A new session, this time controlling, minimizes it again.
+    backend.push(session(2, active(Role::Viewer)));
+    live.waker.wake();
+    assert!(settles_iconic(&live, true), "a new session minimizes the main window again");
+
+    // Owner, 11/11: the window comes back when the session this computer controlled ends and none is left; the
+    // session in which it was controlled leaves it minimized (D60).
+    backend.push(session(1, SessionState::Ended { reason: None }));
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(iconic(&live), "session 2 (controlling) still goes on");
+    backend.push(session(2, SessionState::Ended { reason: None }));
+    live.waker.wake();
+    assert!(settles_iconic(&live, false), "the controlling session ended: the main window is restored");
+
+    // Controlled alone: the window stays minimized after the end.
+    backend.push(session(3, active(Role::Host)));
+    live.waker.wake();
+    assert!(settles_iconic(&live, true), "a new session minimizes the main window");
+    backend.push(session(3, SessionState::Ended { reason: None }));
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(iconic(&live), "the computer that was controlled keeps its window minimized");
+}
+
+/// A backend that records the commands it is sent and delivers the events a test pushes.
+#[derive(Default)]
+struct Recording {
+    events: std::sync::Mutex<Vec<swapdesk_ui::UiEvent>>,
+    commands: std::sync::Mutex<Vec<swapdesk_ui::Command>>,
+}
+
+impl Recording {
+    fn push(&self, e: swapdesk_ui::UiEvent) {
+        self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(e);
+    }
+    fn disconnects(&self) -> usize {
+        let c = self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.iter().filter(|c| matches!(c, swapdesk_ui::Command::Disconnect { .. })).count()
+    }
+}
+
+impl UiBackend for Recording {
+    fn send(&self, command: swapdesk_ui::Command) -> swapdesk_ui::Ticket {
+        self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(command);
+        swapdesk_ui::Ticket(0)
+    }
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        std::mem::take(&mut *self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+fn entry_event(state: swapdesk_ui::SessionState) -> swapdesk_ui::UiEvent {
+    swapdesk_ui::UiEvent::Session {
+        session_id: swapdesk_ui::mock::ENTRY,
+        device_id: swapdesk_ui::mock::MAC.into(),
+        state,
+    }
+}
+
+fn last_focus() -> Option<ControlId> {
+    *crate::window::LAST_FOCUS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A real shell on `state` with a recording backend.
+fn start_recording(state: swapdesk_ui::UiState) -> (Live, Arc<Recording>) {
+    let backend = Arc::new(Recording::default());
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run(state, backend, w, Vec::new()).expect("shell");
+    });
+    (live, backend)
+}
+
+/// Delivers an event of the service to the shell and waits for it to be handled.
+fn deliver(live: &Live, backend: &Recording, e: swapdesk_ui::UiEvent) {
+    use swapdesk_ui::UiWaker;
+    backend.push(e);
+    live.waker.wake();
+    std::thread::sleep(Duration::from_millis(700));
+}
+
+fn press_escape(live: &Live) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+    // SAFETY: sends to our window from another thread (it blocks until the window thread has answered).
+    unsafe { SendMessageW(live.hwnd(), WM_KEYDOWN, Some(WPARAM(usize::from(VK_ESCAPE.0))), Some(LPARAM(0))) };
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+#[test]
+fn escape_on_the_main_window_cancels_a_waiting_card() {
+    use swapdesk_ui::SessionState;
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    assert_eq!(backend.disconnects(), 0);
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 1, "Esc sent the cancel of the waiting entry");
+}
+
+#[test]
+fn escape_on_the_main_window_closes_an_ended_card() {
+    use swapdesk_ui::{ConnectWhy, SessionState};
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(last_focus(), Some(ControlId::ConnectClose));
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 0, "closing an ended card sends nothing");
+    assert_eq!(last_focus(), Some(ControlId::Control), "Fechar ran: the card is gone and focus is back on the button");
+}
+
+#[test]
+fn escape_over_a_dialog_keeps_its_old_meaning() {
+    use swapdesk_ui::SessionState;
+    let (live, backend) = start_recording(Scenario::PedidoConexao.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    press_escape(&live);
+    assert_eq!(backend.disconnects(), 0, "a dialog over the window takes Esc itself: the wait is not cancelled");
+}
+
+#[test]
+fn a_service_event_that_ends_a_connect_in_failure_moves_focus_to_fechar() {
+    use swapdesk_ui::{ConnectWhy, SessionState};
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    // The wait card of a click gets Cancelar from the click's own effect; a news item of the wait asks for nothing.
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    assert_eq!(last_focus(), None, "a wait that goes on takes no focus");
+    deliver(&live, &backend, entry_event(SessionState::NotOpened { why: ConnectWhy::Declined }));
+    assert_eq!(last_focus(), Some(ControlId::ConnectClose), "the end card's Fechar takes the focus");
+}
+
+const CONFIRM_LINE: &str = "Permitir que o MacBook do escritório entre sem perguntar";
+
+fn confirm_state(remaining_s: u16) -> swapdesk_ui::UiState {
+    swapdesk_ui::UiState::for_elevated_confirm(swapdesk_ui::Language::PtBr, false, CONFIRM_LINE.into(), remaining_s)
+}
+
+/// The elevated instance's confirmation window on a thread; the channel gets its answer when it closes.
+fn start_confirm(remaining_s: u16) -> (Live, std::sync::mpsc::Receiver<Option<bool>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let live = Live::start_with(move |w| {
+        let _ = tx.send(crate::app::run_confirm_with(confirm_state(remaining_s), w).expect("shell"));
+    });
+    (live, rx)
+}
+
+#[test]
+fn enter_alone_confirms_nothing() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+    let (live, answer) = start_confirm(90);
+    // SAFETY: sends to our window from another thread (it blocks until the window thread has answered).
+    unsafe { SendMessageW(live.hwnd(), WM_KEYDOWN, Some(WPARAM(usize::from(VK_RETURN.0))), Some(LPARAM(0))) };
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(answer.try_recv().is_err(), "no button has the keyboard: Enter confirms nothing and the window stays");
+    // Esc is "Cancelar": the window closes with a no.
+    press_escape(&live);
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Some(false)));
+}
+
+#[test]
+fn it_closes_as_declined_when_the_time_runs_out() {
+    let (_live, answer) = start_confirm(4);
+    assert_eq!(answer.recv_timeout(Duration::from_secs(15)), Ok(Some(false)));
+}
+
+#[test]
+fn closing_the_elevated_window_is_no_approval_and_a_click_on_confirmar_is_one() {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDOWN, WM_LBUTTONUP};
+    let (live, answer) = start_confirm(90);
+    // SAFETY: posting to our window.
+    unsafe {
+        let _ = PostMessageW(Some(live.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(None));
+    drop(live);
+
+    // A real button press where "Confirmar" is painted approves.
+    let (live, answer) = start_confirm(90);
+    let ((w, h), scale) = live.geometry();
+    let size = (w as f32 / scale, h as f32 / scale);
+    let r = render(&confirm_state(90), WindowKind::Main, size, scale, &Interaction::default()).unwrap();
+    let rect = r.output.widgets.iter().find(|w| w.id == ControlId::DialogPrimary).map(|w| w.rect).unwrap();
+    let (cx, cy) = rect.center();
+    let (px, py) = ((cx * scale) as isize, (cy * scale) as isize);
+    let at = LPARAM(((py & 0xFFFF) << 16) | (px & 0xFFFF));
+    // SAFETY: sends to our window from another thread.
+    unsafe {
+        SendMessageW(live.hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(at));
+        SendMessageW(live.hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(at));
+        SendMessageW(live.hwnd(), WM_LBUTTONUP, Some(WPARAM(0)), Some(at));
+    }
+    assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Some(true)));
+}
+
+impl Recording {
+    fn view_sizes(&self) -> Vec<(u16, u16, u16)> {
+        let c = self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.iter()
+            .filter_map(|c| match c {
+                swapdesk_ui::Command::SetViewSize { width, height, max_fps, .. } => Some((*width, *height, *max_fps)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// F-VIEW-06: a real viewer window reports its video area in physical pixels, and again when it is resized; the same
+/// size again sends nothing.
+#[test]
+fn a_viewer_window_reports_its_video_area_and_a_resize_reports_it_again() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, GetWindowRect, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    };
+    let (live, backend) = start_recording(Scenario::Visualizador.prepared_state());
+    let first = backend.view_sizes();
+    assert_eq!(first.len(), 1, "one report for the first layout: {first:?}");
+    let (w, h, _hz) = first[0];
+
+    // The viewer is the thread's other window (the waker holds the main one).
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `lparam` is the vector passed below, alive for the whole enumeration.
+        unsafe { (*(lparam.0 as *mut Vec<isize>)).push(hwnd.0 as isize) };
+        true.into()
+    }
+    let mut all: Vec<isize> = Vec::new();
+    // SAFETY: enumerates this test's window thread; the callback only reads the handles.
+    unsafe {
+        let _ = EnumThreadWindows(live.thread_id, Some(collect), LPARAM(std::ptr::from_mut(&mut all) as isize));
+    }
+    let main = live.hwnd().0 as isize;
+    let viewer = all
+        .into_iter()
+        .filter(|h| *h != main)
+        .map(|h| HWND(h as *mut std::ffi::c_void))
+        .find(|h| {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            // SAFETY: a plain read of a window of this thread.
+            unsafe { GetWindowRect(*h, &mut r).is_ok() && r.right - r.left > 600 }
+        })
+        .expect("the viewer window");
+    let mut rc = windows::Win32::Foundation::RECT::default();
+    // SAFETY: our window, from another thread (blocks until the window thread has handled it).
+    unsafe {
+        let _ = GetWindowRect(viewer, &mut rc);
+        let _ = SetWindowPos(
+            viewer,
+            None,
+            0,
+            0,
+            rc.right - rc.left + 160,
+            rc.bottom - rc.top + 100,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
+    }
+    std::thread::sleep(Duration::from_millis(900));
+    let after = backend.view_sizes();
+    assert_eq!(after.len(), 2, "a resize reports once more: {after:?}");
+    assert!(after[1].0 > w && after[1].1 > h, "the area grew from {w}x{h}: {after:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(backend.view_sizes().len(), 2, "nothing more while the size holds");
+}
+
+/// Slice 4 (FILES-UI.md 4.2): the viewer window is an OLE drop target, the main window is not. OLE marks a registered
+/// window with the property `OleDropTargetInterface`; that it is set proves `OleInitialize` ran on the UI thread
+/// (`RegisterDragDrop` fails on a thread that only called `CoInitializeEx`) and the registration went through.
+#[test]
+fn the_viewer_window_is_registered_as_a_drop_target_and_the_main_window_is_not() {
+    use windows::Win32::Foundation::TRUE;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetPropW};
+    use windows::core::{BOOL, w};
+
+    // A mock run of the viewer scenario: its viewer window exists next to the main one.
+    let live = Live::start(Scenario::Visualizador);
+    let main = live.hwnd();
+    struct Found(Vec<HWND>);
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `Found` of the caller, alive for the whole enumeration.
+        unsafe { (*(lparam.0 as *mut Found)).0.push(hwnd) };
+        TRUE
+    }
+    let mut found = Found(Vec::new());
+    // SAFETY: enumerates the windows of the shell thread; the pointer outlives the call.
+    unsafe {
+        let _ = EnumThreadWindows(live.thread_id, Some(collect), LPARAM(&mut found as *mut Found as isize));
+    }
+    // SAFETY: plain property reads of our windows.
+    let registered = |h: HWND| !unsafe { GetPropW(h, w!("OleDropTargetInterface")) }.0.is_null();
+    let top = found.0;
+    assert!(!registered(main), "the main window takes no drops");
+    assert!(top.iter().any(|&h| h != main && registered(h)), "the viewer window is a drop target ({top:?})");
 }

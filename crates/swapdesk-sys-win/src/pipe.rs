@@ -171,6 +171,12 @@ pub fn ui_pipe_name(session_id: u32) -> String {
     format!("ui-{session_id}")
 }
 
+/// `elev-<session id>` (ACCOUNTS.md S7, ELEVATION.md 3.3): where an elevated instance of any administrator of the
+/// session confirms a ticket.
+pub fn elev_pipe_name(session_id: u32) -> String {
+    format!("elev-{session_id}")
+}
+
 /// `helper-<role>-<session id>-<128-bit random hex>` (C2.1); the hex part is [`random_hex_128`].
 pub fn helper_pipe_name(role: HelperRole, session_id: u32, random_hex: &str) -> String {
     format!("helper-{}-{session_id}-{random_hex}", role.as_str())
@@ -211,6 +217,17 @@ impl PipeAcl {
     /// Production UI pipe or user-helper pipe: SYSTEM and that user.
     pub fn system_and_user(user_sid: impl Into<String>) -> Self {
         Self { owner: PipeOwner::System, user_sid: Some(user_sid.into()) }
+    }
+
+    /// Production elevator pipe: SYSTEM, and Administrators with the user row's rights. A filtered token holds
+    /// Administrators deny-only, which an allow entry ignores, so only an elevated administrator opens it.
+    pub fn system_and_administrators() -> Self {
+        Self { owner: PipeOwner::System, user_sid: Some(ADMINISTRATORS_SID.to_string()) }
+    }
+
+    /// Development elevator pipe: the current user in SYSTEM's row, and Administrators.
+    pub fn dev_and_administrators() -> Self {
+        Self { owner: PipeOwner::CurrentUser, user_sid: Some(ADMINISTRATORS_SID.to_string()) }
     }
 
     /// Production system-helper pipe: SYSTEM only.
@@ -263,6 +280,11 @@ impl PipeSpec {
     /// `ui-<session id>`: several instances, so the next client can connect while the previous one is closing.
     pub fn ui(session_id: u32, acl: PipeAcl) -> Self {
         Self { name: ui_pipe_name(session_id), acl, max_instances: 4 }
+    }
+
+    /// `elev-<session id>`: a couple of instances, one confirmation at a time is the rule.
+    pub fn elevator(session_id: u32, acl: PipeAcl) -> Self {
+        Self { name: elev_pipe_name(session_id), acl, max_instances: 2 }
     }
 
     /// A helper pipe: one instance, ever.
@@ -429,7 +451,8 @@ impl PipeConn {
     }
 
     /// Server side, C2.3: impersonates the client at the identification level, reads the token's user SID,
-    /// whether it is elevated and whether Administrators is an **enabled** group in it, then reverts.
+    /// whether it is elevated, whether Administrators is an **enabled** group in it and whether Administrators is in it
+    /// at all (a filtered administrator token holds it deny-only), then reverts.
     ///
     /// Call it after reading at least the client's first message: the page says `ImpersonateNamedPipeClient` uses "the
     /// last message read from the pipe". (Observed on Windows 11 10.0.26300: the call also succeeds right after connect,
@@ -461,11 +484,27 @@ impl PipeConn {
         let token = OwnedHandle(token);
         let user_sid = token_user_sid(token.0)?;
         let elevated = token_is_elevated(token.0)?;
-        let administrators_enabled = token_groups(token.0)?.iter().any(|(sid, attrs)| {
-            sid == ADMINISTRATORS_SID && attrs & SE_GROUP_ENABLED != 0 && attrs & SE_GROUP_USE_FOR_DENY_ONLY == 0
-        });
-        Ok(ClientIdentity { user_sid, elevated, administrators_enabled })
+        let groups = token_groups(token.0)?;
+        Ok(ClientIdentity {
+            user_sid,
+            elevated,
+            administrators_enabled: administrators_enabled(&groups),
+            administrators_present: administrators_present(&groups),
+        })
     }
+}
+
+/// The Administrators SID is among `groups` (`(sid, attributes)` as `token_groups` gives them) and enabled, not "deny
+/// only".
+pub(crate) fn administrators_enabled(groups: &[(String, u32)]) -> bool {
+    groups.iter().any(|(sid, attrs)| {
+        sid == ADMINISTRATORS_SID && attrs & SE_GROUP_ENABLED != 0 && attrs & SE_GROUP_USE_FOR_DENY_ONLY == 0
+    })
+}
+
+/// The Administrators SID is among `groups` with any attributes: a filtered administrator token holds it deny-only.
+pub(crate) fn administrators_present(groups: &[(String, u32)]) -> bool {
+    groups.iter().any(|(sid, _)| sid == ADMINISTRATORS_SID)
 }
 
 /// Who a pipe client is, from its impersonated token.
@@ -477,6 +516,9 @@ pub struct ClientIdentity {
     pub elevated: bool,
     /// The Administrators SID is in the token and enabled (not "deny only", as in a filtered token).
     pub administrators_enabled: bool,
+    /// The Administrators SID is in the token with any attributes, enabled or deny-only: the account is an administrator
+    /// account, whether or not this token is the elevated one.
+    pub administrators_present: bool,
 }
 
 impl ClientIdentity {

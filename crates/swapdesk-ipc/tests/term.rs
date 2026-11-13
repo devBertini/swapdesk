@@ -189,3 +189,13 @@ fn a_truncated_or_padded_terminal_body_is_a_protocol_error() {
         assert!(matches!(decode_message(&frame), Err(IpcError::UnknownType(t)) if t == ty), "type {ty:#x}");
     }
 }
+
+/// GRANTS-SYNC.md 8 S7: op 39 carries the device and is answered `Done`.
+#[test]
+fn refresh_grants_op_39_round_trips() {
+    let op = UiOp::RefreshGrants { device_id: "0123456789abcdef0123456789abcdef".into() };
+    assert_eq!(op.code(), 39);
+    let msg = Message::UiRequest { req: 9, op };
+    assert_eq!(decode_message(&encode_message(&msg).unwrap()).unwrap(), msg);
+    assert_eq!(ReplyBody::decode(39, &[]).unwrap(), ReplyBody::Done);
+}

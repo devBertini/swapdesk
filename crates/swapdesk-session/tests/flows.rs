@@ -50,6 +50,64 @@ use swapdesk_session::SessionEnd;
 
 // ---------- F-SESS-02: unattended entry ----------
 
+/// A viewer of 1.0 has no elevation step: it is let in with the whole grant, as 1.0 did.
+#[test]
+fn a_minor_0_viewer_gets_unattended_at_entry_as_in_1_0() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let all = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, all | PermissionSet::FILES);
+        let (s, _task) = mem.open(&who, viewer_config_1_0(all)).await;
+        let s = s.unwrap();
+        assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, all));
+        assert_eq!(ui.prompt_count(), 0, "no prompt");
+        assert_eq!(s.ctx().peer_minor(), swapdesk_proto::PROTO_MINOR, "the host answers with its own minor");
+    });
+}
+
+/// A viewer of minor 1 that entered without a prompt holds no `UNATTENDED`: the lock screen, the sign-in screen and
+/// UAC pause it, as they pause a prompted session, until it elevates.
+#[test]
+fn an_unelevated_unattended_session_pauses_at_a_secure_desktop() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), registry_one(rec.clone()));
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        // The plain terminal stays: only the administrator one is machine-level.
+        let plain = PermissionSet::CONTROL | PermissionSet::TERMINAL;
+        assert_eq!((s.grant().mode, s.grant().granted), (GrantMode::Unattended, plain));
+        assert_eq!(ui.prompt_count(), 0, "no prompt");
+        let host_ctx = lock(&rec.sessions)[0].clone();
+        assert!(host_ctx.entered_unattended(), "the host knows nobody accepted this session");
+        assert_eq!(host_ctx.peer_minor(), swapdesk_proto::PROTO_MINOR);
+        assert!(host_ctx.can_inject());
+        for desktop in [Desktop::Secure, Desktop::Locked, Desktop::LoginWindow] {
+            mem.host.set_desktop(desktop);
+            wait_event(
+                &mut s,
+                Duration::from_secs(1),
+                "paused",
+                |e| matches!(e, ViewerEvent::HostState { desktop: d, paused: true } if *d == desktop),
+            )
+            .await;
+            assert!(host_ctx.is_paused() && !host_ctx.can_inject(), "{desktop:?}: input is dropped");
+        }
+        mem.host.set_desktop(Desktop::Default);
+        wait_event(&mut s, Duration::from_secs(1), "resumed", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Default, paused: false })
+        })
+        .await;
+        assert!(host_ctx.can_inject());
+    });
+}
+
 #[test]
 fn unattended_entry_grants_the_stored_permissions_without_a_prompt() {
     run_paused(async {
@@ -64,8 +122,9 @@ fn unattended_entry_grants_the_stored_permissions_without_a_prompt() {
         assert_eq!(s.grant().mode, GrantMode::Unattended);
         assert_eq!(
             s.grant().granted,
-            PermissionSet::UNATTENDED | PermissionSet::CONTROL,
-            "stored grants intersected with what was requested"
+            PermissionSet::CONTROL,
+            "stored grants intersected with what was requested, without the machine-level bit: a viewer of minor 1 \
+             asks for it with Elevate"
         );
         assert_eq!(ui.prompt_count(), 0, "no prompt");
         assert_eq!(s.grant().host.name, "host-pc");
@@ -152,6 +211,51 @@ fn a_prompted_session_presets_the_stored_grants_and_applies_what_the_host_picked
         .await;
         // The stored grants are unchanged: the pick is for this session only.
         assert_eq!(mem.trust.read(|t| t.find_by_id(&who.id).unwrap().grants_here), PermissionSet::VIEW);
+    });
+}
+
+/// Security review of 13/11 (F2): what the host's user grants beyond the request (D8) is the host's to give, never a
+/// flow out of the viewer. The viewer holds the host's set intersected with what it asked for.
+#[test]
+fn a_viewer_holds_only_what_the_host_granted_and_it_asked_for() {
+    run_paused(async {
+        let host_says = PermissionSet::VIEW | PermissionSet::CLIPBOARD | PermissionSet::CONTROL;
+        let ui = TestUi::accepting(host_says);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, host_says);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::VIEW).await;
+        assert_eq!(s.grant().granted, PermissionSet::VIEW, "the grant the viewer reports is what it can use");
+        assert_eq!(s.granted(), PermissionSet::VIEW);
+        assert!(!s.ctx().can_inject(), "a View request sends no input, whatever the host says");
+        assert!(!s.ctx().spawn_gated(PermissionSet::CLIPBOARD, async {}), "no clipboard task starts");
+
+        // The host's user widens the running session later: still nothing opens at the viewer.
+        let id = s.grant().session_id;
+        assert!(mem.host.set_session_grants(id, host_says | PermissionSet::FILES));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(s.granted(), PermissionSet::VIEW);
+        assert!(!s.ctx().spawn_gated(PermissionSet::FILES, async {}));
+        while let Some(e) = s.try_event() {
+            if let ViewerEvent::PermissionsChanged(p) = e {
+                assert_eq!(p, PermissionSet::VIEW, "the viewer's interface is told the set it holds");
+            }
+        }
+    });
+}
+
+#[test]
+fn a_control_request_holds_what_the_host_granted_within_it() {
+    run_paused(async {
+        let asked = PermissionSet::CONTROL | PermissionSet::CLIPBOARD | PermissionSet::FILES;
+        let ui = TestUi::accepting(asked);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, asked);
+        let (s, _task) = prompted(&mem, &who, asked).await;
+        assert_eq!(s.granted(), asked);
+        assert!(s.ctx().can_inject());
+        assert!(s.ctx().spawn_gated(PermissionSet::CLIPBOARD, async {}));
     });
 }
 
@@ -273,6 +377,32 @@ fn a_request_that_the_viewer_withdraws_closes_the_card() {
         io.out.send(Bye { code: ErrorCode::NoError }).await.unwrap();
         let end = task.await.unwrap();
         assert_eq!((end.kind, end.code), (EndKind::PeerBye, ErrorCode::NoError));
+        assert_eq!(lock(&ui.closed).iter().map(|c| c.1).collect::<Vec<_>>(), vec![PromptEnd::Cancelled]);
+        // Answering late changes nothing.
+        ui.answer_held(P(PermissionSet::CONTROL));
+    });
+}
+
+#[test]
+fn a_viewer_dropped_while_prompted_says_bye_and_the_host_prompt_ends_cancelled() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::VIEW);
+        let (host_io, viewer_io) = swapdesk_session::memory_pair();
+        let (host, id) = (mem.host.clone(), who.id);
+        let task = tokio::spawn(async move { host.serve_io(host_io, None, id).await });
+        // The open waits for the user at the host; its caller gives up after 5 s and drops it.
+        let open = ViewerSession::open_io(viewer_io, None, Some([9; 16]), viewer_config(PermissionSet::CONTROL));
+        let waited = tokio::time::timeout(Duration::from_secs(5), open).await;
+        assert!(waited.is_err(), "the host was still asking");
+        assert_eq!(ui.prompt_count(), 1);
+        // The drop said `Bye { NO_ERROR }`: the host ends as for a viewer that left, long before its 20 s.
+        let t0 = Instant::now();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::PeerBye, ErrorCode::NoError));
+        assert!(t0.elapsed() < Duration::from_secs(1), "ended at once, not at the prompt's deadline");
         assert_eq!(lock(&ui.closed).iter().map(|c| c.1).collect::<Vec<_>>(), vec![PromptEnd::Cancelled]);
         // Answering late changes nothing.
         ui.answer_held(P(PermissionSet::CONTROL));
@@ -492,7 +622,9 @@ fn streams_a_session_opens_carry_their_kind_and_the_priority_of_the_protocol_tab
         for (kind, priority) in [(StreamKind::Input, 4), (StreamKind::Clipboard, 0), (StreamKind::FileData, 0)] {
             let mut stream = s.ctx().open_uni(kind).await.unwrap();
             assert_eq!(stream.priority().unwrap(), priority, "{kind:?}");
-            stream.write_all(&[0; 12]).await.unwrap();
+            // The recorder lets a stream go as soon as it has counted it, which stops the stream: a write that comes
+            // after that is refused, and says nothing about the kind or the priority.
+            let _ = stream.write_all(&[0; 12]).await;
         }
         eventually(Duration::from_secs(3), "the three streams", || {
             rec.streams.load(std::sync::atomic::Ordering::SeqCst) == 3
@@ -646,10 +778,11 @@ fn locking_the_host_pauses_video_and_drops_input_unless_the_session_is_unattende
         s.disconnect().await;
         task.await.unwrap();
 
-        // UNATTENDED sessions go on at the login, lock and UAC screens.
+        // A session that holds UNATTENDED goes on at the login, lock and UAC screens (here the entry of a 1.0
+        // viewer, which gets the bit at once).
         let who2 = Who::new();
         pin(&mem.trust, &who2, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
-        let (u, _task) = mem.open(&who2, viewer_config(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
+        let (u, _task) = mem.open(&who2, viewer_config_1_0(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
         let mut u = u.unwrap();
         for desktop in [Desktop::Secure, Desktop::Locked, Desktop::LoginWindow] {
             mem.host.set_desktop(desktop);
@@ -1146,5 +1279,594 @@ fn a_viewer_that_the_host_does_not_know_never_gets_a_session_over_the_wire() {
         assert!(r.is_err());
         assert_eq!(ui.prompt_count(), 0);
         q.stop();
+    });
+}
+
+// ---------- protocol minor 1 in a session ----------
+
+/// A build of minor 1 takes `StoredGrants` after the grant, either way, without acting on it, and refuses `Elevate`
+/// in a session that entered with a prompt (ACCOUNTS.md 9.3), without ending it.
+#[test]
+fn stored_grants_is_taken_after_the_grant_and_elevate_is_refused_without_ending_the_session() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, registry_one(rec.clone()));
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::CONTROL).await;
+        let host_ctx = lock(&rec.sessions)[0].clone();
+        assert_eq!((host_ctx.peer_minor(), s.ctx().peer_minor()), (PROTO_MINOR, PROTO_MINOR));
+
+        // Viewer to host and host to viewer: nothing happens, the session lives.
+        s.ctx().send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        host_ctx.send(StoredGrants { grants: PermissionSet::CONTROL }).await.unwrap();
+        // A prompted session cannot be elevated: a refusal that is not fatal, about this message.
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "the refusal of Elevate", |e| {
+            is_error(e, ErrorCode::NotPermitted, 0x000C, 0)
+        })
+        .await;
+        assert!(s.ctx().ended().is_none() && host_ctx.ended().is_none(), "the session goes on");
+        assert_eq!(host_ctx.granted(), PermissionSet::CONTROL, "nothing was added");
+    });
+}
+
+/// A peer that announced minor 0 cannot have sent a message of minor 1: that is `UNSUPPORTED_VERSION`, fatal.
+#[test]
+fn a_minor_1_message_from_a_peer_that_announced_minor_0_ends_the_session() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (s, task) = mem.open(&who, viewer_config_1_0(PermissionSet::CONTROL)).await;
+        let s = s.unwrap();
+        // The viewer's own send path believes the host's minor (1), so the message leaves; the host knows better.
+        s.ctx().send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::UnsupportedVersion));
+    });
+}
+
+/// The send path keeps PROTOCOL.md 1 by itself: what a 1.0 viewer is sent holds no value of minor 1, whoever
+/// produced it, and no minor-1 type is written to it.
+#[test]
+fn a_minor_0_viewer_is_never_sent_a_minor_1_value_or_type() {
+    run_paused(async {
+        let rec = Recorder::new(&[], &[]);
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui, registry_one(rec.clone()));
+        let (old, new) = (Who::new(), Who::new());
+        pin(&mem.trust, &old, PermissionSet::CONTROL);
+        pin(&mem.trust, &new, PermissionSet::CONTROL);
+
+        let (s, _task) = mem.open(&old, viewer_config_1_0(PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        let host_ctx = lock(&rec.sessions).last().unwrap().clone();
+        assert_eq!(host_ctx.peer_minor(), 0);
+        // A type of minor 1 is not written; the next message proves the stream is intact.
+        host_ctx.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "the 1.0 form of the pause", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: true })
+        })
+        .await;
+        assert!(s.ctx().ended().is_none(), "nothing the 1.0 viewer cannot read reached it");
+        s.disconnect().await;
+        eventually(Duration::from_secs(1), "the end", || mem.host.sessions().is_empty()).await;
+
+        // A viewer of minor 1 is told the real state.
+        let (s, _task) = mem.open(&new, viewer_config(PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "the pause of minor 1", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::AccountAway, paused: true })
+        })
+        .await;
+    });
+}
+
+// ---------- GRANTS-SYNC.md 3: `StoredGrants` in a session ----------
+
+fn peer_grants_of(ui: &TestUi) -> Vec<PermissionSet> {
+    ui.events()
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::PeerGrants { grants, .. } => Some(*grants),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The host tells what it stored for the viewer, not what this session holds: a prompted pick that differs from the
+/// store does not change the value.
+#[test]
+fn the_viewer_hears_the_hosts_stored_grants_not_the_sessions() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL | PermissionSet::FILES);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::VIEW);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::CONTROL | PermissionSet::FILES).await;
+        assert!(s.grant().granted.contains(PermissionSet::FILES), "the session holds the pick");
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the stored grants of the host",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::VIEW),
+        )
+        .await;
+        assert!(s.granted().contains(PermissionSet::FILES), "display only: the session is unchanged");
+    });
+}
+
+#[test]
+fn the_host_hears_the_viewers_stored_grants() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW | PermissionSet::FILES);
+        let (s, _task) = mem.open(&who, cfg).await;
+        let s = s.unwrap();
+        eventually(Duration::from_secs(1), "PeerGrants on the host", || {
+            peer_grants_of(&ui) == vec![PermissionSet::VIEW | PermissionSet::FILES]
+        })
+        .await;
+        let about = ui.find_event(|e| match e {
+            HostEvent::PeerGrants { device, .. } => Some(*device),
+            _ => None,
+        });
+        assert_eq!(about, Some(who.id), "about the authenticated device");
+        assert_eq!(s.granted(), PermissionSet::CONTROL, "display only: the session is unchanged");
+    });
+}
+
+/// A change on either side while the session lives reaches the other; an unchanged value is not told again.
+#[test]
+fn a_stored_grants_change_during_a_session_reaches_the_peer() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW);
+        let (s, _task) = mem.open(&who, cfg).await;
+        let mut s = s.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the first value",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::CONTROL),
+        )
+        .await;
+
+        // The user at the host changes Permissões.
+        set_stored(&mem.trust, &who, PermissionSet::VIEW | PermissionSet::FILES);
+        mem.host.stored_grants_changed(&who.id);
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the new value of the host",
+            |e| matches!(e, ViewerEvent::PeerGrants(g) if *g == PermissionSet::VIEW | PermissionSet::FILES),
+        )
+        .await;
+
+        // The user at the viewer changes Permissões on that side; the same value again is not told twice.
+        let new = PermissionSet::CONTROL | PermissionSet::CLIPBOARD;
+        s.ctx().set_own_stored(new);
+        s.ctx().set_own_stored(new);
+        eventually(Duration::from_secs(1), "the new value of the viewer on the host", || {
+            peer_grants_of(&ui).last() == Some(&new)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(peer_grants_of(&ui), vec![PermissionSet::VIEW, new], "each value once");
+    });
+}
+
+/// Before `SessionGrant` it is a protocol violation, on the host and on the viewer.
+#[test]
+fn stored_grants_before_the_grant_is_a_protocol_violation() {
+    run_paused(async {
+        // The host: a raw viewer of minor 1 sends it right after its `Hello`.
+        let mem = Mem::new(TestUi::accepting(PermissionSet::CONTROL), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (io, task) = mem.connect_raw(&who);
+        io.out.set_peer_minor(PROTO_MINOR);
+        io.out.send(hello_of_minor(PROTO_MINOR)).await.unwrap();
+        io.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::ProtocolViolation));
+
+        // The viewer: a raw host of minor 1 sends it before the grant.
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, viewer_config(PermissionSet::CONTROL)));
+        raw_host_handshake(&mut host, PROTO_MINOR).await;
+        host.out.set_peer_minor(PROTO_MINOR);
+        host.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        assert!(open.await.unwrap().is_err(), "the session does not open");
+    });
+}
+
+/// A host that announced minor 0 cannot have sent it: the viewer ends the session with `UNSUPPORTED_VERSION`.
+/// (The host side of the same rule: `a_minor_1_message_from_a_peer_that_announced_minor_0_ends_the_session`.)
+#[test]
+fn stored_grants_from_a_minor_0_peer_is_unsupported_version() {
+    run_paused(async {
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, viewer_config(PermissionSet::CONTROL)));
+        raw_host_handshake(&mut host, 0).await;
+        raw_grant(&mut host).await;
+        let s = open.await.unwrap().expect("the session opens");
+        // The send path of the raw host would drop it for a minor-0 peer; it plays a broken 1.0 host on purpose.
+        host.out.set_peer_minor(PROTO_MINOR);
+        host.out.send(StoredGrants { grants: PermissionSet::VIEW }).await.unwrap();
+        let end = s.ctx().wait_ended().await;
+        assert_eq!((end.kind, end.code), (EndKind::Violation, ErrorCode::UnsupportedVersion));
+    });
+}
+
+/// Guard (green before and after): a viewer and a host that announce minor 0 are sent only types of 1.0, whatever
+/// the other side has stored.
+#[test]
+fn a_minor_0_peer_is_sent_exactly_the_1_0_sequence() {
+    run_paused(async {
+        // A 1.0 viewer of a host that stored grants for it.
+        let mem = Mem::new(TestUi::accepting(PermissionSet::CONTROL), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut io, _task) = mem.connect_raw(&who);
+        raw_hello(&mut io, PermissionSet::CONTROL, None, None).await;
+        let mut seen = Vec::new();
+        let mut keep = |m: &Message, want: fn(&Message) -> bool| {
+            seen.push(m.type_id());
+            want(m).then_some(())
+        };
+        next_matching(&mut io, "the grant", |m| keep(m, |m| matches!(m, Message::SessionGrant(_)))).await;
+        set_stored(&mem.trust, &who, PermissionSet::VIEW);
+        mem.host.stored_grants_changed(&who.id);
+        next_matching(&mut io, "the narrowed session", |m| keep(m, |m| matches!(m, Message::PermissionsChanged(_))))
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(m) = io.rx.try_recv() {
+            seen.push(m.unwrap().type_id());
+        }
+        for t in seen {
+            assert_eq!(Message::type_min_minor(t), 0, "{t:#06x} reached a 1.0 viewer");
+        }
+
+        // A 1.0 host of a viewer that stored grants for it: the viewer sends it nothing of minor 1.
+        let (mut host, viewer) = swapdesk_session::memory_pair();
+        let mut cfg = viewer_config(PermissionSet::CONTROL);
+        cfg.stored_grants = Some(PermissionSet::VIEW);
+        let open = tokio::spawn(ViewerSession::open_io(viewer, None, None, cfg));
+        let mut sent = raw_host_handshake(&mut host, 0).await;
+        raw_grant(&mut host).await;
+        let s = open.await.unwrap().expect("the session opens");
+        s.ctx().set_own_stored(PermissionSet::CONTROL);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(m) = host.rx.try_recv() {
+            sent.push(m.unwrap());
+        }
+        for m in sent {
+            assert_eq!(Message::type_min_minor(m.type_id()), 0, "{:#06x} reached a 1.0 host", m.type_id());
+        }
+    });
+}
+
+fn hello_of_minor(minor: u16) -> Hello {
+    Hello {
+        proto_minor: minor,
+        app_version: "t".into(),
+        name: "raw".into(),
+        os: Os::MacOs,
+        os_version: "15".into(),
+        intent: Intent::Control,
+        requested: PermissionSet::CONTROL,
+        resume: None,
+        swap_token: None,
+    }
+}
+
+/// Plays a host of `minor` up to the decision: reads the `Hello` and `Capabilities` of the viewer, answers both.
+/// Returns what the viewer sent.
+async fn raw_host_handshake(host: &mut swapdesk_session::ControlIo, minor: u16) -> Vec<Message> {
+    let hello = next_msg(host, "Hello").await;
+    let caps = next_msg(host, "Capabilities").await;
+    host.out
+        .send(HelloAck {
+            proto_minor: minor,
+            app_version: "t".into(),
+            name: "raw-host".into(),
+            os: Os::Windows,
+            os_version: "11".into(),
+        })
+        .await
+        .unwrap();
+    host.out.send(capabilities()).await.unwrap();
+    vec![hello, caps]
+}
+
+async fn raw_grant(host: &mut swapdesk_session::ControlIo) {
+    host.out
+        .send(SessionGrant {
+            session_id: 7,
+            granted: PermissionSet::CONTROL,
+            mode: GrantMode::Prompted,
+            resume_token: [1; 16],
+        })
+        .await
+        .unwrap();
+}
+
+// ---------- ACCOUNTS.md 5.6: one hosted session per machine, across the accounts' cores ----------
+
+/// Two accounts of one machine, each with a device that holds `UNATTENDED`, at the sign-in screen (nobody present):
+/// both devices enter at once, and exactly one session opens; the other is `BUSY` until it ends.
+#[test]
+fn two_unattended_entries_at_the_sign_in_screen_at_once_admit_exactly_one() {
+    run_paused(async {
+        let machine = swapdesk_session::MachineHosting::new();
+        let account = |m: std::sync::Arc<swapdesk_session::MachineHosting>| {
+            let ui = TestUi::accepting(PermissionSet::CONTROL);
+            ui.set_present(false);
+            Mem::with(ui, Registry::new(), move |c| c.machine = Some(m))
+        };
+        let (a, b) = (account(machine.clone()), account(machine.clone()));
+        let (wa, wb) = (Who::new(), Who::new());
+        let stored = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        pin(&a.trust, &wa, stored);
+        pin(&b.trust, &wb, stored);
+        let asks = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        // Both at once: each open runs as a task of its own.
+        let open = |host: swapdesk_session::HostService, id: swapdesk_trust::DeviceId| {
+            tokio::spawn(async move {
+                let (host_io, viewer_io) = swapdesk_session::memory_pair();
+                let task = tokio::spawn(async move { host.serve_io(host_io, None, id).await });
+                let s = ViewerSession::open_io(viewer_io, None, Some([9; 16]), viewer_config(asks)).await;
+                (s, task)
+            })
+        };
+        let (ta, tb) = (open(a.host.clone(), wa.id), open(b.host.clone(), wb.id));
+        let (sa, sb) = (ta.await.unwrap().0, tb.await.unwrap().0);
+        let opened = [sa.is_ok(), sb.is_ok()];
+        assert_eq!(opened.iter().filter(|o| **o).count(), 1, "exactly one: {opened:?}");
+        let (winner, loser_mem, loser_who) = match (sa, sb) {
+            (Ok(s), Err(e)) => {
+                assert!(matches!(e, OpenError::Refused(ErrorCode::Busy)), "{e:?}");
+                (s, &b, &wb)
+            }
+            (Err(e), Ok(s)) => {
+                assert!(matches!(e, OpenError::Refused(ErrorCode::Busy)), "{e:?}");
+                (s, &a, &wa)
+            }
+            _ => unreachable!(),
+        };
+        assert!(machine.is_held());
+        // The session ends: the machine is free, and the other account hosts.
+        winner.disconnect().await;
+        eventually(Duration::from_secs(2), "the machine is free", || !machine.is_held()).await;
+        let (again, _task) = loser_mem.open(loser_who, viewer_config(asks)).await;
+        assert!(again.is_ok(), "the other account hosts now");
+    });
+}
+
+// ---------- ACCOUNTS.md 5.1: an account hosts only its own console ----------
+
+fn set_owner(ui: &TestUi, owner: swapdesk_session::ConsoleOwner) {
+    *lock(&ui.owner) = owner;
+}
+
+/// Another account at the console: a request is refused, `ACCOUNT_AWAY` to a viewer of minor 1 and
+/// `NOBODY_PRESENT` to one of 1.0, whatever it holds.
+#[test]
+fn a_request_to_an_account_not_at_the_console_is_refused_account_away_or_nobody_present_by_minor() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Other);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let asks = PermissionSet::CONTROL | PermissionSet::UNATTENDED;
+        let (s, _t) = mem.open(&who, viewer_config(asks)).await;
+        assert_refused(s, ErrorCode::AccountAway);
+        let (s, _t) = mem.open(&who, viewer_config_1_0(asks)).await;
+        assert_refused(s, ErrorCode::NobodyPresent);
+        assert_eq!(ui.prompt_count(), 0, "nobody was asked");
+    });
+}
+
+/// The sign-in screen belongs to no account: a device holding `UNATTENDED` enters, a prompted request finds nobody.
+#[test]
+fn at_the_sign_in_screen_an_unattended_device_of_any_account_enters() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.set_present(false);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Nobody);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, _t) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        assert_eq!(s.expect("enters").grant().mode, GrantMode::Unattended);
+    });
+}
+
+#[test]
+fn a_prompted_request_at_the_sign_in_screen_is_nobody_present() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.set_present(false);
+        set_owner(&ui, swapdesk_session::ConsoleOwner::Nobody);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (s, _t) = mem.open(&who, viewer_config(PermissionSet::CONTROL)).await;
+        assert_refused(s, ErrorCode::NobodyPresent);
+    });
+}
+
+/// During a session another account takes the console: the session pauses at once (`AccountAway` to minor 1,
+/// `Locked` paused to 1.0), goes on if the account comes back within the minute, and ends with `ACCOUNT_AWAY`
+/// otherwise.
+#[test]
+fn when_another_account_takes_the_console_the_session_pauses_then_ends() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, task) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        let mut s = s.unwrap();
+        // It leaves and comes back within the minute: the session goes on.
+        mem.host.set_desktop(Desktop::AccountAway);
+        wait_event(&mut s, Duration::from_secs(1), "paused", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::AccountAway, paused: true })
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        mem.host.set_desktop(Desktop::Default);
+        wait_event(&mut s, Duration::from_secs(1), "resumed", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Default, paused: false })
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        assert!(s.ctx().ended().is_none(), "the minute counts from the last departure");
+        // It leaves for good: the session ends after the minute.
+        mem.host.set_desktop(Desktop::AccountAway);
+        let end = tokio::time::timeout(Duration::from_secs(70), task).await.expect("ends").unwrap();
+        assert_eq!(end.code, ErrorCode::AccountAway);
+    });
+}
+
+/// Review of S4 (ACCOUNTS.md 5.1): a session committed while its account is already away starts paused, and the
+/// minute counts from its start.
+#[test]
+fn a_session_that_starts_while_its_account_is_away_ends_after_the_minute() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::CONTROL);
+        ui.info.lock().unwrap().desktop = Desktop::AccountAway;
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::CONTROL | PermissionSet::UNATTENDED);
+        let (s, task) = mem.open(&who, viewer_config(PermissionSet::CONTROL | PermissionSet::UNATTENDED)).await;
+        let s = s.unwrap();
+        assert!(s.ctx().ended().is_none());
+        let end = tokio::time::timeout(Duration::from_secs(70), task).await.expect("ends").unwrap();
+        assert_eq!(end.code, ErrorCode::AccountAway);
+    });
+}
+
+/// ACCOUNTS.md 9: a session that entered without a prompt is elevated by `Elevate`: it gains `UNATTENDED` (and
+/// `ADMIN_TERMINAL`, stored and requested), stops pausing on a secure desktop, the host logs `Elevated` and the
+/// resume token dies. Asked again it answers the same; once the device no longer holds `UNATTENDED` it refuses.
+#[test]
+fn elevate_adds_the_machine_level_bits_to_an_unattended_entry_and_is_logged() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        lock(&ui.info).desktop = Desktop::Locked;
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        assert_eq!(
+            s.grant().granted,
+            PermissionSet::CONTROL | PermissionSet::TERMINAL,
+            "entered without the machine-level bits (the terminal as the user stays)"
+        );
+        wait_event(&mut s, Duration::from_secs(1), "paused on the lock screen", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: true })
+        })
+        .await;
+        let resumable = mem.host.resumable_sessions();
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "elevated",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == stored),
+        )
+        .await;
+        wait_event(&mut s, Duration::from_secs(1), "no longer paused", |e| {
+            matches!(e, ViewerEvent::HostState { desktop: Desktop::Locked, paused: false })
+        })
+        .await;
+        assert!(
+            ui.events().iter().any(|e| matches!(e, HostEvent::Elevated { granted, .. } if *granted == stored)),
+            "logged as Elevated"
+        );
+        assert!(!ui.events().iter().any(|e| matches!(e, HostEvent::GrantsChanged { .. })), "not as a grant change");
+        assert_eq!(mem.host.resumable_sessions(), resumable - 1, "the resume token died");
+        // Again: the same answer.
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "the same answer",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == stored),
+        )
+        .await;
+        // The device loses UNATTENDED in Permissões: the session narrows, and Elevate is refused.
+        set_stored(&mem.trust, &who, PermissionSet::CONTROL);
+        mem.host.stored_grants_changed(&who.id);
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "refused", |e| is_error(e, ErrorCode::NotPermitted, 0x000C, 0))
+            .await;
+        assert!(s.ctx().ended().is_none());
+    });
+}
+
+/// `ADMIN_TERMINAL` comes with the elevation only when the viewer asked for it.
+#[test]
+fn elevate_adds_the_administrator_terminal_only_when_it_was_requested() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL);
+        let (s, _task) = mem.open(&who, viewer_config(PermissionSet::UNATTENDED | PermissionSet::CONTROL)).await;
+        let mut s = s.unwrap();
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "elevated", |e| {
+            matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::UNATTENDED | PermissionSet::CONTROL)
+        })
+        .await;
+    });
+}
+
+/// Review of S6, finding 1: `Elevate` adds the two machine-level bits only; what the host's person took from the
+/// session (here the terminal, in the banner) is not given back, and without the terminal no administrator terminal
+/// comes with the elevation.
+#[test]
+fn elevate_never_gives_back_what_the_host_took_from_the_session() {
+    run_paused(async {
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        let stored = PermissionSet::UNATTENDED | PermissionSet::ADMIN_TERMINAL | PermissionSet::CONTROL;
+        pin(&mem.trust, &who, stored);
+        let (s, _task) = mem.open(&who, viewer_config(stored)).await;
+        let mut s = s.unwrap();
+        assert!(s.grant().granted.contains(PermissionSet::TERMINAL));
+        assert!(mem.host.set_session_grants(s.grant().session_id, PermissionSet::CONTROL));
+        wait_event(
+            &mut s,
+            Duration::from_secs(1),
+            "narrowed",
+            |e| matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::CONTROL),
+        )
+        .await;
+        s.ctx().send(Elevate {}).await.unwrap();
+        wait_event(&mut s, Duration::from_secs(1), "elevated without the terminal", |e| {
+            matches!(e, ViewerEvent::PermissionsChanged(g) if *g == PermissionSet::CONTROL | PermissionSet::UNATTENDED)
+        })
+        .await;
     });
 }

@@ -18,9 +18,11 @@ mod actor;
 pub mod caps;
 pub mod ctx;
 pub mod forward;
+mod grants_sync;
 pub mod host;
 pub mod link;
 pub mod liveness;
+pub mod machine;
 pub mod policy;
 pub mod registry;
 pub mod resume;
@@ -32,11 +34,12 @@ pub use caps::{CapTracker, CapVerdict, Caps};
 pub use ctx::{DesktopState, EndKind, SessionCtx, SessionEnd};
 pub use forward::{ForwardHandler, Forwarded, VIDEO_CONTROL_TYPES};
 pub use host::{
-    ConsentRequest, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest, SessionInfo,
-    StartInfo,
+    ConsentRequest, ConsoleOwner, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest,
+    RESUME_WINDOW, SessionInfo, StartInfo,
 };
 pub use link::{CONTROL_PRIORITY, ControlIo, Inbound, LinkError, Outbox, SendError, memory_pair};
 pub use liveness::{Liveness, LivenessConfig, Verdict};
+pub use machine::MachineHosting;
 pub use policy::{Role, priority_of};
 pub use registry::{ChannelHandler, IncomingStream, RegisterError, Registry};
 pub use resume::{ResumeError, ResumeTable, SwapTokens};

@@ -12,12 +12,17 @@
 // Outside tests an unwrap is a crash of the service: return the error or use `expect` with the reason.
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 
+pub mod accounts;
+pub mod blocking;
+pub mod datagrams;
 pub mod helper;
 mod helper_pty;
 pub mod netcache;
 pub mod outbox;
 pub mod proxy;
+mod retry;
 pub mod rpc;
+pub mod scale;
 pub mod service;
 pub mod ui_hub;
 
@@ -29,5 +34,7 @@ mod helper_fs_tests;
 mod helper_pty_tests;
 #[cfg(test)]
 mod helper_tests;
+#[cfg(test)]
+mod helper_wake_tests;
 #[cfg(test)]
 mod testpipe;

@@ -21,12 +21,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swapdesk_core_mac::macos_version;
+use swapdesk_host::ui_hub::SystemHooks;
 use swapdesk_net_mac::MacNetInterfaces;
 use swapdesk_platform::{Clock, Level, MonoMicros, SecretStore, TraceSink};
 use swapdesk_secret_mac::{
     KeychainLocation, MacSecretStore, SecretLocation, create_keychain_file, delete_keychain_file,
 };
 use swapdesk_shell_mac::{ViewerHooks, Waker, run_with_host, system_dark, system_language};
+use swapdesk_sys_mac::actions::MacActions;
 use swapdesk_ui::mock::{MockBackend, Scenario};
 use swapdesk_ui::service_backend::ViewerSink;
 use swapdesk_ui::{UiBackend, UiState};
@@ -144,7 +146,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Scenario::from_name(name).ok_or_else(|| format!("Unknown scenario \"{name}\".\n\n{}", usage()))?;
         let backend: Arc<dyn UiBackend> = Arc::new(MockBackend::new(waker.clone()));
         scenario.apply_to(&mut state);
+        if let Some(path) = &options.shot {
+            swapdesk_shell_mac::set_shot(path.clone());
+        }
         let startup = if scenario == Scenario::Carregando { state.startup_commands() } else { Vec::new() };
+        if let Some(file) = options.selftest.clone() {
+            crate::selftest::schedule_mock(file, Duration::from_secs(2));
+        }
         run_with_host(state, backend, waker, startup, ViewerHooks::default());
         return Ok(());
     }
@@ -170,11 +178,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // C5.1: the per-user settings (ui.bin under ~/Library/Application Support/Swapdesk) are read before the first
     // paint. A scratch run (self-test, host drive) never touches the user's file.
     let prefs_trace = Arc::clone(&trace);
+    // No record yet: this is the first start of Swapdesk for this user.
+    let mut first_run = false;
     if !options.use_scratch()
         && let Some(home) = std::env::var_os("HOME")
     {
         swapdesk_ui::prefs::set_note_hook(move |line| prefs_trace.log(Level::Info, "app", format_args!("{line}")));
         let dir = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        first_run = !dir.join(swapdesk_ui::prefs::FILE_NAME).exists();
         state.load_prefs(Box::new(swapdesk_ui::prefs::FilePrefs::in_dir(&dir)));
     }
 
@@ -205,13 +216,90 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }));
     // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
     if options.selftest.is_none() {
+        // "Bloquear ao terminar" (F-SESS-03): the end of a hosted session locks the screen as the quick action does.
+        let lock_on_end: Arc<dyn SystemHooks> =
+            Arc::new(crate::lock_end::LockOnEnd::new(MacActions::user, Arc::clone(&trace)));
+        // A hosted session keeps the display on (a sleeping display lists nothing to capture).
+        let display_awake: Arc<dyn SystemHooks> = Arc::new(crate::display_awake::DisplayAwake::new(
+            Arc::new(crate::display_awake::IoKitPower),
+            Arc::clone(&trace),
+        ));
+        params.hooks = Arc::new(crate::display_awake::Both(lock_on_end, display_awake));
         params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
+    }
+    // The administrator confirmation (docs/ELEVATION-MAC.md): macOS's own dialog on a normal run. The self-test, the
+    // host drive and a scripted run have nobody at the keyboard to answer it, so an `Elevate` there ends in an error
+    // instead of a dialog left on the screen. (`--mock` never gets here.)
+    if options.selftest.is_none() && options.drive_host.is_none() && options.ui_script.is_none() {
+        params.admin_confirm = Some(Arc::new(crate::elevate::SystemAdminPrompt::new(Arc::clone(&trace))));
     }
     let sink: Arc<dyn ViewerSink> = viewer.clone();
     let service = InProcessService::start(params, waker.clone(), Some(sink))
         .map_err(|e| format!("the service did not start: {e}"))?;
     let backend = service.backend();
     viewer.set_out(backend.clone());
+    // ACCOUNTS.md 12.2: this app hosts only while its user session is the active one.
+    {
+        let (hub, uid) = (service.hub().clone(), crate::service::own_user_id());
+        hub.set_session_active(&uid, true);
+        let trace = Arc::clone(&trace);
+        let observer = crate::session_notices::observe(move |active| {
+            trace.log(
+                Level::Info,
+                "app",
+                format_args!("this user session is {}", if active { "active" } else { "inactive" }),
+            );
+            hub.set_session_active(&uid, active);
+        });
+        // Registered for the whole run of the app.
+        std::mem::forget(observer);
+    }
+    // D24: this Mac hosts only while its screen is unlocked. A normal run follows the lock; the self-test, the host
+    // drive and a scripted run have nobody at the keyboard and must keep hosting whatever the screen does, as the
+    // cross-machine proofs need.
+    if options.selftest.is_none() && options.drive_host.is_none() && options.ui_script.is_none() {
+        match crate::screen_lock::watch(
+            service.hub().clone(),
+            crate::screen_lock::read_screen,
+            crate::screen_lock::POLL,
+            Arc::clone(&trace),
+        ) {
+            // Kept for the whole run of the app, like the session observer.
+            Ok(watch) => std::mem::forget(watch),
+            Err(e) => trace.log(Level::Warn, "app", format_args!("the screen lock is not followed: {e}")),
+        }
+    }
+    // F-FILE-03: the hub tells the UI when macOS refuses the receiving folder (checked at each status and after each
+    // transfer that ends).
+    service.hub().set_receive_folder_probe(Arc::new(crate::host::receive_folder_denied));
+    // The main window's notices about the Mac's grants and login item: read at each status, and again at start and
+    // whenever the app comes back to the front (the person grants them in System Settings).
+    if options.selftest.is_none() {
+        let login_item = options.registers_login_item();
+        service.hub().set_mac_probe(Arc::new(move || crate::host::mac_state(login_item)));
+        let hub = service.hub().clone();
+        hub.mac_status_changed();
+        // Registered for the whole run of the app, like the session observer.
+        std::mem::forget(crate::app_active::observe(move || hub.mac_status_changed()));
+    }
+    // UPDATES.md 2.2, 7: the installed app's updater (never a scratch run); a version that started after a swap commits.
+    if !options.use_scratch()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let support = Path::new(&home).join("Library").join("Application Support").join("Swapdesk");
+        let live: crate::update::LiveSessions = Arc::default();
+        let ended = crate::update::at_start(&support, &*trace);
+        if let Some(updater) = crate::update::app_updater(&support, Arc::clone(&live), Arc::clone(&trace)) {
+            let hub = service.hub().clone();
+            let _ = live.set(Box::new(move || hub.live_sessions()));
+            service.hub().set_updater(Arc::clone(&updater));
+            match ended {
+                Some(Ok(())) => updater.updated(),
+                Some(Err(v)) => updater.rolled_back(&v),
+                None => {}
+            }
+        }
+    }
     let user = state.user_prefs();
     viewer.set_user_prefs(user.keyboard_mode, user.swap_ctrl_cmd);
     if options.selftest.is_none() {
@@ -220,30 +308,83 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let addrs = service.local_addrs().iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
     trace.log(Level::Info, "app", format_args!("Swapdesk.app started (scratch: {})", options.use_scratch()));
 
-    // D32: the app hosts from inside its own process, so it must come back after a login. A normal run only.
-    if options.registers_login_item() {
-        let (level, line) = crate::login_item::register();
-        trace.log(level, "app", format_args!("{line}"));
+    // D32: the app hosts from inside its own process, so it must come back after a login: the first start registers
+    // it as a login item. After that the switch "Abrir ao ligar" and the login item say the same thing
+    // (`login_switch`). A normal run only.
+    let follows_login_item = options.registers_login_item();
+    if follows_login_item {
+        use crate::login_item::Status;
+        use crate::login_switch::{AtStart, at_start};
+        let enabled = crate::login_item::status() == Some(Status::Enabled);
+        let wanted = state.user_prefs().open_at_login;
+        if at_start(first_run, enabled, wanted) == AtStart::Register {
+            let (level, line) = crate::login_item::register();
+            trace.log(level, "app", format_args!("{line}"));
+        }
+        let now = crate::login_item::status();
+        trace.log(
+            Level::Info,
+            "app",
+            format_args!(
+                "login item at start: {} (first run {first_run}, switch was {wanted})",
+                now.map_or_else(|| "unavailable".to_owned(), Status::name)
+            ),
+        );
+        state.set_open_at_login(now == Some(Status::Enabled));
     }
     let note_trace = Arc::clone(&trace);
     let hooks = ViewerHooks {
         video: Some(Arc::new(MacVideoSlot::new(&viewer))),
         input: Some(Arc::new(viewer.input())),
-        show_swap: true,
         note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
+        logs_dir: Some(store.dir().to_path_buf()),
+        request_os_permissions: Some({
+            let grants_trace = Arc::clone(&trace);
+            Arc::new(move |missing: &[swapdesk_ui::OsPermission]| crate::host::request_grants(missing, &*grants_trace))
+        }),
     };
     // The host drive owns the backend's events: the window gets a backend that says nothing.
     let observing: Arc<dyn UiBackend> = match &options.drive_host {
         Some(dir) => {
-            crate::drive::start(dir, Arc::clone(&backend), Arc::clone(&trace))?;
-            Arc::new(crate::drive::Silent)
+            let window = Arc::new(crate::drive::Silent::default());
+            let wake_ui = Arc::clone(&waker);
+            let tee = crate::drive::Tee {
+                real: Arc::clone(&backend),
+                window: Arc::clone(&window),
+                wake: Arc::new(move || swapdesk_ui::UiWaker::wake(&*wake_ui)),
+            };
+            crate::drive::start(dir, store.dir(), tee, Arc::clone(&trace))?;
+            swapdesk_shell_mac::set_snapshot_dir(dir.to_path_buf());
+            window
         }
         None => Arc::new(ObservingBackend::new(backend, Arc::clone(&viewer))),
+    };
+    // The switch "Abrir ao ligar" flipped in the window: the login item follows, off the UI thread.
+    let observing: Arc<dyn UiBackend> = if follows_login_item {
+        let switch_trace = Arc::clone(&trace);
+        let on = state.user_prefs().open_at_login;
+        Arc::new(crate::login_switch::Following::new(
+            observing,
+            on,
+            Box::new(move |on| {
+                let trace = Arc::clone(&switch_trace);
+                std::thread::spawn(move || {
+                    let (level, line) = crate::login_item::set(on);
+                    trace.log(level, "app", format_args!("{line}"));
+                });
+            }),
+        ))
+    } else {
+        observing
     };
     let startup = if options.drive_host.is_some() { Vec::new() } else { state.startup_commands() };
 
     if let Some(file) = options.selftest.clone() {
         crate::selftest::schedule(file, Duration::from_secs(2), addrs, Arc::clone(&viewer));
+    }
+    // Development: a script on another machine drives the windows (dev-harness builds).
+    if let Some(dir) = &options.ui_script {
+        crate::ui_script::start(dir, Arc::clone(&viewer))?;
     }
 
     let stop_viewer = Arc::clone(&viewer);

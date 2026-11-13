@@ -14,7 +14,7 @@ use super::*;
 
 /// What the host user's grants to the viewer machine are, and what the viewer's grants to the host machine are
 /// (each side needs `CONTROL` stored for the other, or a swap cannot make it the host: PROTOCOL.md 6.3 step 1).
-const CV: PermissionSet = PermissionSet::CONTROL;
+pub(super) const CV: PermissionSet = PermissionSet::CONTROL;
 const SWAP_ASK_OP: u16 = 22;
 const CHAT_SEND_OP: u16 = 24;
 const WAKE_OP: u16 = 26;
@@ -70,9 +70,7 @@ impl Duo {
                 })
                 .is_ok()
         );
-        let ReplyBody::SessionId(id) = self.viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-            panic!()
-        };
+        let id = self.viewer_ui.connected(req);
         active_as(&mut self.viewer_ui, Role::Viewer, &[]);
         active_as(&mut self.host_ui, Role::Host, &[]);
         id
@@ -87,7 +85,7 @@ impl Duo {
 }
 
 /// The id of the next session that goes active in `role` on this UI, other than the ones in `not`.
-fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
+pub(super) fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
     ui.notify("an active session", |n| match n {
         Notify::Session { session_id, state, .. }
             if !not.contains(session_id) && grants_active(state).is_some_and(|(r, _)| r == role) =>
@@ -98,7 +96,7 @@ fn active_as(ui: &mut Client, role: Role, not: &[u64]) -> u64 {
     })
 }
 
-fn ended(ui: &mut Client, session_id: u64) -> Option<ApiCode> {
+pub(super) fn ended(ui: &mut Client, session_id: u64) -> Option<ApiCode> {
     ui.notify("the end of a session", |n| match n {
         Notify::Session { session_id: id, state: SessionState::Ended { reason }, .. } if *id == session_id => {
             Some(*reason)
@@ -150,7 +148,8 @@ fn swap_runs_both_ways_and_the_card_goes_only_to_the_uis_it_was_sent_to() {
     assert_eq!(by, "other-pc", "the card names the machine that asks");
     assert!((1..=20).contains(&remaining), "the 20 s countdown: {remaining}");
     // A UI the card did not go to cannot answer it.
-    let mut stranger = d.host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false });
+    let mut stranger =
+        d.host.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin: false, can_elevate: false });
     assert_eq!(stranger.call(UiOp::AnswerSwap { request_id: card, accept: true }).unwrap_err(), ApiCode::NotPermitted);
     assert_eq!(
         d.host_ui.call(UiOp::AnswerSwap { request_id: card + 100, accept: true }).unwrap_err(),
@@ -242,32 +241,20 @@ fn a_declined_or_refused_swap_leaves_the_session_alone_and_says_why() {
     d.finish();
 }
 
-// ---------- swap is for two machines of the same OS ----------
+// ---------- swap across systems (F-XSWAP-01, 1.1) ----------
 
 #[test]
-fn a_swap_toward_another_os_is_refused_asking_and_asked() {
+fn a_swap_toward_another_os_asks_like_any_other() {
     use swapdesk_proto::Os;
     let mut d = Duo::new();
     let s = d.open();
-
-    // Outgoing: the viewer's trust record says the host is a Mac (this test machine is Windows): refused at once.
+    // Both records say the other side is a Mac (this test machine is Windows): the question reaches the user.
     d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
-    assert_eq!(d.viewer_ui.call(UiOp::RequestSwap { session_id: s }).unwrap_err(), ApiCode::NotPermitted);
-    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "nothing was sent to the other side");
-    d.viewer.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
-
-    // Incoming: the host's record says the viewer is a Mac: the question never reaches the user and the asker is
-    // refused.
     d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::MacOs)).expect("store");
-    request_swap(&mut d.viewer_ui, s);
-    assert!(matches!(swap_note(&mut d.viewer_ui, s), SwapNote::Declined { .. }));
-    assert!(d.host_ui.nothing_within(Duration::from_millis(300), ask_card), "no card at the asked user");
-
-    // Same OS again: the swap card comes as before.
-    d.host.trust.update(|st| st.devices.iter_mut().for_each(|dev| dev.os = Os::Windows)).expect("store");
     request_swap(&mut d.viewer_ui, s);
     let (card, _, _) = asked(&mut d.host_ui, s);
     assert!(d.host_ui.call(UiOp::AnswerSwap { request_id: card, accept: false }).is_ok());
+    assert!(matches!(swap_note(&mut d.viewer_ui, s), SwapNote::Declined { .. }));
     d.finish();
 }
 
@@ -407,6 +394,7 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
         addrs: vec![Ipv4Addr::LOCALHOST],
         session_port: relay.port,
         pair_port: 0,
+        proto_minor: 0,
     }]);
     let s = d.open();
     d.viewer_ui.take("video before the cut", |m| {
@@ -439,6 +427,24 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
             .nothing_within(Duration::from_millis(300), |m| matches!(m, Ipc::UiNotify(Notify::IncomingRequest(_)))),
         "a resume asks nobody"
     );
+    // The host's UI watched the same loss: its session was reconnecting and is active again, and it was never ended
+    // (WAITING.md row 22: the banner stays and no viewer window opens on the host).
+    d.host_ui.notify("the hosted session reconnecting", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { .. }, .. } if *session_id == s => Some(()),
+        _ => None,
+    });
+    let (role, granted) = d.host_ui.notify("the hosted session is back", |n| match n {
+        Notify::Session { session_id, state, .. } if *session_id == s => grants_active(state),
+        _ => None,
+    });
+    assert_eq!((role, granted), (Role::Host, ALL.bits()));
+    assert!(
+        d.host_ui.nothing_within(Duration::from_millis(300), |m| matches!(
+            m,
+            Ipc::UiNotify(Notify::Session { session_id, state: SessionState::Ended { .. }, .. }) if *session_id == s
+        )),
+        "a session the core resumed never ended for the host's UI"
+    );
     // The handle works on the new connection: a control message, a chat message and media all cross it.
     assert!(d.viewer_ui.call(UiOp::SetAudio { session_id: s, on: true }).is_ok());
     assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("voltei".into()) }).is_ok());
@@ -467,6 +473,7 @@ fn disconnect_while_reconnecting_ends_the_session_and_stops_the_attempts() {
         addrs: vec![Ipv4Addr::LOCALHOST],
         session_port: relay.port,
         pair_port: 0,
+        proto_minor: 0,
     }]);
     let s = d.open();
     relay.cut(true);
@@ -494,7 +501,7 @@ impl WakeSocket for RecordingWake {
 const MAC: [u8; 6] = [0x3C, 0x52, 0x82, 0xAA, 0xBB, 0xCC];
 
 /// A machine on `windows_typical` interfaces whose paired device `other` is asleep: its MAC and last address stored.
-fn sleeper(other: &Machine) -> (Machine, Sent) {
+pub(super) fn sleeper(other: &Machine) -> (Machine, Sent) {
     let m = Machine::with_interfaces("sala", FakeNetInterfaces::windows_typical());
     m.pin(other, CV);
     m.trust
@@ -519,7 +526,7 @@ fn sleeper(other: &Machine) -> (Machine, Sent) {
     (m, sent)
 }
 
-fn waking(ui: &mut Client, id: u64) -> u16 {
+pub(super) fn waking(ui: &mut Client, id: u64) -> u16 {
     ui.notify("Acordando", |n| match n {
         Notify::Session { session_id, state: SessionState::Waking { remaining_s }, .. } if *session_id == id => {
             Some(*remaining_s)
@@ -632,7 +639,8 @@ fn a_ui_outside_the_console_neither_hears_nor_answers_nor_asks_for_a_swap_that_m
     // The user at the console of the viewer machine moves to session 2; the UI of session 1 stays connected and
     // still owns the viewer session.
     d.viewer.hub.set_console_session(Some(2));
-    let mut console = d.viewer.client(ConnInfo { session_id: 2, user: user("S-1-5-21-3"), admin: false });
+    let mut console =
+        d.viewer.client(ConnInfo { session_id: 2, user: user("S-1-5-21-3"), admin: false, can_elevate: false });
 
     // It cannot ask for the swap itself: that would make this machine the host, with the swap token skipping the
     // prompt and the presence check.
@@ -661,4 +669,105 @@ fn a_ui_outside_the_console_neither_hears_nor_answers_nor_asks_for_a_swap_that_m
 
     drop(console);
     d.finish();
+}
+
+/// ACCOUNTS.md 5.6 (review of S6, finding 8): the elevation kills the resume token, so after a lost link the viewer
+/// enters again without a prompt, unelevated, and the button is offered again.
+#[test]
+fn a_reconnect_after_elevate_enters_again_unelevated() {
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    let relay = Relay::start(host.session_addr());
+    viewer.presence.set(vec![PresencePeer {
+        device_id: host.id(),
+        name: "host-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![Ipv4Addr::LOCALHOST],
+        session_port: relay.port,
+        pair_port: 0,
+        proto_minor: 1,
+    }]);
+    host.hub.set_console_session(Some(1));
+    viewer.hub.set_console_session(Some(1));
+    let mut viewer_ui = viewer.client(ConnInfo { can_elevate: true, ..info(false) });
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let s = active_as(&mut viewer_ui, Role::Viewer, &[entry]);
+    let elevation_of = |ui: &mut Client| {
+        ui.notify("the session's state", |n| match n {
+            Notify::Session { session_id, state: SessionState::Active { elevation, .. }, .. } if *session_id == s => {
+                Some(*elevation)
+            }
+            _ => None,
+        })
+    };
+    let ReplyBody::ElevationTicket { ticket, .. } = viewer_ui
+        .call(UiOp::ElevationBegin { action: swapdesk_ipc::ElevAction::ElevateSession { session_id: s } })
+        .expect("a ticket")
+    else {
+        panic!()
+    };
+    viewer.hub.confirm_elevation(&ticket, &ConnInfo { admin: true, can_elevate: true, ..info(false) }, true).unwrap();
+    assert!(viewer_ui.call(UiOp::ElevateSession { session_id: s }).is_ok());
+    assert!(host.core.host().sessions()[0].granted.contains(PermissionSet::UNATTENDED));
+
+    // The Wi-Fi drops, then comes back: no resume (the token died with the elevation), a new entry without a prompt.
+    relay.cut(true);
+    viewer_ui.notify("Reconectando", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
+            if *session_id == s && *attempt >= 1 =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    viewer_ui.clear();
+    relay.cut(false);
+    assert_eq!(elevation_of(&mut viewer_ui), 1, "back, unelevated, the button offered again");
+    // F4 of the review of 13/11: what this machine confirmed did not survive the lost link, so the administrator
+    // terminal is guarded again (F-SESS-02), not let through on the confirmation of the entry before.
+    assert_eq!(
+        viewer_ui.call(UiOp::TermOpen { session_id: s, cols: 80, rows: 24, admin: true }).unwrap_err(),
+        ApiCode::NeedsAdmin,
+        "a fresh entry carries no elevation of the last one"
+    );
+    wait_for("the host's new session", || {
+        let hosted = host.core.host().sessions();
+        (hosted.len() == 1 && !hosted[0].granted.contains(PermissionSet::UNATTENDED)).then_some(())
+    });
+    drop(viewer_ui);
+    drop(relay);
+    viewer.finish();
+    host.finish();
+}
+
+/// Review of S6, finding 7: once the host no longer stores `UNATTENDED` for this device, the session offers no
+/// elevation (its `Elevate` would be refused).
+#[test]
+fn the_button_goes_when_the_host_revokes_unattended() {
+    let mut host = Machine::new("host-pc");
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, PermissionSet::UNATTENDED | PermissionSet::CONTROL);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperSystem);
+    host.attach_helper(IpcRole::HelperUser);
+    viewer.sees_minor(&host, false, 1);
+    host.hub.set_console_session(Some(1));
+    let mut host_ui = host.client(info(true));
+    let mut viewer_ui = viewer.client(info(false));
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let entry = viewer_ui.entry_of(req);
+    let s = active_as(&mut viewer_ui, Role::Viewer, &[entry]);
+    assert_eq!(viewer.core.viewer(s).unwrap().elevation(), 1);
+    let revoke = UiOp::SetGrants { device_id: viewer.hex(), grants: PermissionSet::CONTROL.bits() };
+    assert!(host_ui.call(revoke).is_ok());
+    wait_for("the button to go", || (viewer.core.viewer(s)?.elevation() == 0).then_some(()));
+    drop((host_ui, viewer_ui));
+    viewer.finish();
+    host.finish();
 }

@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use quinn::{Connection, SendStream, VarInt};
-use swapdesk_proto::{KeyframeRequest, MAX_VIDEO_PAYLOAD, ReceiverReport, StreamKind, VIDEO_HEADER_LEN, Wire};
+use swapdesk_proto::{KeyframeRequest, MAX_VIDEO_PAYLOAD, ReceiverReport, StreamKind, VIDEO_HEADER_LEN, Wire, Writer};
 use tokio::sync::Notify;
 
 use crate::rate::{BitrateSink, RateConfig, RateController};
@@ -29,11 +30,12 @@ pub const VIDEO_PRIORITY: i32 = 1;
 /// Reset code of a stream whose frame went stale at the host (a newer keyframe, a backlog, a timeout).
 pub const RESET_STALE: u32 = 0x1001;
 
-/// A frame to send: the header says what it is; `payload_len` is set from the payload.
+/// A frame to send: the header says what it is; `payload_len` is set from the payload. The payload is shared by
+/// reference count: QUIC keeps a handle to these same bytes until the viewer has them, and nothing is copied.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
     pub header: swapdesk_proto::VideoHeader,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 /// The payload is the screen's pixels (up to 8 MiB): `Debug` shows its size only (CONTRACTS.md C2.3).
@@ -329,11 +331,15 @@ impl VideoSender {
             }
         };
         let _ = stream.set_priority(VIDEO_PRIORITY);
-        let mut wire = Vec::with_capacity(1 + VIDEO_HEADER_LEN + frame.payload.len());
-        let (Ok(kind), Ok(head)) = (StreamKind::Video.encode(), h.encode()) else { return SendOutcome::TooLarge };
-        wire.extend_from_slice(&kind);
-        wire.extend_from_slice(&head);
-        wire.extend_from_slice(&frame.payload);
+        // The stream is its kind, the header and the payload: the first two in a small buffer of their own, the
+        // payload as it came.
+        let mut head = Writer::appending(Vec::with_capacity(1 + VIDEO_HEADER_LEN));
+        if StreamKind::Video.put(&mut head, 0).is_err() || h.put(&mut head, 0).is_err() {
+            return SendOutcome::TooLarge;
+        }
+        let head = Bytes::from(head.into_bytes());
+        let wire_len = head.len() + frame.payload.len();
+        let parts = [head, frame.payload];
 
         let reset = Arc::new(Notify::new());
         let seq = {
@@ -353,12 +359,12 @@ impl VideoSender {
                 InFlight { display: h.display_id, key, queued: Instant::now(), reset: Arc::clone(&reset) },
             );
             st.stats.sent += 1;
-            st.stats.bytes += wire.len() as u64;
+            st.stats.bytes += wire_len as u64;
             seq
         };
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let end = push(&mut stream, &wire, &reset, inner.cfg.frame_timeout).await;
+            let end = push(&mut stream, parts, &reset, inner.cfg.frame_timeout).await;
             let mut st = lock(&inner.state);
             st.in_flight.remove(&seq);
             match end {
@@ -384,11 +390,14 @@ enum PushEnd {
     Failed,
 }
 
-/// Writes the whole frame, finishes the stream and waits for the peer to acknowledge it, unless told to reset.
-async fn push(stream: &mut SendStream, wire: &[u8], reset: &Notify, limit: Duration) -> PushEnd {
+/// Writes the whole frame (its head, then its payload), finishes the stream and waits for the peer to acknowledge it,
+/// unless told to reset. QUIC takes the two buffers as they are.
+async fn push(stream: &mut SendStream, mut parts: [Bytes; 2], reset: &Notify, limit: Duration) -> PushEnd {
     let stopped = stream.stopped();
+    // A frame without a payload is its head alone.
+    let filled = if parts[1].is_empty() { 1 } else { 2 };
     let work = async {
-        stream.write_all(wire).await.map_err(|_| ())?;
+        stream.write_all_chunks(&mut parts[..filled]).await.map_err(|_| ())?;
         stream.finish().map_err(|_| ())?;
         stopped.await.map_err(|_| ())
     };
@@ -428,8 +437,11 @@ mod debug_tests {
             codec: Codec::H264,
             payload_len: 64,
         };
-        let shown = format!("{:?}", Frame { header, payload: vec![233; 64] });
+        let shown = format!("{:?}", Frame { header, payload: vec![233; 64].into() });
+        // Byte 233 as a `Vec<u8>` prints it (`233`) or as `Bytes` does (`\xe9`).
         assert!(!shown.split(|c: char| !c.is_ascii_digit()).any(|t| t == "233"), "payload bytes leaked: {shown}");
+        assert!(!shown.contains("xe9"), "payload bytes leaked: {shown}");
+        assert!(format!("{:?}", Bytes::from(vec![233u8; 4])).contains("xe9"), "the check knows how `Bytes` prints");
         assert!(shown.contains("<redacted 64 bytes>"), "{shown}");
     }
 }

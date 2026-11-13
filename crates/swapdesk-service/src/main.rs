@@ -5,6 +5,7 @@
 //! ```text
 //! swapdesk-service.exe                                      the Windows service SwapdeskService (started by the SCM)
 //! swapdesk-service.exe --console [--instance N] [--dev-loopback]
+//! swapdesk-service.exe --apply-update|--roll-back <old> <new>  the update applier (UPDATES.md 6.2), started by the service
 //! ```
 //!
 //! * `--console`: development mode (C2.4). The same code as the current user, no SCM, stores and trace in
@@ -45,7 +46,18 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(options::Parsed::Run(o)) => run(o),
+        Ok(options::Parsed::ApplyUpdate { old, new, roll_back }) => apply_update(&old, &new, roll_back),
     }
+}
+
+#[cfg(not(windows))]
+fn apply_update(_: &str, _: &str, _: bool) -> ExitCode {
+    ExitCode::from(2)
+}
+
+#[cfg(windows)]
+fn apply_update(old: &str, new: &str, roll_back: bool) -> ExitCode {
+    ExitCode::from(app::apply_update(old, new, roll_back))
 }
 
 #[cfg(not(windows))]

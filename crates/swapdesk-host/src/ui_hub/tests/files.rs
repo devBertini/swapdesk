@@ -65,18 +65,47 @@ struct Pair {
 
 impl Pair {
     fn new(tag: &str, cut_able: bool) -> Self {
+        Self::build(tag, cut_able, None)
+    }
+
+    /// `unattended_by`: the host lets the viewer's device in without a prompt, granted by the account with this
+    /// id; the viewer then enters that way (an administrator account, a host record of minor 1, through the relay).
+    fn build(tag: &str, cut_able: bool, unattended_by: Option<&str>) -> Self {
+        Self::build_with(tag, cut_able, unattended_by, None, None)
+    }
+
+    /// The host announces protocol minor `host_minor` (default: this build's), and its helper's server publishes the
+    /// volumes of `system` when there is one.
+    fn build_with(
+        tag: &str,
+        cut_able: bool,
+        unattended_by: Option<&str>,
+        host_minor: Option<u16>,
+        system: Option<Arc<dyn swapdesk_files::SystemDisk>>,
+    ) -> Self {
         let (home, src, recv) =
             (temp(&format!("{tag}-home")), temp(&format!("{tag}-src")), temp(&format!("{tag}-recv")));
-        let mut host = Machine::new("host-pc");
+        let mut host = match host_minor {
+            Some(m) => Machine::with_minor("host-pc", m),
+            None => Machine::new("host-pc"),
+        };
         let viewer = Machine::new("viewer-pc");
-        host.pin(&viewer, ALL | FILES);
+        let stored = if unattended_by.is_some() { ALL | FILES | PermissionSet::UNATTENDED } else { ALL | FILES };
+        host.pin(&viewer, stored);
+        if let Some(sid) = unattended_by {
+            host.trust
+                .update(|s| s.devices.iter_mut().for_each(|d| d.unattended_granted_by = Some(user(sid))))
+                .expect("store");
+        }
+        let minor = if unattended_by.is_some() { swapdesk_proto::PROTO_MINOR } else { 0 };
         viewer.pin(&host, CV);
         host.attach_helper(IpcRole::HelperSystem);
         host.attach_helper_with(IpcRole::HelperUser, |deps| {
-            deps.with_fs(Arc::new(FsServer::new(Roots::Home {
-                home: home.clone(),
-                receive: Some(DEFAULT_RECEIVE.into()),
-            })))
+            let server = FsServer::new(Roots::Home { home: home.clone(), receive: Some(DEFAULT_RECEIVE.into()) });
+            deps.with_fs(Arc::new(match system {
+                Some(system) => server.with_system(system),
+                None => server,
+            }))
         });
         let relay = cut_able.then(|| Relay::start(host.session_addr()));
         match &relay {
@@ -88,8 +117,9 @@ impl Pair {
                 addrs: vec![Ipv4Addr::LOCALHOST],
                 session_port: r.port,
                 pair_port: 0,
+                proto_minor: minor,
             }]),
-            None => viewer.sees(&host, false),
+            None => viewer.sees_minor(&host, false, minor),
         }
         host.sees(&viewer, false);
         host.hub.set_console_session(Some(1));
@@ -98,28 +128,28 @@ impl Pair {
         let host_ui = host.client(info(false));
         let mut viewer_ui = Client::connect_with_disk(
             &viewer.hub,
-            info(false),
+            ConnInfo { can_elevate: unattended_by.is_some(), ..info(false) },
             Some(Arc::new(FsServer::new(Roots::Tokens(Arc::clone(&tokens))))),
         );
         let mut host_ui = host_ui;
         let req =
             viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
-        let incoming = host_ui.notify("IncomingRequest", |n| match n {
-            Notify::IncomingRequest(r) => Some(r.clone()),
-            _ => None,
-        });
-        assert!(
-            host_ui
-                .call(UiOp::AnswerIncoming {
-                    request_id: incoming.request_id,
-                    decision: Decision::Accept,
-                    grants: (ALL | FILES).bits()
-                })
-                .is_ok()
-        );
-        let ReplyBody::SessionId(session) = viewer_ui.reply(req, CONNECT_OP).expect("the session opens") else {
-            panic!()
-        };
+        if unattended_by.is_none() {
+            let incoming = host_ui.notify("IncomingRequest", |n| match n {
+                Notify::IncomingRequest(r) => Some(r.clone()),
+                _ => None,
+            });
+            assert!(
+                host_ui
+                    .call(UiOp::AnswerIncoming {
+                        request_id: incoming.request_id,
+                        decision: Decision::Accept,
+                        grants: (ALL | FILES).bits()
+                    })
+                    .is_ok()
+            );
+        }
+        let session = viewer_ui.connected(req);
         active_as(&mut viewer_ui, Role::Viewer, &[]);
         active_as(&mut host_ui, Role::Host, &[]);
         Self { host, viewer, host_ui, viewer_ui, session, home, src, recv, tokens, relay }
@@ -155,10 +185,42 @@ impl Pair {
 }
 
 fn state_of(ui: &mut Client, id: u32, what: &str, f: impl Fn(&TransferWire) -> bool) -> TransferWire {
-    ui.notify(what, |n| match n {
-        Notify::Files(FilesNote::Transfer { transfer_id, state, .. }) if *transfer_id == id && f(state) => Some(*state),
+    state_within(ui, WAIT, id, what, f)
+}
+
+/// How long a step may take whose length is the work itself, not a reaction: a whole file moving (its time grows
+/// with the bytes and with the load of a full parallel suite), or the QUIC idle timeout (6 s) of a cut link. Defect
+/// stage 101: under the full suite these steps passed the 10 s a reaction gets, with nothing wrong.
+const LONG_STEP: Duration = Duration::from_secs(60);
+
+fn state_within(
+    ui: &mut Client,
+    limit: Duration,
+    id: u32,
+    what: &str,
+    f: impl Fn(&TransferWire) -> bool,
+) -> TransferWire {
+    ui.take_within(limit, what, |m| match m {
+        Ipc::UiNotify(Notify::Files(FilesNote::Transfer { transfer_id, state, .. }))
+            if *transfer_id == id && f(state) =>
+        {
+            Some(*state)
+        }
         _ => None,
     })
+}
+
+/// A notification whose wait includes the idle timeout of a cut link: a long step (see [`LONG_STEP`]).
+fn notify_long<T>(ui: &mut Client, what: &str, mut f: impl FnMut(&Notify) -> Option<T>) -> T {
+    ui.take_within(LONG_STEP, what, |m| match m {
+        Ipc::UiNotify(n) => f(n),
+        _ => None,
+    })
+}
+
+/// A transfer finishing: a long step (see [`LONG_STEP`]).
+fn finished(ui: &mut Client, id: u32, what: &str) -> TransferWire {
+    state_within(ui, LONG_STEP, id, what, is_done)
 }
 
 fn is_done(s: &TransferWire) -> bool {
@@ -228,30 +290,30 @@ fn the_file_ops_browse_send_and_get_with_throttled_progress_and_the_saved_as_not
     let secs = started.elapsed().as_secs_f64().max(0.25);
     assert!(f64::from(running) <= 4.0 * secs + 2.0, "{running} progress notes in {secs:.2} s: throttled to 4 a second");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
-    state_of(&mut p.host_ui, id, "the host's user hears of the file", is_done);
+    finished(&mut p.host_ui, id, "the host's user hears of the file");
 
-    // The name is taken: the host saves "up (1).bin" and its user's UI is told which name it got.
+    // The name is taken: the host saves "up (2).bin" and its user's UI is told which name it got.
     let id2 = one_id(p.send(vec![pick], Some("incoming")));
-    state_of(&mut p.viewer_ui, id2, "the second upload", is_done);
-    assert!(std::fs::metadata(p.home.join("incoming").join("up (1).bin")).is_ok(), "the first file stays");
+    finished(&mut p.viewer_ui, id2, "the second upload");
+    assert!(std::fs::metadata(p.home.join("incoming").join("up (2).bin")).is_ok(), "the first file stays");
     let saved = p.host_ui.notify("saved as", |n| match n {
         Notify::Files(FilesNote::SavedAs { transfer_id, name, .. }) if *transfer_id == id2 => Some(name.0.clone()),
         _ => None,
     });
-    assert_eq!(saved, "up (1).bin");
+    assert_eq!(saved, "up (2).bin");
 
     // F-FILE-02 download into the receive folder the UI chose; the second time the name is taken on this side.
     let g1 = one_id(p.get("docs/down.bin"));
-    state_of(&mut p.viewer_ui, g1, "the download", is_done);
+    finished(&mut p.viewer_ui, g1, "the download");
     assert!(same(&std::fs::read(p.recv.join("down.bin")).unwrap(), &down));
     let g2 = one_id(p.get("docs/down.bin"));
     let saved = p.viewer_ui.notify("saved as", |n| match n {
         Notify::Files(FilesNote::SavedAs { transfer_id, name, .. }) if *transfer_id == g2 => Some(name.0.clone()),
         _ => None,
     });
-    assert_eq!(saved, "down (1).bin");
-    state_of(&mut p.viewer_ui, g2, "the second download", is_done);
-    assert!(same(&std::fs::read(p.recv.join("down (1).bin")).unwrap(), &down));
+    assert_eq!(saved, "down (2).bin");
+    finished(&mut p.viewer_ui, g2, "the second download");
+    assert!(same(&std::fs::read(p.recv.join("down (2).bin")).unwrap(), &down));
 
     // Refusals: nothing reaches the host for a request that is not one of this UI's own.
     let other = p.viewer.client(info(false));
@@ -297,8 +359,9 @@ fn a_transfer_the_user_pauses_waits_for_retomar_and_continues_from_the_verified_
     assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Pause { transfer_id: id })).is_ok());
     state_of(&mut p.viewer_ui, id, "paused", |s| matches!(s, TransferWire::Paused { .. }));
     // "Retomar".
-    assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
-    state_of(&mut p.viewer_ui, id, "done after Retomar", is_done);
+    let resumed = p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id }));
+    assert!(resumed.is_ok(), "Retomar: {resumed:?}");
+    finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("big.bin")).unwrap(), &big));
     assert!(!p.home.join("incoming").join("big.bin.swapdesk-part").exists());
     // Cancel removes a transfer and its partial file.
@@ -403,13 +466,15 @@ fn a_cut_link_pauses_the_transfers_and_the_reconnect_offers_them_again_with_no_c
     let relay = p.relay.take().expect("a cut-able pair");
     relay.cut(true);
     for id in [up_id, down_id] {
-        state_of(&mut p.viewer_ui, id, "paused by the lost link", |s| matches!(s, TransferWire::Paused { .. }));
+        state_within(&mut p.viewer_ui, LONG_STEP, id, "paused by the lost link", |s| {
+            matches!(s, TransferWire::Paused { .. })
+        });
     }
     let partial = std::fs::metadata(p.home.join("incoming").join("up.bin.swapdesk-part"))
         .expect("the host keeps the partial file")
         .len();
     assert!(partial < up.len() as u64);
-    p.viewer_ui.notify("Reconectando", |n| match n {
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| match n {
         Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
             if *session_id == p.session && *attempt >= 1 =>
         {
@@ -420,8 +485,8 @@ fn a_cut_link_pauses_the_transfers_and_the_reconnect_offers_them_again_with_no_c
 
     // The network is back: nobody clicks "Retomar", and both finish with the right bytes.
     relay.cut(false);
-    state_of(&mut p.viewer_ui, up_id, "the upload to finish", is_done);
-    state_of(&mut p.viewer_ui, down_id, "the download to finish", is_done);
+    finished(&mut p.viewer_ui, up_id, "the upload to finish");
+    finished(&mut p.viewer_ui, down_id, "the download to finish");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     assert!(same(&std::fs::read(p.recv.join("down.bin")).unwrap(), &std::fs::read(p.home.join("down.bin")).unwrap()));
     assert!(
@@ -443,12 +508,12 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
     state_of(&mut p.viewer_ui, id, "paused", |s| matches!(s, TransferWire::Paused { .. }));
     let relay = p.relay.take().expect("a cut-able pair");
     relay.cut(true);
-    p.viewer_ui.notify("Reconectando", |n| {
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| {
         matches!(n, Notify::Session { state: SessionState::Reconnecting { attempt }, .. } if *attempt >= 1)
             .then_some(())
     });
     relay.cut(false);
-    p.viewer_ui.notify("the session is back", |n| match n {
+    notify_long(&mut p.viewer_ui, "the session is back", |n| match n {
         Notify::Session { session_id, state, .. } if *session_id == p.session => grants_active(state),
         _ => None,
     });
@@ -460,9 +525,373 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
         "a paused transfer is not started again"
     );
     // "Retomar" after the reconnect offers it again and it finishes.
-    assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
-    state_of(&mut p.viewer_ui, id, "done after Retomar", is_done);
+    let resumed = p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id }));
+    assert!(resumed.is_ok(), "Retomar: {resumed:?}");
+    finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     p.relay = Some(relay);
     p.finish();
+}
+
+/// D13 across a lost link (review of the unattended entry, finding 1): a session that entered without a prompt,
+/// granted by one account while another is at the console, has touched no file yet. Its link drops and it resumes.
+/// The first file request after that must still ask the user at the console: a resume is the same session, and
+/// nobody at the host ever accepted it.
+#[test]
+fn after_a_reconnect_the_files_of_another_user_are_still_asked_for() {
+    // The console's interface is the account S-1-5-21-1 (`info`); the grant came from another one.
+    let mut p = Pair::build("d13-resume", true, Some("S-1-5-21-777"));
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+
+    let relay = p.relay.take().expect("a cut-able pair");
+    relay.cut(true);
+    notify_long(&mut p.viewer_ui, "Reconectando", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { attempt }, .. }
+            if *session_id == p.session && *attempt >= 1 =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    p.viewer_ui.clear();
+    relay.cut(false);
+    notify_long(&mut p.viewer_ui, "the session is back", |n| match n {
+        Notify::Session { session_id, state: SessionState::Active { .. }, .. } if *session_id == p.session => Some(()),
+        _ => None,
+    });
+
+    // The first file request of the resumed session: the host asks its console user before anything moves.
+    let pick = p.pick("a.bin", b"hello");
+    assert!(p.send(vec![pick], Some("incoming")).is_ok());
+    let asked = p.host_ui.notify("the consent question", |n| match n {
+        Notify::IncomingRequest(r)
+            if matches!(r.kind, RequestKind::Consent { feature: swapdesk_proto::Feature::Files }) =>
+        {
+            Some(r.request_id)
+        }
+        _ => None,
+    });
+    assert!(!p.home.join("incoming").join("a.bin").exists(), "nothing is written before the answer");
+    assert!(p.host_ui.call(UiOp::AnswerIncoming { request_id: asked, decision: Decision::Decline, grants: 0 }).is_ok());
+    drop(relay);
+    p.finish();
+}
+
+/// WAITING.md 4, row 12: while the host asks its user about the files (D13), the viewer's interface is told so, with
+/// the seconds the question has.
+#[test]
+fn the_viewer_is_told_that_the_host_asks_its_user_and_for_how_long() {
+    let mut p = Pair::build("d13-wait", false, Some("S-1-5-21-777"));
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+    let pick = p.pick("a.bin", b"hello");
+    assert!(p.send(vec![pick], Some("incoming")).is_ok());
+    let (feature, remaining) = p.viewer_ui.notify("ConsentPending", |n| match n {
+        Notify::ConsentPending { session_id, feature, remaining_s } if *session_id == p.session => {
+            Some((*feature, *remaining_s))
+        }
+        _ => None,
+    });
+    assert_eq!(feature, swapdesk_proto::Feature::Files);
+    assert!(remaining > 0 && remaining <= 20, "the host's seconds: {remaining}");
+    let asked = p.host_ui.notify("the consent question", |n| match n {
+        Notify::IncomingRequest(r) if matches!(r.kind, RequestKind::Consent { .. }) => Some(r.request_id),
+        _ => None,
+    });
+    assert!(p.host_ui.call(UiOp::AnswerIncoming { request_id: asked, decision: Decision::Decline, grants: 0 }).is_ok());
+    p.finish();
+}
+
+// ---------- the explorer (slice 2b, minor 2) ----------
+
+use swapdesk_files::{SysVolume, SystemDisk};
+use swapdesk_ipc::{FsChange, FsNameView};
+use swapdesk_proto::{ErrorCode, PlaceKind, VolumeKind};
+
+/// Publishes the folders the test puts in `volumes`; its bin is a folder.
+struct Disks {
+    volumes: Mutex<Vec<SysVolume>>,
+    bin: PathBuf,
+}
+
+impl SystemDisk for Disks {
+    fn volumes(&self) -> Vec<SysVolume> {
+        lock(&self.volumes).clone()
+    }
+
+    fn places(&self) -> Vec<(PlaceKind, PathBuf)> {
+        Vec::new()
+    }
+
+    fn trash(&self, path: &std::path::Path) -> Result<(), ErrorCode> {
+        std::fs::rename(path, self.bin.join(path.file_name().unwrap())).map_err(|_| ErrorCode::IoFailed)
+    }
+
+    fn protected(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+fn disk(identity: &str, root: &std::path::Path, kind: VolumeKind) -> SysVolume {
+    SysVolume {
+        identity: identity.into(),
+        root: root.to_path_buf(),
+        kind,
+        label: identity.into(),
+        letter: None,
+        total_bytes: 100,
+        free_bytes: 50,
+        has_bin: true,
+    }
+}
+
+fn text(s: &str) -> Text {
+    Text(s.to_string())
+}
+
+fn results(r: Result<ReplyBody, ApiCode>) -> Vec<(String, ErrorCode)> {
+    match r.expect("the results of a change") {
+        ReplyBody::OpResults(v) => v.into_iter().map(|i| (i.name.0, i.code)).collect(),
+        other => panic!("not results: {other:?}"),
+    }
+}
+
+#[test]
+fn the_explorer_ops_page_change_and_hear_of_volume_changes_and_the_audit_counts() {
+    let root = temp("explorer-vols");
+    let (v1, v2, bin) = (root.join("sysvol"), root.join("stick"), root.join("bin"));
+    for d in [&v1, &v2, &bin] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(v2.join("on-stick.txt"), b"s").unwrap();
+    let disks = Arc::new(Disks {
+        volumes: Mutex::new(vec![disk("sys", &v1, VolumeKind::System), disk("stick", &v2, VolumeKind::Removable)]),
+        bin: bin.clone(),
+    });
+    let mut p = Pair::build_with("explorer", false, None, None, Some(Arc::clone(&disks) as Arc<dyn SystemDisk>));
+    let session_id = p.session;
+    std::fs::write(p.home.join("a.txt"), b"a").unwrap();
+    std::fs::write(p.home.join("b.txt"), b"b").unwrap();
+
+    // 48: the home folder and the volumes.
+    let ReplyBody::Volumes(v) = p.viewer_ui.call(UiOp::Files(FilesOp::Volumes { session_id })).unwrap() else {
+        panic!("volumes")
+    };
+    assert_eq!(v.home.0, "");
+    let volumes: Vec<_> = v.volumes.iter().map(|x| (x.id, x.kind)).collect();
+    assert_eq!(volumes, [(1, VolumeKind::System), (2, VolumeKind::Removable)]);
+    // 46: a page of a volume, and of the home folder.
+    let ReplyBody::Listing2(l) =
+        p.viewer_ui.call(UiOp::Files(FilesOp::ListPage { session_id, path: text(":2"), start: 0 })).unwrap()
+    else {
+        panic!("a page")
+    };
+    assert_eq!(l.path.0, ":2");
+    assert_eq!((l.page.entries[0].name.0.as_str(), l.page.next, l.page.free), ("on-stick.txt", None, Some(50)));
+    let ReplyBody::Listing2(l) =
+        p.viewer_ui.call(UiOp::Files(FilesOp::ListPage { session_id, path: text(""), start: 0 })).unwrap()
+    else {
+        panic!("a page")
+    };
+    assert!(l.page.entries.iter().any(|e| e.name.0 == "a.txt"));
+    // 47: new folder, a rename onto an existing name, a move of two names, to the bin.
+    let change = |c| UiOp::Files(FilesOp::Change { session_id, change: c });
+    assert_eq!(
+        results(p.viewer_ui.call(change(FsChange::MakeDir { parent: text(""), name: text("new") }))),
+        [("new".to_string(), ErrorCode::NoError)]
+    );
+    assert!(p.home.join("new").is_dir());
+    let rename = FsChange::Rename { dir: text(""), name: text("a.txt"), new_name: text("b.txt") };
+    assert_eq!(results(p.viewer_ui.call(change(rename))), [("a.txt".to_string(), ErrorCode::Exists)]);
+    let names = |n: &[&str]| n.iter().map(|x| FsNameView { name: text(x) }).collect::<Vec<_>>();
+    let mv = FsChange::Move { from_dir: text(""), names: names(&["a.txt", "nope"]), to_dir: text("new") };
+    assert_eq!(
+        results(p.viewer_ui.call(change(mv))),
+        [("a.txt".to_string(), ErrorCode::NoError), ("nope".to_string(), ErrorCode::NotFound)]
+    );
+    assert!(p.home.join("new").join("a.txt").exists() && !p.home.join("a.txt").exists());
+    let trash = FsChange::Trash { dir: text(":2"), names: names(&["on-stick.txt"]) };
+    assert_eq!(results(p.viewer_ui.call(change(trash))), [("on-stick.txt".to_string(), ErrorCode::NoError)]);
+    assert!(bin.join("on-stick.txt").exists());
+
+    // The audit has counts and kinds, never a name (FILES-UI.md 8.3).
+    let wanted = [
+        AuditEvent::FilesChanged { op: 0, count: 1, area: 0 },
+        AuditEvent::FilesChanged { op: 2, count: 1, area: 0 },
+        AuditEvent::FilesChanged { op: 3, count: 1, area: 2 },
+        AuditEvent::FilesReach { kinds: 1 << 2 },
+    ];
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let have: Vec<AuditEvent> = p.host.audit.entries().into_iter().map(|e| e.event).collect();
+        if wanted.iter().all(|w| have.contains(w)) {
+            let reaches = have.iter().filter(|e| matches!(e, AuditEvent::FilesReach { .. })).count();
+            assert_eq!(reaches, 1, "once per kind: {have:?}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the audit never got {wanted:?}: {have:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The host's user's UI hears the same facts for the session banner, as counts (FILES-UI.md 6): the first reach of
+    // a volume outside home once, then each change with its kind and the names done.
+    let session_id_h = session_id;
+    let heard = |ui: &mut Client, what: &str, want: FilesNote| {
+        ui.notify(what, |n| matches!(n, Notify::Files(f) if *f == want).then_some(()));
+    };
+    heard(&mut p.host_ui, "the reach", FilesNote::Reach { session_id: session_id_h });
+    heard(&mut p.host_ui, "the new folder", FilesNote::Changed { session_id: session_id_h, op: 0, count: 1 });
+    heard(&mut p.host_ui, "the move", FilesNote::Changed { session_id: session_id_h, op: 2, count: 1 });
+    heard(&mut p.host_ui, "the bin", FilesNote::Changed { session_id: session_id_h, op: 3, count: 1 });
+
+    // A stick is pulled: the helper notices within a couple of seconds, the host pushes the list, the viewer's UI
+    // hears notification 22 with one volume left.
+    lock(&disks.volumes).truncate(1);
+    let pushed = notify_long(&mut p.viewer_ui, "the pushed volume list", |n| match n {
+        Notify::Files(FilesNote::Volumes { session_id: s, volumes }) if *s == session_id => Some(volumes.clone()),
+        _ => None,
+    });
+    assert_eq!(pushed.volumes.len(), 1);
+    assert_eq!(pushed.volumes[0].id, 1);
+    p.finish();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_explorer_ops_answer_invalid_at_once_toward_a_host_of_minor_1() {
+    let mut p = Pair::build_with("explorer-old", false, None, Some(1), None);
+    let session_id = p.session;
+    let started = Instant::now();
+    let page = UiOp::Files(FilesOp::ListPage { session_id, path: text(""), start: 0 });
+    assert_eq!(p.viewer_ui.call(page).unwrap_err(), ApiCode::Invalid);
+    let change = FsChange::MakeDir { parent: text(""), name: text("x") };
+    assert_eq!(p.viewer_ui.call(UiOp::Files(FilesOp::Change { session_id, change })).unwrap_err(), ApiCode::Invalid);
+    assert_eq!(p.viewer_ui.call(UiOp::Files(FilesOp::Volumes { session_id })).unwrap_err(), ApiCode::Invalid);
+    assert!(started.elapsed() < Duration::from_secs(5), "answered at once, not by a timeout");
+    assert!(!p.home.join("x").exists());
+    // The 1.0 drawer still works against it.
+    let root = listing(p.viewer_ui.call(UiOp::Files(FilesOp::List { session_id, path: None })));
+    assert_eq!(root.path.0, "");
+    p.finish();
+}
+
+#[test]
+fn the_hosted_sessions_ui_hears_each_transfer_with_its_direction() {
+    let mut p = Pair::new("banner-dir", false);
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+    std::fs::write(p.home.join("down.bin"), data(100_000)).unwrap();
+    let session = p.session;
+    let done_direction = |ui: &mut Client, id: u32| {
+        ui.notify("a finished transfer", |n| match n {
+            Notify::Files(FilesNote::Transfer {
+                session_id, transfer_id, outgoing, state: TransferWire::Done, ..
+            }) if *session_id == session && *transfer_id == id => Some(*outgoing),
+            _ => None,
+        })
+    };
+    // The viewer sends a file here: for this computer it is a file that arrives (outgoing false).
+    let pick = p.pick("up.bin", &data(100_000));
+    let up = one_id(p.send(vec![pick], Some("incoming")));
+    assert!(!done_direction(&mut p.host_ui, up), "an upload arrives at the host");
+    // The viewer takes a file from here: the host sends it (outgoing true).
+    let down = one_id(p.get("down.bin"));
+    finished(&mut p.viewer_ui, down, "the download");
+    p.host_ui.notify("the host's own sending", |n| match n {
+        Notify::Files(FilesNote::Transfer { session_id, outgoing: true, .. }) if *session_id == session => Some(()),
+        _ => None,
+    });
+    p.finish();
+}
+
+#[test]
+fn a_refused_receiving_folder_shows_in_the_network_status_and_goes_when_access_works() {
+    // F-FILE-03: the platform names the folder it refuses; the status carries it with the folder's display name,
+    // the UIs hear of a change once, and it goes when the probe says access works again.
+    let m = Machine::with_interfaces("sala", swapdesk_fakes::FakeNetInterfaces::windows_typical());
+    let refused: Arc<std::sync::Mutex<Option<PathBuf>>> = Arc::default();
+    let probe = Arc::clone(&refused);
+    m.hub.set_receive_folder_probe(Arc::new(move || probe.lock().unwrap().clone()));
+    let mut ui = m.client(info(false));
+    let notices = |ui: &mut Client| match ui.call(UiOp::GetNetwork).unwrap() {
+        ReplyBody::Network(n) => n.notices,
+        other => panic!("not a network: {other:?}"),
+    };
+    assert!(notices(&mut ui).is_empty(), "no refusal yet");
+
+    *refused.lock().unwrap() = Some(PathBuf::from("/Users/ana/Downloads"));
+    assert_eq!(notices(&mut ui), vec![swapdesk_ipc::Notice::ReceiveFolderDenied("Downloads".into())]);
+    m.hub.hub.receive_access_changed();
+    ui.notify("the notice pushed", |n| match n {
+        Notify::NetworkChanged(s)
+            if s.notices == vec![swapdesk_ipc::Notice::ReceiveFolderDenied("Downloads".into())] =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+
+    *refused.lock().unwrap() = None;
+    m.hub.hub.receive_access_changed();
+    ui.notify("the notice gone", |n| match n {
+        Notify::NetworkChanged(s) if s.notices.is_empty() => Some(()),
+        _ => None,
+    });
+}
+
+#[test]
+fn the_mac_grants_and_login_item_show_in_the_network_status_and_go_when_given() {
+    // The Mac's probe names what is missing and whether the login item waits for approval; the status carries the
+    // notices, the UIs hear of a change once, and the notices go when the probe says all is given.
+    use swapdesk_ipc::{Notice, OsPermission};
+    let m = Machine::with_interfaces("sala", swapdesk_fakes::FakeNetInterfaces::windows_typical());
+    let state: Arc<std::sync::Mutex<crate::ui_hub::MacState>> = Arc::default();
+    let probe = Arc::clone(&state);
+    m.hub.set_mac_probe(Arc::new(move || probe.lock().unwrap().clone()));
+    let mut ui = m.client(info(false));
+    let notices = |ui: &mut Client| match ui.call(UiOp::GetNetwork).unwrap() {
+        ReplyBody::Network(n) => n.notices,
+        other => panic!("not a network: {other:?}"),
+    };
+    assert!(notices(&mut ui).is_empty(), "nothing missing yet");
+    m.hub.mac_status_changed();
+
+    let missing = vec![OsPermission::ScreenRecording, OsPermission::InputMonitoring];
+    *state.lock().unwrap() = crate::ui_hub::MacState { missing: missing.clone(), login_item_needs_approval: true };
+    let both = vec![Notice::ServiceNeedsApproval, Notice::MacPermissionsMissing(missing)];
+    assert_eq!(notices(&mut ui), both);
+    m.hub.mac_status_changed();
+    let want = both.clone();
+    ui.notify("the notices pushed", move |n| match n {
+        Notify::NetworkChanged(s) if s.notices == want => Some(()),
+        _ => None,
+    });
+
+    // One grant given: the list shrinks.
+    state.lock().unwrap().missing = vec![OsPermission::InputMonitoring];
+    m.hub.mac_status_changed();
+    ui.notify("the shorter list", |n| match n {
+        Notify::NetworkChanged(s)
+            if s.notices
+                == vec![
+                    Notice::ServiceNeedsApproval,
+                    Notice::MacPermissionsMissing(vec![OsPermission::InputMonitoring]),
+                ] =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+
+    *state.lock().unwrap() = crate::ui_hub::MacState::default();
+    m.hub.mac_status_changed();
+    ui.notify("the notices gone", |n| match n {
+        Notify::NetworkChanged(s) if s.notices.is_empty() => Some(()),
+        _ => None,
+    });
+    assert!(notices(&mut ui).is_empty());
+}
+
+#[test]
+fn a_no_space_refusal_reaches_the_ui_as_its_own_code() {
+    assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::NoSpace), ApiCode::NoSpace);
+    assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::IoFailed), ApiCode::Internal);
 }

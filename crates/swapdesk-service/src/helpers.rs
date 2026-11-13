@@ -8,8 +8,8 @@
 //! [`Supervisor::next_wake`] (the earliest restart that is due) and from the wake-ups, never on a timer of its own.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use swapdesk_host::service::{HelperKind, ServiceCore};
@@ -40,6 +40,8 @@ pub enum Launch {
 struct Running {
     child: ChildProcess,
     started: Instant,
+    /// The core it attached to (its address): when another account's core may host now, it moves (ACCOUNTS.md 5.1).
+    core: usize,
     /// A second owner of the pipe handle, to cancel its blocked read at shutdown.
     cancel: PipeConn,
 }
@@ -74,14 +76,21 @@ pub struct HowToStart {
 /// What a start thread needs, without holding the core alive: the service can stop while a start is waiting for its
 /// helper to connect.
 struct StartEnv {
-    core: Weak<ServiceCore>,
+    core: CoreOf,
     launch: Launch,
     suffix: String,
     exe: PathBuf,
 }
 
+/// The core the helpers attach to now: the account that may host (ACCOUNTS.md 15 S3; S4 binds it to the console
+/// with the fence). `None`: no account may host, and no helper is attached.
+/// How often the supervisor looks again for an account that may host, while there is none.
+const NO_ACCOUNT_RECHECK: Duration = Duration::from_secs(1);
+
+pub type CoreOf = Arc<dyn Fn() -> Option<Arc<ServiceCore>> + Send + Sync>;
+
 pub struct Supervisor {
-    core: Arc<ServiceCore>,
+    core: CoreOf,
     trace: Arc<dyn TraceSink>,
     env: Arc<StartEnv>,
     /// Told when a start thread has its result, so the owner's loop looks at the supervisor.
@@ -109,7 +118,7 @@ impl Supervisor {
     /// `console` is the console session and whether a user is logged in at it. `wake` is what a start thread calls when it
     /// has its result.
     pub fn new(
-        core: Arc<ServiceCore>,
+        core: CoreOf,
         trace: Arc<dyn TraceSink>,
         how: HowToStart,
         console: (Option<u32>, bool),
@@ -117,7 +126,7 @@ impl Supervisor {
     ) -> Self {
         let HowToStart { launch, suffix, exe } = how;
         let (session, user_present) = console;
-        let env = Arc::new(StartEnv { core: Arc::downgrade(&core), launch, suffix, exe });
+        let env = Arc::new(StartEnv { core: Arc::clone(&core), launch, suffix, exe });
         Self {
             core,
             trace,
@@ -200,6 +209,31 @@ impl Supervisor {
             }
         }
         let Some(session) = self.session else { return };
+        // A helper attached to a core that may no longer host goes now and starts again on the right one (no backoff:
+        // it did not fail).
+        let current = (self.core)().map(|c| core_id(&c));
+        let attached: Vec<Option<usize>> = self.slots.iter().map(|s| s.running.as_ref().map(|r| r.core)).collect();
+        for i in misplaced(&attached, current) {
+            if let Some(r) = self.slots[i].running.take() {
+                self.trace.log(
+                    Level::Info,
+                    "supervisor",
+                    format_args!("{} helper moves to the account that may host now", self.slots[i].role.as_str()),
+                );
+                end(r);
+                self.slots[i].due = Some(now);
+            }
+        }
+        // No account may host yet (nobody has opened Swapdesk): no helper is started, and the slots look again in a
+        // second, without counting it as a failure.
+        if (self.core)().is_none() {
+            for s in &mut self.slots {
+                if s.running.is_none() && s.starting.is_none() && s.due.is_some_and(|d| d <= now) {
+                    s.due = Some(now + NO_ACCOUNT_RECHECK);
+                }
+            }
+            return;
+        }
         for i in 0..self.slots.len() {
             let (due, role) = (self.slots[i].due, self.slots[i].role);
             if self.slots[i].running.is_some() || self.slots[i].starting.is_some() || due.is_none_or(|d| d > now) {
@@ -297,7 +331,7 @@ impl Supervisor {
                 }
             }
             if let Some(r) = s.running.take() {
-                if let Some(link) = HelperKind::of_role(s.ipc).and_then(|k| self.core.helper(k)) {
+                if let Some(link) = HelperKind::of_role(s.ipc).and_then(|k| (self.core)().and_then(|c| c.helper(k))) {
                     link.send_now(swapdesk_ipc::Message::Shutdown);
                 }
                 let _ = r.child.wait(Duration::from_secs(2));
@@ -369,19 +403,30 @@ fn start_helper(env: &StartEnv, role: HelperRole, ipc: IpcRole, session: u32) ->
     }
     // The core records the PID verified above, never the one the helper writes in its `Hello`. A core that is gone (the
     // service is stopping) takes no helper.
-    let Some(core) = env.core.upgrade() else {
+    let Some(core) = (env.core)() else {
         let _ = child.kill();
-        return Err("the service is stopping".into());
+        return Err("no account may host now, or the service is stopping".into());
     };
     let attached = core.attach_helper_pid(ipc, verified_pid, reader, writer);
     drop(done_tx);
     match attached {
-        Ok(_) => Ok(Running { child, started: Instant::now(), cancel }),
+        Ok(_) => Ok(Running { child, started: Instant::now(), cancel, core: core_id(&core) }),
         Err(e) => {
             let _ = child.kill();
             Err(e.to_string())
         }
     }
+}
+
+fn core_id(core: &Arc<ServiceCore>) -> usize {
+    Arc::as_ptr(core) as usize
+}
+
+/// The slots whose running helper is attached to another core than the one that may host now (review of S3/S4, M4):
+/// at the sign-in screen the hosting account changes from A to B, and B's core has no helper until they move. With no
+/// core that may host, every running helper is misplaced.
+fn misplaced(attached: &[Option<usize>], current: Option<usize>) -> Vec<usize> {
+    attached.iter().enumerate().filter(|(_, a)| a.is_some_and(|a| Some(a) != current)).map(|(i, _)| i).collect()
 }
 
 /// Ends a helper that is still running and unblocks its pipe.
@@ -410,5 +455,15 @@ mod tests {
         assert_eq!(earliest_due(Some(1), &[(true, None), (false, None)]), None);
         // No console session: nothing can start, so nothing to wake for.
         assert_eq!(earliest_due(None, &[(false, at(1)), (false, at(2))]), None);
+    }
+
+    /// Review of S3/S4, M4: a running helper whose core is no longer the one that may host is moved; one on the right
+    /// core stays; with no core that may host, every running helper goes.
+    #[test]
+    fn a_helper_moves_when_the_hosting_account_changes() {
+        assert_eq!(misplaced(&[Some(1), Some(1)], Some(1)), Vec::<usize>::new(), "the right core: they stay");
+        assert_eq!(misplaced(&[Some(1), Some(2)], Some(2)), vec![0], "A's helper moves to B");
+        assert_eq!(misplaced(&[Some(1), None], Some(2)), vec![0], "a slot with nothing running is not counted");
+        assert_eq!(misplaced(&[Some(1), Some(1)], None), vec![0, 1], "nobody may host: both go");
     }
 }

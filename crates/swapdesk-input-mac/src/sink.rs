@@ -18,6 +18,7 @@
 //! UNPROVEN on hardware (the owner's click at the Mac is needed for the Accessibility grant): that the posted
 //! modifier events act as real ones in every application, and the wheel signs (see `sink_logic`).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use objc2_app_kit::NSEvent;
@@ -44,6 +45,16 @@ fn denied() -> PlatformError {
         os_code: None,
         detail: "Accessibility access is not granted to this process".to_owned(),
     }
+}
+
+/// Presses of keys that are not modifiers posted by this process so far.
+static KEY_PRESSES: AtomicU64 = AtomicU64::new(0);
+
+/// How many key presses (modifiers and repeats aside) this process has handed to the system since it started. A
+/// proof compares it with what the application in front received: a key the system took and the application did
+/// not get was lost after this sink.
+pub fn posted_key_presses() -> u64 {
+    KEY_PRESSES.load(Ordering::Relaxed)
 }
 
 /// Whether this process may post events (`AXIsProcessTrusted`, read without a prompt).
@@ -114,6 +125,9 @@ impl MacInputSink {
                     CGEvent::set_integer_value_field(Some(&ev), CGEventField::KeyboardEventAutorepeat, 1);
                 }
                 CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+                if *down && !*modifier && !*repeat {
+                    KEY_PRESSES.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Planned::Text { units } => {
                 for down in [true, false] {

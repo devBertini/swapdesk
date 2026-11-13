@@ -1,5 +1,7 @@
 //! `VideoDecoder` over the Media Foundation H.264 decoder MFT (the inbox transform, which decodes on the GPU through DXVA
-//! when given a D3D11 device manager and in software otherwise).
+//! when given a D3D11 device manager and in software otherwise). A frame whose header says `Codec::Hevc` is decoded by the
+//! HEVC decoder MFT instead, on the GPU only (DXVA): a decoder that does not take the D3D11 device manager makes `decode`
+//! fail with `ErrorKind::Unsupported`, since HEVC is only ever negotiated for hardware (D39, F-VIEW-07).
 //!
 //! Low-latency mode, no reordering: one Annex B access unit in, at most one picture out. The picture is an NV12 D3D11
 //! texture ([`DecoderOutput::Gpu`], for zero-copy rendering later) or a BGRA copy in system memory
@@ -9,7 +11,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use swapdesk_platform::{
-    AdapterId, DecodedFrame, DisplayId, ErrorKind, GpuSurface, MonoMicros, Pixels, Result, VideoDecoder,
+    AdapterId, Codec, DecodedFrame, DisplayId, ErrorKind, GpuSurface, MonoMicros, Pixels, Result, VideoDecoder,
 };
 use swapdesk_proto::VideoHeader;
 use windows::Win32::Graphics::Direct3D11::{
@@ -21,7 +23,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_E_NOTACCEPTING, MF_MT_FRAME_SIZE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_SA_D3D11_BINDFLAGS,
     MFCreateDXGIDeviceManager, MFSampleExtension_CleanPoint, MFSampleExtension_Discontinuity,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFVideoFormat_NV12,
 };
 use windows::core::Interface;
 
@@ -90,6 +92,9 @@ pub struct MfH264Decoder {
 type Converter = (VideoProc, (u32, u32), (u32, u32));
 
 struct State {
+    codec: Codec,
+    /// `BEGIN_STREAMING` and `START_OF_STREAM` have been sent (an HEVC decoder is told after its first output type).
+    streaming_started: bool,
     gpu: Gpu,
     transform: IMFTransform,
     activation: mft::Mft,
@@ -131,6 +136,13 @@ impl Drop for State {
 impl MfH264Decoder {
     pub fn new(options: DecoderOptions) -> Self {
         Self { options, state: None, waiting_keyframe: true, last_id: None, last_header: None, seq: 0, decode_us: 0 }
+    }
+
+    /// Starts the decoder MFT of `codec` and drops it again: whether it activates, takes the D3D11 device manager and
+    /// accepts its input type, which is all `hevc_probe` needs to know. Returns the MFT's name.
+    pub(crate) fn probe_start(&mut self, codec: Codec) -> Result<String> {
+        self.start(codec, (1280, 720))?;
+        Ok(self.state.as_ref().map(|s| s.frame_ms.clone()).unwrap_or_default())
     }
 
     /// Microseconds the last `decode` call took (input to picture).
@@ -200,7 +212,7 @@ impl MfH264Decoder {
         self.waiting_keyframe
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&mut self, stream: Codec, size: (u32, u32)) -> Result<()> {
         crate::sys::init_thread()?;
         let gpu = match &self.options.device {
             Some(d) => Gpu::from_device(d.clone())?,
@@ -213,11 +225,16 @@ impl MfH264Decoder {
                 "GPU output needs DXVA decoding (DecoderOptions::dxva)",
             ));
         }
-        let candidates = mft::software(Category::Decoder)?;
-        let mft = candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| err(ErrorKind::Unavailable, "VideoDecoder", "no H.264 decoder MFT"))?;
+        // The synchronous inbox transform of the codec: for H.264 it is part of Windows, for HEVC it comes with the
+        // "HEVC Video Extensions" or the GPU vendor's driver (GUESS: which of the two this PC has is what `hevc_probe` reports).
+        let candidates = mft::software_for(Category::Decoder, stream)?;
+        let mft = candidates.into_iter().next().ok_or_else(|| {
+            let (kind, name) = match stream {
+                Codec::H264 => (ErrorKind::Unavailable, "H.264"),
+                Codec::Hevc => (ErrorKind::Unsupported, "HEVC"),
+            };
+            err(kind, "VideoDecoder", format!("no {name} decoder MFT"))
+        })?;
         let transform = mft.activate()?;
         // Any `?` below shuts the transform down; `State`'s own `Drop` takes over once it is built.
         let mut guard = mft::ActivationGuard::new(&transform, &mft);
@@ -257,10 +274,22 @@ impl MfH264Decoder {
         }
         // SAFETY: offers the input type, then the first NV12 output type the MFT lists.
         unsafe {
-            let input = video_type(&MFVideoFormat_H264, 0, 0, 0)?;
-            transform.SetInputType(0, &input, 0).ctx("IMFTransform::SetInputType(H264)")?;
+            // The HEVC decoder lists no output type until the input type has a frame size (the header of the first frame
+            // has it); the H.264 one finds the size in the first SPS.
+            let (w, h) = if stream == Codec::Hevc { size } else { (0, 0) };
+            let input = video_type(&mft::subtype(stream), w, h, 0)?;
+            transform.SetInputType(0, &input, 0).ctx("IMFTransform::SetInputType(codec)")?;
+        }
+        if stream == Codec::Hevc && !dxva {
+            return Err(err(
+                ErrorKind::Unsupported,
+                "VideoDecoder",
+                "the HEVC decoder does not run on the GPU (no D3D11 device manager accepted)",
+            ));
         }
         let mut state = State {
+            codec: stream,
+            streaming_started: false,
             gpu,
             transform,
             activation: mft.clone(),
@@ -282,11 +311,12 @@ impl MfH264Decoder {
             copies: 0,
         };
         guard.disarm();
-        let _ = state.negotiate_output();
-        // SAFETY: streaming start messages.
-        unsafe {
-            state.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).ctx("BEGIN_STREAMING")?;
-            state.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).ctx("START_OF_STREAM")?;
+        // An HEVC decoder lists no output type before it has read a sequence header (measured on the NVIDIA MFT of this PC:
+        // `BEGIN_STREAMING` answers `MF_E_TRANSFORM_TYPE_NOT_SET`), so its streaming messages wait for the first stream
+        // change, where `pull` negotiates the output type again.
+        state.streaming_started = state.negotiate_output().is_ok() || stream == Codec::H264;
+        if state.streaming_started {
+            state.begin_streaming()?;
         }
         self.state = Some(state);
         Ok(())
@@ -294,6 +324,16 @@ impl MfH264Decoder {
 }
 
 impl State {
+    fn begin_streaming(&mut self) -> Result<()> {
+        // SAFETY: streaming start messages.
+        unsafe {
+            self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).ctx("BEGIN_STREAMING")?;
+            self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).ctx("START_OF_STREAM")?;
+        }
+        self.streaming_started = true;
+        Ok(())
+    }
+
     /// Picks the first NV12 output type and reads the visible size. `Err` when the MFT lists none yet.
     fn negotiate_output(&mut self) -> Result<()> {
         // SAFETY: type enumeration and selection on a live transform.
@@ -363,7 +403,12 @@ impl State {
                     }));
                 }
                 Output::NeedMoreInput => return Ok(None),
-                Output::StreamChange => self.negotiate_output()?,
+                Output::StreamChange => {
+                    self.negotiate_output()?;
+                    if !self.streaming_started {
+                        self.begin_streaming()?;
+                    }
+                }
             }
         }
     }
@@ -530,8 +575,15 @@ fn nv12_to_bgra(nv12: &[u8], stride: usize, plane_rows: usize, w: u32, h: u32) -
 
 impl VideoDecoder for MfH264Decoder {
     fn decode(&mut self, header: &VideoHeader, annex_b: &[u8]) -> Result<Option<DecodedFrame>> {
+        if self.state.as_ref().is_some_and(|s| s.codec != header.codec) {
+            // The stream changed codec (a new session on the same decoder): a new transform, a keyframe first.
+            self.state = None;
+            self.waiting_keyframe = true;
+            self.last_id = None;
+            self.last_header = None;
+        }
         if self.state.is_none() {
-            self.start()?;
+            self.start(header.codec, (u32::from(header.width), u32::from(header.height)))?;
         }
         if !header.keyframe {
             // A hole in the frame ids: the picture would be wrong from here to the next keyframe.

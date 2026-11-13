@@ -6,7 +6,7 @@ use super::*;
 
 /// A UI of another session than the console's (session 1 in these tests): `admin` is the elevation of its token.
 fn background(machine: &Machine, admin: bool) -> Client {
-    machine.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin })
+    machine.client(ConnInfo { session_id: 9, user: user("S-1-5-21-2"), admin, can_elevate: admin })
 }
 
 // ---------- 1 and 2: the operations that change who may reach this machine ----------
@@ -165,4 +165,82 @@ fn the_pairing_endpoint_ignores_a_blocked_address_before_any_handshake() {
     drop((ua, ub));
     a.finish();
     b.finish();
+}
+
+/// F-SEC-02, the MAC path: B blocks a device by its MAC (listed under an old address); the neighbour table says A's
+/// pairing attempt comes from that MAC, so B ignores it before any handshake and shows no card.
+#[test]
+fn the_pairing_endpoint_ignores_a_blocked_mac_under_another_address_before_any_handshake() {
+    struct OneMac([u8; 6]);
+    impl swapdesk_platform::NeighborTable for OneMac {
+        fn cached_mac(&self, _peer: std::net::IpAddr) -> Option<[u8; 6]> {
+            Some(self.0)
+        }
+    }
+    let mac = [0x02, 0x5a, 0xd0, 0, 0, 0x39];
+    let a = Machine::new("alfa");
+    let b = Machine::new("beta");
+    let mut ua = a.client(info(false));
+    let mut ub = b.client(info(false));
+    b.hub.set_neighbors(Arc::new(OneMac(mac)));
+    b.trust
+        .block_mac(swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: [192, 168, 0, 57],
+            name: String::new(),
+            blocked_at_ms: 0,
+        })
+        .expect("store");
+    assert!(b.trust.read(|s| s.blocked.is_empty()), "no address is blocked, only the MAC");
+
+    let ReplyBody::PairingId(_id_b) = ub.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    let ReplyBody::PairingId(id_a) = ua.call(UiOp::PairOpen { device_id: Some(b.hex()) }).unwrap() else { panic!() };
+    a.sees(&b, true);
+    assert!(ua.call(UiOp::PairStart { pairing_id: id_a, device_id: b.hex() }).is_ok());
+    let shows_code = |m: &Ipc| matches!(m, Ipc::UiNotify(Notify::Pairing { state: PairingState::ShowCode { .. }, .. }));
+    assert!(ub.nothing_within(Duration::from_millis(1500), shows_code), "B talked to a blocked MAC");
+    assert!(ua.nothing_within(Duration::from_millis(100), shows_code));
+    assert!(b.trust.read(|s| s.devices.is_empty()));
+
+    assert!(ua.call(UiOp::PairCancel { pairing_id: id_a }).is_ok());
+    drop((ua, ub));
+    a.finish();
+    b.finish();
+}
+
+/// ACCOUNTS.md 5.6: what only narrows the account's own reach is open to any session of the account's own user, a
+/// session switched away from the console included; widening stays the console's, and another user gets nothing.
+#[test]
+fn a_narrowing_from_a_switched_out_session_of_the_same_user_is_accepted() {
+    let m = Machine::new("sala");
+    m.hub.set_account("S-1-5-21-1");
+    let (other, third) = (Machine::new("other"), Machine::new("third"));
+    m.pin(&other, PermissionSet::CONTROL.union(PermissionSet::FILES));
+    m.pin(&third, PermissionSet::CONTROL);
+    let (id, id3) = (other.hex(), third.hex());
+    // The account's own user, in a session that is not the console's.
+    let mut switched = m.client(ConnInfo { session_id: 9, user: user("S-1-5-21-1"), admin: false, can_elevate: false });
+    let denied = ApiCode::NotPermitted;
+    assert_eq!(
+        switched
+            .call(UiOp::SetGrants {
+                device_id: id.clone(),
+                grants: PermissionSet::CONTROL.union(PermissionSet::AUDIO).bits()
+            })
+            .unwrap_err(),
+        denied,
+        "adding a permission is the console's"
+    );
+    assert!(switched.call(UiOp::SetGrants { device_id: id.clone(), grants: PermissionSet::VIEW.bits() }).is_ok());
+    assert_eq!(m.trust.read(|s| s.find_by_id(&other.id()).unwrap().grants_here), PermissionSet::VIEW, "narrowed");
+    assert_eq!(switched.call(UiOp::PairOpen { device_id: None }).unwrap_err(), denied, "pairing is the console's");
+    // Another user of the machine, even away from the console, narrows nothing here.
+    let mut stranger = background(&m, false);
+    assert_eq!(stranger.call(UiOp::ForgetDevice { device_id: id3.clone() }).unwrap_err(), denied);
+    assert!(switched.call(UiOp::ForgetDevice { device_id: id3 }).is_ok(), "the own user forgets a device");
+    assert!(m.trust.read(|s| s.find_by_id(&third.id()).is_none()));
+    drop((switched, stranger));
+    m.finish();
+    other.finish();
+    third.finish();
 }

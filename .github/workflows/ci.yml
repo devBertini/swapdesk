@@ -18,6 +18,7 @@ env:
   NEXTEST_VERSION: "0.9.151"
   DENY_VERSION: "0.20.2"
   VET_VERSION: "0.10.3"
+  FUZZ_VERSION: "0.13.2"
 
 jobs:
   windows:
@@ -104,6 +105,15 @@ jobs:
           cargo check --locked --all-targets
           -p swapdesk-shell-mac -p swapdesk-codec-mac -p swapdesk-render-mac -p swapdesk-input-mac
           -p swapdesk-audio-mac -p swapdesk-net-mac -p swapdesk-secret-mac -p swapdesk-core-mac
+      - name: Clippy on the macOS crates and the crates the Mac builds
+        run: >
+          cargo clippy --all-targets --locked
+          -p swapdesk-app-mac -p swapdesk-audio-mac -p swapdesk-capture-mac -p swapdesk-codec-mac -p swapdesk-core-mac
+          -p swapdesk-input-mac -p swapdesk-net-mac -p swapdesk-render-mac -p swapdesk-secret-mac -p swapdesk-shell-mac
+          -p swapdesk-proto -p swapdesk-platform -p swapdesk-keys -p swapdesk-trust -p swapdesk-lan -p swapdesk-session
+          -p swapdesk-video -p swapdesk-audio -p swapdesk-files -p swapdesk-swap -p swapdesk-extras -p swapdesk-host
+          -p swapdesk-ui -p swapdesk-fakes -p swapdesk-ipc -p swapdesk-term -p swapdesk-termview -p swapdesk-app
+          -- -D warnings
       - name: Install cargo-nextest
         run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
       - name: Tests of the OS-free crates
@@ -166,6 +176,21 @@ jobs:
               keep = [l for l in lines if l.strip() and re.search(r"error|FAIL|panicked|SIGSEGV|TIMEOUT", l)][-30:]
               print(f"::error title=no JUnit report::{esc(chr(10).join(keep + lines[-25:])[-3800:])}")
 
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --version ${{ env.NEXTEST_VERSION }} --locked
+      - name: Tests of the crates that hold no OS API
+        run: >
+          cargo nextest run --locked --profile ci
+          -p swapdesk-proto -p swapdesk-platform -p swapdesk-keys -p swapdesk-trust -p swapdesk-lan -p swapdesk-session
+          -p swapdesk-video -p swapdesk-audio -p swapdesk-files -p swapdesk-swap -p swapdesk-extras -p swapdesk-host
+          -p swapdesk-ui -p swapdesk-fakes -p swapdesk-ipc -p swapdesk-term -p swapdesk-termview -p swapdesk-app
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:
@@ -178,3 +203,15 @@ jobs:
         run: cargo install cargo-vet --version ${{ env.VET_VERSION }} --locked
       - name: Every dependency audited or exempted (supply-chain/)
         run: cargo vet --locked
+
+  fuzz:
+    # D40: every parser a peer feeds runs under libFuzzer for two minutes per pull request (fuzz/, its own workspace).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nightly toolchain and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --version ${{ env.FUZZ_VERSION }} --locked
+      - name: Every fuzz target, 120 s each
+        run: bash scripts/dev/fuzz.sh 120

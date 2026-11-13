@@ -6,7 +6,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use swapdesk_files::{Command, DEFAULT_RECEIVE, Event, FsCaller, FsServer, Roots, Tokens};
+use swapdesk_files::{
+    Command, DEFAULT_RECEIVE, DirRead, Event, Fs, FsCaller, FsServer, FsStat, Kind, LocalFs, Moved, ReadHandle, Roots,
+    Tokens,
+};
 use swapdesk_ipc::{FsAnswer, FsCall};
 use swapdesk_swap::{AskEnd, SwapPrompt};
 use swapdesk_trust::UserRef;
@@ -275,13 +278,13 @@ fn files_travel_both_ways_through_the_proxies_and_never_overwrite() {
     };
     assert_eq!((entries[0].name.as_str(), entries[0].size), ("down.bin", down.len() as u64));
 
-    // F-FILE-01 upload into a folder of the host, then again: the name is taken, so it is saved as "up (1).bin".
+    // F-FILE-01 upload into a folder of the host, then again: the name is taken, so it is saved as "up (2).bin".
     run(&handle, Command::SendFile { id: 10, path: PathBuf::from(&up_path), dest: Some("incoming".into()) });
     vh.wait("the sender to hear it verified", |e| matches!(e, Event::Sent { id: 10 }));
     assert!(same(&std::fs::read(rig.home.join("incoming").join("up.bin")).unwrap(), &up));
     run(&handle, Command::SendFile { id: 11, path: PathBuf::from(&up_path), dest: Some("incoming".into()) });
     vh.wait("the second upload", |e| matches!(e, Event::Sent { id: 11 }));
-    assert!(same(&std::fs::read(rig.home.join("incoming").join("up (1).bin")).unwrap(), &up));
+    assert!(same(&std::fs::read(rig.home.join("incoming").join("up (2).bin")).unwrap(), &up));
     assert!(
         same(&std::fs::read(rig.home.join("incoming").join("up.bin")).unwrap(), &up),
         "the first file is untouched"
@@ -292,7 +295,7 @@ fn files_travel_both_ways_through_the_proxies_and_never_overwrite() {
         .collect();
     assert_eq!(
         saved,
-        [Path::new("incoming").join("up.bin"), Path::new("incoming").join("up (1).bin")],
+        [Path::new("incoming").join("up.bin"), Path::new("incoming").join("up (2).bin")],
         "the host's user is told where each went"
     );
 
@@ -441,4 +444,163 @@ fn d13_a_no_refuses_every_transfer_of_the_session_and_nobody_present_refuses_wit
     assert_eq!(asked, 0, "nobody at the console: refused at once");
     assert!(events.iter().any(|e| matches!(e, Event::Failed { id: 1, code: ErrorCode::NobodyPresent })), "{events:?}");
     assert!(!events.iter().any(|e| matches!(e, Event::Sent { .. })));
+}
+
+/// A disk whose `move_into` waits for the test to let it finish (a copy across volumes that takes a long time); every
+/// other call goes to the real disk.
+struct SlowMove {
+    inner: LocalFs,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+    entered: AtomicBool,
+}
+
+impl Fs for SlowMove {
+    fn list_dir(&self, path: &Path, max_entries: u32) -> Result<DirRead, ErrorCode> {
+        self.inner.list_dir(path, max_entries)
+    }
+    fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode> {
+        self.inner.stat(path, follow)
+    }
+    fn open_read(&self, path: &Path) -> Result<ReadHandle, ErrorCode> {
+        self.inner.open_read(path)
+    }
+    fn read_at(&self, id: u64, offset: u64, len: u32) -> Result<Vec<u8>, ErrorCode> {
+        self.inner.read_at(id, offset, len)
+    }
+    fn read_stat(&self, id: u64) -> Result<FsStat, ErrorCode> {
+        self.inner.read_stat(id)
+    }
+    fn close_read(&self, id: u64) {
+        self.inner.close_read(id)
+    }
+    fn stat_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<Option<FsStat>, ErrorCode> {
+        self.inner.stat_file(dir, name, kind)
+    }
+    fn part_create(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+        self.inner.part_create(dir, name)
+    }
+    fn part_truncate(&self, dir: &Path, name: &str, len: u64) -> Result<(), ErrorCode> {
+        self.inner.part_truncate(dir, name, len)
+    }
+    fn part_append(&self, dir: &Path, name: &str, offset: u64, data: &[u8]) -> Result<(), ErrorCode> {
+        self.inner.part_append(dir, name, offset, data)
+    }
+    fn part_len(&self, dir: &Path, name: &str) -> Result<u64, ErrorCode> {
+        self.inner.part_len(dir, name)
+    }
+    fn part_read(&self, dir: &Path, name: &str, offset: u64, len: u32) -> Result<Vec<u8>, ErrorCode> {
+        self.inner.part_read(dir, name, offset, len)
+    }
+    fn part_sync(&self, dir: &Path, name: &str, final_mtime_ms: Option<u64>) -> Result<(), ErrorCode> {
+        self.inner.part_sync(dir, name, final_mtime_ms)
+    }
+    fn part_rename(&self, dir: &Path, name: &str, target_name: &str) -> Result<(), ErrorCode> {
+        self.inner.part_rename(dir, name, target_name)
+    }
+    fn remove_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<(), ErrorCode> {
+        self.inner.remove_file(dir, name, kind)
+    }
+    fn meta_read(&self, dir: &Path, name: &str) -> Result<Option<Vec<u8>>, ErrorCode> {
+        self.inner.meta_read(dir, name)
+    }
+    fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode> {
+        self.inner.meta_write(dir, name, data)
+    }
+    fn move_into(&self, from_dir: &Path, name: &str, to_dir: &Path) -> Result<Moved, ErrorCode> {
+        self.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = lock(&self.gate).recv();
+        self.inner.move_into(from_dir, name, to_dir)
+    }
+}
+
+#[test]
+fn a_listing_is_answered_while_a_long_move_runs_and_the_move_then_reports_its_true_result() {
+    let mut rig = Rig::new("slowmove");
+    let (release, gate) = std::sync::mpsc::channel();
+    let slow = Arc::new(SlowMove { inner: LocalFs::new(), gate: Mutex::new(gate), entered: AtomicBool::new(false) });
+    let server = Arc::new(FsServer::with_fs(slow.clone(), Roots::Home { home: rig.home.clone(), receive: None }));
+    rig.user = TestHelper::spawn_with(&rig.host.core, IpcRole::HelperUser, move |deps| deps.with_fs(server));
+    std::fs::create_dir_all(rig.home.join("from")).unwrap();
+    std::fs::create_dir_all(rig.home.join("to")).unwrap();
+    std::fs::write(rig.home.join("from").join("big.bin"), b"payload").unwrap();
+    let (handle, _seen) = rig.connect(false);
+    let vh = &rig.viewer_hooks;
+
+    let name = |n: &str| swapdesk_proto::FsName { name: n.into() };
+    run(
+        &handle,
+        Command::FsOp {
+            op_id: 1,
+            op: swapdesk_proto::FsOpKind::Move {
+                from_dir: "from".into(),
+                names: vec![name("big.bin")],
+                to_dir: "to".into(),
+            },
+        },
+    );
+    wait_for("the move to start on the disk", || slow.entered.load(std::sync::atomic::Ordering::SeqCst).then_some(()));
+    // While it runs, a listing of the same session is answered, and the move has not answered yet.
+    run(&handle, Command::Dir { req_id: 5, path: Some("to".into()) });
+    vh.wait("a listing while the move runs", |e| matches!(e, Event::Listing { req_id: 5, .. }));
+    assert!(!vh.has(|e| matches!(e, Event::OpResult { .. })), "the move is still running");
+    // Past the generic 30 s the viewer must still hear the truth, not a failure: it hears it when the disk is done.
+    release.send(()).unwrap();
+    vh.wait("the move's result", |e| matches!(e, Event::OpResult { op_id: 1, .. }));
+    let results =
+        vh.find(|e| if let Event::OpResult { results, .. } = e { Some(results.clone()) } else { None }).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].code, ErrorCode::NoError, "the move was done");
+    assert!(rig.home.join("to").join("big.bin").exists() && !rig.home.join("from").join("big.bin").exists());
+    rig.finish(handle);
+}
+
+#[test]
+fn a_change_stops_before_its_next_name_when_control_is_withdrawn() {
+    // A change of the host's files needs FILES and CONTROL. When the host's user takes one back while a long change
+    // runs, the name being worked on finishes (a move is never half) and the ones not begun are left alone.
+    let mut rig = Rig::new("withdrawn");
+    let (release, gate) = std::sync::mpsc::channel();
+    let slow = Arc::new(SlowMove { inner: LocalFs::new(), gate: Mutex::new(gate), entered: AtomicBool::new(false) });
+    let server = Arc::new(FsServer::with_fs(slow.clone(), Roots::Home { home: rig.home.clone(), receive: None }));
+    rig.user = TestHelper::spawn_with(&rig.host.core, IpcRole::HelperUser, move |deps| deps.with_fs(server));
+    std::fs::create_dir_all(rig.home.join("from")).unwrap();
+    std::fs::create_dir_all(rig.home.join("to")).unwrap();
+    for n in ["one.bin", "two.bin", "three.bin"] {
+        std::fs::write(rig.home.join("from").join(n), n).unwrap();
+    }
+    let (handle, _seen) = rig.connect(false);
+    let name = |n: &str| swapdesk_proto::FsName { name: n.into() };
+    run(
+        &handle,
+        Command::FsOp {
+            op_id: 1,
+            op: swapdesk_proto::FsOpKind::Move {
+                from_dir: "from".into(),
+                names: vec![name("one.bin"), name("two.bin"), name("three.bin")],
+                to_dir: "to".into(),
+            },
+        },
+    );
+    wait_for("the first move to start on the disk", || {
+        slow.entered.load(std::sync::atomic::Ordering::SeqCst).then_some(())
+    });
+    // The user takes CONTROL back while the first name is on the disk.
+    let remaining = PermissionSet::VIEW | FILES;
+    assert!(rig.host.core.host().set_session_grants(handle.session_id(), remaining));
+    // Give the session core its moment to abort what needed CONTROL, then let the disk finish the first name.
+    std::thread::sleep(Duration::from_millis(300));
+    release.send(()).unwrap();
+    wait_for("the first name to be done", || rig.home.join("to").join("one.bin").exists().then_some(()));
+    // A second and third name would each wait on the gate forever if they began: release them so a run that does not
+    // stop shows itself as moved files, not as a hang.
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(rig.home.join("to").join("one.bin").exists(), "the name being worked on finished");
+    assert!(
+        rig.home.join("from").join("two.bin").exists() && rig.home.join("from").join("three.bin").exists(),
+        "the names not begun were left alone"
+    );
+    assert!(!rig.home.join("to").join("two.bin").exists() && !rig.home.join("to").join("three.bin").exists());
+    rig.finish(handle);
 }

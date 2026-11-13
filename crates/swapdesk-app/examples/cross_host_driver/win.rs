@@ -5,7 +5,8 @@
 //! `swapdesk_crossdrive::host_drive`: opens pairing, confirms the code the viewer reports, grants the viewer VIEW,
 //! CONTROL and AUDIO, answers the incoming request with Accept, waits for the session to end and forgets the device.
 //!
-//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>]
+//!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] [--clip] [--files]
+//!         [--chat <file>] [--reconnect] [--term --audit-dir <folder>] [--swap]
 //!     cross_host_driver --stay
 //!
 //! `--stay` (hand testing) pairs nothing and forgets nothing: it accepts every session request of a paired device
@@ -22,7 +23,7 @@ use std::time::Duration;
 
 use swapdesk_app::cli::Options;
 use swapdesk_app::connect::open_pipe;
-use swapdesk_crossdrive::{HostConfig, host_drive, host_stay};
+use swapdesk_crossdrive::{AuditCheck, HostConfig, host_drive, host_stay};
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Permission, Permissions, UiWaker};
 
@@ -45,17 +46,26 @@ pub fn main() -> ExitCode {
     let stay = args.iter().any(|a| a == "--stay");
     let peer_code = value(&args, "--peer-code");
     if !stay && peer_code.is_none() {
-        eprintln!("usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] | --stay");
+        eprintln!(
+            "usage: cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] | --stay \
+             [--service-pid <pid> --instance <n>]"
+        );
         return ExitCode::from(2);
     }
+    // A development instance (`swapdesk-service --console --instance <n>`) instead of the installed service: its pipe
+    // carries the instance's suffix and its server is the process named here, not the one the SCM reports.
+    let number = |flag: &str| value(&args, flag).and_then(|v| v.parse::<u32>().ok());
+    let options =
+        Options { service_pid: number("--service-pid"), instance: number("--instance"), ..Options::default() };
     let log = |line: &str| println!("{line}");
     let fail = |why: &str| {
         println!("HOST_RESULT FAIL {why}");
         ExitCode::FAILURE
     };
 
-    // The same open as the shell's: the pipe's server must be the service the SCM reports.
-    let conn = match open_pipe(&Options::default()) {
+    // The same open as the shell's: the pipe's server must be the service the SCM reports, or the development
+    // instance's process.
+    let conn = match open_pipe(&options) {
         Ok(c) => c,
         Err(e) => return fail(&format!("cannot open the UI pipe: {e}")),
     };
@@ -69,7 +79,28 @@ pub fn main() -> ExitCode {
     };
     log(&format!("HOST_CONNECTED win_session={}", backend.win_session()));
 
-    let grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+    let mut grants = Permissions::NONE.with(Permission::Control).with(Permission::Audio);
+    // `--clip`: the copy and paste proof also needs the clipboard granted.
+    if args.iter().any(|a| a == "--clip") {
+        grants = grants.with(Permission::Clipboard);
+    }
+    // `--files`: the files proof needs the files granted.
+    if args.iter().any(|a| a == "--files") {
+        grants = grants.with(Permission::Files);
+    }
+    // `--reconnect`: the viewer's link is dropped for about 10 s; the host's script logs the session's drop and return
+    // (it needs no grant), waits for the viewer to take the lost session back, and the session timeout below must
+    // cover the drop and the resume window.
+    if args.iter().any(|a| a == "--reconnect") {
+        log("HOST_RECONNECT_WATCH");
+    }
+    // `--term`: the terminal proof needs the terminal granted. `--audit-dir <folder>`: the data folder of this host (the
+    // development instance's), whose audit file the script reads once the session is over. Toward a Windows host no
+    // quick action runs (Task Manager asks for an elevation), so none is waited for.
+    let term = args.iter().any(|a| a == "--term");
+    if term {
+        grants = grants.with(Permission::Terminal);
+    }
     if stay {
         return match host_stay(&backend, grants, &log) {
             Ok(()) => ExitCode::SUCCESS,
@@ -81,6 +112,15 @@ pub fn main() -> ExitCode {
         pair_timeout: seconds(&args, "--pair-timeout", 100),
         session_timeout: seconds(&args, "--session-timeout", 120),
         grants,
+        // `--chat <file>`: the chat proof; once the orchestrator writes a text to <file> the host sends it.
+        chat_say: value(&args, "--chat").map(PathBuf::from),
+        // `--swap`: the proof of the swap; the host accepts the question the viewer asks.
+        swap: args.iter().any(|a| a == "--swap"),
+        // `--reconnect`: the lost session is waited out; the viewer takes it back.
+        reconnect: args.iter().any(|a| a == "--reconnect"),
+        audit: value(&args, "--audit-dir")
+            .filter(|_| term)
+            .map(|dir| AuditCheck { dir: PathBuf::from(dir), wait_action: false }),
     };
     let (outcome, result) = host_drive(&backend, &cfg, &log);
     match result {

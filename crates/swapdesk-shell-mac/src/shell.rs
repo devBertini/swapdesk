@@ -15,32 +15,37 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSControl, NSEventType, NSImage, NSMenu, NSMenuItem, NSModalResponseOK,
-    NSSavePanel, NSScrollView, NSStatusBar, NSStatusItem, NSTextField, NSTitlePosition, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSImage,
+    NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSPoint, NSRange, NSString, NSTimer, ns_string,
+    NSObjectProtocol, NSPoint, NSString, NSTimer, NSURL, NSUserDefaults, ns_string,
 };
+use swapdesk_paint::term::{PUMP_BUDGET, TerminalPane};
 use swapdesk_ui::debounce::Debouncer;
-use swapdesk_ui::tokens::{layout, palette};
+use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{
-    Activation, Changed, Command, ControlId, EditId, Effect, MsgKey, Quality, SelectId, SpecialKeys, Theme, UiBackend,
-    UiState, WindowKind,
+    Activation, Changed, Command, ControlId, EditId, MsgKey, SelectId, Theme, UiBackend, UiState, WindowKind,
 };
 
+use crate::appkit::*;
+use crate::banner_window::BannerWindow;
+use crate::canvas::CanvasView;
+use crate::effects::{Handling, handling};
 use crate::input::ViewerInput;
 use crate::model::*;
 use crate::system::{Waker, local_clock, system_dark};
 use crate::video::VideoSlot;
 use crate::viewer_window::ViewerWindow;
-use crate::views::*;
 
 /// Receives a line the shell wants in the trace log.
 pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// What the app does to ask macOS for the permissions the notice lists.
+pub type OsPermissionRequest = Arc<dyn Fn(&[swapdesk_ui::OsPermission]) + Send + Sync>;
 
 /// What the other lanes plug into the viewer window.
 #[derive(Default, Clone)]
@@ -49,10 +54,13 @@ pub struct ViewerHooks {
     pub video: Option<Arc<dyn VideoSlot>>,
     /// The input lane: gets the keyboard, mouse and focus events of the video view.
     pub input: Option<Arc<dyn ViewerInput>>,
-    /// Draw the "Inverter" button in the toolbar (its slot is always laid out in the model).
-    pub show_swap: bool,
     /// Told what the shell decided on its own at launch (login-item launch, status item), for the app's trace log.
     pub note: Option<LaunchNote>,
+    /// The folder of the app's logs, which "open the logs" shows in the Finder; none in a mock run.
+    pub logs_dir: Option<std::path::PathBuf>,
+    /// Asks macOS for these permissions (the system's own prompts) for the "Conceder permissões" button: the app owns
+    /// the grants (D32), so the app does it; none in a mock run.
+    pub request_os_permissions: Option<OsPermissionRequest>,
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -76,6 +84,12 @@ define_class!(
 
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, n: &NSNotification) {
+            with_shell(|s| s.resized(n));
+        }
+
+        // F-VIEW-06: another monitor may refresh at another rate.
+        #[unsafe(method(windowDidChangeScreen:))]
+        fn window_did_change_screen(&self, n: &NSNotification) {
             with_shell(|s| s.resized(n));
         }
 
@@ -118,14 +132,27 @@ define_class!(
             with_shell(|s| s.quit());
         }
 
-        #[unsafe(method(act:))]
-        fn act(&self, sender: &AnyObject) {
-            with_shell(|s| s.on_action(sender));
-        }
-
         #[unsafe(method(tick:))]
         fn tick(&self, _t: &AnyObject) {
             with_shell(|s| s.tick());
+        }
+
+        // The banner's line changes: the next minute of "há 12 min", or the end of a files note.
+        #[unsafe(method(bannerTick:))]
+        fn banner_tick(&self, _t: &AnyObject) {
+            with_shell(|s| s.banner_tick());
+        }
+
+        // Development (`dev_panel`): looks at the panel that is open and cancels it.
+        #[unsafe(method(devPanelCheck:))]
+        fn dev_panel_check(&self, _t: &AnyObject) {
+            dev::panel_check();
+        }
+
+        // The explorer's drag: 50 ms while one runs (spring-loaded folders, auto-scroll).
+        #[unsafe(method(dragTick:))]
+        fn drag_tick(&self, _t: &AnyObject) {
+            with_shell(|s| s.drag_tick());
         }
 
         #[unsafe(method(placeholders:))]
@@ -147,7 +174,7 @@ define_class!(
         // forwards it to its delegate, this controller).
         #[unsafe(method(cancelOperation:))]
         fn cancel_operation(&self, _sender: Option<&AnyObject>) {
-            with_shell(|s| s.cancel_rename());
+            with_shell(|s| s.escape());
         }
 
         #[unsafe(method(themeChanged:))]
@@ -172,12 +199,22 @@ const VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
 
 struct MainWindow {
     window: Retained<NSWindow>,
-    actions: RefCell<Vec<Action>>,
-    fields: RefCell<Vec<(EditId, Retained<NSTextField>)>>,
-    last: RefCell<Option<MainModel>>,
-    /// The content view is being replaced: AppKit ends the old field's editing (`textDidEndEditing`, an action) in
-    /// the middle of `setContentView`, and that action is the old view's, not the person's.
-    rebuilding: Cell<bool>,
+    /// The content view: it paints the shared frame, takes the mouse and the keyboard and holds the text fields.
+    canvas: Retained<CanvasView>,
+}
+
+/// The appearance `SWAPDESK_THEME=dark|light` asks for (development), `None` without it.
+fn forced_appearance() -> Option<&'static str> {
+    crate::locale::theme_override(std::env::var("SWAPDESK_THEME").ok().as_deref())
+        .map(|dark| if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" })
+}
+
+static SHOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static SHOT_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Development: the file the main window is captured to once it is drawn (see `Shell::take_shot`).
+pub fn set_shot(path: std::path::PathBuf) {
+    let _ = SHOT.set(path);
 }
 
 pub struct Shell {
@@ -189,15 +226,28 @@ pub struct Shell {
     hooks: ViewerHooks,
     main: MainWindow,
     viewer: RefCell<Option<ViewerWindow>>,
+    /// The host banner, while another computer watches or controls this Mac.
+    banner: RefCell<Option<BannerWindow>>,
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// The banner's one-shot timer, and the moment (ms of the local clock) it is due.
+    banner_timer: RefCell<Option<Retained<NSTimer>>>,
+    banner_due_ms: Cell<u64>,
     placeholder_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// Runs while an explorer drag does.
+    drag_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// Where the context menu opens, in the canvas's coordinates.
+    menu_at: std::cell::Cell<(f32, f32)>,
     debounce: RefCell<Debouncer>,
     started: std::time::Instant,
     /// The theme whose `NSApp.appearance` is in force (the app starts with none: Sistema).
     appearance: std::cell::Cell<Theme>,
+    /// The question the main window was last brought up for: the incoming request and the dialog on screen.
+    raised_for: RefCell<Option<(Option<u32>, Option<swapdesk_ui::DialogKind>)>>,
     /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
     status_item: RefCell<Option<Retained<NSStatusItem>>>,
+    /// The drawer's terminal: the model of the open shell, drawn by the viewer's canvas (F-XTERM-01).
+    terminal: RefCell<TerminalPane>,
 }
 
 thread_local! {
@@ -207,6 +257,174 @@ thread_local! {
 fn with_shell<R>(f: impl FnOnce(&Rc<Shell>) -> R) -> Option<R> {
     let shell = SHELL.with(|s| s.borrow().clone())?;
     Some(f(&shell))
+}
+
+/// Reads the UI state for a paint. `None` when there is no shell, or while the shell itself is changing the state
+/// (it marks the canvases dirty when it is done, so the paint comes again).
+pub(crate) fn with_state<R>(f: impl FnOnce(&UiState) -> R) -> Option<R> {
+    let shell = SHELL.with(|s| s.borrow().clone())?;
+    let state = shell.state.try_borrow().ok()?;
+    Some(f(&state))
+}
+
+/// Runs `f` on the drawer's terminal panel. `None` when there is no shell or the panel is in use further up the stack.
+pub(crate) fn with_terminal<R>(f: impl FnOnce(&mut TerminalPane) -> R) -> Option<R> {
+    let shell = SHELL.with(|s| s.borrow().clone())?;
+    let mut pane = shell.terminal.try_borrow_mut().ok()?;
+    Some(f(&mut pane))
+}
+
+/// The id of the shell that runs in the drawer's terminal (open, not ended).
+pub(crate) fn running_terminal() -> Option<u32> {
+    with_state(|st| matches!(st.term_phase(), swapdesk_ui::TermPhase::Open { .. }).then(|| st.term_id()).flatten())
+        .flatten()
+}
+
+/// Commands from a canvas outside an activation (the terminal's keys and its new size).
+pub(crate) fn send_from_canvas(commands: Vec<Command>) {
+    with_shell(|s| s.send_commands(commands));
+}
+
+/// The modifiers and click count of the click about to be reported (the explorer's rows read them).
+pub(crate) fn set_pointer_mods(mods: swapdesk_ui::PointerMods) {
+    with_shell(|s| s.state.borrow_mut().set_pointer_mods(mods));
+}
+
+/// A click on control `id` of the canvas of window `kind`.
+pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
+    with_shell(|s| s.activate_from(kind, id));
+}
+
+/// A key of the explorer (slice 2a), as the viewer's canvas mapped it.
+pub(crate) fn explorer_key(key: swapdesk_ui::ExplorerKey) {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().explorer_key(key);
+        s.dispatch_from(WindowKind::Viewer, act);
+        // Esc ends a drag: its timer goes with it.
+        s.sync_drag_timer();
+    });
+}
+
+/// The left button went down on `hit` in the explorer (slice 3).
+pub(crate) fn drag_press(hit: Option<ControlId>, at: (f32, f32)) {
+    with_shell(|s| s.state.borrow_mut().drag_press(hit, at));
+}
+
+/// The pointer moved with the left button down over the explorer; `copy` is Option.
+pub(crate) fn drag_move(hit: Option<ControlId>, at: (f32, f32), copy: bool) {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_move(hit, at, copy, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, act);
+        s.sync_drag_timer();
+    });
+}
+
+/// The pointer left the session window with the left button held (slice 5): a drag of the right pane becomes a
+/// system drag of promised files.
+pub(crate) fn drag_left_window() {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_left_window();
+        s.dispatch_from(WindowKind::Viewer, act);
+        s.sync_drag_timer();
+    });
+}
+
+/// A drag out's waker fired (main thread): the downloads the system asked for start, a released drag's cancel.
+pub(crate) fn system_drag_pump() {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().system_drag_pump();
+        s.send_commands(act.commands);
+    });
+}
+
+/// The left button went up over the explorer: true when a drag ended (the canvas must not click).
+pub(crate) fn drag_release(hit: Option<ControlId>, at: (f32, f32), copy: bool) -> bool {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_release(hit, at, copy);
+        let ended = act.is_some();
+        if let Some(act) = act {
+            s.dispatch_from(WindowKind::Viewer, act);
+        }
+        s.sync_drag_timer();
+        ended
+    })
+    .unwrap_or(false)
+}
+
+/// The control of the viewer window a Finder drag at `at` is over (see `CanvasView::drop_under`).
+fn drop_under(s: &Shell, at: (f32, f32)) -> Option<ControlId> {
+    s.canvas(WindowKind::Viewer).and_then(|c| c.drop_under(at))
+}
+
+/// A drag from the Finder came over the session window (slice 4): what the drop would do, for AppKit.
+pub(crate) fn system_drag_enter(data: swapdesk_ui::SystemDragData, at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drag_enter(data, under, at, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
+/// The Finder drag moved or rested.
+pub(crate) fn system_drag_over(at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drag_over(under, at, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
+/// The Finder drag left the window or was cancelled.
+pub(crate) fn system_drag_leave() {
+    with_shell(|s| {
+        let changed = s.state.borrow_mut().system_drag_leave();
+        s.refresh(changed);
+    });
+}
+
+/// The Finder drag was released over the session window.
+pub(crate) fn system_drop(at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drop(under, at);
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
+/// A right click or Control+click at `at` on `hit` in the explorer: the menu opens after the activation.
+pub(crate) fn context_menu(hit: Option<ControlId>, at: (f32, f32)) {
+    with_shell(|s| {
+        s.menu_at.set(at);
+        let act = s.state.borrow_mut().context_menu(hit, false);
+        s.dispatch_from(WindowKind::Viewer, act);
+    });
+}
+
+/// Whether the session window shows the explorer now.
+pub(crate) fn explorer_open() -> bool {
+    with_state(|st| st.explorer_open()).unwrap_or(false)
+}
+
+/// Return in a text field (or the keyboard leaving this computer's name): `text` is what input `id` holds.
+pub(crate) fn submit_edit(id: EditId, text: String) {
+    with_shell(|s| s.submit_edit(id, text));
+}
+
+/// Esc in the main window.
+pub(crate) fn escape() {
+    with_shell(|s| s.escape());
+}
+
+/// The main-queue block a canvas posts after a paint: the native text fields follow the frame's edit slots and the
+/// video view follows the frame's video rectangle.
+pub(crate) fn place_fields() {
+    with_shell(|s| s.after_paint());
 }
 
 /// The main-queue block the waker posts.
@@ -257,25 +475,35 @@ pub(crate) fn start(
 /// As [`start`]; `show_now` false leaves the main window closed until [`Shell::show_main`].
 fn start_with(
     mtm: MainThreadMarker,
-    state: UiState,
+    mut state: UiState,
     backend: Arc<dyn UiBackend>,
     waker: Arc<Waker>,
     startup: Vec<Command>,
     hooks: ViewerHooks,
     show_now: bool,
 ) -> Rc<Shell> {
+    // The viewer's own shortcuts are written with this system's keys (Control+Option, not Ctrl+Alt).
+    state.set_viewer_os(swapdesk_ui::ViewerOs::MacOs);
+    // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
+    state.set_live_picture(hooks.video.is_some());
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // The system's font smoothing thickens the stems of text. The painter draws without it
+    // (`CGContextSetShouldSmoothFonts`), and so must the native text fields over the frame, or a typed value looks
+    // bolder than the text around it. CoreGraphics reads `AppleFontSmoothing` from the app's own preferences: a
+    // registered default does not reach it (tried on macOS 27.2), so the value is written there, before any text is
+    // drawn.
+    NSUserDefaults::standardUserDefaults().setInteger_forKey(0, ns_string!("AppleFontSmoothing"));
     let controller = Controller::create(mtm);
 
     // R-UI-10: UI-thread work over 16 ms goes to stderr with its name and duration, nothing else.
     swapdesk_ui::trace::set_hook(|e| eprintln!("swapdesk: slow UI work {} took {} ms", e.name, e.millis));
 
-    let mut state = state;
-    // This toolbar has the quality select and the view-only switch: the state lists them.
-    state.set_viewer_extras(true);
     install_menus(mtm, &app, &state);
-    let window = make_main_window(mtm, &controller, &state.t(swapdesk_ui::MsgKey::AppName));
+    let (window, canvas) = make_main_window(mtm, &controller, &state.t(swapdesk_ui::MsgKey::AppName));
+    if let Some(shot) = SHOT.get() {
+        canvas.set_dump(shot.with_extension("layout.txt"));
+    }
     let shell = Rc::new(Shell {
         mtm,
         controller: controller.clone(),
@@ -283,24 +511,33 @@ fn start_with(
         backend,
         waker,
         hooks,
-        main: MainWindow {
-            window,
-            actions: RefCell::new(Vec::new()),
-            fields: RefCell::new(Vec::new()),
-            last: RefCell::new(None),
-            rebuilding: Cell::new(false),
-        },
+        main: MainWindow { window, canvas },
         viewer: RefCell::new(None),
+        banner: RefCell::new(None),
         tick_timer: RefCell::new(None),
+        banner_timer: RefCell::new(None),
+        banner_due_ms: Cell::new(0),
         placeholder_timer: RefCell::new(None),
         debounce_timer: RefCell::new(None),
+        drag_timer: RefCell::new(None),
+        menu_at: std::cell::Cell::new((0.0, 0.0)),
         debounce: RefCell::new(Debouncer::new()),
         started: std::time::Instant::now(),
         appearance: std::cell::Cell::new(Theme::System),
+        raised_for: RefCell::new(None),
         status_item: RefCell::new(None),
+        terminal: RefCell::new(TerminalPane::default()),
     });
+    swapdesk_paint::term::set_terminal_waker(shell.waker.clone());
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
+    // The explorer's Trash and free space (slice 2a), for the backend's worker thread.
+    swapdesk_ui::local_disk::set_os(crate::trash::local_os());
+    // "Increase contrast" on at launch: the first paint uses the stronger palette.
+    {
+        let _ = shell.state.borrow_mut().set_contrast(crate::system::system_contrast());
+    }
+    shell.apply_forced_appearance();
 
     // The window appears before any answer; the requests go out right after, all together.
     if show_now {
@@ -332,11 +569,45 @@ pub fn status_item_present() -> bool {
     with_shell(|s| s.status_item.borrow().as_ref().is_some_and(|i| i.isVisible())).unwrap_or(false)
 }
 
+/// Development (`--selftest`): a real click on a sidebar entry of the main window, sent through the window as AppKit
+/// sends the mouse (`sendEvent:`). `Some(true)` when the screen changed, `None` when there was nothing to click.
+pub fn selftest_click() -> Option<bool> {
+    with_shell(|s| s.selftest_click()).flatten()
+}
+
+/// Development (`--mock <scenario> --selftest`): opens the first paired device, clicks "Renomear" and types `name`
+/// and Return into the native field with real key events. `Some(true)` when the field held exactly `name` before the
+/// Return; `None` when a step had nothing to act on. The backend answers the rename later: see
+/// [`selftest_rename_end`].
+pub fn selftest_rename_begin(name: &str) -> Option<bool> {
+    with_shell(|s| s.selftest_rename_begin(name)).flatten()
+}
+
+/// Development (`--selftest`): how many times AppKit's own display pass painted the main window, and how many of
+/// those found the state busy and drew nothing.
+pub fn selftest_display_passes() -> Option<(u64, u64)> {
+    with_shell(|s| s.main.canvas.display_passes())
+}
+
+/// Development: after [`selftest_rename_begin`] and the backend's answer, the device carries `name` and the rename
+/// field is closed.
+pub fn selftest_rename_end(name: &str) -> Option<bool> {
+    with_shell(|s| {
+        let state = s.state.borrow();
+        state.selected_device().map(|d| d.name == name && state.renaming().is_none())
+    })
+    .flatten()
+}
+
 fn clear_shell() {
     SHELL.with(|s| *s.borrow_mut() = None);
 }
 
-fn make_main_window(mtm: MainThreadMarker, controller: &Controller, title: &str) -> Retained<NSWindow> {
+fn make_main_window(
+    mtm: MainThreadMarker,
+    controller: &Controller,
+    title: &str,
+) -> (Retained<NSWindow>, Retained<CanvasView>) {
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
@@ -356,8 +627,15 @@ fn make_main_window(mtm: MainThreadMarker, controller: &Controller, title: &str)
     window.setTitle(&ns(title));
     window.setContentMinSize(size(f64::from(layout::MIN_W), f64::from(layout::MIN_H)));
     window.setDelegate(Some(ProtocolObject::from_ref(controller)));
+    // The content view follows the window's size; the shell marks it dirty on a resize.
+    let canvas = CanvasView::create(
+        mtm,
+        frame(0.0, 0.0, f64::from(layout::DESIGN_W), f64::from(layout::DESIGN_H)),
+        WindowKind::Main,
+    );
+    window.setContentView(Some(&canvas));
     window.center();
-    window
+    (window, canvas)
 }
 
 /// The application menu (quit) and the edit menu (so Cmd+V works in the address field).
@@ -405,6 +683,14 @@ impl Shell {
                 Some(ns_string!("AppleInterfaceThemeChangedNotification")),
                 None,
             );
+            // "Increase contrast" and the other display options: posted to the workspace's own center
+            // (NSAccessibility.h).
+            NSWorkspace::sharedWorkspace().notificationCenter().addObserver_selector_name_object(
+                ctl,
+                sel!(themeChanged:),
+                Some(objc2_app_kit::NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
+                None,
+            );
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 ctl,
                 sel!(textChanged:),
@@ -429,7 +715,11 @@ impl Shell {
         self.waker.drained();
         let events = self.backend.drain();
         let mut changed = Changed::NONE;
-        self.state.borrow_mut().set_clock(local_clock());
+        // A capture (`--mock <scenario> --shot`) shows the scenario at the scenario's own time ("há 12 min", "Hoje,
+        // 15:25"), as the design boards and the Windows captures do.
+        if SHOT.get().is_none() {
+            self.state.borrow_mut().set_clock(local_clock());
+        }
         for e in events {
             changed = changed.union(self.state.borrow_mut().apply(e));
         }
@@ -437,40 +727,277 @@ impl Shell {
         let want = self.state.borrow_mut().take_display_request();
         followups.extend(want);
         self.send_commands(followups);
+        self.pump_terminal();
         self.refresh(changed);
+        self.apply_focus_request();
+        self.minimize_main_for_session();
+        self.restore_main_after_session();
+    }
+
+    /// Feeds the open shell's model with the output that arrived (a byte budget a turn, so a burst never holds the
+    /// thread, R-UI-1), writes back what the terminal answers the program, and repaints the viewer when the screen
+    /// changed. The same as the Windows shell's.
+    fn pump_terminal(&self) {
+        let want = {
+            let st = self.state.borrow();
+            matches!(st.term_phase(), swapdesk_ui::TermPhase::Open { .. } | swapdesk_ui::TermPhase::Exited { .. })
+                .then(|| st.term_id())
+                .flatten()
+        };
+        let pumped = {
+            let mut pane = self.terminal.borrow_mut();
+            pane.sync(want);
+            pane.pump(PUMP_BUDGET)
+        };
+        if let (Some(term_id), false) = (pumped.id, pumped.replies.is_empty()) {
+            self.send_commands(vec![Command::TermWrite { term_id, bytes: pumped.replies }]);
+        }
+        if pumped.repaint
+            && let Some(c) = self.canvas(WindowKind::Viewer)
+        {
+            c.setNeedsDisplay(true);
+        }
+        if pumped.more {
+            // More is queued: another turn of the main queue, not another loop here.
+            swapdesk_ui::UiWaker::wake(&*self.waker);
+        }
+    }
+
+    /// A session of this Mac just came up (either role): the main window goes to the Dock, once per session, unless
+    /// it is already minimized or hidden. Only in a real run (it has the video slot): a mock run keeps its window.
+    /// The window comes back when that session ends (`restore_main_after_session`).
+    fn minimize_main_for_session(&self) {
+        if self.hooks.video.is_none() || !self.state.borrow_mut().take_minimize_request() {
+            return;
+        }
+        let window = &self.main.window;
+        if window.isVisible() && !window.isMiniaturized() {
+            window.miniaturize(None);
+        }
+    }
+
+    /// The last session that minimized the main window ended: the window comes back from the Dock, if it is still
+    /// there (one the user already brought back is left as it is). Only in a real run, like the minimize.
+    fn restore_main_after_session(&self) {
+        if self.hooks.video.is_none() || !self.state.borrow_mut().take_restore_request() {
+            return;
+        }
+        let window = &self.main.window;
+        if window.isMiniaturized() {
+            window.deminiaturize(None);
+        }
     }
 
     fn dispatch(&self, act: Activation) {
-        match act.effect {
-            Some(Effect::FocusEdit(e)) => {
-                let fields = self.main.fields.borrow();
-                if let Some((_, f)) = fields.iter().find(|(id, _)| *id == e) {
-                    self.main.window.makeFirstResponder(Some(f));
-                }
-            }
-            Some(Effect::SaveLog) => self.save_log(),
-            // The Mac shell has no crash marker yet (D12 is Windows first): OpenLogs is never produced there.
-            // The file panel's pickers (stage 44) are a Windows shell feature for now: the Mac panel is a later stage.
-            Some(Effect::PickFiles) | Some(Effect::PickReceiveFolder) => {}
-            // "Salvar" of the rename field: the field's text goes through `submit_edit` like Enter does.
-            Some(Effect::SubmitEdit(e)) => {
-                let text =
-                    self.main.fields.borrow().iter().find(|(id, _)| *id == e).map(|(_, f)| f.stringValue().to_string());
-                if let Some(text) = text {
+        self.dispatch_from(WindowKind::Main, act);
+    }
+
+    /// Sends what an activation asks of the backend, repaints what it changed and runs its effect, if it has one.
+    /// `kind` is the window the activation came from. A menu or a panel waits for the person: it opens last, with
+    /// the activation already dispatched and no borrow of the state held.
+    fn dispatch_from(&self, kind: WindowKind, act: Activation) {
+        let effect = act.effect.map(handling);
+        if let Some(h) = effect.filter(|h| !h.waits_for_a_person()) {
+            self.run(kind, h);
+        }
+        self.send_commands(act.commands);
+        self.refresh(act.changed);
+        if let Some(h) = effect.filter(|h| h.waits_for_a_person()) {
+            self.run(kind, h);
+        }
+    }
+
+    /// Does what an effect asks for (see `effects.rs`: one arm per handler, no catch-all).
+    fn run(&self, kind: WindowKind, handling: Handling) {
+        let canvas = self.canvas(kind).unwrap_or_else(|| self.main.canvas.clone());
+        match handling {
+            Handling::Focus(e) => canvas.focus_control(ControlId::Edit(e), true),
+            Handling::FocusControl(id) => canvas.focus_control(id, true),
+            // The button beside a text input ("Salvar" of the rename field, "Enviar" of the chat): the field's text
+            // goes through `submit_edit` like Return does.
+            Handling::Submit(e) => {
+                if let Some(text) = canvas.edit_text(e) {
                     let again = self.state.borrow_mut().submit_edit(e, text);
+                    if e == EditId::Chat {
+                        canvas.clear_edit(e);
+                    }
                     self.send_commands(again.commands);
                     self.refresh(again.changed);
                 }
             }
-            Some(Effect::Menu(_)) | Some(Effect::OpenLogs) | None => {}
+            Handling::OpenLogsFolder => self.open_logs(),
+            Handling::OpenWebPage => {
+                let page = self.state.borrow_mut().take_web_page();
+                if let Some(url) = page.filter(|u| swapdesk_ui::state::openable_page(u)) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+            }
+            Handling::OpenLoginItems => {
+                if !crate::system::open_login_items_settings() {
+                    self.note("System Settings could not be opened at Login Items (SMAppService needs macOS 13)");
+                }
+            }
+            Handling::RequestOsPermissions => {
+                let missing = self.state.borrow_mut().take_os_permission_request();
+                if let Some(request) = &self.hooks.request_os_permissions {
+                    request(&missing);
+                }
+                if let Some(url) =
+                    crate::effects::permission_request(&missing).filter(|u| swapdesk_ui::state::openable_page(u))
+                {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+            }
+            Handling::OpenLocalFile => {
+                let target = self.state.borrow_mut().take_local_target();
+                // Only an existing regular file: a folder opens in the explorer itself, and nothing else is started.
+                if let Some(path) = target.filter(|p| p.is_file()) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
+                }
+            }
+            Handling::Menu(select) => self.pick(kind, select),
+            Handling::ContextMenu => self.context_popup(kind),
+            Handling::RevealInFinder => {
+                let target = self.state.borrow_mut().take_local_target();
+                // Only something that exists: `open -R` shows it selected in its folder.
+                if let Some(path) = target.filter(|p| p.exists()) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+                }
+            }
+            Handling::SystemDrag => {
+                let out = self.state.borrow_mut().take_system_drag();
+                if let Some(out) = out {
+                    crate::drag_out::begin(&canvas, out, self.mtm);
+                }
+            }
+            Handling::SaveLogPanel => self.save_log(),
         }
-        self.send_commands(act.commands);
-        self.refresh(act.changed);
+    }
+
+    /// The folder of the app's logs, shown in the Finder.
+    fn open_logs(&self) {
+        if let Some(dir) = &self.hooks.logs_dir {
+            let url = NSURL::fileURLWithPath_isDirectory(&ns(&dir.to_string_lossy()), true);
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
     }
 
     fn activate(&self, id: ControlId) {
         let act = self.state.borrow_mut().activate(id);
         self.dispatch(act);
+    }
+
+    /// What a text field of a canvas holds goes to the state. An address waiting for its 150 ms goes now. A field can
+    /// lose the keyboard in the middle of the shell's own work on the state: that call is dropped, the field keeps
+    /// its text.
+    fn submit_edit(&self, id: EditId, text: String) {
+        if id == EditId::Address {
+            self.debounce.borrow_mut().flush();
+            if let Some(timer) = self.debounce_timer.borrow_mut().take() {
+                timer.invalidate();
+            }
+        }
+        let act = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.submit_edit(id, text),
+            Err(_) => return,
+        };
+        self.dispatch(act);
+    }
+
+    /// A click on a painted control. A select answers with its menu, which waits for the person: it opens after the
+    /// activation was dispatched, with no borrow of the state held.
+    fn activate_from(&self, kind: WindowKind, id: ControlId) {
+        let act = self.state.borrow_mut().activate(id);
+        self.dispatch_from(kind, act);
+    }
+
+    /// The canvas of window `kind`, while that window exists.
+    fn canvas(&self, kind: WindowKind) -> Option<Retained<CanvasView>> {
+        match kind {
+            WindowKind::Main => Some(self.main.canvas.clone()),
+            WindowKind::Viewer => self.viewer.borrow().as_ref().map(|v| v.canvas.clone()),
+            WindowKind::Banner => self.banner.borrow().as_ref().map(|b| b.canvas.clone()),
+        }
+    }
+
+    /// After a paint, outside `drawRect:`: every canvas places its text fields, and the viewer's video view goes to
+    /// the rectangle the frame left for it; the render lane is told when that area changed.
+    fn after_paint(&self) {
+        self.main.canvas.place_fields();
+        self.main.canvas.ax_after_paint();
+        let viewer = self.viewer.borrow().as_ref().map(|v| (v.canvas.clone(), v.place_video(), v.view_report()));
+        if let Some((canvas, moved, (w, h, hz))) = viewer {
+            // F-VIEW-06: the host encodes at this size; the state sends a command only when it changed.
+            let commands = self.state.borrow_mut().set_view_area(w, h, hz);
+            self.send_commands(commands);
+            canvas.place_fields();
+            canvas.ax_after_paint();
+            if let (Some(area), Some(slot)) = (moved, &self.hooks.video) {
+                slot.resized(area);
+            }
+        }
+        let banner = self.banner.borrow().as_ref().map(|b| b.canvas.clone());
+        if let Some(canvas) = banner {
+            canvas.place_fields();
+            canvas.ax_after_paint();
+        }
+    }
+
+    /// The menu of a select under its control; the choice goes back through `UiState::choose`.
+    fn pick(&self, kind: WindowKind, select: SelectId) {
+        let options = self.state.borrow().select_options(select);
+        if options.is_empty() {
+            return;
+        }
+        let Some(canvas) = self.canvas(kind) else { return };
+        if let Some(index) = canvas.pick(&options, select.anchor()) {
+            let act = self.state.borrow_mut().choose(select, index);
+            self.dispatch_from(kind, act);
+        }
+    }
+
+    /// The explorer's context menu at the pointer; the choice goes back through `UiState::context_chosen`.
+    fn context_popup(&self, kind: WindowKind) {
+        let items: Vec<(String, bool, bool)> =
+            self.state.borrow().context_items().into_iter().map(|(label, on)| (label, false, on)).collect();
+        let Some(canvas) = self.canvas(kind) else { return };
+        let (x, y) = self.menu_at.get();
+        match canvas.popup(&items, NSPoint::new(f64::from(x), f64::from(y))) {
+            Some(index) => {
+                let act = self.state.borrow_mut().context_chosen(index);
+                self.dispatch_from(kind, act);
+            }
+            None => self.state.borrow_mut().context_closed(),
+        }
+    }
+
+    /// The drag's timer runs while a drag does.
+    fn sync_drag_timer(&self) {
+        let active = self.state.borrow().drag_active();
+        let running = self.drag_timer.borrow().is_some();
+        if active && !running {
+            self.set_timer(&self.drag_timer, 0.05, true, sel!(dragTick:));
+        } else if !active
+            && running
+            && let Some(t) = self.drag_timer.borrow_mut().take()
+        {
+            t.invalidate();
+        }
+    }
+
+    /// Milliseconds since the shell started (the drag's spring-loaded folders read it).
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// One 50 ms tick of a drag: a folder hovered for 800 ms opens, and a list scrolls at its edges.
+    fn drag_tick(&self) {
+        let act = self.state.borrow_mut().drag_tick(self.now_ms());
+        self.dispatch_from(WindowKind::Viewer, act);
+        self.sync_drag_timer();
+        if let Some(canvas) = self.canvas(WindowKind::Viewer) {
+            canvas.drag_autoscroll();
+        }
     }
 
     /// "Where to save the log" waits for a person, so it runs outside the slow-work guard.
@@ -482,97 +1009,32 @@ impl Shell {
         if panel.runModal() == NSModalResponseOK
             && let Some(path) = panel.URL().and_then(|u| u.path())
         {
-            self.send_commands(vec![Command::ActivityExport { path: std::path::PathBuf::from(path.to_string()) }]);
+            let export = self.state.borrow().activity_export(std::path::PathBuf::from(path.to_string()));
+            self.send_commands(vec![export]);
         }
     }
 
     // ----- what AppKit tells the shell -----
 
-    fn on_action(&self, sender: &AnyObject) {
-        if self.main.rebuilding.get() {
-            return;
-        }
-        let Some(control) = sender.downcast_ref::<NSControl>() else { return };
-        let tag = control.tag();
-        let (idx, parity) = ((tag / 2) as usize, tag % 2);
-        let action = if parity == 0 {
-            self.main.actions.borrow().get(idx).copied()
-        } else {
-            self.viewer.borrow().as_ref().and_then(|v| v.actions.borrow().get(idx).copied())
-        };
-        let Some(action) = action else { return };
-        let _g = SlowGuard::ui("on_action");
-        let picked =
-            sender.downcast_ref::<objc2_app_kit::NSPopUpButton>().map(|p| p.indexOfSelectedItem().max(0) as usize);
-        match action {
-            Action::Control(id) => self.activate(id),
-            // The rename field acts on Return only: ending the editing by a click (on "Cancelar") must not save.
-            Action::Edit(EditId::Rename) if !self.return_pressed() => {}
-            Action::Edit(e) => {
-                let text =
-                    sender.downcast_ref::<NSTextField>().map(|f| f.stringValue().to_string()).unwrap_or_default();
-                self.debounce.borrow_mut().flush();
-                let act = self.state.borrow_mut().submit_edit(e, text);
-                if e == EditId::Address {
-                    self.clear_field(e);
-                }
-                self.dispatch(act);
-            }
-            Action::Select(select) => {
-                let act = self.state.borrow_mut().choose(select, picked.unwrap_or(0));
-                self.dispatch(act);
-            }
-            Action::ToolScreen => {
-                let id = picked.and_then(|i| self.state.borrow().viewer_displays().get(i).map(|d| d.id));
-                if let Some(display_id) = id {
-                    let act = self.state.borrow_mut().choose_display(display_id);
-                    self.dispatch(act);
-                }
-            }
-            Action::ToolQuality => {
-                let q = Quality::ALL[picked.unwrap_or(0).min(2)];
-                let act = self.state.borrow_mut().choose_quality(q);
-                self.dispatch(act);
-            }
-            Action::ToolKeys => {
-                let key = picked.and_then(|i| i.checked_sub(1)).and_then(|i| SpecialKeys::ALL.get(i).copied());
-                if let Some(keys) = key {
-                    let act = self.state.borrow_mut().send_keys(keys);
-                    self.dispatch(act);
-                }
-            }
-            Action::ToolSwitch(tool) => match tool {
-                SwitchTool::Fit => self.activate(ControlId::TbFit),
-                SwitchTool::Audio => self.activate(ControlId::TbAudio),
-                SwitchTool::Grab => self.activate(ControlId::TbGrab),
-                SwitchTool::ViewOnly => self.activate(ControlId::TbViewOnly),
-            },
-            Action::ToolSwap => self.activate(ControlId::TbSwap),
-            Action::StripCancel(session_id) => self.send_commands(vec![Command::Disconnect { session_id }]),
-            Action::StripDismiss => {
-                let changed = self.state.borrow_mut().dismiss_connect();
-                self.refresh(changed);
-            }
-        }
-    }
-
-    /// The event being handled is the Return or Enter key.
-    fn return_pressed(&self) -> bool {
-        NSApplication::sharedApplication(self.mtm)
-            .currentEvent()
-            .is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 36 | 76))
-    }
-
-    /// Esc: closes the rename field without saving.
-    fn cancel_rename(&self) {
+    /// Esc in the main window. The rename field closes without saving (its old meaning, first); otherwise the control
+    /// the state names (Cancelar on a waiting card, Fechar on an ended one) is activated as a click on it would.
+    fn escape(&self) {
         if self.state.borrow().renaming().is_some() {
             self.activate(ControlId::RenameCancel);
+            return;
+        }
+        let target = self.state.borrow().escape_target(WindowKind::Main);
+        if let Some(id) = target {
+            self.activate_from(WindowKind::Main, id);
         }
     }
 
-    fn clear_field(&self, e: EditId) {
-        if let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e) {
-            f.setStringValue(&ns(""));
+    /// The state asks for the keyboard focus after an event of the service (a connect ended and its card says why):
+    /// it goes to that control of the main window, once.
+    fn apply_focus_request(&self) {
+        let request = self.state.borrow_mut().take_focus_request();
+        if let Some(id) = request {
+            self.main.canvas.focus_control(id, true);
         }
     }
 
@@ -580,11 +1042,9 @@ impl Shell {
     fn text_changed(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
         let Some(field) = obj.downcast_ref::<NSTextField>() else { return };
-        let Some(Action::Edit(EditId::Address)) =
-            self.main.actions.borrow().get((field.tag() / 2) as usize).copied().filter(|_| field.tag() % 2 == 0)
-        else {
+        if self.main.canvas.edit_of(field) != Some(EditId::Address) {
             return;
-        };
+        }
         let now = self.started.elapsed().as_millis() as u64;
         self.debounce.borrow_mut().input(&field.stringValue().to_string(), now);
         self.set_timer(&self.debounce_timer, 0.15, false, sel!(debounced:));
@@ -683,17 +1143,30 @@ impl Shell {
 
     fn resized(&self, n: &NSNotification) {
         let Some(obj) = n.object() else { return };
+        if std::ptr::eq(&*self.main.window as *const NSWindow as *const AnyObject, &*obj as *const AnyObject) {
+            self.main.canvas.setNeedsDisplay(true);
+        }
         let is_viewer = self.viewer.borrow().as_ref().is_some_and(|v| {
             std::ptr::eq(&*v.window as *const NSWindow as *const AnyObject, &*obj as *const AnyObject)
         });
-        if is_viewer && let (Some(slot), Some(v)) = (&self.hooks.video, self.viewer.borrow().as_ref()) {
-            slot.resized(v.video.area());
+        // The paint that follows moves the video view and tells the render lane its new area.
+        if is_viewer && let Some(v) = self.viewer.borrow().as_ref() {
+            v.canvas.setNeedsDisplay(true);
         }
     }
 
     fn tick(&self) {
         let c = self.state.borrow_mut().tick();
         self.refresh(c);
+        self.apply_focus_request();
+    }
+
+    fn banner_tick(&self) {
+        *self.banner_timer.borrow_mut() = None;
+        if SHOT.get().is_none() {
+            self.state.borrow_mut().set_clock(local_clock());
+        }
+        self.refresh(Changed::BANNER);
     }
 
     fn arm_placeholders(&self) {
@@ -702,22 +1175,37 @@ impl Shell {
         self.refresh(c);
     }
 
+    /// The system's appearance changed: light or dark, or "Increase contrast" turned on or off.
     fn system_theme_changed(&self) {
         let dark = system_dark();
-        let c = self.state.borrow_mut().set_dark(dark);
+        let c = {
+            let mut st = self.state.borrow_mut();
+            st.set_dark(dark).union(st.set_contrast(crate::system::system_contrast()))
+        };
         self.refresh(c);
     }
 
     /// Gives `NSApp` the appearance the theme setting asks for (Aqua, DarkAqua, or none for Sistema), once per change:
     /// the native controls and the title bars follow it. Back on Sistema the OS's own appearance is read again, since
     /// while one was forced `effectiveAppearance` showed the forced one.
+    /// Sets the appearance once at launch: under `SWAPDESK_THEME` (development) the app's own controls must follow
+    /// the forced theme too, or a light card gets the dark system's white button titles.
+    fn apply_forced_appearance(&self) {
+        if let Some(name) = forced_appearance() {
+            let app = NSApplication::sharedApplication(self.mtm);
+            app.setAppearance(NSAppearance::appearanceNamed(&NSString::from_str(name)).as_deref());
+        }
+    }
+
     fn sync_appearance(&self) -> Changed {
         let theme = self.state.borrow().theme();
         if self.appearance.replace(theme) == theme {
             return Changed::NONE;
         }
         let app = NSApplication::sharedApplication(self.mtm);
-        let appearance = appearance_name(theme).and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
+        let appearance = appearance_name(theme)
+            .or_else(|| (theme == Theme::System).then(forced_appearance).flatten())
+            .and_then(|n| NSAppearance::appearanceNamed(&NSString::from_str(n)));
         app.setAppearance(appearance.as_deref());
         if theme == Theme::System {
             let dark = system_dark();
@@ -728,8 +1216,8 @@ impl Shell {
 
     // ----- drawing -----
 
-    /// Windows follow the state (a viewer exists while a session does); then what changed is rebuilt, and only when
-    /// its model differs from the last one drawn.
+    /// Windows follow the state (a viewer exists while a session does, a banner while this Mac is hosted); then what
+    /// changed is painted again.
     fn refresh(&self, changed: Changed) {
         let changed = changed.union(self.sync_appearance());
         if changed.is_none() {
@@ -737,27 +1225,64 @@ impl Shell {
             return;
         }
         self.sync_viewer();
+        if changed.hits(WindowKind::Banner) || changed.hits(WindowKind::Main) {
+            self.sync_banner();
+        }
         if changed.hits(WindowKind::Main) || changed.hits(WindowKind::Banner) {
-            self.rebuild_main();
+            self.main.canvas.setNeedsDisplay(true);
+            self.take_shot();
         }
         if changed.hits(WindowKind::Viewer)
             && let Some(v) = self.viewer.borrow().as_ref()
-            && let Some(model) = viewer_model(&self.state.borrow())
+            && let Some(title) = viewer_title(&self.state.borrow())
         {
-            v.update(self.mtm, self.target(), &model, self.hooks.show_swap);
+            v.window.setTitle(&ns(&title));
+            v.canvas.setNeedsDisplay(true);
         }
         self.attention();
         self.sync_timers();
     }
 
+    /// The banner follows the host session: created with it, painted again when its line changes, gone with it.
+    fn sync_banner(&self) {
+        let model = banner_model(&self.state.borrow());
+        let mut slot = self.banner.borrow_mut();
+        match model {
+            Some(m) => {
+                let first = slot.is_none();
+                let b = slot.get_or_insert_with(|| {
+                    let b = BannerWindow::create(self.mtm);
+                    if let Some(shot) = SHOT.get() {
+                        b.canvas.set_dump(shot.with_extension("banner.layout.txt"));
+                    }
+                    b
+                });
+                b.update(&m);
+                if first && let Some(dir) = crate::banner_window::snapshot_dir() {
+                    b.snapshot(dir);
+                }
+            }
+            None => {
+                if let Some(b) = slot.take() {
+                    b.close();
+                }
+            }
+        }
+    }
+
     fn sync_viewer(&self) {
-        let model = viewer_model(&self.state.borrow());
+        let title = viewer_title(&self.state.borrow());
         let exists = self.viewer.borrow().is_some();
-        match (model, exists) {
-            (Some(m), false) => {
+        match (title, exists) {
+            (Some(title), false) => {
                 let delegate = ProtocolObject::from_ref(&*self.controller);
-                let v = ViewerWindow::create(self.mtm, delegate, &m.title);
-                v.update(self.mtm, self.target(), &m, self.hooks.show_swap);
+                let v = ViewerWindow::create(self.mtm, delegate, &title);
+                if let Some(shot) = SHOT.get() {
+                    v.canvas.set_dump(shot.with_extension("viewer.layout.txt"));
+                }
+                // The first paint says where the video goes: the render lane gets the view already in place.
+                v.canvas.paint_now();
+                v.place_video();
                 if let (Some(slot), Some(surface)) = (&self.hooks.video, v.surface()) {
                     slot.attached(&surface);
                 }
@@ -780,139 +1305,114 @@ impl Shell {
         }
     }
 
-    fn rebuild_main(&self) {
-        let model = main_model(&self.state.borrow());
-        if self.main.last.borrow().as_ref() == Some(&model) {
+    /// Development (`--mock <scenario> --shot <file>`): once the main window is drawn, `screencapture` takes it alone
+    /// a second later (the app's own screen recording grant; nothing is asked), then the app quits.
+    fn take_shot(&self) {
+        let Some(path) = SHOT.get() else { return };
+        if SHOT_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let mtm = self.mtm;
-        let pal = palette(model.dark);
-        let win = &self.main.window;
-        let bounds = win
-            .contentView()
-            .map_or(frame(0.0, 0.0, f64::from(layout::DESIGN_W), f64::from(layout::DESIGN_H)), |v| v.bounds());
-        let (w, h) = (bounds.size.width, bounds.size.height);
-
-        // Keep what the person is typing across the rebuild.
-        let values: Vec<(EditId, String)> =
-            self.main.fields.borrow().iter().map(|(e, f)| (*e, f.stringValue().to_string())).collect();
-        let focused = self
-            .main
-            .fields
-            .borrow()
-            .iter()
-            .find(|(_, f)| {
-                f.currentEditor().is_some_and(|ed| {
-                    win.firstResponder().is_some_and(|r| {
-                        std::ptr::eq(&*r as *const _ as *const AnyObject, &*ed as *const _ as *const AnyObject)
-                    })
-                })
-            })
-            .map(|(e, _)| *e);
-
-        let mut actions = Vec::new();
-        let mut fields = Vec::new();
-        let mut ctx = Ctx { mtm, target: self.target(), pal, actions: &mut actions, parity: 0, fields: &mut fields };
-        let root = PaintedView::create(mtm, bounds, Some(pal.canvas));
-        root.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-
-        match &model.layout {
-            MainLayout::Browse { sidebar: sb, content } => {
-                let side = sidebar(&mut ctx, sb, h);
-                root.addSubview(&side);
-                let cw = w - f64::from(layout::SIDEBAR_W);
-                let mut views: Vec<Retained<NSView>> = Vec::new();
-                if let Some(s) = &model.strip {
-                    views.push(strip(&mut ctx, s, 560.0));
-                }
-                // The home's cards use the width of the window (up to 920); every other page keeps its 560 column.
-                let wide = content.iter().any(|b| matches!(b, Block::Cards(_)));
-                let body_w = if wide { (cw - 64.0).clamp(560.0, 920.0) } else { 560.0 };
-                let body = blocks_stack(&mut ctx, content, body_w, &values);
-                views.push(view_of(&body));
-                let col = vstack(&ctx, &views, 16.0);
-                let inner = fit(&col);
-                let doc = PaintedView::create(mtm, frame(0.0, 0.0, cw, inner.height + 64.0), None);
-                doc.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-                col.setFrameOrigin(NSPoint::new(32.0, 32.0));
-                doc.addSubview(&col);
-                let scroll = NSScrollView::initWithFrame(
-                    NSScrollView::alloc(mtm),
-                    frame(f64::from(layout::SIDEBAR_W), 0.0, cw, h),
-                );
-                scroll.setHasVerticalScroller(true);
-                scroll.setDrawsBackground(false);
-                scroll.setDocumentView(Some(&doc));
-                scroll.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-                );
-                root.addSubview(&scroll);
-            }
-            MainLayout::Card { blocks } => {
-                let mut views: Vec<Retained<NSView>> = Vec::new();
-                if let Some(s) = &model.strip {
-                    views.push(strip(&mut ctx, s, layout::DIALOG_W as f64 - 64.0));
-                }
-                let stack = blocks_stack(&mut ctx, blocks, f64::from(layout::DIALOG_W) - 64.0, &values);
-                views.push(view_of(&stack));
-                let col = vstack(&ctx, &views, 16.0);
-                let inner = fit(&col);
-                let card = NSBox::new(mtm);
-                card.setBoxType(NSBoxType::Custom);
-                card.setTitlePosition(NSTitlePosition::NoTitle);
-                card.setBorderWidth(1.0);
-                card.setBorderColor(&color(pal.line));
-                card.setCornerRadius(f64::from(layout::DIALOG_RADIUS));
-                card.setFillColor(&color(pal.surface));
-                card.setContentViewMargins(size(32.0, 28.0));
-                card.setContentView(Some(&view_of(&col)));
-                let cw = f64::from(layout::DIALOG_W).max(inner.width + 64.0);
-                let ch = inner.height + 56.0;
-                card.setFrame(frame((w - cw) / 2.0, ((h - ch) / 2.0).max(24.0), cw, ch));
-                card.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin,
-                );
-                root.addSubview(&card);
-            }
+        // The main window's content, painted into a bitmap: it needs no screen, so it comes out with the Mac locked too.
+        self.main.canvas.save_png(&path.with_extension("content.png"));
+        // Where each native text field sits against the slot the frame drew for it.
+        let _ = std::fs::write(path.with_extension("fields.txt"), self.main.canvas.fields_dump());
+        // The same for the viewer (without the video: a layer filled outside `drawRect:` is not in the bitmap) and
+        // the banner.
+        if let Some(v) = self.viewer.borrow().as_ref() {
+            v.canvas.paint_now();
+            v.place_video();
+            crate::canvas::save_view_png(&v.content, &path.with_extension("viewer.content.png"));
         }
-        win.setTitle(&ns(&model.title));
-        // No borrow of the shell's cells is held across `setContentView`: it calls back into `on_action`.
-        self.main.rebuilding.set(true);
-        win.setContentView(Some(&view_of(&root)));
-        self.main.rebuilding.set(false);
-        *self.main.actions.borrow_mut() = actions;
-        *self.main.fields.borrow_mut() = fields;
-
-        // The rename field opens with the keyboard in it and its text selected.
-        let rename_opened = model.has_field(EditId::Rename)
-            && !self.main.last.borrow().as_ref().is_some_and(|m| m.has_field(EditId::Rename));
-        if rename_opened && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == EditId::Rename) {
-            win.makeFirstResponder(Some(f));
-            if let Some(ed) = f.currentEditor() {
-                let len = f.stringValue().length();
-                ed.setSelectedRange(NSRange::new(0, len));
-            }
-        } else if let Some(e) = focused
-            && let Some((_, f)) = self.main.fields.borrow().iter().find(|(id, _)| *id == e)
+        if let Some(b) = self.banner.borrow().as_ref() {
+            b.canvas.save_png(&path.with_extension("banner.content.png"));
+        }
+        // A scenario with a session films the viewer window, any other the main window.
+        let window = self.viewer.borrow().as_ref().map_or(self.main.window.windowNumber(), |v| v.window.windowNumber());
+        let path = path.clone();
+        // The view tree beside the picture (class, frame, hidden, layer), for a capture that looks wrong.
+        if let Some(v) = self.viewer.borrow().as_ref()
+            && let Some(root) = v.window.contentView()
         {
-            win.makeFirstResponder(Some(f));
-            if let Some(ed) = f.currentEditor() {
-                let len = f.stringValue().length();
-                ed.setSelectedRange(NSRange::new(len, 0));
+            fn walk(v: &NSView, depth: usize, out: &mut String) {
+                let f = v.frame();
+                out.push_str(&format!(
+                    "{:indent$}{} {:.0},{:.0} {:.0}x{:.0}{}{}
+",
+                    "",
+                    v.class().name().to_string_lossy(),
+                    f.origin.x,
+                    f.origin.y,
+                    f.size.width,
+                    f.size.height,
+                    if v.isHidden() { " hidden" } else { "" },
+                    if v.wantsLayer() { " layer" } else { "" },
+                    indent = depth * 2
+                ));
+                let subs = v.subviews();
+                for i in 0..subs.count() {
+                    walk(&subs.objectAtIndex(i), depth + 1, out);
+                }
             }
+            let mut out = String::new();
+            walk(&root, 0, &mut out);
+            let _ = std::fs::write(path.with_extension("views.txt"), out);
         }
-        *self.main.last.borrow_mut() = Some(model);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let status = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x", "-o", &format!("-l{window}"), &path.to_string_lossy()])
+                .status();
+            std::process::exit(if status.is_ok_and(|s| s.success()) { 0 } else { 1 });
+        });
     }
 
-    /// A request that needs an answer brings the main window up.
+    fn selftest_click(&self) -> Option<bool> {
+        let canvas = &self.main.canvas;
+        if !canvas.painted() && !canvas.paint_now() {
+            return None;
+        }
+        let before = self.state.borrow().screen();
+        let target = if before == swapdesk_ui::Screen::Settings { ControlId::NavHome } else { ControlId::NavSettings };
+        if !canvas.send_click(target) {
+            return None;
+        }
+        Some(self.state.borrow().screen() != before)
+    }
+
+    /// A click on control `id` of the main window as it is now: the frame is painted first, so the control is where
+    /// the state puts it.
+    fn selftest_press(&self, id: ControlId) -> Option<()> {
+        let canvas = &self.main.canvas;
+        (canvas.paint_now() && canvas.send_click(id)).then_some(())
+    }
+
+    fn selftest_rename_begin(&self, name: &str) -> Option<bool> {
+        let device = self.state.borrow().devices().iter().position(|d| d.paired)?;
+        self.selftest_press(ControlId::Device(u16::try_from(device).ok()?))?;
+        self.selftest_press(ControlId::RenameDevice)?;
+        // The rename field appears with the next paint, prefilled and selected: typing replaces the old name.
+        let canvas = &self.main.canvas;
+        canvas.paint_now();
+        canvas.edit_text(EditId::Rename)?;
+        canvas.send_keys(name);
+        let typed = canvas.edit_text(EditId::Rename)? == name;
+        canvas.send_keys("\r");
+        Some(typed)
+    }
+
+    /// A request that needs an answer brings the main window up, once, when it appears. Not on every refresh: the
+    /// request stays open for its countdown, and the person must be able to go on working in another app meanwhile
+    /// (the app taking the front again each second also swallowed the keys typed there).
     fn attention(&self) {
         let asks = {
             let st = self.state.borrow();
-            st.incoming_session_open() || st.dialog(WindowKind::Main).is_some()
+            let request = st.incoming().filter(|_| st.incoming_session_open()).map(|i| i.request.request_id);
+            let dialog = st.dialog(WindowKind::Main);
+            (request.is_some() || dialog.is_some()).then_some((request, dialog))
         };
-        if asks {
+        let new = asks.is_some() && *self.raised_for.borrow() != asks;
+        *self.raised_for.borrow_mut() = asks;
+        if new {
             self.show_main();
         }
     }
@@ -942,10 +1442,28 @@ impl Shell {
 
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
-        let (tick, placeholder) = {
+        let (now_ms, tick, placeholder, banner) = {
             let st = self.state.borrow();
-            (st.needs_tick(), st.has_pending_fetch())
+            let now = local_clock().now_ms;
+            // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
+            (now, st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
+        match banner {
+            // Armed again when the due moment moved earlier: a files note that ends in 10 s comes before the minute
+            // the timer was armed for.
+            Some(ms) => {
+                let due = now_ms.saturating_add(ms);
+                if self.banner_timer.borrow().is_none() || due + 50 < self.banner_due_ms.get() {
+                    self.set_timer(&self.banner_timer, ms as f64 / 1000.0, false, sel!(bannerTick:));
+                    self.banner_due_ms.set(due);
+                }
+            }
+            None => {
+                if let Some(t) = self.banner_timer.borrow_mut().take() {
+                    t.invalidate();
+                }
+            }
+        }
         let ticking = self.tick_timer.borrow().is_some();
         if tick && !ticking {
             self.set_timer(&self.tick_timer, 1.0, true, sel!(tick:));
@@ -967,8 +1485,8 @@ impl Shell {
     }
 }
 
-// Selecting a pop-up option by `SelectId` is handled in `on_action`; keep the import used for the match arm.
-const _: Option<SelectId> = None;
-
+mod ax_checks;
+#[doc(hidden)]
+pub mod dev;
 #[doc(hidden)]
 pub mod selftest;

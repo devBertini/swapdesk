@@ -19,6 +19,7 @@ swapdesk-files = { path = "../swapdesk-files" }
 swapdesk-host = { path = "../swapdesk-host" }
 swapdesk-ipc = { path = "../swapdesk-ipc" }
 swapdesk-platform = { path = "../swapdesk-platform" }
+swapdesk-proto = { path = "../swapdesk-proto" }
 swapdesk-sys-win = { path = "../swapdesk-sys-win" }
 swapdesk-capture-win = { path = "../swapdesk-capture-win" }
 swapdesk-codec-win = { path = "../swapdesk-codec-win" }

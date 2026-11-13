@@ -19,60 +19,17 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::core::{BOOL, HSTRING, Interface, Result};
 
-/// Instrument Sans (SIL OFL 1.1, assets/OFL.txt), embedded so nothing is installed system-wide.
-pub static INSTRUMENT_SANS: &[u8] = include_bytes!("../assets/InstrumentSans[wdth,wght].ttf");
+pub use swapdesk_paint::INSTRUMENT_SANS;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect { x, y, w, h }
-    }
-    pub fn right(&self) -> f32 {
-        self.x + self.w
-    }
-    pub fn bottom(&self) -> f32 {
-        self.y + self.h
-    }
-    pub fn inset(&self, d: f32) -> Rect {
-        Rect::new(self.x + d, self.y + d, self.w - 2.0 * d, self.h - 2.0 * d)
-    }
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
-    }
-    pub fn center(&self) -> (f32, f32) {
-        (self.x + self.w / 2.0, self.y + self.h / 2.0)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Align {
-    Start,
-    Center,
-}
-
-/// Laid-out text: draw it with [`Painter::draw`]. Cloning shares the COM layout (a reference count).
-#[derive(Clone)]
-pub struct Label {
-    layout: IDWriteTextLayout,
-    /// Distance from the top of the line box to the first baseline.
-    baseline: f32,
-    pub w: f32,
-    pub h: f32,
-}
+use swapdesk_paint::Painter;
+pub use swapdesk_paint::{Align, Label, Rect};
 
 /// Size, weight, line height, tracking and scale, as bits.
-type FormatKey = (u32, u16, u32, u32);
+type FormatKey = (u32, u16, u32, u32, u8);
 
 /// What a cached layout depends on: the text, the style (size, weight, line height, tracking), the width rounded to
 /// device pixels, the alignment, trimming, bold prefix, the language and the scale.
-type LayoutKey = (String, (u32, u16, u32, u32), i32, Align, bool, u32, swapdesk_ui::Language, u32);
+type LayoutKey = (String, (u32, u16, u32, u32, u8), i32, Align, bool, u32, swapdesk_ui::Language, u32);
 
 /// The layout cache is cleared when it holds more than this many entries.
 const LAYOUT_CACHE_MAX: usize = 512;
@@ -86,6 +43,11 @@ pub struct Fonts {
     /// Ascent and descent of the face as fractions of the em; CSS centres them in the line box.
     ascent: f32,
     descent: f32,
+    /// The system's monospaced face (the terminal grid): Cascadia Mono, else Consolas, and its metrics.
+    mono_collection: IDWriteFontCollection,
+    mono_family: HSTRING,
+    mono_ascent: f32,
+    mono_descent: f32,
     formats: RefCell<HashMap<FormatKey, (IDWriteTextFormat, f32)>>,
     /// The ellipsis trimming sign of each text format, made once.
     signs: RefCell<HashMap<FormatKey, IDWriteInlineObject>>,
@@ -138,6 +100,17 @@ impl Fonts {
             }
         };
         let (ascent, descent) = face_metrics(&collection, &family).unwrap_or((1.0, 0.25));
+        let mut system = None;
+        // SAFETY: `system` receives the shared system collection.
+        unsafe { factory.GetSystemFontCollection(&mut system, false)? };
+        let mono_collection = system.ok_or_else(windows::core::Error::empty)?;
+        let mono_family = HSTRING::from(
+            ["Cascadia Mono", "Consolas"]
+                .into_iter()
+                .find(|f| has_family(&mono_collection, &HSTRING::from(*f)))
+                .unwrap_or("Consolas"),
+        );
+        let (mono_ascent, mono_descent) = face_metrics(&mono_collection, &mono_family).unwrap_or((0.8, 0.2));
         Ok(Fonts {
             factory,
             collection,
@@ -145,6 +118,10 @@ impl Fonts {
             loader,
             ascent,
             descent,
+            mono_collection,
+            mono_family,
+            mono_ascent,
+            mono_descent,
             formats: RefCell::default(),
             signs: RefCell::default(),
             layouts: RefCell::default(),
@@ -155,23 +132,32 @@ impl Fonts {
 
     /// The content area (ascent plus descent) of a style, as an inline box would have it.
     pub fn content_height(&self, st: TextStyle) -> f32 {
-        (self.ascent + self.descent) * st.size
+        let (ascent, descent) = self.metrics(st);
+        (ascent + descent) * st.size
+    }
+
+    /// Ascent and descent (fractions of the em) of the face a style uses.
+    fn metrics(&self, st: TextStyle) -> (f32, f32) {
+        if st.mono { (self.mono_ascent, self.mono_descent) } else { (self.ascent, self.descent) }
     }
 
     /// A text format with CSS line spacing, and the baseline offset inside the line box in DIPs.
     fn format(&self, st: TextStyle, scale: f32) -> Result<(IDWriteTextFormat, f32)> {
-        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits());
+        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits(), st.face_bits());
         if let Some(f) = self.formats.borrow().get(&key) {
             return Ok(f.clone());
         }
         let locale = HSTRING::from(locale_name(self.language.get()));
+        let (family, collection) =
+            if st.mono { (&self.mono_family, &self.mono_collection) } else { (&self.family, &self.collection) };
+        let style = if st.italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL };
         // SAFETY: the collection, family name and locale outlive the call.
         let format = unsafe {
             self.factory.CreateTextFormat(
-                &self.family,
-                &self.collection,
+                family,
+                collection,
                 DWRITE_FONT_WEIGHT(i32::from(st.weight)),
-                DWRITE_FONT_STYLE_NORMAL,
+                style,
                 DWRITE_FONT_STRETCH_NORMAL,
                 st.size,
                 &locale,
@@ -179,11 +165,8 @@ impl Fonts {
         };
         // CSS puts the content area in the middle of the line box. Browsers lay text out in device pixels and round
         // the font's ascent and descent there, so the half-leading is worked out the same way.
-        let line_height = st.size * st.line;
-        let ascent_px = (self.ascent * st.size * scale).round();
-        let descent_px = (self.descent * st.size * scale).round();
-        let half_leading = ((line_height * scale - (ascent_px + descent_px)) / 2.0).floor();
-        let baseline = (half_leading + ascent_px) / scale;
+        let (ascent, descent) = self.metrics(st);
+        let (line_height, baseline) = swapdesk_paint::line_box(st, scale, ascent, descent);
         // SAFETY: plain setter on a format we own.
         unsafe { format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_height, baseline)? };
         self.formats.borrow_mut().insert(key, (format.clone(), baseline));
@@ -192,7 +175,7 @@ impl Fonts {
 
     /// The ellipsis trimming sign of a text format, created once per format.
     fn ellipsis_sign(&self, st: TextStyle, scale: f32, format: &IDWriteTextFormat) -> Result<IDWriteInlineObject> {
-        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits());
+        let key = (st.size.to_bits(), st.weight, st.line.to_bits(), scale.to_bits(), st.face_bits());
         if let Some(sign) = self.signs.borrow().get(&key) {
             return Ok(sign.clone());
         }
@@ -216,7 +199,7 @@ impl Fonts {
     ) -> Result<Label> {
         let key: LayoutKey = (
             text.to_owned(),
-            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits()),
+            (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits(), st.face_bits()),
             (max_w * scale).round() as i32,
             align,
             ellipsis,
@@ -279,8 +262,8 @@ impl Fonts {
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
             // Browsers keep layout sizes in 1/64 device pixels, rounded down; sums of them decide where rows land.
-            let h = (m.height * scale * 64.0).floor() / 64.0 / scale;
-            Ok(Label { layout, w: m.width, h, baseline })
+            let h = swapdesk_paint::label_height(m.height, scale);
+            Ok(Label::new(m.width, h, baseline, layout))
         }
     }
 }
@@ -328,6 +311,14 @@ fn load_private(factory: &IDWriteFactory) -> Result<(IDWriteFontCollection, IDWr
     }
 }
 
+/// Whether the collection holds a family of that name (`FindFamilyName` answers index 0 for a missing one).
+fn has_family(collection: &IDWriteFontCollection, family: &HSTRING) -> bool {
+    let mut index = 0;
+    let mut exists = BOOL(0);
+    // SAFETY: out-pointers are valid locals.
+    unsafe { collection.FindFamilyName(family, &mut index, &mut exists) }.is_ok() && exists.as_bool()
+}
+
 fn face_metrics(collection: &IDWriteFontCollection, family: &HSTRING) -> Result<(f32, f32)> {
     let mut index = 0;
     let mut exists = BOOL(0);
@@ -373,7 +364,7 @@ pub struct Strokes {
 }
 
 /// Draws one frame onto a render target whose DPI is already set.
-pub struct Painter<'a> {
+pub struct D2dPainter<'a> {
     rt: &'a ID2D1RenderTarget,
     factory: &'a ID2D1Factory,
     strokes: &'a Strokes,
@@ -382,26 +373,17 @@ pub struct Painter<'a> {
     pub scale: f32,
 }
 
-impl<'a> Painter<'a> {
+impl<'a> D2dPainter<'a> {
     pub fn new(
         rt: &'a ID2D1RenderTarget,
         factory: &'a ID2D1Factory,
         strokes: &'a Strokes,
         fonts: &'a Fonts,
         scale: f32,
-    ) -> Result<Painter<'a>> {
+    ) -> Result<D2dPainter<'a>> {
         // SAFETY: plain resource creation on a live render target.
         let brush = unsafe { rt.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
-        Ok(Painter { rt, factory, strokes, brush, fonts, scale })
-    }
-
-    /// One device pixel, in DIPs: the width a CSS 1 px border gets (browsers floor it to whole device pixels).
-    pub fn hairline(&self) -> f32 {
-        self.scale.floor().max(1.0) / self.scale
-    }
-
-    pub fn snap(&self, v: f32) -> f32 {
-        (v * self.scale).round() / self.scale
+        Ok(D2dPainter { rt, factory, strokes, brush, fonts, scale })
     }
 
     fn snapped(&self, r: Rect) -> D2D_RECT_F {
@@ -418,33 +400,57 @@ impl<'a> Painter<'a> {
         unsafe { self.brush.SetColor(&d2d_color(c)) };
     }
 
-    pub fn clear(&self, c: Color) {
+    /// Builds a geometry in the closure and strokes or fills it as the closure says: (colour, width, fill).
+    fn path(
+        &self,
+        build: impl FnOnce(&windows::Win32::Graphics::Direct2D::ID2D1GeometrySink) -> (Color, f32, bool),
+    ) -> Result<()> {
+        // SAFETY: the geometry and sink are local; the sink is closed before the geometry is used.
+        unsafe {
+            let geometry = self.factory.CreatePathGeometry()?;
+            let sink = geometry.Open()?;
+            let (color, width, fill) = build(&sink);
+            sink.Close()?;
+            self.set(color);
+            if fill {
+                self.rt.FillGeometry(&geometry, &self.brush, None);
+            } else {
+                self.rt.DrawGeometry(&geometry, &self.brush, width, Some(&self.strokes.round));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Painter for D2dPainter<'_> {
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    fn content_height(&self, st: TextStyle) -> f32 {
+        self.fonts.content_height(st)
+    }
+
+    fn clear(&self, c: Color) {
         // SAFETY: called between BeginDraw and EndDraw by the window.
         unsafe { self.rt.Clear(Some(&d2d_color(c))) };
     }
 
-    pub fn fill_rect(&self, r: Rect, c: Color) {
+    fn fill_rect(&self, r: Rect, c: Color) {
         self.set(c);
         // SAFETY: valid rect and brush.
         unsafe { self.rt.FillRectangle(&self.snapped(r), &self.brush) };
     }
 
-    pub fn fill_rrect(&self, r: Rect, radius: f32, c: Color) {
+    fn fill_rrect(&self, r: Rect, radius: f32, c: Color) {
         self.set(c);
         let rect = rounded(self.snapped(r), radius);
         // SAFETY: valid rounded rect and brush.
         unsafe { self.rt.FillRoundedRectangle(&rect, &self.brush) };
     }
 
-    /// A box with a 1 px border: border colour outside, fill inside.
-    pub fn bordered(&self, r: Rect, radius: f32, border: Color, fill: Color) {
-        self.fill_rrect(r, radius, border);
-        let bw = self.hairline();
-        self.fill_rrect(r.inset(bw), (radius - bw).max(0.0), fill);
-    }
-
     /// A stroke centred on the rectangle's edge, like an SVG or a CSS outline of the same width.
-    pub fn stroke_rrect(&self, r: Rect, radius: f32, width: f32, c: Color) {
+    fn stroke_rrect(&self, r: Rect, radius: f32, width: f32, c: Color) {
         self.set(c);
         let rect = rounded(D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() }, radius);
         // SAFETY: valid rounded rect and brush.
@@ -452,28 +458,28 @@ impl<'a> Painter<'a> {
     }
 
     /// A dashed rounded border (the file drop zone).
-    pub fn stroke_rrect_dashed(&self, r: Rect, radius: f32, width: f32, c: Color) {
+    fn stroke_rrect_dashed(&self, r: Rect, radius: f32, width: f32, c: Color) {
         self.set(c);
         let rect = rounded(D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() }, radius);
         // SAFETY: valid rounded rect, brush and stroke style.
         unsafe { self.rt.DrawRoundedRectangle(&rect, &self.brush, width, Some(&self.strokes.dashed)) };
     }
 
-    pub fn line(&self, from: (f32, f32), to: (f32, f32), width: f32, c: Color, round: bool) {
+    fn line(&self, from: (f32, f32), to: (f32, f32), width: f32, c: Color, round: bool) {
         self.set(c);
         let (a, b) = (point!(from.0, from.1), point!(to.0, to.1));
         // SAFETY: valid points, brush and (optional) stroke style.
         unsafe { self.rt.DrawLine(a, b, &self.brush, width, if round { Some(&self.strokes.round) } else { None }) };
     }
 
-    pub fn fill_circle(&self, center: (f32, f32), radius: f32, c: Color) {
+    fn fill_circle(&self, center: (f32, f32), radius: f32, c: Color) {
         self.set(c);
         let e = D2D1_ELLIPSE { point: point!(center.0, center.1), radiusX: radius, radiusY: radius };
         // SAFETY: valid ellipse and brush.
         unsafe { self.rt.FillEllipse(&e, &self.brush) };
     }
 
-    pub fn stroke_circle(&self, center: (f32, f32), radius: f32, width: f32, c: Color) {
+    fn stroke_circle(&self, center: (f32, f32), radius: f32, width: f32, c: Color) {
         self.set(c);
         let e = D2D1_ELLIPSE { point: point!(center.0, center.1), radiusX: radius, radiusY: radius };
         // SAFETY: valid ellipse and brush.
@@ -481,7 +487,7 @@ impl<'a> Painter<'a> {
     }
 
     /// A spinner arc: 3/4 of a circle starting at `start` degrees (the "Reconectando" icon).
-    pub fn arc_stroke(&self, center: (f32, f32), radius: f32, start_deg: f32, sweep_deg: f32, width: f32, c: Color) {
+    fn arc_stroke(&self, center: (f32, f32), radius: f32, start_deg: f32, sweep_deg: f32, width: f32, c: Color) {
         let pt = |deg: f32| {
             let r = deg.to_radians();
             (center.0 + radius * r.cos(), center.1 + radius * r.sin())
@@ -505,8 +511,8 @@ impl<'a> Painter<'a> {
     }
 
     /// A filled triangle (the wire's arrowhead).
-    pub fn fill_triangle(&self, p: [(f32, f32); 3], c: Color) -> Result<()> {
-        self.path(|sink| {
+    fn fill_triangle(&self, p: [(f32, f32); 3], c: Color) {
+        let _ = self.path(|sink| {
             // SAFETY: the sink is open for the duration of the closure.
             unsafe {
                 sink.BeginFigure(point!(p[0].0, p[0].1), D2D1_FIGURE_BEGIN_FILLED);
@@ -515,33 +521,12 @@ impl<'a> Painter<'a> {
                 sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             }
             (c, 0.0, true)
-        })
-    }
-
-    /// Builds a geometry in the closure and strokes or fills it as the closure says: (colour, width, fill).
-    fn path(
-        &self,
-        build: impl FnOnce(&windows::Win32::Graphics::Direct2D::ID2D1GeometrySink) -> (Color, f32, bool),
-    ) -> Result<()> {
-        // SAFETY: the geometry and sink are local; the sink is closed before the geometry is used.
-        unsafe {
-            let geometry = self.factory.CreatePathGeometry()?;
-            let sink = geometry.Open()?;
-            let (color, width, fill) = build(&sink);
-            sink.Close()?;
-            self.set(color);
-            if fill {
-                self.rt.FillGeometry(&geometry, &self.brush, None);
-            } else {
-                self.rt.DrawGeometry(&geometry, &self.brush, width, Some(&self.strokes.round));
-            }
-        }
-        Ok(())
+        });
     }
 
     /// Draws an SVG path (`d` attribute: M L H V C A Z, absolute and relative) from a 24-unit viewBox at `(x, y)`,
     /// scaled to `size` DIPs, stroked with `width` (in viewBox units).
-    pub fn svg(&self, d: &str, x: f32, y: f32, size: f32, width: f32, c: Color) {
+    fn svg(&self, d: &str, x: f32, y: f32, size: f32, width: f32, c: Color) {
         let s = size / 24.0;
         let _ = self.path(|sink| {
             // SAFETY: the sink is open for the duration of the closure.
@@ -551,7 +536,7 @@ impl<'a> Painter<'a> {
     }
 
     /// A soft shadow under a rounded rectangle: stacked translucent rounded rectangles.
-    pub fn shadow(&self, r: Rect, radius: f32, dy: f32, blur: f32, c: Color) {
+    fn shadow(&self, r: Rect, radius: f32, dy: f32, blur: f32, c: Color) {
         let steps = 12;
         for i in 0..steps {
             let t = i as f32 / steps as f32;
@@ -566,55 +551,34 @@ impl<'a> Painter<'a> {
         }
     }
 
-    pub fn push_clip(&self, r: Rect) {
+    fn push_clip(&self, r: Rect) {
         let rect = D2D_RECT_F { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
         // SAFETY: balanced with `pop_clip`.
         unsafe { self.rt.PushAxisAlignedClip(&rect, windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED) };
     }
 
-    pub fn pop_clip(&self) {
+    fn pop_clip(&self) {
         // SAFETY: balances `push_clip`.
         unsafe { self.rt.PopAxisAlignedClip() };
     }
 
-    pub fn label(&self, text: &str, st: TextStyle) -> Label {
-        self.label_in(text, st, 100_000.0, Align::Start)
-    }
-
-    pub fn label_in(&self, text: &str, st: TextStyle, max_w: f32, align: Align) -> Label {
-        self.make_label(text, st, max_w, align, false)
-    }
-
-    /// One line, trimmed with an ellipsis at `max_w`.
-    pub fn label_ellipsis(&self, text: &str, st: TextStyle, max_w: f32) -> Label {
-        self.make_label(text, st, max_w, Align::Start, true)
-    }
-
-    /// Wrapped text whose first `bold_chars` characters are semi-bold (a sentence in bold followed by plain text).
-    pub fn label_rich(&self, text: &str, st: TextStyle, max_w: f32, bold_chars: usize) -> Label {
+    fn layout(&self, text: &str, st: TextStyle, max_w: f32, align: Align, ellipsis: bool, bold_chars: usize) -> Label {
         let bold_utf16 = text.chars().take(bold_chars).map(char::len_utf16).sum::<usize>() as u32;
-        self.make_label_ex(text, st, max_w, Align::Start, false, bold_utf16)
-    }
-
-    fn make_label(&self, text: &str, st: TextStyle, max_w: f32, align: Align, ellipsis: bool) -> Label {
-        self.make_label_ex(text, st, max_w, align, ellipsis, 0)
-    }
-
-    fn make_label_ex(&self, text: &str, st: TextStyle, max_w: f32, align: Align, ellipsis: bool, bold: u32) -> Label {
         // A failed layout draws nothing instead of failing the frame.
-        self.fonts.layout(text, st, self.scale, max_w, align, ellipsis, bold).unwrap_or_else(|_| {
+        self.fonts.layout(text, st, self.scale, max_w, align, ellipsis, bold_utf16).unwrap_or_else(|_| {
             self.fonts.layout("", st, self.scale, max_w, align, false, 0).expect("an empty layout always succeeds")
         })
     }
 
     /// Draws a label with its line box starting at `(x, y)`. The baseline lands on a whole device pixel; across the
     /// line the glyphs keep their subpixel positions, as in a browser.
-    pub fn draw(&self, l: &Label, x: f32, y: f32, c: Color) {
+    fn draw(&self, l: &Label, x: f32, y: f32, c: Color) {
         self.set(c);
         let top = self.snap(y + l.baseline) - l.baseline;
         let origin = point!(x, top);
+        let Some(layout) = l.handle::<IDWriteTextLayout>() else { return };
         // SAFETY: valid layout and brush.
-        unsafe { self.rt.DrawTextLayout(origin, &l.layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE) };
+        unsafe { self.rt.DrawTextLayout(origin, layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE) };
     }
 }
 
@@ -764,24 +728,19 @@ unsafe fn svg_into(sink: &windows::Win32::Graphics::Direct2D::ID2D1GeometrySink,
     }
 }
 
-/// The SVG path of a rounded rectangle, for icons that are drawn from `<rect>` in the design.
-pub fn rrect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> String {
-    format!(
-        "M{} {}h{}a{r} {r} 0 0 1 {r} {r}v{}a{r} {r} 0 0 1 -{r} {r}h-{}a{r} {r} 0 0 1 -{r} -{r}v-{}a{r} {r} 0 0 1 {r} -{r}z",
-        x + r,
-        y,
-        w - 2.0 * r,
-        h - 2.0 * r,
-        w - 2.0 * r,
-        h - 2.0 * r
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use swapdesk_ui::Language;
 
     use super::*;
+
+    /// The Mac reads the face's metrics from the font file; they must be the ones DirectWrite uses here.
+    #[test]
+    fn the_shared_face_metrics_are_directwrites() {
+        let fonts = Fonts::new().expect("fonts");
+        let (a, d) = swapdesk_paint::face_metrics(INSTRUMENT_SANS).expect("metrics");
+        assert_eq!((fonts.ascent, fonts.descent), (a, d));
+    }
 
     #[test]
     fn locale_follows_the_interface_language() {
@@ -793,7 +752,7 @@ mod tests {
     #[test]
     fn a_second_identical_paint_creates_no_text_layout() {
         use crate::offscreen::{design_size, render_with};
-        use crate::view::Interaction;
+        use swapdesk_paint::Interaction;
         use swapdesk_ui::WindowKind;
         use swapdesk_ui::mock::Scenario;
         // SAFETY: COM initialisation of the test thread (WIC needs it); a repeated call is harmless.
@@ -828,7 +787,7 @@ mod tests {
     #[test]
     fn the_layout_cache_is_bounded_and_trimming_signs_are_made_once() {
         let fonts = Fonts::new().expect("fonts");
-        let st = swapdesk_ui::tokens::TextStyle { size: 14.0, weight: 400, line: 1.4, tracking: 0.0 };
+        let st = swapdesk_ui::tokens::TextStyle::new(14.0, 400).line(1.4);
         for i in 0..(LAYOUT_CACHE_MAX + 40) {
             fonts.layout(&format!("row {i}"), st, 1.0, 100.0, Align::Start, true, 0).expect("layout");
         }
@@ -837,9 +796,28 @@ mod tests {
     }
 
     #[test]
+    fn the_monospaced_face_gives_every_glyph_one_advance_and_has_formats_of_its_own() {
+        let fonts = Fonts::new().expect("fonts");
+        let mono = swapdesk_ui::tokens::text::TERM;
+        let ui = swapdesk_ui::tokens::TextStyle::new(13.0, 400).line(1.3);
+        let width = |t: &str, st| fonts.layout(t, st, 1.0, 1000.0, Align::Start, false, 0).expect("layout").w;
+        let (i, m) = (width("iiii", mono), width("mmmm", mono));
+        assert!(i > 0.0 && (i - m).abs() < 0.01, "monospaced: {i} against {m}");
+        assert!(width("mmmm", ui) > width("iiii", ui) + 1.0, "the interface's face is proportional");
+        fonts.layout("x", mono.italic(), 1.0, 1000.0, Align::Start, false, 0).expect("italic layout");
+        assert_eq!(fonts.formats.borrow().len(), 3, "the interface's, the monospaced and its italic");
+        assert!(fonts.content_height(mono) > 0.0);
+        assert!(
+            ["Cascadia Mono", "Consolas"].contains(&fonts.mono_family.to_string().as_str()),
+            "{}",
+            fonts.mono_family
+        );
+    }
+
+    #[test]
     fn changing_language_drops_the_cached_formats() {
         let fonts = Fonts::new().expect("fonts");
-        let st = swapdesk_ui::tokens::TextStyle { size: 14.0, weight: 400, line: 1.4, tracking: 0.0 };
+        let st = swapdesk_ui::tokens::TextStyle::new(14.0, 400).line(1.4);
         fonts.layout("a", st, 1.0, 100.0, Align::Start, false, 0).expect("layout");
         assert_eq!(fonts.formats.borrow().len(), 1);
         assert!(!fonts.set_language(Language::PtBr), "same language keeps the cache");

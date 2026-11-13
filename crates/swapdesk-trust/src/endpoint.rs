@@ -15,6 +15,7 @@ use swapdesk_platform::Level;
 use swapdesk_proto::ErrorCode;
 use tokio::sync::Notify;
 
+use crate::datagram_filter::{DatagramFilter, endpoint_from_socket_filtered};
 use crate::error::{Result, TrustError};
 use crate::gate::{gate_session_client, gate_session_server};
 use crate::identity::Identity;
@@ -41,12 +42,39 @@ pub fn open_session_endpoint(socket: UdpSocket, identity: &Identity, trust: Arc<
     endpoint_from_socket(socket, Some(session_server_config(identity, trust)?))
 }
 
+/// [`open_session_endpoint`] behind a [`DatagramFilter`]: a datagram the filter refuses is dropped before quinn parses it,
+/// so its sender gets no answer of any kind (no Version Negotiation, no stateless reset, no Retry).
+pub fn open_session_endpoint_filtered(
+    socket: UdpSocket,
+    identity: &Identity,
+    trust: Arc<dyn PinLookup>,
+    keep: DatagramFilter,
+) -> Result<Endpoint> {
+    endpoint_from_socket_filtered(socket, Some(session_server_config(identity, trust)?), keep)
+}
+
+/// [`open_pairing_endpoint`] behind a [`DatagramFilter`].
+pub fn open_pairing_endpoint_filtered(
+    socket: UdpSocket,
+    identity: &Identity,
+    keep: DatagramFilter,
+) -> Result<Endpoint> {
+    endpoint_from_socket_filtered(socket, Some(pairing_server_config(identity)?), keep)
+}
+
 /// The pairing endpoint. Call it only when pairing mode opens, and close the endpoint when it ends.
 pub fn open_pairing_endpoint(socket: UdpSocket, identity: &Identity) -> Result<Endpoint> {
     endpoint_from_socket(socket, Some(pairing_server_config(identity)?))
 }
 
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long the session server lets a peer take to finish the handshake (mutual TLS: the peer is authenticated only
+/// when it ends), F4 of the 13/11 security review. A paired peer on the LAN takes milliseconds (a few round trips of
+/// well under 10 ms, or a retransmission at about 1 s after a loss), so this is short: a peer that stalls before its
+/// certificate holds a place for 2 s, not 10 s. The client keeps [`HANDSHAKE_LIMIT`]: it waits for a host that may
+/// be slow to wake.
+pub const ACCEPT_HANDSHAKE_LIMIT: Duration = Duration::from_secs(2);
 
 /// Session client: connect to `addr` expecting the device whose key is `expected`, then run the gate.
 pub async fn connect_session(
@@ -61,8 +89,21 @@ pub async fn connect_session(
     let conn = tokio::time::timeout(HANDSHAKE_LIMIT, connecting)
         .await
         .map_err(|_| TrustError::Timeout("handshake"))?
-        .map_err(|e| TrustError::Tls(e.to_string()))?;
-    gate_session_client(&conn, &expected)?;
+        .map_err(|e| match e {
+        // This side's own TLS check failed (the pinned-key verifier refused the server's key or its proof of
+        // it): a wrong peer answered. A `ConnectionClosed` is the peer's word, unauthenticated at this stage
+        // (a forged Initial can carry a crypto close), so it is an ordinary handshake failure. Codes 0x100 to 0x1ff are
+        // QUIC's TLS alerts (RFC 9001 4.8).
+        quinn::ConnectionError::TransportError(t) if (0x100..=0x1ff).contains(&u64::from(t.code)) => {
+            TrustError::WrongPeer
+        }
+        e => TrustError::Tls(e.to_string()),
+    })?;
+    // The gate refusing the key is this side's check too: the handshake did not reach the expected device.
+    gate_session_client(&conn, &expected).map_err(|e| match e {
+        TrustError::UnknownDevice => TrustError::WrongPeer,
+        e => e,
+    })?;
     Ok(conn)
 }
 
@@ -70,7 +111,7 @@ pub async fn connect_session(
 /// Returns the connection and the pinned device it belongs to.
 pub async fn accept_session(incoming: Incoming, trust: &dyn PinLookup) -> Result<(quinn::Connection, DeviceId)> {
     let connecting = incoming.accept().map_err(|e| TrustError::Tls(e.to_string()))?;
-    let conn = tokio::time::timeout(HANDSHAKE_LIMIT, connecting)
+    let conn = tokio::time::timeout(ACCEPT_HANDSHAKE_LIMIT, connecting)
         .await
         .map_err(|_| TrustError::Timeout("handshake"))?
         .map_err(|e| TrustError::Tls(e.to_string()))?;

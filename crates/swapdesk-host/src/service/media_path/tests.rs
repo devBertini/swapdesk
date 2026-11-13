@@ -55,21 +55,21 @@ fn next_frame(path: &VideoPath) -> Option<Frame> {
 fn the_slot_keeps_only_the_newest_frame_and_the_gap_drops_p_frames_until_a_keyframe() {
     let (path, asked) = path_with_run();
     // Nothing waits behind a stalled send: three frames offered while the task is busy leave one, flagged as a gap.
-    path.offer(header(1, true), vec![1]);
+    path.offer(header(1, true), vec![1].into());
     assert_eq!(next_frame(&path).map(|f| f.header.frame_id), Some(1), "a keyframe passes");
     for id in 2..=4 {
-        path.offer(header(id, false), vec![id as u8]);
+        path.offer(header(id, false), vec![id as u8].into());
     }
     assert_eq!(path.stats().replaced, 2, "frames 2 and 3 were replaced by 4");
     assert!(next_frame(&path).is_none(), "frame 4 follows a gap: it would not decode, so it is dropped");
     assert_eq!(asked.load(Ordering::SeqCst), 1, "and a keyframe is asked for");
     // Until the keyframe comes, P-frames are dropped without asking again.
-    path.offer(header(5, false), vec![5]);
+    path.offer(header(5, false), vec![5].into());
     assert!(next_frame(&path).is_none());
     assert_eq!(asked.load(Ordering::SeqCst), 1, "asked once inside KEY_WAIT");
-    path.offer(header(6, true), vec![6]);
+    path.offer(header(6, true), vec![6].into());
     assert_eq!(next_frame(&path).map(|f| f.header.frame_id), Some(6));
-    path.offer(header(7, false), vec![7]);
+    path.offer(header(7, false), vec![7].into());
     assert_eq!(next_frame(&path).map(|f| f.header.frame_id), Some(7), "the stream flows again");
     assert_eq!(path.stats().keyframes_asked, 1);
 }
@@ -77,15 +77,15 @@ fn the_slot_keeps_only_the_newest_frame_and_the_gap_drops_p_frames_until_a_keyfr
 #[test]
 fn a_p_frame_that_waited_past_the_backlog_limit_is_dropped_and_a_keyframe_asked() {
     let (path, asked) = path_with_run();
-    path.offer(header(1, true), vec![1]);
+    path.offer(header(1, true), vec![1].into());
     assert!(next_frame(&path).is_some());
-    path.offer(header(2, false), vec![2]);
+    path.offer(header(2, false), vec![2].into());
     std::thread::sleep(STALE + Duration::from_millis(40));
     assert!(next_frame(&path).is_none(), "older than {STALE:?}: stale");
     assert_eq!(path.stats().stale, 1);
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     // A stale keyframe is still a keyframe: it resets the stream.
-    path.offer(header(3, true), vec![3]);
+    path.offer(header(3, true), vec![3].into());
     std::thread::sleep(STALE + Duration::from_millis(40));
     assert_eq!(next_frame(&path).map(|f| f.header.frame_id), Some(3));
 }
@@ -93,14 +93,14 @@ fn a_p_frame_that_waited_past_the_backlog_limit_is_dropped_and_a_keyframe_asked(
 #[test]
 fn frames_without_a_capture_or_of_another_display_never_enter_the_slot() {
     let path = VideoPath::new();
-    path.offer(header(1, true), vec![1]);
+    path.offer(header(1, true), vec![1].into());
     assert!(path.take().is_none(), "no capture runs");
     let (path, _) = path_with_run();
     let mut other = header(1, true);
     other.display_id = 9;
-    path.offer(other, vec![1]);
+    path.offer(other, vec![1].into());
     assert!(path.take().is_none(), "another display");
-    path.offer(header(2, true), vec![2]);
+    path.offer(header(2, true), vec![2].into());
     path.set_run(None);
     assert!(path.take().is_none(), "a stopped capture takes its waiting frame with it");
 }
@@ -250,7 +250,7 @@ fn a_300_ms_stall_holds_no_audio_back_and_the_video_recovers_with_a_keyframe() {
                     id += 1;
                     let key = id == 1 || wanted.swap(false, Ordering::SeqCst);
                     let len = if key { 90_000 } else { 30_000 };
-                    path.offer(header(id, key), vec![(id % 251) as u8; len]);
+                    path.offer(header(id, key), vec![(id % 251) as u8; len].into());
                     produced.store(id, Ordering::Relaxed);
                 }
             }

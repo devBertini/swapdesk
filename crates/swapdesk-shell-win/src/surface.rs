@@ -135,6 +135,12 @@ impl Gfx {
         }
     }
 
+    /// The device was removed by the driver (a reset, the adapter gone): everything made on it must be made again.
+    pub fn device_removed(&self) -> bool {
+        // SAFETY: a plain query on a live device.
+        unsafe { self.d3d.GetDeviceRemovedReason() }.is_err()
+    }
+
     /// A Direct2D 1.0 view of the factory, for the painter.
     pub fn factory(&self) -> windows::Win32::Graphics::Direct2D::ID2D1Factory {
         self.d2d_factory.clone().into()

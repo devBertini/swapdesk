@@ -254,7 +254,12 @@ fn notifications_become_events_and_wake_the_ui() {
     let session = UiEvent::Session {
         session_id: 11,
         device_id: "mac".into(),
-        state: SessionState::Active { since_ms: 1, role: Role::Viewer, granted: Permissions(3) },
+        state: SessionState::Active {
+            since_ms: 1,
+            role: Role::Viewer,
+            granted: Permissions(3),
+            elevation: Default::default(),
+        },
     };
     svc.write(Message::UiNotify(Notify::DevicesChanged(vec![cv::device_to_wire(&device("mac"))])));
     svc.write(Message::UiNotify(cv::event_to_notify(&session).unwrap()));
@@ -285,7 +290,7 @@ fn viewer_video_reaches_the_sink_and_viewer_input_is_written() {
         payload_len: 3,
     };
     let pos = CursorPosition { visible: true, display: 1, seq: 2, x: 100, y: 200, shape_id: 0 };
-    svc.write(Message::ViewerVideo { session_id: 8, header, payload: Bytes(vec![1, 2, 3]) });
+    svc.write(Message::ViewerVideo { session_id: 8, header, payload: vec![1, 2, 3].into() });
     svc.write(Message::ViewerAudio { session_id: 8, datagram: Bytes(vec![9; 20]) });
     svc.write(Message::ViewerCursorPos { session_id: 8, pos });
     let end = Instant::now() + WAIT;
@@ -869,4 +874,355 @@ fn the_files_events_map_both_ways() {
         let n = cv::event_to_notify(&e).expect("it crosses the pipe");
         assert_eq!(cv::notify_to_event(n).unwrap(), e);
     }
+}
+
+// ---------- elevation ----------
+
+use swapdesk_ipc::{ElevAction, ElevationOutcome, ElevationTicket};
+
+const TICKET: ElevationTicket = ElevationTicket([7; 16]);
+
+/// An `Elevator` that answers as scripted and remembers what it was asked.
+struct FakeElevator {
+    run: ElevatorRun,
+    seen: Mutex<Vec<(ElevationTicket, Instant)>>,
+    /// While set, `run` waits for it first.
+    gate: Mutex<Option<Receiver<()>>>,
+}
+
+impl FakeElevator {
+    fn new(run: ElevatorRun) -> Arc<Self> {
+        Arc::new(FakeElevator { run, seen: Mutex::new(Vec::new()), gate: Mutex::new(None) })
+    }
+}
+
+impl Elevator for FakeElevator {
+    fn run(&self, ticket: &ElevationTicket, _line: &str, deadline: Instant) -> ElevatorRun {
+        self.seen.lock().unwrap().push((*ticket, deadline));
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.recv_timeout(WAIT);
+        }
+        self.run
+    }
+}
+
+fn grants_action() -> ElevatedAction {
+    ElevatedAction::SetGrants { device_id: "mac".into(), grants: Permissions(0b1000_0011) }
+}
+
+/// Plays the service for one `Elevate`: answers Begin with `TICKET`, then End with `outcome`.
+fn serve_elevation(svc: &mut Fake, outcome: ElevationOutcome) {
+    let (req, op) = svc.request();
+    assert_eq!(
+        op,
+        UiOp::ElevationBegin { action: ElevAction::SetGrants { device_id: "mac".into(), grants: 0b1000_0011 } }
+    );
+    svc.reply(req, ReplyBody::ElevationTicket { ticket: TICKET, ttl_s: 120 });
+    let (req, end) = svc.request();
+    assert_eq!(end, UiOp::ElevationEnd { ticket: TICKET }, "the ticket is always ended");
+    svc.reply(req, ReplyBody::ElevationOutcome(outcome));
+}
+
+fn elevation_events(b: &ServiceBackend, t: Ticket) -> Result<(), ApiError> {
+    let got = collect(b, 2);
+    let UiEvent::ElevationResult { action, run: _, result } = got[0].clone() else { panic!("{got:?}") };
+    assert_eq!(action, grants_action());
+    // The ticket of the command is answered `Done` after the result, so the strip shows nothing more.
+    assert_eq!(got[1], UiEvent::Reply { ticket: t, result: Ok(Reply::Done) });
+    result
+}
+
+#[test]
+fn elevate_asks_a_ticket_runs_the_elevator_ends_it_and_reports_ok() {
+    let (b, mut svc, _) = Fake::connect();
+    let elevator = FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) });
+    b.set_elevator(elevator.clone());
+    let before = Instant::now();
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    serve_elevation(&mut svc, ElevationOutcome::Confirmed);
+    assert_eq!(elevation_events(&b, t), Ok(()));
+    let seen = elevator.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, TICKET);
+    let left = seen[0].1.duration_since(before);
+    assert!(left > Duration::from_secs(105) && left <= Duration::from_secs(111), "{left:?}");
+}
+
+#[test]
+fn elevate_does_not_hold_the_backend_while_the_elevator_runs() {
+    let (b, mut svc, _) = Fake::connect();
+    let elevator = FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) });
+    let (open, gate) = mpsc::channel();
+    *elevator.gate.lock().unwrap() = Some(gate);
+    b.set_elevator(elevator);
+    let e = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    let (req, _) = svc.request();
+    svc.reply(req, ReplyBody::ElevationTicket { ticket: TICKET, ttl_s: 120 });
+    // The elevator is still running: another command goes through the same pipe and is answered.
+    let l = b.send(Command::ListDevices);
+    let (req, op) = svc.request();
+    assert_eq!(op, UiOp::ListDevices);
+    svc.reply(req, devices_body(&[]));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: l, result: Ok(Reply::Devices(vec![])) }]);
+    open.send(()).unwrap();
+    let (req, _) = svc.request();
+    svc.reply(req, ReplyBody::ElevationOutcome(ElevationOutcome::Confirmed));
+    assert_eq!(elevation_events(&b, e), Ok(()));
+}
+
+#[test]
+fn a_declined_uac_ends_the_ticket_and_reports_refused() {
+    let (b, mut svc, _) = Fake::connect();
+    b.set_elevator(FakeElevator::new(ElevatorRun::Declined));
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    serve_elevation(&mut svc, ElevationOutcome::Open);
+    assert_eq!(elevation_events(&b, t), Err(ApiError::new(ApiCode::Refused)));
+}
+
+#[test]
+fn elevate_without_an_elevator_reports_internal_and_sends_no_ticket() {
+    let (b, mut svc, _) = Fake::connect();
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    assert_eq!(elevation_events(&b, t), Err(ApiError::new(ApiCode::Internal)));
+    // Nothing reached the service: the next thing it reads is the first real request, with req 1.
+    let l = b.send(Command::ListDevices);
+    assert_eq!(svc.request(), (1, UiOp::ListDevices));
+    svc.reply(1, devices_body(&[]));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: l, result: Ok(Reply::Devices(vec![])) }]);
+}
+
+/// ELEVATION.md slice 7 (it was `an_action_on_hold_sends_no_ticket_and_reports_internal`): no action is on hold any
+/// more; each one asks the service for a ticket with its own wire action.
+#[test]
+fn every_action_gets_a_ticket() {
+    let (b, mut svc, _) = Fake::connect();
+    let elevator = FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) });
+    b.set_elevator(elevator.clone());
+    for (action, wire) in [
+        (ElevatedAction::ElevateSession { session_id: 4 }, ElevAction::ElevateSession { session_id: 4 }),
+        (ElevatedAction::OpenAdminTerminal { session_id: 1 }, ElevAction::OpenAdminTerminal { session_id: 1 }),
+    ] {
+        let t = b.send(Command::Elevate { action: action.clone(), line: String::new(), run: 1 });
+        let (req, op) = svc.request();
+        assert_eq!(op, UiOp::ElevationBegin { action: wire });
+        svc.reply(req, ReplyBody::ElevationTicket { ticket: TICKET, ttl_s: 120 });
+        let (req, end) = svc.request();
+        assert_eq!(end, UiOp::ElevationEnd { ticket: TICKET });
+        svc.reply(req, ReplyBody::ElevationOutcome(ElevationOutcome::Confirmed));
+        let got = collect(&b, 2);
+        assert_eq!(got[0], UiEvent::ElevationResult { action, run: 1, result: Ok(()) });
+        assert_eq!(got[1], UiEvent::Reply { ticket: t, result: Ok(Reply::Done) });
+    }
+    assert_eq!(elevator.seen.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn the_outcome_comes_from_the_service_not_from_the_exit_code() {
+    let (b, mut svc, _) = Fake::connect();
+    // The process says 0, the service says nobody confirmed: a failure.
+    b.set_elevator(FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) }));
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    serve_elevation(&mut svc, ElevationOutcome::Open);
+    assert_eq!(elevation_events(&b, t), Err(ApiError::new(ApiCode::Internal)));
+
+    // The other way: the process says 5, the service says confirmed: Ok.
+    let (b, mut svc, _) = Fake::connect();
+    b.set_elevator(FakeElevator::new(ElevatorRun::Ended { exit_code: Some(5) }));
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    serve_elevation(&mut svc, ElevationOutcome::Confirmed);
+    assert_eq!(elevation_events(&b, t), Ok(()));
+}
+
+#[test]
+fn a_failed_run_is_refined_by_the_exit_code_and_the_end_outcome() {
+    use ElevationOutcome as O;
+    let run = |exit_code| ElevatorRun::Ended { exit_code };
+    let cases = [
+        (run(Some(1)), O::Declined, ApiCode::Refused),
+        (run(Some(1)), O::Open, ApiCode::Refused),
+        (run(Some(3)), O::Open, ApiCode::ServiceDown),
+        (run(Some(4)), O::Open, ApiCode::NotPermitted),
+        (run(Some(6)), O::Open, ApiCode::NotPermitted),
+        (run(Some(5)), O::Unknown, ApiCode::Timeout),
+        (run(Some(0)), O::Unknown, ApiCode::Timeout),
+        (run(Some(2)), O::Open, ApiCode::Internal),
+        (run(Some(7)), O::Open, ApiCode::Internal),
+        (run(None), O::Open, ApiCode::Internal),
+        (ElevatorRun::TimedOut, O::Open, ApiCode::Timeout),
+        (ElevatorRun::Failed(ApiCode::Internal), O::Open, ApiCode::Internal),
+    ];
+    for (run, outcome, want) in cases {
+        let (b, mut svc, _) = Fake::connect();
+        b.set_elevator(FakeElevator::new(run));
+        let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+        serve_elevation(&mut svc, outcome);
+        assert_eq!(elevation_events(&b, t), Err(ApiError::new(want)), "{run:?} then {outcome:?}");
+    }
+}
+
+#[test]
+fn a_refused_begin_reports_its_code_and_the_service_going_away_reports_service_down() {
+    for code in [swapdesk_ipc::ApiCode::NotPermitted, swapdesk_ipc::ApiCode::NotFound, swapdesk_ipc::ApiCode::Busy] {
+        let (b, mut svc, _) = Fake::connect();
+        let elevator = FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) });
+        b.set_elevator(elevator.clone());
+        let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+        let (req, _) = svc.request();
+        svc.fail(req, code);
+        assert_eq!(elevation_events(&b, t), Err(ApiError::new(cv::code_from_wire(code))));
+        assert!(elevator.seen.lock().unwrap().is_empty(), "nothing runs without a ticket");
+    }
+    let (b, mut svc, _) = Fake::connect();
+    b.set_elevator(FakeElevator::new(ElevatorRun::Ended { exit_code: Some(0) }));
+    let t = b.send(Command::Elevate { action: grants_action(), line: String::new(), run: 1 });
+    let _ = svc.request();
+    drop(svc);
+    assert_eq!(elevation_events(&b, t), Err(ApiError::new(ApiCode::ServiceDown)));
+}
+
+// ---------- the elevated instance's side ----------
+
+use crate::elevated_client::{self, ElevatedExit};
+
+/// Runs `elevated_client::run` against a service side whose answers are written before it starts (the pipe buffers
+/// them): the ack, the answer to the Describe (req 1) and the answer to the Confirm (req 2). Returns the exit, what
+/// the client wrote and the confirmations it was asked for.
+fn elevated_run(
+    describe: Result<ReplyBody, swapdesk_ipc::ApiCode>,
+    confirm_answer: bool,
+    confirm_reply: Result<ReplyBody, swapdesk_ipc::ApiCode>,
+) -> (ElevatedExit, Vec<Message>, Vec<(ElevAction, String, u16)>) {
+    let (client_in, svc_out) = pipe();
+    let (svc_in, client_out) = pipe();
+    let mut to_client = FrameWriter::new(svc_out);
+    to_client.write_message(&Message::HelloAck { version: IPC_VERSION, win_session: 3 }).unwrap();
+    for (req, r) in [(1, describe), (2, confirm_reply)] {
+        let m = match r {
+            Ok(body) => Message::UiReply { req, status: 0, body: Bytes(body.encode().unwrap()) },
+            Err(code) => Message::UiReply { req, status: code.status(), body: Bytes::default() },
+        };
+        to_client.write_message(&m).unwrap();
+    }
+    let mut asked = Vec::new();
+    let exit = elevated_client::run(client_in, client_out, &TICKET, |action, peer, left| {
+        asked.push((action.clone(), peer.to_owned(), left));
+        confirm_answer
+    });
+    drop(to_client);
+    let mut from_client = FrameReader::new(svc_in);
+    let mut wrote = Vec::new();
+    while let Ok(Some(m)) = from_client.read_message() {
+        wrote.push(m);
+    }
+    (exit, wrote, asked)
+}
+
+fn described() -> Result<ReplyBody, swapdesk_ipc::ApiCode> {
+    Ok(ReplyBody::ElevationAction {
+        action: ElevAction::SetGrants { device_id: "mac".into(), grants: 0b1000_0011 },
+        peer_name: "MacBook".into(),
+        remaining_s: 100,
+    })
+}
+
+#[test]
+fn the_elevated_client_confirms_declines_and_maps_each_refusal_to_its_exit_code() {
+    let hello = Message::Hello { role: IpcRole::Elevator, version: IPC_VERSION, pid: std::process::id() };
+    let describe = Message::UiRequest { req: 1, op: UiOp::ElevationDescribe { ticket: TICKET } };
+    let confirm = |approve| Message::UiRequest { req: 2, op: UiOp::ElevationConfirm { ticket: TICKET, approve } };
+
+    let (exit, wrote, asked) = elevated_run(described(), true, Ok(ReplyBody::Done));
+    assert_eq!((exit, exit.code()), (ElevatedExit::Confirmed, 0));
+    assert_eq!(wrote, vec![hello.clone(), describe.clone(), confirm(true)]);
+    assert_eq!(
+        asked,
+        vec![(ElevAction::SetGrants { device_id: "mac".into(), grants: 0b1000_0011 }, "MacBook".to_owned(), 100)]
+    );
+
+    let (exit, wrote, _) = elevated_run(described(), false, Ok(ReplyBody::Done));
+    assert_eq!((exit, exit.code()), (ElevatedExit::Declined, 1));
+    assert_eq!(wrote, vec![hello.clone(), describe.clone(), confirm(false)], "approve: false is sent");
+
+    let refused = |code| elevated_run(Err(code), true, Ok(ReplyBody::Done));
+    let (exit, wrote, asked) = refused(swapdesk_ipc::ApiCode::NotFound);
+    assert_eq!((exit, exit.code()), (ElevatedExit::Expired, 5));
+    assert!(asked.is_empty(), "nobody is asked about a ticket that is gone");
+    assert_eq!(wrote, vec![hello.clone(), describe.clone()]);
+    let (exit, _, _) = refused(swapdesk_ipc::ApiCode::NeedsAdmin);
+    assert_eq!((exit, exit.code()), (ElevatedExit::NotAdmin, 6));
+    let (exit, _, _) = refused(swapdesk_ipc::ApiCode::NotPermitted);
+    assert_eq!((exit, exit.code()), (ElevatedExit::Refused, 4));
+
+    // The ticket ran out while the person was deciding.
+    let (exit, _, _) = elevated_run(described(), true, Err(swapdesk_ipc::ApiCode::NotFound));
+    assert_eq!(exit, ElevatedExit::Expired);
+}
+
+#[test]
+fn the_elevated_client_exits_unreachable_without_a_service() {
+    let (client_in, svc_out) = pipe();
+    let (_svc_in, client_out) = pipe();
+    drop(svc_out);
+    let exit = elevated_client::run(client_in, client_out, &TICKET, |_, _, _| true);
+    assert_eq!((exit, exit.code()), (ElevatedExit::Unreachable, 3));
+}
+
+/// Review of the elevation, finding 9: the service ends an elevator connection whose lifetime ran out with
+/// `Bye { TIMEOUT }`; the ticket is gone with it, which is `Expired`, not an unreachable service.
+#[test]
+fn an_elevator_connection_ended_for_its_lifetime_exits_expired() {
+    let (client_in, svc_out) = pipe();
+    let (_svc_in, client_out) = pipe();
+    let mut to_client = FrameWriter::new(svc_out);
+    to_client.write_message(&Message::HelloAck { version: IPC_VERSION, win_session: 3 }).unwrap();
+    to_client.write_message(&Message::Bye { code: swapdesk_proto::ErrorCode::Timeout }).unwrap();
+    let exit = elevated_client::run(client_in, client_out, &TICKET, |_, _, _| panic!("nobody is asked"));
+    assert_eq!((exit, exit.code()), (ElevatedExit::Expired, 5));
+}
+
+/// "Exportar registro": the service lists the activity log (op 21, the most it keeps) and this process writes the file,
+/// in the interface's language and local time, with the fields a spreadsheet splits on quoted.
+#[test]
+fn the_activity_log_is_listed_by_the_service_and_written_by_this_process() {
+    let (b, mut svc, _) = Fake::connect();
+    let path = files_temp("export").join("atividade.csv");
+    let rows = [
+        AuditView {
+            at_ms: 1_763_000_000_000,
+            device_name: "Mac; da sala".into(),
+            what: Msg::new(crate::strings::MsgKey::DrawerChat),
+            duration_s: Some(372),
+            alert: false,
+        },
+        AuditView {
+            at_ms: 1_762_990_000_000,
+            device_name: "PC".into(),
+            what: Msg::new(crate::strings::MsgKey::DrawerChat),
+            duration_s: None,
+            alert: false,
+        },
+    ];
+    let t = b.send(Command::ActivityExport { path: path.clone(), language: Language::PtBr, utc_offset_min: -180 });
+    let (req, op) = svc.request();
+    assert_eq!(op, UiOp::ActivityList { before_ms: None, limit: swapdesk_ipc::MAX_ACTIVITY as u32 });
+    svc.reply(req, ReplyBody::Activity(rows.iter().map(cv::audit_to_wire).collect()));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: t, result: Ok(Reply::Done) }]);
+    let csv = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[0], "quando;dispositivo;o que aconteceu;duracao_s");
+    assert_eq!(lines[1], "2025-11-12 23:13;\"Mac; da sala\";Chat;372");
+    assert_eq!(lines[2], "2025-11-12 20:26;PC;Chat;");
+    assert_eq!(lines.len(), 3);
+
+    // A file that cannot be written is an error, and nothing else is written.
+    let t = b.send(Command::ActivityExport {
+        path: path.with_file_name("no-such-folder").join("x.csv"),
+        language: Language::En,
+        utc_offset_min: 0,
+    });
+    let (req, _) = svc.request();
+    svc.reply(req, ReplyBody::Activity(Vec::new()));
+    assert_eq!(collect(&b, 1), vec![UiEvent::Reply { ticket: t, result: Err(ApiError::new(ApiCode::Internal)) }]);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

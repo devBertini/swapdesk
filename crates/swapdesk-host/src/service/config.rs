@@ -23,6 +23,9 @@ pub struct ServiceConfig {
     pub app_version: String,
     /// What this build can do (C1 `Capabilities`); the default describes H.264 decode and Opus audio.
     pub capabilities: Capabilities,
+    /// This machine has a hardware HEVC encoder (the probe's answer, `swapdesk_codec_win::hevc_support().0`); with it a
+    /// session may be encoded in HEVC (F-VIEW-07, [`session_codec`]). Default `false`: H.264 only.
+    pub host_hevc_hardware: bool,
     /// The device key (C5), used in both roles.
     pub identity: Arc<Identity>,
     /// The trust store: who is pinned and what each device may do here.
@@ -53,7 +56,24 @@ pub struct ServiceConfig {
     /// The runner the service itself uses for a quick action when no user helper is attached (Windows:
     /// `WinActions::service()`: lock, sleep, restart). `None`: such an action is refused as unavailable.
     pub service_actions: Option<Box<dyn ActionRunner + Send>>,
+    /// The protocol minor the session endpoint announces: this build's own. Tests play a host of 1.0 with 0.
+    pub proto_minor: u16,
+    /// What this core shares with the cores of the machine's other accounts (ACCOUNTS.md 5.6); `None`: its own.
+    pub machine: Option<super::MachineShared>,
+    /// Whether it listens on the approved addresses from the start (an account without pairings does not; the hub
+    /// turns it on with `ServiceCore::set_receiving`).
+    pub receiving: bool,
+    /// ACCOUNTS.md 5.5: binds the session port on the wildcard address, exclusively (Windows: `SO_EXCLUSIVEADDRUSE`),
+    /// once at start and whether or not the account receives yet, so no other local account can take it. The guard
+    /// still refuses any connection whose arrival address is not approved. `None`: one socket per approved address.
+    pub wildcard: Option<WildcardBinder>,
+    /// The system's neighbour table, for the devices blocked by MAC (D65); [`crate::blocking::NoNeighbors`] until the
+    /// service gives the real one ([`ServiceConfig::with_neighbors`]).
+    pub neighbors: Arc<dyn swapdesk_platform::NeighborTable>,
 }
+
+/// Binds the session port on the wildcard address (see [`ServiceConfig::wildcard`]).
+pub type WildcardBinder = Arc<dyn Fn(u16) -> std::io::Result<std::net::UdpSocket> + Send + Sync>;
 
 /// The collaborators of a core, the part of the configuration with no sensible default.
 pub struct ServiceDeps {
@@ -74,6 +94,7 @@ impl ServiceConfig {
             os_version: os_version.into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
             capabilities: default_capabilities(),
+            host_hevc_hardware: false,
             identity,
             trust,
             session_port: DEFAULT_SESSION_PORT,
@@ -87,8 +108,20 @@ impl ServiceConfig {
             audio_exclude_pid: 0,
             listen_extra: Vec::new(),
             allow_loopback_peers: false,
+            proto_minor: swapdesk_proto::PROTO_MINOR,
+            machine: None,
+            receiving: true,
+            wildcard: None,
             service_actions: None,
+            neighbors: Arc::new(crate::blocking::NoNeighbors),
         }
+    }
+
+    /// The system's neighbour table, so a device blocked by its MAC is refused under any address (D65).
+    #[must_use]
+    pub fn with_neighbors(mut self, neighbors: Arc<dyn swapdesk_platform::NeighborTable>) -> Self {
+        self.neighbors = neighbors;
+        self
     }
 
     /// The runner for quick actions when no user helper is attached (see [`ServiceConfig::service_actions`]).
@@ -107,20 +140,102 @@ impl ServiceConfig {
     }
 }
 
-/// H.264 up to 4K60 and Opus; keyboard unknown until the shell says.
+/// `caps` with an HEVC decode entry added when `hevc_decode` (and none is there yet); unchanged otherwise.
+pub fn with_hevc_decode(mut caps: Capabilities, hevc_decode: bool) -> Capabilities {
+    if hevc_decode && !caps.video_decode.iter().any(|c| c.codec == Codec::Hevc) {
+        let hevc = capabilities_with_hevc(true).video_decode.into_iter().find(|c| c.codec == Codec::Hevc);
+        if let Some(entry) = hevc {
+            caps.video_decode.insert(0, entry);
+        }
+    }
+    caps
+}
+
+/// H.264 up to 4K60 and Opus; keyboard unknown until the shell says. No HEVC: see [`capabilities_with_hevc`].
 pub fn default_capabilities() -> Capabilities {
-    Capabilities {
-        video_decode: vec![VideoCap {
-            codec: Codec::H264,
-            profile: H264Profile::High,
-            max_level: 52,
+    capabilities_with_hevc(false)
+}
+
+/// [`default_capabilities`], with an HEVC decode entry when `hevc_decode_hardware` says this machine's hardware decodes
+/// HEVC (PROTOCOL.md 5.3: probed at start, absent otherwise; the caller passes `swapdesk_codec_win::hevc_support().1`).
+/// The entry reads as HEVC Main, level 5.1 (`general_level_idc` 153, listed as 153 / 3 = 51: 3840x2160 at 60 fps fits
+/// level 5.1), up to 4K60 like the H.264 entry. A host sends it to a minor-0 peer through `Capabilities::for_minor`,
+/// which leaves the entry out.
+pub fn capabilities_with_hevc(hevc_decode_hardware: bool) -> Capabilities {
+    let mut video_decode = vec![VideoCap {
+        codec: Codec::H264,
+        profile: H264Profile::High,
+        max_level: 52,
+        max_width: 3840,
+        max_height: 2160,
+        max_fps: 60,
+    }];
+    if hevc_decode_hardware {
+        video_decode.push(VideoCap {
+            codec: Codec::Hevc,
+            profile: H264Profile::Main,
+            max_level: 51,
             max_width: 3840,
             max_height: 2160,
             max_fps: 60,
-        }],
+        });
+    }
+    Capabilities {
+        video_decode,
         audio: vec![AudioCodec::Opus48Stereo],
         max_datagram: 1200,
         keyboard: KeyboardInfo { kind: KbKind::Unknown, layout: String::new() },
         features: 0,
+    }
+}
+
+/// F-VIEW-07, the host's side: the codec a session's video is encoded in. HEVC only when the viewer's `Capabilities`
+/// (`None`: not received) list an HEVC decoder, the viewer announced a minor that knows it, and `host_hevc_hardware` says
+/// this machine has a hardware HEVC encoder; H.264 in every other case.
+pub fn session_codec(viewer_caps: Option<&Capabilities>, viewer_minor: u16, host_hevc_hardware: bool) -> Codec {
+    viewer_caps.map_or(Codec::H264, |caps| caps.pick_codec(viewer_minor, host_hevc_hardware))
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_capabilities_advertise_no_hevc() {
+        assert!(default_capabilities().video_decode.iter().all(|c| c.codec == Codec::H264));
+        assert_eq!(default_capabilities(), capabilities_with_hevc(false));
+    }
+
+    #[test]
+    fn hevc_is_advertised_only_when_the_hardware_decodes_it() {
+        let with = capabilities_with_hevc(true);
+        let hevc: Vec<_> = with.video_decode.iter().filter(|c| c.codec == Codec::Hevc).collect();
+        assert_eq!(hevc.len(), 1);
+        let h = hevc[0];
+        assert_eq!((h.profile, h.max_level, h.max_width, h.max_height), (H264Profile::Main, 51, 3840, 2160));
+        assert!(with.video_decode.iter().any(|c| c.codec == Codec::H264), "H.264 stays listed");
+        assert!(capabilities_with_hevc(false).video_decode.iter().all(|c| c.codec != Codec::Hevc));
+    }
+
+    #[test]
+    fn a_minor_zero_peer_is_not_told_about_hevc() {
+        let told = capabilities_with_hevc(true).for_minor(0);
+        assert!(told.video_decode.iter().all(|c| c.codec == Codec::H264));
+    }
+
+    #[test]
+    fn the_session_codec_is_hevc_only_when_both_machines_and_the_minor_allow_it() {
+        let hevc = capabilities_with_hevc(true);
+        let h264_only = capabilities_with_hevc(false);
+        assert_eq!(session_codec(Some(&hevc), 2, true), Codec::Hevc);
+        assert_eq!(session_codec(Some(&hevc), 2, false), Codec::H264, "no hardware encoder on the host");
+        assert_eq!(session_codec(Some(&h264_only), 2, true), Codec::H264, "the viewer does not decode HEVC");
+        assert_eq!(
+            session_codec(Some(&hevc), 1, true),
+            Codec::H264,
+            "a minor-1 viewer (built before HEVC) never gets it"
+        );
+        assert_eq!(session_codec(Some(&hevc), 0, true), Codec::H264, "a minor-0 viewer never gets HEVC");
+        assert_eq!(session_codec(None, 2, true), Codec::H264, "capabilities not received yet");
     }
 }

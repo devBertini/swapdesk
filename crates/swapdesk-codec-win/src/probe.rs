@@ -112,8 +112,15 @@ pub fn probe_decoders() -> Result<Vec<DecoderProbe>> {
 fn run(adapter: &AdapterDesc, name: &str, clsid: &str) -> EncoderProbe {
     let mut enc =
         MfH264Encoder::new(EncoderOptions { choice: MftChoice::Clsid(clsid.to_string()), ..Default::default() });
-    let cfg =
-        EncoderConfig { width: 1920, height: 1080, fps: 60, kbps: 20_000, preset: Preset::Auto, adapter: adapter.id };
+    let cfg = EncoderConfig {
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        kbps: 20_000,
+        preset: Preset::Auto,
+        adapter: adapter.id,
+        codec: swapdesk_platform::Codec::H264,
+    };
     match enc.configure(&cfg) {
         Ok(info) => EncoderProbe {
             adapter: adapter.clone(),

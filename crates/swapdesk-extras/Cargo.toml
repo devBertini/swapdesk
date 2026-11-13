@@ -21,4 +21,5 @@ tokio.workspace = true
 [dev-dependencies]
 swapdesk-fakes = { path = "../swapdesk-fakes" }
 swapdesk-trust = { path = "../swapdesk-trust" }
+swapdesk-netsim = { path = "../swapdesk-netsim" }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

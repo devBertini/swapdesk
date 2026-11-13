@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use quinn::{Connection, VarInt};
 use swapdesk_platform::Clock;
 use swapdesk_proto::{
-    Capabilities, Desktop, Display, ErrorCode, Feature, GrantMode, Hello, Intent, Os, PermissionSet, PromptPending,
+    Capabilities, Desktop, Display, ErrorCode, Feature, GrantMode, Hello, Intent, Os, PROTO_MINOR, PermissionSet,
+    PromptPending,
 };
 use swapdesk_trust::{DeviceId, TrustHandle};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -24,6 +25,16 @@ use crate::policy::{self, Role};
 use crate::registry::Registry;
 use crate::resume::{ResumeError, ResumeTable, SwapTokens};
 use crate::util::{lock, random_session_id};
+
+/// How long after a lost link a hosted session may be resumed (`HostConfig::resume_window`'s default): what the
+/// host's interface shows as reconnecting before it calls the session ended.
+pub const RESUME_WINDOW: Duration = Duration::from_secs(60);
+
+/// How long a session waits for the banner's window (`HostConfig::banner_wait`'s default).
+pub const BANNER_WAIT: Duration = Duration::from_secs(15);
+
+/// How often an entry waiting for the banner's window looks for it.
+const BANNER_POLL: Duration = Duration::from_millis(100);
 
 /// The time source of the session's timers: tokio's clock, so a test can pause it.
 pub(crate) fn now() -> Instant {
@@ -49,10 +60,20 @@ pub struct HostConfig {
     pub resume_wait: Duration,
     /// How long an armed swap token lives (6.3 step 4: 10 s).
     pub swap_token_ttl: Duration,
+    /// How long a session may wait for the banner's window to be connected (F-SESS-03): an entry without a prompt
+    /// that finds it missing is refused `TIMEOUT` after this, and a live session whose window went away ends with
+    /// `TIMEOUT` after it.
+    pub banner_wait: Duration,
     /// Sessions that may be live at once; another request is refused `BUSY`.
     pub max_live_sessions: usize,
     pub liveness: LivenessConfig,
     pub caps: Caps,
+    /// The protocol minor this host announces in its `HelloAck`: this build's own. A test that plays a host of 1.0
+    /// sets 0 (it then takes no grants sync, as a 1.0 host does not).
+    pub proto_minor: u16,
+    /// The machine's one hosting reservation, shared with the cores of the other accounts (ACCOUNTS.md 5.6). `None`:
+    /// this core is the machine's only one.
+    pub machine: Option<std::sync::Arc<crate::machine::MachineHosting>>,
 }
 
 impl HostConfig {
@@ -66,12 +87,15 @@ impl HostConfig {
             prompt_timeout: Duration::from_secs(20),
             consent_timeout: Duration::from_secs(20),
             handshake_timeout: Duration::from_secs(10),
-            resume_window: Duration::from_secs(60),
+            resume_window: RESUME_WINDOW,
             resume_wait: Duration::from_secs(8),
             swap_token_ttl: Duration::from_secs(10),
+            banner_wait: BANNER_WAIT,
             max_live_sessions: 1,
             liveness: LivenessConfig::default(),
             caps: Caps::default(),
+            proto_minor: PROTO_MINOR,
+            machine: None,
         }
     }
 }
@@ -167,6 +191,36 @@ pub enum HostEvent {
         feature: Feature,
         answer: ErrorCode,
     },
+    /// What the viewer's account has stored for this host (`StoredGrants`, minor 1): display only, for the
+    /// column "Este computador pode, no X". It never widens or narrows a session.
+    PeerGrants {
+        device: DeviceId,
+        grants: PermissionSet,
+    },
+    /// A device said which protocol minor it speaks over a connection its pinned key authenticated (a grants sync,
+    /// GRANTS-SYNC.md 4.3): it counts over the hint of its discovery record.
+    PeerMinor {
+        device: DeviceId,
+        minor: u16,
+    },
+    /// The viewer elevated a session that entered without a prompt (`Elevate`, ACCOUNTS.md 9): it holds `granted`
+    /// now, `UNATTENDED` among them. Written to the activity as `Elevated`; the banner says "Controle elevado".
+    Elevated {
+        device: DeviceId,
+        session_id: u64,
+        granted: PermissionSet,
+    },
+}
+
+/// Who is at the console, seen from one account's core (ACCOUNTS.md 5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleOwner {
+    /// This core's account (or the machine has one account only).
+    This,
+    /// Nobody: the sign-in screen.
+    Nobody,
+    /// Another account of the machine.
+    Other,
 }
 
 /// The host's user and desktop, as the session layer needs them. The service implements it over the session
@@ -174,6 +228,12 @@ pub enum HostEvent {
 pub trait HostUi: Send + Sync + 'static {
     /// "Someone at the host" (PROTOCOL.md 6.2): a UI is connected from the console session and it is unlocked.
     fn somebody_present(&self) -> bool;
+
+    /// Who owns the console: a session of this account is admitted only while it is this account, or nobody for an
+    /// entry without a prompt (ACCOUNTS.md 5.1). A machine of one account always says `This`.
+    fn console_owner(&self) -> ConsoleOwner {
+        ConsoleOwner::This
+    }
 
     /// Shows the request. The answer comes through the channel; dropping the sender is a refusal.
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer>;
@@ -188,7 +248,31 @@ pub trait HostUi: Send + Sync + 'static {
     /// permission went away first).
     fn consent_closed(&self, _request: &ConsentRequest, _how: PromptEnd) {}
 
+    /// Whether the banner of F-SESS-03 can be shown to this host's user now: `false` only where one is required (the
+    /// account is at the console, on an interactive desktop) and its window is not connected. An entry without a
+    /// prompt waits for it, and a live session pauses and then ends without it, so nobody is ever controlled with no
+    /// banner and no "Desconectar". A host that needs no window (the Mac: quitting the app stops hosting) says `true`.
+    fn banner_ready(&self) -> bool {
+        true
+    }
+
+    /// Asks the machine to start the window of this account in the console session (Windows: the service starts
+    /// `Swapdesk.exe` as that user). Idempotent: called again while the window is still missing.
+    fn start_banner_window(&self) {}
+
     /// "Bloquear ao terminar" (F-SESS-03).
+    /// The desktop the sessions should be on now, as the interface side knows it (`None`: it does not track one).
+    fn current_desktop(&self) -> Option<Desktop> {
+        None
+    }
+
+    /// Whether this host can capture and control a desktop that is not `Default` (Windows: yes, through the SYSTEM
+    /// helper, D11; the Mac, D24: no, nothing can be captured or injected at its lock screen or login window). A host
+    /// that cannot refuses an entry while it is on another desktop and pauses every session there, `UNATTENDED` or not.
+    fn serves_other_desktops(&self) -> bool {
+        true
+    }
+
     fn lock_on_end(&self) -> bool {
         false
     }
@@ -275,6 +359,8 @@ pub(crate) struct HostInner {
     /// Signalled whenever a live session ends or is marked lost, for a resume that waits for it.
     changed: Notify,
     next_request: AtomicU64,
+    /// What each device may still spend on grants syncs (GRANTS-SYNC.md 4.6).
+    pub(crate) sync_budget: Mutex<crate::grants_sync::SyncBudget>,
 }
 
 /// Owns the sessions of this machine as a host. Cheap to clone.
@@ -283,7 +369,7 @@ pub struct HostService {
     pub(crate) inner: Arc<HostInner>,
 }
 
-fn app_code(code: ErrorCode) -> VarInt {
+pub(crate) fn app_code(code: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(code.tag()))
 }
 
@@ -340,6 +426,7 @@ impl HostService {
                 deciding: Mutex::new(HashSet::new()),
                 changed: Notify::new(),
                 next_request: AtomicU64::new(1),
+                sync_budget: Mutex::new(crate::grants_sync::SyncBudget::default()),
             }),
         }
     }
@@ -356,9 +443,29 @@ impl HostService {
     }
 
     /// The same over any control link (the in-memory pair of the tests).
-    pub async fn serve_io(&self, io: ControlIo, conn: Option<Connection>, device: DeviceId) -> SessionEnd {
-        let (ev_tx, ev_rx) = mpsc::channel(256);
+    pub async fn serve_io(&self, mut io: ControlIo, conn: Option<Connection>, device: DeviceId) -> SessionEnd {
         let inner = &self.inner;
+        let deadline = now() + inner.cfg.handshake_timeout;
+        // The first control message says what the connection is: `Hello` opens a session, `GrantsSync` a grants
+        // sync (GRANTS-SYNC.md 4.2), which never reaches the session's state machine.
+        let first = tokio::time::timeout(inner.cfg.handshake_timeout, io.rx.recv()).await.ok().flatten();
+        if let Some(Ok(msg)) = &first
+            && inner.cfg.proto_minor >= 1
+            && let Some(sync) = crate::grants_sync::as_sync(msg)
+        {
+            return crate::grants_sync::answer(self, io, conn, device, sync).await;
+        }
+        let (ev_tx, ev_rx) = mpsc::channel(256);
+        // Anything else is the session's: the first message goes to its state machine before the rest.
+        match first {
+            Some(item) => {
+                let _ = ev_tx.try_send(crate::ctx::Ev::In(item));
+            }
+            None if io.rx.is_closed() => {
+                let _ = ev_tx.try_send(crate::ctx::Ev::In(Err(crate::link::LinkError::Lost)));
+            }
+            None => {}
+        }
         let ctx = SessionCtx::new(CtxParts {
             role: Role::Host,
             device: Some(device),
@@ -369,12 +476,7 @@ impl HostService {
             clock: Arc::clone(&inner.clock),
             consent: Some(ConsentSource { ui: Arc::clone(&inner.ui), timeout: inner.cfg.consent_timeout, device }),
         });
-        let side = Side::Host {
-            service: Arc::clone(&self.inner),
-            device,
-            hello: None,
-            deadline: now() + inner.cfg.handshake_timeout,
-        };
+        let side = Side::Host { service: Arc::clone(&self.inner), device, hello: None, deadline };
         // A panic in a handler ends only this session (D15): the guard takes it out of the live table as lost, so
         // the host is not left "busy" with a session nobody runs.
         let _guard = EndGuard { inner: Arc::clone(&self.inner), ctx: ctx.clone() };
@@ -425,6 +527,23 @@ impl HostService {
             // Only what was revoked goes; what the host's user added for this session alone stays (D8).
             let seen = std::mem::replace(&mut *lock(&ctx.inner.stored_seen), stored);
             ctx.modify_granted(|granted| policy::without_revoked(granted, seen, stored));
+            // The viewer of minor 1 hears what is stored now (display only on its side).
+            ctx.set_own_stored(stored);
+        }
+    }
+
+    /// Whether this account may host now (ACCOUNTS.md 5.1): its user owns the console, or nobody does and a session
+    /// of it entered without a prompt. The fence lets a helper go on after a desktop switch only then.
+    pub fn may_host_now(&self) -> bool {
+        self.may_host_with(self.inner.ui.console_owner())
+    }
+
+    /// [`HostService::may_host_now`] for a console owner read elsewhere (the fence reads the console afresh).
+    pub fn may_host_with(&self, owner: ConsoleOwner) -> bool {
+        match owner {
+            ConsoleOwner::This => true,
+            ConsoleOwner::Other => false,
+            ConsoleOwner::Nobody => lock(&self.inner.table).live.values().any(SessionCtx::entered_unattended),
         }
     }
 
@@ -438,6 +557,30 @@ impl HostService {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The host's user ended a session the interface shows as lost ("Desconectar" on a "Reconectando"). A session
+    /// that is lost has its token killed: refused for good until its window ends (`ResumeError::Killed`), not
+    /// forgotten, so the viewer's redials with it end in `DECLINED` instead of starting a fresh session. A session
+    /// that is live again (the viewer resumed before this call) is ended with `Bye`; what is found live and the token's
+    /// death are decided under the one table lock, so no resume commits in between.
+    pub fn drop_resume(&self, session_id: u64) {
+        let live = {
+            let mut t = lock(&self.inner.table);
+            match t.live.get(&session_id).cloned() {
+                Some(ctx) => {
+                    t.resume.invalidate(session_id);
+                    Some(ctx)
+                }
+                None => {
+                    t.resume.kill(session_id);
+                    None
+                }
+            }
+        };
+        if let Some(ctx) = live {
+            ctx.bye(ErrorCode::NoError);
         }
     }
 
@@ -456,6 +599,11 @@ impl HostService {
 
     /// A desktop switch on the host: `HostState` goes to every live session, paused where the session lacks
     /// `UNATTENDED`.
+    /// The desktop the sessions should be on now (the interface side's, else `Default`).
+    pub fn desktop_now(&self) -> Desktop {
+        self.inner.ui.current_desktop().unwrap_or(Desktop::Default)
+    }
+
     pub fn set_desktop(&self, desktop: Desktop) {
         let live: Vec<SessionCtx> = lock(&self.inner.table).live.values().cloned().collect();
         for ctx in live {
@@ -494,6 +642,40 @@ impl HostService {
 }
 
 impl HostInner {
+    /// The grants of a session after `Elevate` (ACCOUNTS.md 9.3), from `current` and the store read now: the bit
+    /// `UNATTENDED`, and the bit `ADMIN_TERMINAL` when it is stored and was requested and the session still holds the
+    /// terminal. Only those two bits: what the host's person took from this session (the view, the terminal) is never
+    /// given back. Refused (`NOT_PERMITTED`) unless the session entered without a prompt, still holds `VIEW`, and the
+    /// device still holds `UNATTENDED` in this account's store. Called inside the grant change, so a revoke in
+    /// Permissões either comes first and refuses it, or comes after and takes it back.
+    pub(crate) fn elevated_grant(
+        &self,
+        ctx: &SessionCtx,
+        device: &DeviceId,
+        current: PermissionSet,
+    ) -> Result<PermissionSet, ErrorCode> {
+        let stored = self.stored(device).map(|d| d.grants_here).unwrap_or(PermissionSet::EMPTY);
+        if !ctx.entered_unattended()
+            || !stored.contains(PermissionSet::UNATTENDED)
+            || !current.contains(PermissionSet::VIEW)
+        {
+            return Err(ErrorCode::NotPermitted);
+        }
+        let mut bits = current.bits() | PermissionSet::BIT_UNATTENDED;
+        if stored.contains(PermissionSet::ADMIN_TERMINAL)
+            && ctx.requested().contains(PermissionSet::ADMIN_TERMINAL)
+            && current.contains(PermissionSet::TERMINAL)
+        {
+            bits |= PermissionSet::BIT_ADMIN_TERMINAL;
+        }
+        PermissionSet::from_bits(bits).ok_or(ErrorCode::Internal)
+    }
+
+    /// The session's resume token dies: a reconnect enters again, unelevated (ACCOUNTS.md 5.6).
+    pub(crate) fn forget_resume(&self, session_id: u64) {
+        lock(&self.table).resume.invalidate(session_id);
+    }
+
     pub(crate) fn stored(&self, device: &DeviceId) -> Option<swapdesk_trust::PairedDevice> {
         self.trust.read(|s| s.find_by_id(device).cloned())
     }
@@ -502,10 +684,32 @@ impl HostInner {
         lock(&self.table).live.len()
     }
 
+    /// This core's identity for the machine's reservation.
+    fn core_key(&self) -> usize {
+        std::ptr::from_ref(self) as usize
+    }
+
+    /// Another account's core hosts a session now.
+    fn machine_busy(&self) -> bool {
+        self.cfg.machine.as_ref().is_some_and(|m| m.held_by_other(self.core_key()))
+    }
+
     /// The decision for a `Hello` (5.2 step 2). Runs as a task of the session; the state machine commits the result.
     pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
         let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
         let stored_grants = stored.grants_here;
+
+        // ACCOUNTS.md 5.1: another account at the console hosts nothing for this one. The code is ACCOUNT_AWAY; a peer
+        // of 1.0 reads it as NOBODY_PRESENT (the send path maps it). Nobody at the console admits only an entry
+        // without a prompt (the prompt below finds nobody present).
+        if self.ui.console_owner() == ConsoleOwner::Other {
+            return Decision::Refuse(ErrorCode::AccountAway);
+        }
+        // D24: a host that cannot serve its lock screen (the Mac) admits nobody while it is locked, an unattended
+        // device neither: nothing there could be seen or controlled.
+        if !self.ui.serves_other_desktops() && self.ui.current_desktop().is_some_and(|d| d != Desktop::Default) {
+            return Decision::Refuse(ErrorCode::NobodyPresent);
+        }
 
         // A resume: the token is checked, and a token whose old connection is not yet known lost waits for it.
         // (The host being busy with another session is decided at the commit, after the old connection is gone.)
@@ -533,6 +737,9 @@ impl HostInner {
                             break;
                         }
                     }
+                    // The host's user ended this session: refused for good, so the redials of the viewer's 60 s end
+                    // here and start neither an unattended session nor a prompt in front of that person.
+                    Err(ResumeError::Killed) => return Decision::Refuse(ErrorCode::Declined),
                     // An unknown, expired, used or foreign token is not an error: the session goes the normal way
                     // (an unattended device reconnects through UNATTENDED, any other gets a fresh prompt).
                     Err(_) => break,
@@ -540,8 +747,8 @@ impl HostInner {
             }
         }
 
-        // Another session is live: refused before anything is consumed or asked.
-        if self.live_count() >= self.cfg.max_live_sessions {
+        // Another session is live, here or in another account's core: refused before anything is consumed or asked.
+        if self.live_count() >= self.cfg.max_live_sessions || self.machine_busy() {
             return Decision::Refuse(ErrorCode::Busy);
         }
 
@@ -553,7 +760,11 @@ impl HostInner {
             }
         }
 
-        if policy::unattended_grant(stored_grants, hello.requested).is_some() {
+        if policy::unattended_grant(stored_grants, hello.requested, hello.proto_minor).is_some() {
+            // F-SESS-03: nothing is delivered to a device that enters without a prompt until the banner can show it.
+            if let Err(code) = self.await_banner().await {
+                return Decision::Refuse(code);
+            }
             return Decision::Grant { basis: Basis::Unattended, requested: hello.requested, slot: None };
         }
 
@@ -607,6 +818,25 @@ impl HostInner {
         }
     }
 
+    /// Waits, up to `banner_wait`, for the banner's window to be connected, asking the machine to start it first.
+    /// `TIMEOUT` when it does not come: the viewer is told the host did not answer in time.
+    async fn await_banner(&self) -> Result<(), ErrorCode> {
+        if self.ui.banner_ready() {
+            return Ok(());
+        }
+        self.ui.start_banner_window();
+        let deadline = tokio::time::Instant::now() + self.cfg.banner_wait;
+        loop {
+            tokio::time::sleep(BANNER_POLL).await;
+            if self.ui.banner_ready() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ErrorCode::Timeout);
+            }
+        }
+    }
+
     fn prompt_timeout_secs(&self) -> u64 {
         self.cfg.prompt_timeout.as_secs()
     }
@@ -633,6 +863,32 @@ impl HostInner {
         if t.live.len() >= self.cfg.max_live_sessions {
             return Err(ErrorCode::Busy);
         }
+        // The machine's one hosted session: taken before any grant, given back below if this commit fails.
+        let machine = self.cfg.machine.as_ref();
+        if matches!(decision, Decision::Grant { .. } | Decision::Resume { .. })
+            && machine.is_some_and(|m| !m.take(self.core_key()))
+        {
+            return Err(ErrorCode::Busy);
+        }
+        let result = self.commit_granted(&mut t, ctx, device, decision);
+        if result.is_err()
+            && t.live.is_empty()
+            && let Some(m) = machine
+        {
+            m.release(self.core_key());
+        }
+        let committed = result?;
+        t.live.insert(committed.session_id, ctx.clone());
+        Ok(committed)
+    }
+
+    fn commit_granted(
+        &self,
+        t: &mut Table,
+        ctx: &SessionCtx,
+        device: &DeviceId,
+        decision: Decision,
+    ) -> Result<Committed, ErrorCode> {
         let Some(stored_now) = self.trust.read(|s| s.find_by_id(device).map(|d| d.grants_here)) else {
             return Err(ErrorCode::UnknownDevice);
         };
@@ -642,9 +898,15 @@ impl HostInner {
                 let (granted, mode) = match basis {
                     // Entry without a prompt needs the stored `UNATTENDED` still: a revocation that raced the
                     // decision refuses it, and the viewer's next request is asked about.
-                    Basis::Unattended => match policy::unattended_grant(stored_now, requested) {
-                        Some(g) => (g, GrantMode::Unattended),
-                        None => return Err(ErrorCode::NotPermitted),
+                    // What it holds depends on the viewer's minor: 1.1 enters without the machine-level bits.
+                    // Both sides' minor counts: a host that announces minor 0 grants as 1.0 does.
+                    Basis::Unattended => match policy::unattended_grant(
+                        stored_now,
+                        requested,
+                        ctx.peer_minor().min(self.cfg.proto_minor),
+                    ) {
+                        Some(g) if !g.is_empty() => (g, GrantMode::Unattended),
+                        _ => return Err(ErrorCode::NotPermitted),
                     },
                     Basis::Swap => (policy::swap_grant(stored_now, requested), GrantMode::Swap),
                     Basis::Prompted(picked) => {
@@ -656,14 +918,18 @@ impl HostInner {
                     }
                 };
                 ctx.set_requested(requested);
+                let unattended = mode == GrantMode::Unattended;
+                ctx.set_entered_unattended(unattended);
                 let session_id = random_session_id();
-                let token = t.resume.insert(session_id, *device, granted);
+                let token = t.resume.insert(session_id, *device, granted, unattended);
                 Committed { session_id, granted, mode, token }
             }
             Decision::Resume { session_id, token, requested } => {
+                let unattended = t.resume.entered_unattended(session_id);
                 match t.resume.resume(now(), device, session_id, &token, stored_now) {
                     Ok((granted, token)) => {
                         ctx.set_requested(requested);
+                        ctx.set_entered_unattended(unattended);
                         Committed { session_id, granted, mode: GrantMode::Resumed, token }
                     }
                     Err(_) => return Err(ErrorCode::Busy),
@@ -675,7 +941,7 @@ impl HostInner {
         ctx.inner.session_id.store(committed.session_id, Ordering::SeqCst);
         ctx.set_granted(committed.granted);
         *lock(&ctx.inner.stored_seen) = stored_now;
-        t.live.insert(committed.session_id, ctx.clone());
+        *lock(&ctx.inner.own_stored) = Some(stored_now);
         Ok(committed)
     }
 
@@ -691,6 +957,11 @@ impl HostInner {
         {
             let mut t = lock(&self.table);
             t.live.remove(&id);
+            if t.live.is_empty()
+                && let Some(m) = &self.cfg.machine
+            {
+                m.release(self.core_key());
+            }
             if resumable {
                 t.resume.mark_lost(id, now());
             } else {

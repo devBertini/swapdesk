@@ -85,6 +85,12 @@ impl Writer {
         Self::default()
     }
 
+    /// A writer that appends to `buf`, keeping its bytes and its capacity: one buffer serves many encodings
+    /// (`into_bytes` hands it back).
+    pub fn appending(buf: Vec<u8>) -> Self {
+        Self { buf }
+    }
+
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -557,6 +563,18 @@ mod tests {
         let mut w = Writer::new();
         w.put_varint(v).unwrap();
         w.into_bytes()
+    }
+
+    #[test]
+    fn an_appending_writer_keeps_the_bytes_and_the_capacity_it_was_given() {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(&[9, 9]);
+        let at = buf.as_ptr();
+        let mut w = Writer::appending(buf);
+        w.put_u16(0x0201);
+        let out = w.into_bytes();
+        assert_eq!(out, [9, 9, 1, 2]);
+        assert_eq!((out.as_ptr(), out.capacity()), (at, 64), "the same buffer came back");
     }
 
     #[test]

@@ -14,11 +14,11 @@ use swapdesk_lan::guard::approved_addrs;
 use swapdesk_platform::{NetCategory, NetInterface};
 use swapdesk_proto::{Desktop, ErrorCode, GrantMode, Os, PermissionSet, Preset};
 use swapdesk_session::SessionCtx;
-use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, PairedDevice, device_id_hex};
+use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, Direction, PairedDevice, device_id_hex};
 use swapdesk_ui::strings::MsgKey;
 
 use super::presence::PresencePeer;
-use super::{Hub, lock};
+use super::{Hub, MacState, lock};
 
 /// How many audit entries the device list reads for "last session".
 const LAST_SESSION_SCAN: usize = 2000;
@@ -76,7 +76,8 @@ pub(crate) const MANUAL_PREFIX: &str = "addr:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Manual {
     pub addr: Ipv4Addr,
-    /// The peer's session port: [`crate::service::DEFAULT_SESSION_PORT`], or the one typed (development mode only).
+    /// The peer's session port: [`crate::service::DEFAULT_SESSION_PORT`], or the one typed (`ip:port`, an account on a
+    /// slot other than 0, ACCOUNTS.md 5.2).
     pub session_port: u16,
 }
 
@@ -107,6 +108,16 @@ pub(crate) fn parse_device_id(text: &str) -> Option<DeviceId> {
     Some(id)
 }
 
+/// The folder's name as the notice says it: its last component (the whole path for a root), at most 64 bytes.
+pub(crate) fn folder_label(folder: &std::path::Path) -> String {
+    let name = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut end = name.len().min(64);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_string()
+}
+
 /// The `ApiCode` of a protocol error code.
 pub(crate) fn api_of(code: ErrorCode) -> ApiCode {
     match code {
@@ -122,6 +133,7 @@ pub(crate) fn api_of(code: ErrorCode) -> ApiCode {
         | ErrorCode::AlreadyPaired
         | ErrorCode::Unavailable => ApiCode::Refused,
         ErrorCode::InvalidName => ApiCode::Invalid,
+        ErrorCode::NoSpace => ApiCode::NoSpace,
         ErrorCode::NoError => ApiCode::Internal,
         _ => ApiCode::Internal,
     }
@@ -148,8 +160,17 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         AuditEvent::SessionStarted { granted, .. } if !granted.contains(PermissionSet::CONTROL) => {
             (msg(MsgKey::AuditViewOnly, &[]), false)
         }
+        AuditEvent::SessionStarted { direction: Direction::Incoming, .. } => (msg(MsgKey::AuditControlled, &[]), false),
+        AuditEvent::SessionStarted { direction: Direction::Outgoing, .. } => {
+            (msg(MsgKey::AuditControlledFromHere, &[]), false)
+        }
         AuditEvent::Swapped => (msg(MsgKey::AuditSwap, &[device_name.to_string()]), false),
         AuditEvent::FilesSent { count, .. } => (msg(MsgKey::AuditControlFiles, &[count.to_string()]), false),
+        AuditEvent::Elevated => (msg(MsgKey::AuditElevated, &[]), false),
+        // FILES-UI.md 8.3: counts and kinds only; the Activity line says how many files were changed, or that files
+        // outside the home folder were opened.
+        AuditEvent::FilesChanged { count, .. } => (msg(MsgKey::AuditFilesChanged, &[count.to_string()]), false),
+        AuditEvent::FilesReach { .. } => (msg(MsgKey::AuditFilesReach, &[]), false),
         _ => return None,
     })
 }
@@ -165,7 +186,54 @@ impl Hub {
     }
 
     pub fn this_device(&self) -> ThisDevice {
-        ThisDevice { name: self.settings().name, os: self.p.os, ready: ready_of(&self.interfaces()) }
+        // D55: the note shows only while this account has no pairing, on a computer a 1.0 install left data on.
+        let legacy_note =
+            self.had_1_0.load(std::sync::atomic::Ordering::Relaxed) && self.p.trust.read(|s| s.devices.is_empty());
+        ThisDevice { name: self.settings().name, os: self.p.os, ready: ready_of(&self.interfaces()), legacy_note }
+    }
+
+    /// The receiving folder macOS refuses, as a notice (F-FILE-03); `None` without a probe or without a refusal.
+    fn receive_notice(&self) -> Option<Notice> {
+        let probe = lock(&self.receive_probe).clone()?;
+        probe().map(|folder| Notice::ReceiveFolderDenied(folder_label(&folder)))
+    }
+
+    /// Tells the UIs the network status again when the refused receiving folder changed since it last did. Called
+    /// after a transfer ends: a refused receive turns the notice on, a working one turns it off.
+    pub(crate) fn receive_access_changed(&self) {
+        let now = self.receive_notice().map(|n| match n {
+            Notice::ReceiveFolderDenied(name) => name,
+            _ => String::new(),
+        });
+        let changed = std::mem::replace(&mut *lock(&self.receive_told), now.clone()) != now;
+        if changed {
+            self.notify(Notify::NetworkChanged(self.network_status()));
+        }
+    }
+
+    /// The Mac's notices from its probe: the missing grants (with the list) and the login item waiting for approval.
+    fn mac_state(&self) -> MacState {
+        lock(&self.mac_probe).clone().map(|probe| probe()).unwrap_or_default()
+    }
+
+    fn mac_notices(state: MacState) -> Vec<Notice> {
+        let mut out = Vec::new();
+        if state.login_item_needs_approval {
+            out.push(Notice::ServiceNeedsApproval);
+        }
+        if !state.missing.is_empty() {
+            out.push(Notice::MacPermissionsMissing(state.missing));
+        }
+        out
+    }
+
+    /// Tells the UIs the network status again when the Mac's grants or login item changed since it last did.
+    pub(crate) fn mac_status_changed(&self) {
+        let now = self.mac_state();
+        let changed = std::mem::replace(&mut *lock(&self.mac_told), now.clone()) != now;
+        if changed {
+            self.notify(Notify::NetworkChanged(self.network_status()));
+        }
     }
 
     /// The first approved interface that is up, its address and category; the notices the UI shows as banners.
@@ -173,7 +241,12 @@ impl Hub {
         let list = self.interfaces();
         let approved = approved_addrs(&list);
         let Some(first) = approved.first() else {
-            return NetworkStatus { label: String::new(), address: None, category: None, notices: Vec::new() };
+            return NetworkStatus {
+                label: String::new(),
+                address: None,
+                category: None,
+                notices: Self::mac_notices(self.mac_state()).into_iter().chain(self.receive_notice()).collect(),
+            };
         };
         let iface = list.iter().find(|i| i.index == first.if_index);
         let category = iface.and_then(|i| i.category);
@@ -184,6 +257,8 @@ impl Hub {
         if iface.is_some_and(|i| i.inbound_blocked == Some(true)) {
             notices.push(Notice::FirewallBlocks);
         }
+        notices.extend(Self::mac_notices(self.mac_state()));
+        notices.extend(self.receive_notice());
         NetworkStatus {
             label: first.if_name.clone(),
             address: Some(first.addr.to_string()),
@@ -405,25 +480,53 @@ impl Hub {
         let names: Vec<(DeviceId, String)> =
             self.p.trust.read(|s| s.devices.iter().map(|d| (d.device_id, d.name.clone())).collect());
         let mut out = Vec::new();
+        // Newest first, so a session's end comes before its start: the end's duration waits here for the start's line.
+        let mut ends: Vec<(DeviceRef, u32)> = Vec::new();
         // Entries without a line are skipped, so read more than `limit` and cut after.
         for e in self.p.audit.recent(limit.saturating_mul(4).max(256)) {
+            if let AuditEvent::SessionEnded(_) = e.event {
+                ends.push((e.device, e.duration_s.unwrap_or(0)));
+                continue;
+            }
+            let mut duration_s = e.duration_s;
+            if let AuditEvent::SessionStarted { .. } = e.event
+                && let Some(at) = ends.iter().position(|(d, _)| *d == e.device)
+            {
+                duration_s = Some(ends.remove(at).1);
+            }
             if before_ms.is_some_and(|b| e.time_ms >= b) {
                 continue;
             }
             let device_name = match &e.device {
                 DeviceRef::Known(id) => {
-                    names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone()).unwrap_or_else(|| device_id_hex(id))
+                    // A device no longer paired has no name here: the interface writes "removed device" in its language.
+                    names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone()).unwrap_or_default()
                 }
                 DeviceRef::Unknown { addr, .. } => Ipv4Addr::from(*addr).to_string(),
             };
             if let Some((what, alert)) = activity_line(&e, &device_name) {
-                out.push(AuditView { at_ms: e.time_ms, device_name, what, duration_s: e.duration_s, alert });
+                out.push(AuditView { at_ms: e.time_ms, device_name, what, duration_s, alert });
                 if out.len() >= limit {
                     break;
                 }
             }
         }
         out
+    }
+
+    /// The protocol minor of `id`'s discovery record, when the device is on the network now.
+    pub fn minor_hint(&self, id: &DeviceId) -> Option<u16> {
+        self.p.presence.peers().iter().find(|p| &p.device_id == id).map(|p| p.proto_minor)
+    }
+
+    /// The protocol minor to count on for `id`, whose record now carries `hint` ([`Hub::minor_hint`]): what it said
+    /// in a session, else what its record says, else 0 (PROTOCOL.md 1). A viewer asks for anything of a later minor only toward a device this says knows it.
+    pub fn known_minor(&self, id: &DeviceId, hint: Option<u16>) -> u16 {
+        // A device that closed a grants sync as a violation speaks minor 0 until its record comes back.
+        if lock(&self.sync).refused(id) {
+            return 0;
+        }
+        lock(&self.minors).known(id, hint)
     }
 
     /// An address the viewer path can dial for `id`: the device seen on the network now, one learned from a typed
@@ -437,10 +540,72 @@ impl Hub {
         if let Some(a) = lock(&self.learned).get(id) {
             return Some(*a);
         }
+        // Out of discovery: the last stored address, at the port the device was last seen on (an account on a slot
+        // other than 0), else the default port. A stale port fails at the key check, harmlessly.
+        let port = lock(&self.peer_ports)
+            .0
+            .entries
+            .iter()
+            .find(|e| &e.device_id == id)
+            .map_or(crate::service::DEFAULT_SESSION_PORT, |e| e.session_port);
         self.p
             .trust
             .read(|s| s.find_by_id(id).and_then(|d| d.last_addrs.first().copied()))
-            .map(|a| SocketAddrV4::new(Ipv4Addr::from(a), crate::service::DEFAULT_SESSION_PORT))
+            .map(|a| SocketAddrV4::new(Ipv4Addr::from(a), port))
+    }
+
+    /// `id` (paired) was seen on `port`: kept in `peers.bin` when it changed, at most once a minute per device.
+    pub fn note_peer_port(&self, id: &DeviceId, port: u16) {
+        const GAP: std::time::Duration = std::time::Duration::from_secs(60);
+        if self.p.trust.read(|s| s.find_by_id(id).is_none()) {
+            return;
+        }
+        let snapshot = {
+            let mut guard = lock(&self.peer_ports);
+            let (ports, written) = &mut *guard;
+            if ports.entries.iter().any(|e| &e.device_id == id && e.session_port == port) {
+                return;
+            }
+            if written.get(id).is_some_and(|t| t.elapsed() < GAP) {
+                return;
+            }
+            let seen_ms = self.p.wall.unix_ms();
+            match ports.entries.iter_mut().find(|e| &e.device_id == id) {
+                Some(e) => {
+                    e.session_port = port;
+                    e.seen_ms = seen_ms;
+                }
+                None => {
+                    if ports.entries.len() >= super::store::MAX_PEER_PORTS {
+                        // The oldest goes.
+                        if let Some(i) = ports.entries.iter().enumerate().min_by_key(|(_, e)| e.seen_ms).map(|(i, _)| i)
+                        {
+                            ports.entries.remove(i);
+                        }
+                    }
+                    ports.entries.push(super::store::PeerPort { device_id: *id, session_port: port, seen_ms });
+                }
+            }
+            written.insert(*id, std::time::Instant::now());
+            ports.clone()
+        };
+        if let Err(e) = super::store::store_peer_ports(&*self.p.secrets, &snapshot) {
+            self.log(swapdesk_platform::Level::Warn, format_args!("peers.bin was not written: {e}"));
+        }
+    }
+
+    /// The device was forgotten: its last port goes with it.
+    pub fn forget_peer_port(&self, id: &DeviceId) {
+        let snapshot = {
+            let mut guard = lock(&self.peer_ports);
+            let before = guard.0.entries.len();
+            guard.0.entries.retain(|e| &e.device_id != id);
+            if guard.0.entries.len() == before {
+                return;
+            }
+            guard.0.clone()
+        };
+        let _ = super::store::store_peer_ports(&*self.p.secrets, &snapshot);
     }
 }
 
@@ -454,9 +619,7 @@ impl AuditSink for HubAudit {
         let Some(hub) = self.hub.upgrade() else { return };
         hub.p.audit.append(entry.clone());
         let name = match &entry.device {
-            DeviceRef::Known(id) => {
-                hub.p.trust.read(|s| s.find_by_id(id).map(|d| d.name.clone())).unwrap_or_else(|| device_id_hex(id))
-            }
+            DeviceRef::Known(id) => hub.p.trust.read(|s| s.find_by_id(id).map(|d| d.name.clone())).unwrap_or_default(),
             DeviceRef::Unknown { addr, .. } => Ipv4Addr::from(*addr).to_string(),
         };
         if let Some((what, true)) = activity_line(&entry, &name) {
@@ -468,5 +631,26 @@ impl AuditSink for HubAudit {
                 alert: true,
             }));
         }
+    }
+}
+
+#[cfg(test)]
+mod explorer_audit_tests {
+    use super::*;
+
+    fn line(event: AuditEvent) -> Option<(MsgKey, Vec<String>, bool)> {
+        let entry = AuditEntry { time_ms: 1, device: DeviceRef::Known([1; 16]), event, duration_s: None };
+        activity_line(&entry, "pc")
+            .map(|(m, alert)| (MsgKey::ALL[usize::from(m.key)], m.args.into_iter().map(|a| a.0).collect(), alert))
+    }
+
+    /// FILES-UI.md 8.3: the Activity lines of the explorer carry a count or nothing, never a name.
+    #[test]
+    fn the_explorers_audit_has_activity_lines_with_counts_only() {
+        assert_eq!(
+            line(AuditEvent::FilesChanged { op: 3, count: 12, area: 2 }),
+            Some((MsgKey::AuditFilesChanged, vec!["12".to_string()], false))
+        );
+        assert_eq!(line(AuditEvent::FilesReach { kinds: 0b100 }), Some((MsgKey::AuditFilesReach, vec![], false)));
     }
 }
