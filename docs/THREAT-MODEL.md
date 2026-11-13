@@ -119,6 +119,30 @@ Version 1.1 checks GitHub for a new release and installs it on a person's click 
 | A new version that does not start | Rolled back within 60 seconds on both systems |
 | Parser bugs in a privileged process | Manifest and signature are bounded and parsed only after the signature check; the package is opened only after its hash matches; both readers are property-tested and fuzzed |
 
+## Review of 1.1 (13/11/2026)
+
+Four independent reviews read the whole surface of 1.1 (network and sessions, files and the explorer, the updater with the local privilege boundaries, unattended access with elevation and the terminal). No way was found for a standard user to reach SYSTEM, for one account to reach another's sessions, keys or grants, or for anyone to ship an update without the release key. Each finding below was fixed at its cause with a test that failed before the fix.
+
+| Finding | Fix |
+|---|---|
+| Critical: a malicious host's folder names (`..\..\…\Startup`, an absolute path) steered a folder download outside the folder the person chose | Every name a host sends is checked on receipt; a remote name becomes a local path only through one checked join of one valid component; the receive path and `LocalMakeDir` refuse a path that climbs |
+| High: on a Windows viewer a drag out of such a name could delete a file of the viewer | The same checked join for the drag's staging names; the hub reads a path's last component on both separators |
+| Medium: Windows 8.3 short names (`PROGRA~3`) stepped around the protected folders | The guard compares the long final form too |
+| Medium: FILES alone could put a file in an autostart location of the host | The autostart folders, the shell startup files and the PowerShell profile folders refuse writes (D66); reading stays allowed. Remains: an autostart path nobody listed |
+| Medium: a peer with CLIPBOARD made the other side reserve gigabytes from declared lengths | A clipboard item grows with its bytes, one in flight per session |
+| Medium: a malicious host could read a View-only viewer's clipboard and keys | A viewer holds only what it asked for (host's grant ∩ request) for everything that leaves it |
+| Medium: a held read handle on an installed file stopped every update with the service down | The applier claims every file first and refuses with nothing touched; the old service runs; a failed restore still starts a complete set |
+| Medium: a reused Windows session id left the next user without a UI pipe | The pipe is rebound when the session's user changes and the old client dropped |
+| Medium: the host's Desconectar on a lost session let an unattended device straight back in | A killed resume token is declined for its window |
+| Medium: "Bloquear ao terminar" locked nothing | It locks the account's console session on both systems |
+| Medium: an unattended entry on Windows ran without a banner when Swapdesk's window was closed | The entry starts the window and waits for it; a session whose window goes away pauses |
+| Low: QUIC migration, a stalled-handshake squat, answers before the handshake to blocked or unapproved sources, a stale interface list in the guard, forged discovery records against grants sync and presence, close codes toward 1.0, cancel/dismiss of updates from another account, no free-space check, check-then-rename races, bidi names and offer-name swaps, a trash dialog holding the helper, changes after a permission was withdrawn, a stale elevation flag, actions audited after they ran, endless pages | Each fixed; see the commits of 13/11 |
+
+Accepted, with the reason:
+- A host cannot verify that the viewer's own confirmation happened: `Elevate` carries no proof, and a peer that says minor 0 gets the 1.0 grant (ACCOUNTS.md 9.3, D54, D56).
+- A blocked MAC under an address this machine has not yet tied to that MAC reaches the guard once; the guard refuses it as soon as the neighbour table knows it. Failing closed on an unknown MAC would cut off legitimate peers.
+- The Mac's administrator check runs in the user's own process (D54).
+
 ## Out of scope
 
 - Anything beyond the LAN, except the update check, covered above. 1.x has no relay, cloud or NAT traversal. A later mode beyond the LAN (D36) gets its own threat model before it is built, and this one stays true for the LAN-only default.
@@ -151,4 +175,4 @@ These are marked UNPROVEN or GUESS in the design documents. They are risks, not 
 | What macOS allows at the login window and lock screen | Probes P4 to P6 not yet run; not in 1.0 | SPEC R4, F-UNAT-02 |
 | Whether macOS daemon-owned networking is exempt from Local Network privacy | Assumed from an Apple technical note, risk R10 (probe P8) | SPEC R10 |
 | Rate limits, lockout durations, handshake caps and timeouts | GUESS numbers | PROTOCOL 1, 3; CONTRACTS C5.1 |
-| The whole implementation against these threats | A focused review ran before 1.0; coverage-guided fuzzing and an independent audit have not | |
+| The whole implementation against these threats | A focused review ran before 1.0 and four independent reviews of 1.1 on 13/11/2026 (above); coverage-guided fuzzing runs in the hardening stage; no external audit | |
