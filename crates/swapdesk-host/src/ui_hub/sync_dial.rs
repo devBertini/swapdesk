@@ -85,6 +85,12 @@ impl SyncState {
         self.per.get(device).map(|s| s.unknown_key)
     }
 
+    /// Syncs running now.
+    #[cfg(test)]
+    pub fn in_flight_now(&self) -> usize {
+        self.in_flight
+    }
+
     /// A sync of `device` ended as a violation: its known minor is 0 until its record comes back.
     pub fn refused(&self, device: &DeviceId) -> bool {
         self.per.get(device).is_some_and(|s| s.refused)
@@ -262,6 +268,10 @@ impl Hub {
         let me = Arc::clone(self);
         rt.spawn(async move {
             let result = core.sync_grants_async(addr, device).await;
+            // The answer came over a connection the device's pinned key authenticated: it answers at `addr`.
+            if let (Ok(_), SocketAddr::V4(v4)) = (&result, addr) {
+                me.p.presence.authenticated(device, v4);
+            }
             me.sync_finished(device, started, result);
         });
     }
@@ -326,6 +336,12 @@ impl Hub {
             Err(SyncError::UnknownKey) => self.log(
                 Level::Info,
                 format_args!("{hex} refused this machine's key: no automatic grants sync until it is acted on"),
+            ),
+            Err(SyncError::WrongPeer) => self.log(
+                Level::Info,
+                format_args!(
+                    "the machine at the address of {hex} is not that device: syncing goes on with its next record"
+                ),
             ),
             Err(e) => self.log(Level::Debug, format_args!("a grants sync with {hex} gave no answer: {e:?}")),
         }

@@ -709,6 +709,8 @@ impl Hub {
             return Err(ConnectWhy::Failed);
         }
         let session_id = handle.session_id();
+        // The host answered over a connection its pinned key authenticated: it answers at `addr`.
+        self.p.presence.authenticated(id, addr);
         // What the host said it speaks, over the connection its pinned key authenticated.
         let said = handle.ctx().peer_minor();
         if lock(&self.minors).said(id, said, hint) {

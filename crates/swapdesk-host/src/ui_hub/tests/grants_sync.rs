@@ -306,6 +306,53 @@ fn a_peer_that_forgot_this_core_is_not_dialled_again_automatically() {
     b.finish();
 }
 
+/// F6: a forged record puts a paired device's fingerprint at another machine's address. That machine's key fails
+/// this side's own check; it is not the device refusing this side's key, so automatic syncs go on and the next record
+/// (the real device) is synced.
+#[test]
+fn a_record_that_sends_the_dial_to_the_wrong_machine_does_not_stop_the_sync() {
+    let (a, b) = paired(PermissionSet::CONTROL, PermissionSet::VIEW);
+    let impostor = Machine::new("impostor");
+    let SocketAddr::V4(there) = impostor.session_addr() else { unreachable!() };
+    // B's fingerprint, the impostor's address and port.
+    a.presence.set(vec![PresencePeer {
+        device_id: b.id(),
+        name: "other-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![*there.ip()],
+        session_port: there.port(),
+        pair_port: 0,
+        proto_minor: 1,
+    }]);
+    let t = Instant::now();
+    while dialled(&a) < 1 {
+        assert!(t.elapsed() < Duration::from_secs(8), "A dials the forged address: {:?}", a.log.lines());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Wait for that dial to end.
+    while lock(&a.hub.hub.sync).in_flight_now() > 0 {
+        assert!(t.elapsed() < Duration::from_secs(8), "the dial ends");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        lock(&a.hub.hub.sync).per_unknown_key(&b.id()),
+        Some(false),
+        "the wrong machine's key is not B refusing A's key: {:?}",
+        a.log.lines()
+    );
+    // The real device appears: it is synced.
+    a.sees_minor(&b, false, 1);
+    wait_there(&a, PermissionSet::VIEW, Duration::from_secs(6), "A learns what B allows after the forged dial");
+    assert!(dialled(&a) >= 2);
+    // The answer proved B at its own address, and the impostor's never.
+    let SocketAddr::V4(b_addr) = b.session_addr() else { unreachable!() };
+    assert_eq!(a.presence.contacts(), vec![(b.id(), b_addr)]);
+    a.finish();
+    b.finish();
+    impostor.finish();
+}
+
 #[test]
 fn an_answer_older_than_a_push_does_not_overwrite_it() {
     let (a, b) = paired(PermissionSet::CONTROL, PermissionSet::VIEW);

@@ -28,6 +28,10 @@ pub enum TrustError {
     NotInPairingMode,
     /// The peer's key is not (or no longer) in the trust store.
     UnknownDevice,
+    /// Whatever answered at the address is not the device this side meant to reach: its key failed this side's own
+    /// check (the session client's verifier or gate). Says nothing about whether that device still trusts this
+    /// side: a wrong peer answered, not the device (a forged or stale record).
+    WrongPeer,
 }
 
 impl TrustError {
@@ -42,7 +46,7 @@ impl TrustError {
             Self::Timeout(_) => ErrorCode::Timeout,
             Self::SasRejected => ErrorCode::SasRejected,
             Self::NotInPairingMode => ErrorCode::NotPermitted,
-            Self::UnknownDevice => ErrorCode::UnknownDevice,
+            Self::UnknownDevice | Self::WrongPeer => ErrorCode::UnknownDevice,
         }
     }
 }
@@ -61,6 +65,7 @@ impl fmt::Display for TrustError {
             Self::SasRejected => f.write_str("the codes did not match"),
             Self::NotInPairingMode => f.write_str("not in pairing mode"),
             Self::UnknownDevice => f.write_str("unknown device"),
+            Self::WrongPeer => f.write_str("the peer at that address is not the device expected"),
         }
     }
 }

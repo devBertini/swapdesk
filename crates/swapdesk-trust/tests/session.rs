@@ -182,6 +182,22 @@ fn a_client_refuses_a_server_that_is_not_the_device_it_meant_to_reach() {
     });
 }
 
+/// F6: the client's own refusal of the server's key is a different error from every other handshake failure, so a
+/// caller can tell "a wrong peer answered at that address" (a forged or stale record) from "the device refused us".
+#[test]
+fn a_server_whose_key_fails_the_clients_check_is_a_wrong_peer_not_a_tls_failure() {
+    run(async {
+        let a = Node::new("a", TestUi::answering(true));
+        let b = Node::new("b", TestUi::answering(true));
+        pin(&b, &a);
+        let (ep, addr) = session_server(&b);
+        let _server = tokio::spawn(accept_one(ep, b.trust.clone()));
+        let impostor_expected = Identity::generate(0).unwrap();
+        let attempt = connect_session(&client_endpoint(), &a.identity, addr, *impostor_expected.spki()).await;
+        assert!(matches!(attempt, Err(TrustError::WrongPeer)), "{:?}", attempt.as_ref().map(|_| ()));
+    });
+}
+
 // ---------- R11: no resumption, no early data ----------
 
 #[derive(Debug)]

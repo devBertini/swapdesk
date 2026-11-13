@@ -162,6 +162,12 @@ fn app_code(code: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(code.tag()))
 }
 
+/// The QUIC application close code a peer of `peer_minor` is sent: like the code of a `Bye`, one that peer knows
+/// (PROTOCOL.md 1; a 1.0 peer is not sent `ACCOUNT_AWAY`).
+fn close_code(code: ErrorCode, peer_minor: u16) -> VarInt {
+    app_code(code.for_minor(peer_minor))
+}
+
 pub(crate) struct Actor {
     side: Side,
     ctx: SessionCtx,
@@ -990,9 +996,27 @@ impl Actor {
             if said {
                 let _ = tokio::time::timeout(LINGER_LIMIT, conn.closed()).await;
             }
-            conn.close(app_code(f.close), b"");
+            conn.close(close_code(f.close, self.ctx.peer_minor()), b"");
         }
         end
+    }
+}
+
+#[cfg(test)]
+mod close_code_tests {
+    use super::*;
+
+    /// F7: a peer of minor 0 is not sent a close code of a later minor, as the `Bye` it is sent is mapped too.
+    #[test]
+    fn a_minor_0_peer_is_closed_with_nobody_present_for_account_away() {
+        let nobody = VarInt::from_u32(u32::from(ErrorCode::NobodyPresent.tag()));
+        assert_eq!(u64::from(ErrorCode::NobodyPresent.tag()), 5);
+        assert_eq!(close_code(ErrorCode::AccountAway, 0), nobody);
+        // A peer of minor 1 hears the real code; every other code is the same for every minor.
+        assert_eq!(close_code(ErrorCode::AccountAway, 1), app_code(ErrorCode::AccountAway));
+        assert_eq!(close_code(ErrorCode::AccountAway, 1).into_inner(), 22);
+        assert_eq!(close_code(ErrorCode::ProtocolViolation, 0), app_code(ErrorCode::ProtocolViolation));
+        assert_eq!(close_code(ErrorCode::NoError, 0), app_code(ErrorCode::NoError));
     }
 }
 

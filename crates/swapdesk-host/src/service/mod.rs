@@ -137,8 +137,10 @@ pub const SYNC_LIMIT: Duration = Duration::from_secs(5);
 pub enum SyncError {
     /// The address did not pass the LAN guard, or the device is not paired.
     Guard(ConnectError),
-    /// The device's handshake refused this side's key.
+    /// The device, authenticated by its pinned key, refused this side's key.
     UnknownKey,
+    /// What answered at the address is not the device (its key failed this side's check): a forged or stale record.
+    WrongPeer,
     /// The device closed it as a violation: it does not speak minor 1, whatever its record says.
     Violation,
     /// The device is over its budget, or already syncing with this side.
@@ -224,9 +226,12 @@ impl Connector {
         let attempt = async {
             let (endpoint, spki, stored) = self.endpoint_for(addr, device).await.map_err(SyncError::Guard)?;
             let conn = connect_session(&endpoint, &self.dialer.identity, addr, spki).await.map_err(|e| match e {
-                // The handshake refused this side's key: the device forgot it (or pins another key of this
-                // computer).
-                swapdesk_trust::TrustError::Tls(_) | swapdesk_trust::TrustError::UnknownDevice => SyncError::UnknownKey,
+                // Whatever answered failed this side's own check of the key: a forged or stale record sent the
+                // dial to the wrong machine. Nothing is known about what the device itself thinks of this side.
+                swapdesk_trust::TrustError::WrongPeer => SyncError::WrongPeer,
+                // Every other handshake failure is the peer's unauthenticated word or a lost packet. That the
+                // device forgot this side is read only after the handshake, from what its pinned key authenticated
+                // (`closed_why`).
                 _ => SyncError::Failed,
             })?;
             let (send, recv) = conn.open_bi().await.map_err(|e| closed_why(&e))?;

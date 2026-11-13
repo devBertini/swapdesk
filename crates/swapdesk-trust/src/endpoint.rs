@@ -61,8 +61,21 @@ pub async fn connect_session(
     let conn = tokio::time::timeout(HANDSHAKE_LIMIT, connecting)
         .await
         .map_err(|_| TrustError::Timeout("handshake"))?
-        .map_err(|e| TrustError::Tls(e.to_string()))?;
-    gate_session_client(&conn, &expected)?;
+        .map_err(|e| match e {
+        // This side's own TLS check failed (the pinned-key verifier refused the server's key or its proof of
+        // it): a wrong peer answered. A `ConnectionClosed` is the peer's word, unauthenticated at this stage
+        // (a forged Initial can carry a crypto close), so it is an ordinary handshake failure. Codes 0x100 to 0x1ff are
+        // QUIC's TLS alerts (RFC 9001 4.8).
+        quinn::ConnectionError::TransportError(t) if (0x100..=0x1ff).contains(&u64::from(t.code)) => {
+            TrustError::WrongPeer
+        }
+        e => TrustError::Tls(e.to_string()),
+    })?;
+    // The gate refusing the key is this side's check too: the handshake did not reach the expected device.
+    gate_session_client(&conn, &expected).map_err(|e| match e {
+        TrustError::UnknownDevice => TrustError::WrongPeer,
+        e => e,
+    })?;
     Ok(conn)
 }
 
