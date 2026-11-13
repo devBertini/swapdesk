@@ -928,9 +928,8 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                     h.set_console_user(user.clone());
                 });
                 term_env.set_session(state.session_id);
-                if let Some(s) = state.session_id {
-                    pipes.ensure(s);
-                }
+                // Also a logon or logoff of any session: a session id that changed hands needs a pipe for its new user.
+                pipes.sync(state.session_id);
                 supervisor.console_changed(state.session_id, state.user.is_some());
             }
             Ok(Some(SessionEvent::DesktopSwitched(d))) => every_hub(&|h| h.set_desktop(d)),
