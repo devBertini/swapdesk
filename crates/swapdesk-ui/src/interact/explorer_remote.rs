@@ -627,6 +627,10 @@ impl UiState {
         if let Some(n) = &self.explorer.there.notice {
             return Some(self.tm(n));
         }
+        // A folder download reads the other computer's folders before anything starts: say so (R-UI-13).
+        if self.explorer.there.download.as_ref().is_some_and(|d| d.made.is_none()) {
+            return Some(self.tm(&Msg::new(MsgKey::ExplorerScanning).with(self.peer_name())));
+        }
         self.there_v10().then(|| self.tm(&Msg::new(MsgKey::ExplorerHomeOnly10).with(self.peer_name())))
     }
 
@@ -1077,7 +1081,7 @@ impl UiState {
         if !job.to_there && !job.folders.is_empty() {
             // A folder download scans first: nothing is made or sent before the limits passed (FILES-UI.md 5).
             if self.download_making() {
-                self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerOpFailed));
+                self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerFolderCopyBusy));
                 return;
             }
             a.commands.extend(self.download_start(job.folders, &job.local_dir, &job.remote_dir, (trash, copy)));

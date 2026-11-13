@@ -702,6 +702,11 @@ strings! {
     // T1: limits of one copy (FILES-UI.md 5) and folders dragged out of the window (1.1)
     ExplorerJobTooBig => "Esta cópia passa do limite de {0} arquivos ou {1} níveis de pastas. Nada foi copiado.", "This copy is over the limit of {0} files or {1} folder levels. Nothing was copied.";
     ExplorerFoldersStayIn => "Pastas ainda não podem ser arrastadas para fora do app.", "Folders cannot be dragged out of the app yet.";
+    ExplorerScanning => "Lendo as pastas do {0}…", "Reading the folders on {0}…";
+    ExplorerFolderCopyBusy => "Espere a cópia de pastas em andamento terminar.", "Wait for the folder copy under way to finish.";
+    ExplorerPropsKind => "Tipo: {0}", "Type: {0}";
+    ExplorerPropsSize => "Tamanho: {0}", "Size: {0}";
+    ExplorerPropsModified => "Modificado: {0}", "Modified: {0}";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

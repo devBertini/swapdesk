@@ -162,8 +162,10 @@ impl UiState {
         self.explorer.there.notice = Some(notice);
     }
 
-    fn too_big() -> Msg {
-        Msg::new(MsgKey::ExplorerJobTooBig).with(MAX_JOB_FILES.to_string()).with(MAX_DEPTH.to_string())
+    fn too_big(&self) -> Msg {
+        Msg::new(MsgKey::ExplorerJobTooBig)
+            .with(crate::format::count(self.lang, MAX_JOB_FILES as u64))
+            .with(MAX_DEPTH.to_string())
     }
 
     fn failure_notice(code: ApiCode) -> Msg {
@@ -191,7 +193,7 @@ impl UiState {
             || dl.folders.len() + dirs.len() > MAX_JOB_FILES
             || (!dirs.is_empty() && cur.dir.depth >= MAX_DEPTH)
         {
-            self.download_abort(Self::too_big());
+            self.download_abort(self.too_big());
             return;
         }
         for name in dirs {
@@ -381,15 +383,17 @@ impl UiState {
     pub(crate) fn there_props_view(&self) -> Option<(String, Vec<String>)> {
         let p = self.explorer.there.props.as_ref()?;
         let title = self.tm(&Msg::new(MsgKey::ExplorerPropsTitle).with(p.name.clone()));
-        let named = |key: MsgKey, value: String| format!("{}: {value}", self.t(key));
+        let named = |key: MsgKey, value: String| self.tm(&Msg::new(key).with(value));
         let mut lines =
-            vec![named(MsgKey::ExplorerColType, crate::interact::explorer::type_of(self.lang, &p.name, p.is_dir))];
+            vec![named(MsgKey::ExplorerPropsKind, crate::interact::explorer::type_of(self.lang, &p.name, p.is_dir))];
         if !p.is_dir {
-            lines.push(named(MsgKey::ExplorerColSize, human_size(self.lang, p.size)));
+            lines.push(named(MsgKey::ExplorerPropsSize, human_size(self.lang, p.size)));
         }
         if p.mtime_ms != 0 {
-            lines
-                .push(named(MsgKey::ExplorerColModified, crate::format::table_when(self.lang, p.mtime_ms, self.clock)));
+            lines.push(named(
+                MsgKey::ExplorerPropsModified,
+                crate::format::table_when(self.lang, p.mtime_ms, self.clock),
+            ));
         }
         if p.is_dir {
             let c = &p.counted;
@@ -398,12 +402,14 @@ impl UiState {
             } else {
                 lines.push(
                     self.tm(&Msg::new(MsgKey::ExplorerPropsContents)
-                        .with(c.files.to_string())
-                        .with(c.folders.to_string())
+                        .with(crate::format::count(self.lang, c.files))
+                        .with(crate::format::count(self.lang, c.folders))
                         .with(human_size(self.lang, c.bytes))),
                 );
                 if c.truncated {
-                    lines.push(self.tm(&Msg::new(MsgKey::ExplorerPropsMore).with((c.files + c.folders).to_string())));
+                    lines.push(self.tm(
+                        &Msg::new(MsgKey::ExplorerPropsMore).with(crate::format::count(self.lang, c.files + c.folders)),
+                    ));
                 }
             }
         }

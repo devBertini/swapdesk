@@ -849,6 +849,8 @@ fn a_folder_download_makes_the_local_folders_before_fetching_the_files_into_them
     assert!(s.explorer_can_copy(), "a folder can come from a 1.1 peer");
     let a = s.activate(ControlId::ExpCopy);
     assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)], "the scan starts; nothing is made or fetched");
+    let reading = s.there_notice_text().expect("the wait is said");
+    assert!(reading.starts_with("Lendo as pastas do "), "{reading}");
     page_of(
         &mut s,
         "Contratos",
@@ -881,6 +883,7 @@ fn a_folder_download_makes_the_local_folders_before_fetching_the_files_into_them
     assert!(matches!(f.get(3), Some(Command::LocalList { .. })), "the left pane lists the new folders");
     assert!(s.explorer.there.download.is_none());
     assert!(s.explorer_transfers_open());
+    assert!(s.there_notice_text().is_none_or(|t| !t.starts_with("Lendo")), "the reading line goes with the scan");
 }
 
 #[test]
@@ -919,7 +922,7 @@ fn a_folder_download_over_the_limits_does_not_start() {
     assert!(s.explorer.there.download.is_none());
     assert_eq!(
         s.explorer_pane(true).notice.as_deref(),
-        Some("Esta cópia passa do limite de 10000 arquivos ou 32 níveis de pastas. Nada foi copiado.")
+        Some("Esta cópia passa do limite de 10.000 arquivos ou 32 níveis de pastas. Nada foi copiado.")
     );
     // 32 levels: the 32nd folder still holds a folder.
     let mut s = opened_11();
