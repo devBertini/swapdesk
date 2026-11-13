@@ -608,6 +608,9 @@ pub struct UiState {
     /// settings, which wins over what the service answers and is written on each change.
     pub(crate) ui: Option<crate::prefs::UserPrefs>,
     prefs_store: Option<Box<dyn crate::prefs::PrefsStore>>,
+    /// The first-run guide shows on Início (B16): no per-user record existed when the interface started, and the
+    /// person has not closed the guide yet. Closing it writes the record, so it never comes back.
+    pub(crate) guide_open: bool,
     pub(crate) clock: Clock,
     pub(crate) this: Option<ThisDevice>,
     pub(crate) network: Option<NetworkStatus>,
@@ -732,6 +735,7 @@ impl UiState {
             theme: Theme::System,
             ui: None,
             prefs_store: None,
+            guide_open: false,
             clock: Clock::default(),
             this: None,
             network: None,
@@ -1447,6 +1451,18 @@ impl UiState {
         self.crash_notice
     }
 
+    /// The first-run guide (B16): its title and body while it shows.
+    pub fn guide_card(&self) -> Option<(String, String)> {
+        self.guide_open.then(|| (self.t(MsgKey::GuideTitle), self.t(MsgKey::GuideBody)))
+    }
+
+    /// The person closed the guide: the record is written, so the guide never shows again.
+    pub(crate) fn close_guide(&mut self) -> Changed {
+        self.guide_open = false;
+        self.write_prefs();
+        Changed::ALL
+    }
+
     /// Seconds of an answered, empty device list before the "no computer found" card replaces the plain text (F20).
     pub const NO_COMPUTER_AFTER_S: u16 = 10;
 
@@ -1557,7 +1573,8 @@ impl UiState {
     /// per-user settings. Call before the first paint. A record that cannot be used reads as the defaults (a trace
     /// line, never a failure).
     pub fn load_prefs(&mut self, store: Box<dyn crate::prefs::PrefsStore>) {
-        // No record yet (first start): the language the window started with, the system's, stays.
+        // No record yet (first start): the language the window started with, the system's, stays, and the guide shows.
+        self.guide_open = matches!(store.read(), Ok(None));
         let p = crate::prefs::load_or(&*store, crate::prefs::UserPrefs { language: self.lang, ..Default::default() });
         self.lang = p.language;
         self.theme = p.theme;

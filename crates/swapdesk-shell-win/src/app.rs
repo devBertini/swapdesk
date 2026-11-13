@@ -42,6 +42,8 @@ pub struct Shared {
     dark_applied: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
     pub terminal: RefCell<TerminalPane>,
+    /// The notification area icon is up (a real run): closing the main window hides it instead of ending the run.
+    pub tray: Cell<bool>,
 }
 
 thread_local! {
@@ -155,6 +157,7 @@ fn run_shell(
         banner_on: Cell::new(false),
         dark_applied: Cell::new(dark_now),
         terminal: RefCell::new(TerminalPane::default()),
+        tray: Cell::new(false),
     });
     // Terminal output arrives on the pipe's reader thread and wakes this thread to pump and repaint.
     set_terminal_waker(Arc::clone(&waker) as Arc<dyn swapdesk_ui::UiWaker>);
@@ -162,6 +165,12 @@ fn run_shell(
     // The window appears before any answer; the requests go out right after, all together.
     let main = Window::create(&shared, WindowKind::Main)?;
     waker.set_window(main.hwnd());
+    // A real run gets the notification area icon (B16), with the same actions as the Mac's menu bar item.
+    let tray_hwnd = main.hwnd();
+    if shared.host.is_some() {
+        let tip = shared.state.borrow().t(swapdesk_ui::MsgKey::AppName);
+        shared.tray.set(crate::tray::add(tray_hwnd, &tip));
+    }
     shared.windows.borrow_mut().push(main);
     shared.send_commands(startup);
     shared.refresh(Changed::ALL);
@@ -174,6 +183,9 @@ fn run_shell(
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+    if shared.tray.get() {
+        crate::tray::remove(tray_hwnd);
     }
     SHARED.with(|s| *s.borrow_mut() = None);
     Ok(shared)

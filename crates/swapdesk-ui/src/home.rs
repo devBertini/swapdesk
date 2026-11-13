@@ -149,6 +149,12 @@ impl UiState {
                 s.button(id, label);
             }
         }
+        if let Some((title, body)) = self.guide_card() {
+            s.text(UiRole::Heading, title);
+            s.text(UiRole::Text, body);
+            s.button(ControlId::GuideSkip, self.t(MsgKey::GuideSkip));
+            s.button(ControlId::GuideDone, self.t(MsgKey::GuideDone));
+        }
         self.crash_and_empty_controls(s);
         for card in &home.cards {
             match card {

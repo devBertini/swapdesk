@@ -1407,6 +1407,42 @@ impl Window {
                 }
                 Some(LRESULT(0))
             }
+            WM_CLOSE if self.kind == WindowKind::Main && self.shared.tray.get() => {
+                // D32 on both systems: the interface stays in the notification area, connected to the service.
+                // SAFETY: hides our own window.
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                Some(LRESULT(0))
+            }
+            crate::tray::WM_TRAY if self.kind == WindowKind::Main => {
+                use windows::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_RBUTTONUP};
+                let event = (lparam.0 & 0xFFFF) as u32;
+                let action = match event {
+                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(crate::tray::TrayAction::Open),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => {
+                        let (open, quit) = {
+                            let st = self.shared.state.borrow();
+                            (st.t(swapdesk_ui::MsgKey::StatusOpen), st.t(swapdesk_ui::MsgKey::StatusQuit))
+                        };
+                        crate::tray::menu(hwnd, &open, &quit)
+                    }
+                    _ => None,
+                };
+                match action {
+                    // SAFETY: shows and raises our own window.
+                    Some(crate::tray::TrayAction::Open) => unsafe {
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                        let _ = SetForegroundWindow(hwnd);
+                    },
+                    // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
+                    Some(crate::tray::TrayAction::Quit) => unsafe {
+                        let _ = DestroyWindow(hwnd);
+                    },
+                    None => {}
+                }
+                Some(LRESULT(0))
+            }
             WM_CLOSE => {
                 if self.kind == WindowKind::Viewer {
                     // Closing the viewer ends the session; the window goes when the session has ended.

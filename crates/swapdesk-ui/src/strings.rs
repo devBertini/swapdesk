@@ -559,6 +559,10 @@ strings! {
     DisplayNumbered => "Tela {0}", "Display {0}";
     DisplayOption => "{0}, {1}", "{0}, {1}";
     DisplayOptionPrimary => "{0} (principal), {1}", "{0} (main), {1}";
+    GuideTitle => "Bem-vindo ao Swapdesk", "Welcome to Swapdesk";
+    GuideBody => "1. Instale o Swapdesk no outro computador, na mesma rede.\n2. Escolha-o em Na rede e clique em Parear; confira se o código é o mesmo nos dois.\n3. Em Permissões, diga o que ele pode fazer aqui. Depois é só clicar em Controlar.", "1. Install Swapdesk on the other computer, on the same network.\n2. Pick it under On the network and click Pair; check that the code is the same on both.\n3. Under Permissions, say what it may do here. Then click Control.";
+    GuideSkip => "Pular", "Skip";
+    GuideDone => "Entendi", "Got it";
     ExplorerTitle => "Arquivos", "Files";
     ExplorerBackToScreen => "Tela", "Screen";
     ExplorerThisComputer => "Este computador", "This computer";

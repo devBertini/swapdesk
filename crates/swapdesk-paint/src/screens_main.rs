@@ -380,6 +380,24 @@ fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
         c.paint(f, Rect::new(a.x, y, a.cw, h));
         used += h + 20.0;
     }
+    // B16: the first-run guide, until the person closes it ("Pular" left, "Entendi" right).
+    if let Some((title, body)) = f.st.guide_card() {
+        let buttons = [
+            (ControlId::GuideSkip, f.t(MsgKey::GuideSkip), Kind::Default),
+            (ControlId::GuideDone, f.t(MsgKey::GuideDone), Kind::Primary),
+        ];
+        let c = Card {
+            look: Look::Inline,
+            icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::SWAP)),
+            title: Some(&title),
+            body: Some(&body),
+            bar: None,
+            buttons: &buttons,
+        };
+        let h = c.height(f, a.cw);
+        c.paint(f, Rect::new(a.x, y + used, a.cw, h));
+        used += h + 20.0;
+    }
     if f.st.fetch(DataKind::Devices) != swapdesk_ui::Fetch::Ready {
         return used;
     }

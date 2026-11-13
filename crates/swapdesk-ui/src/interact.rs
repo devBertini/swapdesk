@@ -91,6 +91,9 @@ pub enum ControlId {
     Notice(NoticeKind),
     /// The "no computer found" card's action: focus the address field (F20).
     NoComputerAddress,
+    /// The first-run guide's "Pular" and "Entendi" (B16): both close it for good.
+    GuideSkip,
+    GuideDone,
     /// A button of the update card or the Ajustes section "Atualizações" (UPDATES.md 10).
     Update(crate::update_card::UpdAction),
     WakeCancel,
@@ -1557,6 +1560,7 @@ impl UiState {
                 }
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),
+            ControlId::GuideSkip | ControlId::GuideDone => a.changed = self.close_guide(),
             ControlId::Update(action) => self.activate_update(action, &mut a),
             ControlId::WakeCancel | ControlId::ConnectCancel => {
                 let device_id = self.selected_device().map(|d| d.id.clone());
