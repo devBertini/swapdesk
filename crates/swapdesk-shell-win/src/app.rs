@@ -323,6 +323,43 @@ impl Shared {
         self.dispatch(act, from);
     }
 
+    /// The pointer moved while the left button is down over the explorer (slice 3). The state starts the drag, decides
+    /// the target and the caption; `copy` is Ctrl.
+    pub fn drag_move(self: &Rc<Self>, under: Option<ControlId>, at: (f32, f32), copy: bool, from: &Window) {
+        let act = self.state.borrow_mut().drag_move(under, at, copy, now_ms());
+        self.dispatch(act, from);
+    }
+
+    /// A 50 ms tick while a drag runs: a folder hovered for 800 ms opens.
+    pub fn drag_tick(self: &Rc<Self>, from: &Window) {
+        let act = self.state.borrow_mut().drag_tick(now_ms());
+        self.dispatch(act, from);
+    }
+
+    /// The left button went up over the explorer: true when a drag ended (the window must not click).
+    pub fn drag_release(self: &Rc<Self>, under: Option<ControlId>, at: (f32, f32), copy: bool, from: &Window) -> bool {
+        let act = self.state.borrow_mut().drag_release(under, at, copy);
+        match act {
+            Some(act) => {
+                self.dispatch(act, from);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Capture or focus was lost while a drag runs.
+    pub fn drag_cancel(self: &Rc<Self>) {
+        let changed = self.state.borrow_mut().drag_cancel();
+        self.refresh(changed);
+    }
+
+    /// A context menu was asked for on `under` (slice 3); the menu opens once the message has finished.
+    pub fn context_menu(self: &Rc<Self>, under: Option<ControlId>, from_keyboard: bool, from: &Window) {
+        let act = self.state.borrow_mut().context_menu(under, from_keyboard);
+        self.dispatch(act, from);
+    }
+
     /// A key of the explorer (slice 2a), as the window mapped it.
     pub fn explorer_key(self: &Rc<Self>, key: swapdesk_ui::ExplorerKey, from: &Window) {
         let act = self.state.borrow_mut().explorer_key(key);
@@ -362,7 +399,21 @@ impl Shared {
                     crate::system::open_local_file(&path);
                 }
             }
-            Some(effect @ (Effect::Menu(_) | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder)) => {
+            Some(Effect::RevealLocal) => {
+                let target = self.state.borrow_mut().take_local_target();
+                if let Some(path) = target {
+                    crate::system::reveal_local_item(&path);
+                }
+            }
+            // Menus and dialogs wait for a person: queued, run after the message that asked (see `run_modal`).
+            Some(
+                effect @ (Effect::Menu(_)
+                | Effect::ContextMenu
+                | Effect::SaveLog
+                | Effect::PickFiles
+                | Effect::PickReceiveFolder),
+            ) => {
+                debug_assert_eq!(handling(&effect), Handling::Modal);
                 from.set_pending_effect(effect)
             }
             None => {}
@@ -379,6 +430,20 @@ impl Shared {
                     let act = self.state.borrow_mut().choose(select, index);
                     self.send_commands(act.commands);
                     self.refresh(act.changed);
+                }
+            }
+            Effect::ContextMenu => {
+                let items = self.state.borrow().context_items();
+                let flags: Vec<(String, MENU_ITEM_FLAGS)> = items
+                    .into_iter()
+                    .map(|(label, on)| (label, if on { MF_STRING } else { MF_STRING | MF_GRAYED }))
+                    .collect();
+                match popup_menu(from, &flags, from.menu_point()) {
+                    Some(index) => {
+                        let act = self.state.borrow_mut().context_chosen(index);
+                        self.dispatch(act, from);
+                    }
+                    None => self.state.borrow_mut().context_closed(),
                 }
             }
             Effect::SaveLog => {
@@ -418,19 +483,11 @@ impl Shared {
         if options.is_empty() {
             return None;
         }
-        let (x, y) = from.screen_point_of(select.anchor());
-        // SAFETY: a popup menu created, shown and destroyed here; the strings outlive the call.
-        unsafe {
-            let menu = CreatePopupMenu().ok()?;
-            for (i, (label, on)) in options.iter().enumerate() {
-                let flags = if *on { MF_STRING | MF_CHECKED } else { MF_STRING };
-                let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(label.as_str()));
-            }
-            let chosen =
-                TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, x, y, None, from.hwnd(), None);
-            let _ = DestroyMenu(menu);
-            (chosen.0 > 0).then(|| chosen.0 as usize - 1)
-        }
+        let items: Vec<(String, MENU_ITEM_FLAGS)> = options
+            .iter()
+            .map(|(label, on)| (label.clone(), if *on { MF_STRING | MF_CHECKED } else { MF_STRING }))
+            .collect();
+        popup_menu(from, &items, from.screen_point_of(select.anchor()))
     }
 
     pub fn tick(self: &Rc<Self>) {
@@ -661,5 +718,107 @@ impl Shared {
                 self.placeholder_on.set(false);
             }
         }
+    }
+}
+
+/// Milliseconds on a monotonic clock that starts with the first call (the drag's spring-loaded folders read it).
+pub fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The system's own popup menu of `items` (a label and its flags: `MF_GRAYED` disabled, `MF_CHECKED` checked) at the
+/// screen point `at`; the index of the chosen item. The select menus and the explorer's context menu both use it.
+fn popup_menu(from: &Window, items: &[(String, MENU_ITEM_FLAGS)], at: (i32, i32)) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    // SAFETY: a popup menu created, shown and destroyed here; the strings outlive the call.
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for (i, (label, flags)) in items.iter().enumerate() {
+            let _ = AppendMenuW(menu, *flags, i + 1, &HSTRING::from(label.as_str()));
+        }
+        let chosen =
+            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.0, at.1, None, from.hwnd(), None);
+        let _ = DestroyMenu(menu);
+        (chosen.0 > 0).then(|| chosen.0 as usize - 1)
+    }
+}
+
+/// How the shell runs an effect: at once, or as a modal thing that waits for a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Handling {
+    Immediate,
+    Modal,
+}
+
+/// The handling of every effect. No catch-all: a new `Effect` does not build until it is decided here, and
+/// `dispatch` and `run_modal` handle each side.
+pub(crate) fn handling(effect: &Effect) -> Handling {
+    match effect {
+        Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder => {
+            Handling::Modal
+        }
+        Effect::FocusEdit(_)
+        | Effect::Focus(_)
+        | Effect::SubmitEdit(_)
+        | Effect::OpenLogs
+        | Effect::OpenWebPage
+        | Effect::OpenLocal
+        | Effect::RevealLocal => Handling::Immediate,
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+    use swapdesk_ui::SelectId;
+
+    /// One effect of every kind; the match has no catch-all, so a new variant must be listed here.
+    fn every_effect() -> Vec<Effect> {
+        let all = vec![
+            Effect::Menu(SelectId::Theme),
+            Effect::FocusEdit(EditId::Address),
+            Effect::SubmitEdit(EditId::Rename),
+            Effect::SaveLog,
+            Effect::OpenLogs,
+            Effect::PickFiles,
+            Effect::PickReceiveFolder,
+            Effect::Focus(ControlId::ConnectCancel),
+            Effect::OpenWebPage,
+            Effect::OpenLocal,
+            Effect::ContextMenu,
+            Effect::RevealLocal,
+        ];
+        for e in &all {
+            match e {
+                Effect::Menu(_)
+                | Effect::FocusEdit(_)
+                | Effect::Focus(_)
+                | Effect::SubmitEdit(_)
+                | Effect::SaveLog
+                | Effect::OpenLogs
+                | Effect::PickFiles
+                | Effect::PickReceiveFolder
+                | Effect::OpenWebPage
+                | Effect::OpenLocal
+                | Effect::ContextMenu
+                | Effect::RevealLocal => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
+        let all = every_effect();
+        assert_eq!(all.len(), 12);
+        for e in &all {
+            // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
+            let _ = handling(e);
+        }
+        assert_eq!(handling(&Effect::ContextMenu), Handling::Modal);
+        assert_eq!(handling(&Effect::RevealLocal), Handling::Immediate);
     }
 }

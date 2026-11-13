@@ -566,6 +566,13 @@ pub enum Effect {
     OpenWebPage,
     /// Open the local file of [`UiState::take_local_target`] with the system's app for it (the explorer's left pane).
     OpenLocal,
+    /// Show the context menu of [`UiState::context_items`] at the pointer (a right click, Control+click on the Mac,
+    /// the Menu key or Shift+F10); the answer comes back through [`UiState::context_chosen`], or
+    /// [`UiState::context_closed`] when it was dismissed.
+    ContextMenu,
+    /// Show the local item of [`UiState::take_local_target`] in the system's file manager (Explorador de Arquivos,
+    /// Finder).
+    RevealLocal,
 }
 
 /// What to restore when an optimistic change is refused.

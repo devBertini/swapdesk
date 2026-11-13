@@ -46,6 +46,9 @@ pub const TIMER_PLACEHOLDER: usize = 2;
 pub const TIMER_BANNER: usize = 4;
 /// One-shot: 150 ms after the last key typed in the address field (R-UI-4).
 const TIMER_ADDRESS: usize = 3;
+/// While an explorer drag runs: spring-loaded folders and auto-scroll (slice 3).
+const TIMER_DRAG: usize = 5;
+const DRAG_TICK_MS: u32 = 50;
 const EN_CHANGE: u16 = 0x0300;
 const EM_SETCUEBANNER: u32 = 0x1501;
 const EM_SETSEL: u32 = 0x00B1;
@@ -91,6 +94,10 @@ pub struct Window {
     second_list: Cell<Option<(Rect, f32)>>,
     /// The last click on a control: which and when (ms), for a double click on the explorer's rows.
     last_click: Cell<Option<(ControlId, u64)>>,
+    /// Where the context menu opens, in screen pixels (the right click, or the focused row for the Menu key).
+    menu_at: Cell<(i32, i32)>,
+    /// The drag's timer runs.
+    drag_timer: Cell<bool>,
     edit_font: Cell<Option<windows::Win32::Graphics::Gdi::HFONT>>,
     edit_brush: Cell<Option<(u32, HBRUSH)>>,
     /// A modal effect (menu, file dialog) to run after the message that asked for it has finished.
@@ -172,6 +179,8 @@ impl Window {
             held: Cell::new(0),
             second_list: Cell::new(None),
             last_click: Cell::new(None),
+            menu_at: Cell::new((0, 0)),
+            drag_timer: Cell::new(false),
             edit_font: Cell::new(None),
             edit_brush: Cell::new(None),
             pending_effect: RefCell::new(None),
@@ -310,8 +319,7 @@ impl Window {
     /// within the system's double-click time (the explorer's rows select and open with them).
     fn note_pointer_mods(&self, id: ControlId) {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, GetKeyState, VK_CONTROL, VK_SHIFT};
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        let now = u64::try_from(START.get_or_init(std::time::Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX);
+        let now = crate::app::now_ms();
         // SAFETY: plain reads of the keyboard state and the system's double-click time.
         let (ctrl, shift, double) = unsafe {
             (GetKeyState(i32::from(VK_CONTROL.0)) < 0, GetKeyState(i32::from(VK_SHIFT.0)) < 0, GetDoubleClickTime())
@@ -325,6 +333,70 @@ impl Window {
             extend: shift,
             clicks: if again { 2 } else { 1 },
         });
+    }
+
+    /// The explorer of this viewer window is open (the picture is hidden, the rows take the mouse).
+    fn explorer_on(&self) -> bool {
+        self.kind == WindowKind::Viewer && self.shared.state.borrow().explorer_open()
+    }
+
+    /// A client point in pixels, in DIPs.
+    fn dips(&self, x: i32, y: i32) -> (f32, f32) {
+        let s = self.scale();
+        (x as f32 / s, y as f32 / s)
+    }
+
+    fn ctrl_down() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
+        // SAFETY: plain key state read.
+        unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+    }
+
+    /// The drag timer runs while a drag does: 50 ms ticks for the spring-loaded folders and the auto-scroll.
+    fn sync_drag_timer(&self) {
+        let active = self.shared.state.borrow().drag_active();
+        if active != self.drag_timer.get() {
+            self.drag_timer.set(active);
+            // SAFETY: our own window timer.
+            unsafe {
+                if active {
+                    SetTimer(Some(self.hwnd()), TIMER_DRAG, DRAG_TICK_MS, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd()), TIMER_DRAG);
+                }
+            }
+        }
+    }
+
+    /// One drag tick: the state clock, then the list under the pointer scrolls when it is in its top or bottom band.
+    fn drag_tick(&self) {
+        self.sync_drag_timer();
+        if !self.drag_timer.get() {
+            return;
+        }
+        self.shared.drag_tick(self);
+        let mut p = windows::Win32::Foundation::POINT::default();
+        // SAFETY: our window; the cursor position is read and converted to client pixels.
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd(), &mut p);
+        }
+        let (x, y) = self.dips(p.x, p.y);
+        let mut moved = false;
+        {
+            let mut ix = self.ix.borrow_mut();
+            if let Some((area, max)) = self.second_list.get().filter(|(a, _)| a.contains(x, y)) {
+                let to = (ix.drawer_scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, max);
+                moved = std::mem::replace(&mut ix.drawer_scroll, to) != to;
+            } else if let Some(area) = self.list_area.get().filter(|a| a.contains(x, y)) {
+                let to =
+                    (ix.scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, self.scroll_max.get());
+                moved = std::mem::replace(&mut ix.scroll, to) != to;
+            }
+        }
+        if moved {
+            self.invalidate();
+        }
     }
 
     /// The video rectangle in whole window pixels.
@@ -455,6 +527,10 @@ impl Window {
     /// dropped (no activation), and every button the viewer believes is down gets its button-up, so none stays
     /// stuck on the remote host.
     fn capture_lost(&self) {
+        if self.shared.state.borrow().drag_active() {
+            self.shared.drag_cancel();
+            self.sync_drag_timer();
+        }
         let held = self.held.get();
         let was_pressed = self.ix.borrow_mut().pressed.take().is_some();
         if held != 0 {
@@ -1194,6 +1270,11 @@ impl Window {
                 if previous != hit {
                     self.invalidate_controls(&[previous, hit]);
                 }
+                if self.explorer_on() && wparam.0 & 0x0001 != 0 {
+                    // MK_LBUTTON: a press on a row, moved, is the explorer drag.
+                    self.shared.drag_move(hit, self.dips(x, y), Self::ctrl_down(), self);
+                    self.sync_drag_timer();
+                }
                 self.forward_mouse(MouseKind::Move, x, y, hit);
                 Some(LRESULT(0))
             }
@@ -1265,6 +1346,10 @@ impl Window {
                     before
                 };
                 self.forward_button(PointerButton::Left, true, lparam);
+                if self.explorer_on() {
+                    let at = self.dips(x, y);
+                    self.shared.state.borrow_mut().drag_press(hit, at);
+                }
                 if let Some(ControlId::Edit(e)) = hit {
                     self.focus_control(ControlId::Edit(e), false);
                 } else {
@@ -1282,6 +1367,13 @@ impl Window {
                 let pressed = self.ix.borrow_mut().pressed.take();
                 let hit = self.hit_test(x, y);
                 let was_hover = std::mem::replace(&mut self.ix.borrow_mut().hover, hit);
+                // Before the capture is released: that would report a lost capture and cancel the drag. A drag that
+                // ran (or was cancelled) makes this release no click on what is under the pointer.
+                let ended = self.explorer_on() && {
+                    let ended = self.shared.drag_release(hit, self.dips(x, y), Self::ctrl_down(), self);
+                    self.sync_drag_timer();
+                    ended
+                };
                 self.forward_button(PointerButton::Left, false, lparam);
                 if self.held.get() == 0 {
                     // SAFETY: balances SetCapture.
@@ -1290,6 +1382,7 @@ impl Window {
                 self.invalidate_changed(&[pressed, was_hover, hit]);
                 if let (Some(p), Some(h)) = (pressed, hit)
                     && p == h
+                    && !ended
                     && !matches!(p, ControlId::Edit(_))
                 {
                     self.note_pointer_mods(p);
@@ -1299,6 +1392,41 @@ impl Window {
             }
             WM_MOUSEWHEEL if self.forward_wheel(false, wparam, lparam) => Some(LRESULT(0)),
             WM_MOUSEHWHEEL if self.forward_wheel(true, wparam, lparam) => Some(LRESULT(0)),
+            // The explorer context menu (slice 3): the right button belongs to the window, not to the host.
+            WM_RBUTTONDOWN if self.explorer_on() => Some(LRESULT(0)),
+            WM_RBUTTONUP if self.explorer_on() => {
+                let (x, y) = (get_x(lparam.0), get_y(lparam.0));
+                let hit = self.hit_test(x, y);
+                let mut p = windows::Win32::Foundation::POINT { x, y };
+                // SAFETY: our window; converts a client point to screen coordinates.
+                let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p) };
+                self.menu_at.set((p.x, p.y));
+                self.shared.context_menu(hit, false, self);
+                Some(LRESULT(0))
+            }
+            // Shift+F10 and the Menu key arrive with no pointer (lParam -1): the focused row, else the focused pane.
+            windows::Win32::UI::WindowsAndMessaging::WM_CONTEXTMENU if self.explorer_on() => {
+                let (hit, anchor) = if lparam.0 == -1 {
+                    let focus = self.ix.borrow().focus;
+                    let b = focus.and_then(|f| self.bounds_of(f));
+                    let mut p = windows::Win32::Foundation::POINT {
+                        x: b.map_or(16, |b| b.0 as i32 + 16),
+                        y: b.map_or(16, |b| ((b.1 + b.3) / 2.0) as i32),
+                    };
+                    // SAFETY: our window; converts a client point to screen coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p) };
+                    (focus, (p.x, p.y))
+                } else {
+                    let mut p = windows::Win32::Foundation::POINT { x: get_x(lparam.0), y: get_y(lparam.0) };
+                    let screen = (p.x, p.y);
+                    // SAFETY: our window; converts a screen point to client coordinates.
+                    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p) };
+                    (self.hit_test(p.x, p.y), screen)
+                };
+                self.menu_at.set(anchor);
+                self.shared.context_menu(hit, lparam.0 == -1, self);
+                Some(LRESULT(0))
+            }
             WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP if self.host().is_some() => {
                 let (button, down) = match msg {
                     WM_RBUTTONDOWN => (PointerButton::Right, true),
@@ -1387,6 +1515,10 @@ impl Window {
             }
             WM_SETFOCUS | WM_KILLFOCUS => {
                 let focused = msg == WM_SETFOCUS;
+                if !focused && self.shared.state.borrow().drag_active() {
+                    self.shared.drag_cancel();
+                    self.sync_drag_timer();
+                }
                 if let Some(host) = self.host() {
                     host.focus(focused);
                 }
@@ -1467,6 +1599,7 @@ impl Window {
                     TIMER_TICK => self.shared.tick(),
                     TIMER_PLACEHOLDER => self.shared.arm_placeholders(),
                     TIMER_BANNER => self.shared.banner_tick(),
+                    TIMER_DRAG => self.drag_tick(),
                     TIMER_ADDRESS => {
                         // SAFETY: our own window's timer.
                         unsafe {
@@ -1555,6 +1688,11 @@ impl Window {
 
     pub fn set_pending_effect(&self, e: Effect) {
         *self.pending_effect.borrow_mut() = Some(e);
+    }
+
+    /// Where the context menu opens, in screen pixels.
+    pub fn menu_point(&self) -> (i32, i32) {
+        self.menu_at.get()
     }
 
     pub fn screen_point_of(&self, id: ControlId) -> (i32, i32) {

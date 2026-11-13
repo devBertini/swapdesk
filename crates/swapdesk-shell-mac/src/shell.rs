@@ -21,7 +21,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
-    NSObjectProtocol, NSString, NSTimer, NSURL, NSUserDefaults, ns_string,
+    NSObjectProtocol, NSPoint, NSString, NSTimer, NSURL, NSUserDefaults, ns_string,
 };
 use swapdesk_paint::term::{PUMP_BUDGET, TerminalPane};
 use swapdesk_ui::debounce::Debouncer;
@@ -163,6 +163,12 @@ define_class!(
             dev::panel_check();
         }
 
+        // The explorer's drag: 50 ms while one runs (spring-loaded folders, auto-scroll).
+        #[unsafe(method(dragTick:))]
+        fn drag_tick(&self, _t: &AnyObject) {
+            with_shell(|s| s.drag_tick());
+        }
+
         #[unsafe(method(placeholders:))]
         fn placeholders(&self, _t: &AnyObject) {
             with_shell(|s| s.arm_placeholders());
@@ -239,6 +245,10 @@ pub struct Shell {
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
     placeholder_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// Runs while an explorer drag does.
+    drag_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// Where the context menu opens, in the canvas's coordinates.
+    menu_at: std::cell::Cell<(f32, f32)>,
     debounce: RefCell<Debouncer>,
     started: std::time::Instant,
     /// The theme whose `NSApp.appearance` is in force (the app starts with none: Sistema).
@@ -300,6 +310,45 @@ pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
 pub(crate) fn explorer_key(key: swapdesk_ui::ExplorerKey) {
     with_shell(|s| {
         let act = s.state.borrow_mut().explorer_key(key);
+        s.dispatch_from(WindowKind::Viewer, act);
+        // Esc ends a drag: its timer goes with it.
+        s.sync_drag_timer();
+    });
+}
+
+/// The left button went down on `hit` in the explorer (slice 3).
+pub(crate) fn drag_press(hit: Option<ControlId>, at: (f32, f32)) {
+    with_shell(|s| s.state.borrow_mut().drag_press(hit, at));
+}
+
+/// The pointer moved with the left button down over the explorer; `copy` is Option.
+pub(crate) fn drag_move(hit: Option<ControlId>, at: (f32, f32), copy: bool) {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_move(hit, at, copy, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, act);
+        s.sync_drag_timer();
+    });
+}
+
+/// The left button went up over the explorer: true when a drag ended (the canvas must not click).
+pub(crate) fn drag_release(hit: Option<ControlId>, at: (f32, f32), copy: bool) -> bool {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_release(hit, at, copy);
+        let ended = act.is_some();
+        if let Some(act) = act {
+            s.dispatch_from(WindowKind::Viewer, act);
+        }
+        s.sync_drag_timer();
+        ended
+    })
+    .unwrap_or(false)
+}
+
+/// A right click or Control+click at `at` on `hit` in the explorer: the menu opens after the activation.
+pub(crate) fn context_menu(hit: Option<ControlId>, at: (f32, f32)) {
+    with_shell(|s| {
+        s.menu_at.set(at);
+        let act = s.state.borrow_mut().context_menu(hit, false);
         s.dispatch_from(WindowKind::Viewer, act);
     });
 }
@@ -415,6 +464,8 @@ fn start_with(
         tick_timer: RefCell::new(None),
         placeholder_timer: RefCell::new(None),
         debounce_timer: RefCell::new(None),
+        drag_timer: RefCell::new(None),
+        menu_at: std::cell::Cell::new((0.0, 0.0)),
         debounce: RefCell::new(Debouncer::new()),
         started: std::time::Instant::now(),
         appearance: std::cell::Cell::new(Theme::System),
@@ -734,6 +785,14 @@ impl Shell {
                 }
             }
             Handling::Menu(select) => self.pick(kind, select),
+            Handling::ContextMenu => self.context_popup(kind),
+            Handling::RevealInFinder => {
+                let target = self.state.borrow_mut().take_local_target();
+                // Only something that exists: `open -R` shows it selected in its folder.
+                if let Some(path) = target.filter(|p| p.exists()) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+                }
+            }
             Handling::SaveLogPanel => self.save_log(),
             Handling::ChooseFiles => {
                 let title = self.state.borrow().t(MsgKey::ChooseFiles);
@@ -848,6 +907,50 @@ impl Shell {
         if let Some(index) = canvas.pick(&options, select.anchor()) {
             let act = self.state.borrow_mut().choose(select, index);
             self.dispatch_from(kind, act);
+        }
+    }
+
+    /// The explorer's context menu at the pointer; the choice goes back through `UiState::context_chosen`.
+    fn context_popup(&self, kind: WindowKind) {
+        let items: Vec<(String, bool, bool)> =
+            self.state.borrow().context_items().into_iter().map(|(label, on)| (label, false, on)).collect();
+        let Some(canvas) = self.canvas(kind) else { return };
+        let (x, y) = self.menu_at.get();
+        match canvas.popup(&items, NSPoint::new(f64::from(x), f64::from(y))) {
+            Some(index) => {
+                let act = self.state.borrow_mut().context_chosen(index);
+                self.dispatch_from(kind, act);
+            }
+            None => self.state.borrow_mut().context_closed(),
+        }
+    }
+
+    /// The drag's timer runs while a drag does.
+    fn sync_drag_timer(&self) {
+        let active = self.state.borrow().drag_active();
+        let running = self.drag_timer.borrow().is_some();
+        if active && !running {
+            self.set_timer(&self.drag_timer, 0.05, true, sel!(dragTick:));
+        } else if !active
+            && running
+            && let Some(t) = self.drag_timer.borrow_mut().take()
+        {
+            t.invalidate();
+        }
+    }
+
+    /// Milliseconds since the shell started (the drag's spring-loaded folders read it).
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// One 50 ms tick of a drag: a folder hovered for 800 ms opens, and a list scrolls at its edges.
+    fn drag_tick(&self) {
+        let act = self.state.borrow_mut().drag_tick(self.now_ms());
+        self.dispatch_from(WindowKind::Viewer, act);
+        self.sync_drag_timer();
+        if let Some(canvas) = self.canvas(WindowKind::Viewer) {
+            canvas.drag_autoscroll();
         }
     }
 

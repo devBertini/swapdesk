@@ -214,7 +214,7 @@ impl UiState {
     }
 
     /// The permissions of the viewer session, when it is active.
-    fn granted(&self) -> Option<Permissions> {
+    pub(crate) fn granted(&self) -> Option<Permissions> {
         match self.viewer_session().map(|s| &s.state) {
             Some(SessionState::Active { granted, .. }) => Some(*granted),
             _ => None,
@@ -883,7 +883,7 @@ impl UiState {
     // ----- copy: the conflict card, the folder upload -----
 
     /// Why a folder cannot go to the other computer; `None` when it can.
-    fn upload_folder_block(&self) -> Option<MsgKey> {
+    pub(crate) fn upload_folder_block(&self) -> Option<MsgKey> {
         match self.explorer.there.proto {
             Proto::V10 => Some(MsgKey::ExplorerNeeds11),
             Proto::Unknown => Some(MsgKey::ExplorerFoldersLater),
@@ -912,7 +912,6 @@ impl UiState {
             return;
         }
         let there = self.explorer.focus_there;
-        let to_there = !there;
         let picked: Vec<(String, bool)> = {
             let sel = &self.explorer.panes[idx(there)].selected;
             self.sorted_rows(there)
@@ -921,6 +920,30 @@ impl UiState {
                 .map(|e| (e.name.clone(), e.is_dir))
                 .collect()
         };
+        let src = if there {
+            self.there_folder()
+        } else {
+            let Some(dir) = self.explorer.here_dir.clone() else { return };
+            dir.to_string_lossy().into_owned()
+        };
+        self.copy_items(!there, picked, src, None, a);
+    }
+
+    /// The copy of `picked` (names, folder or not) out of the folder `src` of one computer into `dest`, a folder of
+    /// the other (`None`: the other pane's current folder, whose listing lets the conflict card ask first; another
+    /// folder's listing is not known, so the engine's own rule of never overwriting is what protects its files).
+    /// The primary button and a drag between panes both end here.
+    pub(crate) fn copy_items(
+        &mut self,
+        to_there: bool,
+        picked: Vec<(String, bool)>,
+        src: String,
+        dest: Option<String>,
+        a: &mut Activation,
+    ) {
+        if self.session_id().is_none() {
+            return;
+        }
         self.explorer.note = None;
         let files: Vec<String> = picked.iter().filter(|(_, d)| !d).map(|(n, _)| n.clone()).collect();
         let mut folders: Vec<String> = picked.iter().filter(|(_, d)| *d).map(|(n, _)| n.clone()).collect();
@@ -935,10 +958,23 @@ impl UiState {
         if files.is_empty() && folders.is_empty() {
             return;
         }
-        let Some(local_dir) = self.explorer.here_dir.clone() else { return };
-        let job = CopyJob { to_there, files, folders, local_dir, remote_dir: self.there_folder() };
-        let dest = if to_there { self.there_names() } else { self.here_names() };
-        let lower: BTreeSet<String> = dest.iter().map(|n| n.to_lowercase()).collect();
+        let (local_dir, remote_dir) = if to_there {
+            (PathBuf::from(&src), dest.clone().unwrap_or_else(|| self.there_folder()))
+        } else {
+            let Some(local) = dest.as_ref().map(PathBuf::from).or_else(|| self.explorer.here_dir.clone()) else {
+                return;
+            };
+            (local, src)
+        };
+        let job = CopyJob { to_there, files, folders, local_dir, remote_dir };
+        let known = if dest.is_some() {
+            Vec::new()
+        } else if to_there {
+            self.there_names()
+        } else {
+            self.here_names()
+        };
+        let lower: BTreeSet<String> = known.iter().map(|n| n.to_lowercase()).collect();
         let names: Vec<String> = job.files.iter().filter(|n| lower.contains(&n.to_lowercase())).cloned().collect();
         if names.is_empty() {
             self.run_job(job, &BTreeSet::new(), Vec::new(), a);

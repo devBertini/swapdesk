@@ -220,7 +220,23 @@ define_class!(
                 return;
             }
             let hit = self.hit(event);
+            if self.explorer_on() {
+                // A press on a row, moved, is the explorer's drag; Option is the copy key.
+                let copy = event.modifierFlags().contains(NSEventModifierFlags::Option);
+                crate::shell::drag_move(hit, self.point(event), copy);
+            }
             self.hover(hit, hit.is_none() && self.over_video(event));
+        }
+
+        // The explorer's context menu on a right click (Control+click is handled in `mouseDown:`).
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            if self.explorer_on() {
+                self.context_at(event);
+            } else {
+                // SAFETY: forwards the same event to NSView's implementation.
+                unsafe { msg_send![super(self), rightMouseDown: event] }
+            }
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -240,6 +256,14 @@ define_class!(
                 return;
             }
             let hit = self.hit(event);
+            if self.explorer_on() {
+                if event.modifierFlags().contains(NSEventModifierFlags::Control) {
+                    // Control+click is a right click on the Mac.
+                    self.context_at(event);
+                    return;
+                }
+                crate::shell::drag_press(hit, self.point(event));
+            }
             {
                 let mut ix = self.ivars().ix.borrow_mut();
                 ix.pressed = hit;
@@ -275,6 +299,13 @@ define_class!(
                 ix.pressed.take()
             };
             self.setNeedsDisplay(true);
+            if self.explorer_on() {
+                let copy = event.modifierFlags().contains(NSEventModifierFlags::Option);
+                if crate::shell::drag_release(hit, self.point(event), copy) {
+                    // A drag ran (or was cancelled): the release is not a click on what is under it.
+                    return;
+                }
+            }
             // A click is a press and a release on the same control; a text input only takes the focus.
             if let (Some(p), Some(h)) = (pressed, hit)
                 && p == h
@@ -489,11 +520,19 @@ impl CanvasView {
     /// `None` when the menu was dismissed.
     pub fn pick(&self, options: &[(String, bool)], at: ControlId) -> Option<usize> {
         let r = self.rect_of(at)?;
+        let items: Vec<(String, bool, bool)> = options.iter().map(|(label, on)| (label.clone(), *on, true)).collect();
+        self.popup(&items, NSPoint::new(f64::from(r.x), f64::from(r.bottom())))
+    }
+
+    /// Opens the system's menu of `items` (label, checked, enabled) at `at` (this view's coordinates) and waits for the
+    /// person: the index chosen, or `None` when it was dismissed. The select menus and the explorer's context menu
+    /// both use it; a disabled item stays in the list, greyed (`autoenablesItems` is off, so `enabled` rules).
+    pub fn popup(&self, items: &[(String, bool, bool)], at: NSPoint) -> Option<usize> {
         let mtm = self.mtm();
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         let target: &AnyObject = self.as_ref();
-        for (i, (label, on)) in options.iter().enumerate() {
+        for (i, (label, on, enabled)) in items.iter().enumerate() {
             // SAFETY: `menuPicked:` is this view's own method; the item's target is set to the view below.
             let item = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -506,13 +545,13 @@ impl CanvasView {
             // SAFETY: the target is this view, which outlives the menu (the menu is dropped when this call returns).
             unsafe { item.setTarget(Some(target)) };
             item.setTag(i as isize);
+            item.setEnabled(*enabled);
             if *on {
                 item.setState(NSControlStateValueOn);
             }
             menu.addItem(&item);
         }
         self.ivars().picked.set(None);
-        let at = NSPoint::new(f64::from(r.x), f64::from(r.bottom()));
         menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
         self.ivars().picked.take()
     }
@@ -520,6 +559,49 @@ impl CanvasView {
     fn hit(&self, event: &NSEvent) -> Option<ControlId> {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         input::hit_test(&self.ivars().out.borrow().widgets, p.x as f32, p.y as f32)
+    }
+
+    /// The explorer of this viewer window is open: its rows take the mouse (drag, context menu).
+    fn explorer_on(&self) -> bool {
+        self.ivars().kind == WindowKind::Viewer && crate::shell::explorer_open()
+    }
+
+    /// The event's point in this view's coordinates (DIPs: the view is flipped like the frame).
+    fn point(&self, event: &NSEvent) -> (f32, f32) {
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        (p.x as f32, p.y as f32)
+    }
+
+    /// A right click or Control+click on the explorer: the state decides what the menu holds.
+    fn context_at(&self, event: &NSEvent) {
+        crate::shell::context_menu(self.hit(event), self.point(event));
+    }
+
+    /// While a drag runs: the list under the pointer scrolls when the pointer is in its top or bottom band.
+    pub fn drag_autoscroll(&self) {
+        let Some(window) = self.window() else { return };
+        let p = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+        let (x, y) = (p.x as f32, p.y as f32);
+        let iv = self.ivars();
+        let (second, list, max) = {
+            let out = iv.out.borrow();
+            (out.second_list, out.list_area, out.scroll_max)
+        };
+        let moved = {
+            let mut ix = iv.ix.borrow_mut();
+            if let Some((area, most)) = second.filter(|(a, _)| a.contains(x, y)) {
+                let to = (ix.drawer_scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, most);
+                std::mem::replace(&mut ix.drawer_scroll, to) != to
+            } else if let Some(area) = list.filter(|a| a.contains(x, y)) {
+                let to = (ix.scroll + swapdesk_ui::drag_autoscroll(area.y, area.h, y)).clamp(0.0, max);
+                std::mem::replace(&mut ix.scroll, to) != to
+            } else {
+                false
+            }
+        };
+        if moved {
+            self.setNeedsDisplay(true);
+        }
     }
 
     /// The control under the pointer changed: its tint is repainted and the pointer shows what a click would do. Over

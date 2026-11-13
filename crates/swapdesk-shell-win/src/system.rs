@@ -220,6 +220,19 @@ pub fn open_local_file(path: &std::path::Path) -> bool {
     result.0 as isize > 32
 }
 
+/// Shows an item of this computer selected in File Explorer (`explorer.exe /select,`). A folder opens itself.
+pub fn reveal_local_item(path: &std::path::Path) -> bool {
+    let arg = if path.is_dir() {
+        std::ffi::OsString::from(path.as_os_str())
+    } else {
+        let mut a = std::ffi::OsString::from("/select,");
+        a.push(path.as_os_str());
+        a
+    };
+    // No shell string is built: the path is one argument of the program.
+    std::process::Command::new("explorer.exe").arg(arg).spawn().is_ok()
+}
+
 pub fn loword(v: isize) -> u16 {
     (v & 0xFFFF) as u16
 }

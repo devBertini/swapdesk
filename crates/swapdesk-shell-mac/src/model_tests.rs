@@ -106,6 +106,8 @@ fn every_effect() -> Vec<Effect> {
         Effect::PickReceiveFolder,
         Effect::OpenWebPage,
         Effect::OpenLocal,
+        Effect::ContextMenu,
+        Effect::RevealLocal,
     ];
     for e in &all {
         match e {
@@ -118,7 +120,9 @@ fn every_effect() -> Vec<Effect> {
             | Effect::PickFiles
             | Effect::PickReceiveFolder
             | Effect::OpenWebPage
-            | Effect::OpenLocal => {}
+            | Effect::OpenLocal
+            | Effect::ContextMenu
+            | Effect::RevealLocal => {}
         }
     }
     all

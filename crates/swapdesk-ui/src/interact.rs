@@ -22,7 +22,9 @@ fn start_button(intent: Intent) -> ControlId {
 const MAX_DEVICE_NAME: usize = 64;
 
 mod explorer;
+pub mod explorer_drag;
 pub mod explorer_manage;
+pub mod explorer_menu;
 pub mod explorer_remote;
 mod files_panel;
 pub(crate) use explorer::Explorer;
@@ -163,6 +165,9 @@ pub enum ControlId {
     ExpCopy,
     /// Row `n` of a pane, in its sorted order.
     ExpRow(bool, u16),
+    /// A pane's whole area, registered under its rows: the empty part of the list, and the pane's current folder as a
+    /// drop target (slice 3).
+    ExpPane(bool),
     /// A column header: sorts by it (`SORT_NAME` to `SORT_MODIFIED`), again reverses.
     ExpSort(bool, u8),
     ExpBack(bool),
@@ -1852,6 +1857,7 @@ impl UiState {
             ControlId::ExpTela
             | ControlId::ExpCopy
             | ControlId::ExpRow(..)
+            | ControlId::ExpPane(_)
             | ControlId::ExpSort(..)
             | ControlId::ExpBack(_)
             | ControlId::ExpForward(_)

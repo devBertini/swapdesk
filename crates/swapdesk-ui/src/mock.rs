@@ -194,6 +194,10 @@ pub enum Step {
     /// Activate a control and answer each change it sent to the other computer with `ChangeOutcome` for every name,
     /// as a 1.1 peer would (slice 2b).
     ActivateAnswer(ControlId, ChangeOutcome),
+    /// Slice 3: press on a row and drag it over a control (the drag stays in the air).
+    Drag(ControlId, Option<ControlId>),
+    /// Slice 3: a right click on a control (the menu is native; the state holds it open).
+    ContextMenu(ControlId),
     /// The launch requests (R-UI-6), sent and not yet answered.
     Startup,
     /// A request for `DataKind` went out and has not been answered.
@@ -255,6 +259,10 @@ pub enum Scenario {
     ExploradorSemLixeira,
     /// Slice 2b: the card that asks before sending files to the other computer's bin.
     ExploradorLixeiraDeLa,
+    /// Slice 3: a file of this computer dragged over a folder row of the same pane (the pill says "Mover para ...").
+    ExploradorArrastando,
+    /// Slice 3: the state right after a right click on a row (the menu itself is the system's and is not painted).
+    ExploradorMenu,
     Chat,
     /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
     AreaTransferencia,
@@ -308,7 +316,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 62] = [
+    pub const ALL: [Scenario; 64] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -343,6 +351,8 @@ impl Scenario {
         Scenario::ExploradorOutroDisco,
         Scenario::ExploradorSemLixeira,
         Scenario::ExploradorLixeiraDeLa,
+        Scenario::ExploradorArrastando,
+        Scenario::ExploradorMenu,
         Scenario::Chat,
         Scenario::AreaTransferencia,
         Scenario::Banner,
@@ -410,6 +420,8 @@ impl Scenario {
             Scenario::ExploradorOutroDisco => "explorador-outro-disco",
             Scenario::ExploradorSemLixeira => "explorador-sem-lixeira",
             Scenario::ExploradorLixeiraDeLa => "explorador-lixeira-de-la",
+            Scenario::ExploradorArrastando => "explorador-arrastando",
+            Scenario::ExploradorMenu => "explorador-menu",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
@@ -482,6 +494,12 @@ impl Scenario {
             Scenario::ExploradorOutroDisco => "new: Arquivos, the other computer on a removable drive (slice 2b)",
             Scenario::ExploradorSemLixeira => "new: Arquivos, the notice of a delete there with no bin (slice 2b)",
             Scenario::ExploradorLixeiraDeLa => "new: Arquivos, the card before the other computer's bin (slice 2b)",
+            Scenario::ExploradorArrastando => {
+                "new: Arquivos, a file dragged over a folder row, the pill and caption (slice 3)"
+            }
+            Scenario::ExploradorMenu => {
+                "new: Arquivos, right after a right click on a row; the menu is native (slice 3)"
+            }
             Scenario::Chat => "10. Chat e copiar e colar",
             Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
@@ -932,6 +950,17 @@ impl Scenario {
                 v.extend([Activate(ControlId::ExpRow(true, 1)), Activate(ControlId::ExpDelete)]);
                 v
             }
+            Scenario::ExploradorArrastando => {
+                let mut v = Scenario::Explorador.script();
+                // Row 2 is "orçamento-2026.xlsx"; row 0 is the folder "Fotos da viagem".
+                v.push(Drag(ControlId::ExpRow(false, 2), Some(ControlId::ExpRow(false, 0))));
+                v
+            }
+            Scenario::ExploradorMenu => {
+                let mut v = Scenario::Explorador.script();
+                v.push(ContextMenu(ControlId::ExpRow(false, 2)));
+                v
+            }
             Scenario::AreaTransferencia => vec![
                 mac(),
                 Event(Self::viewer_session(21)),
@@ -1147,6 +1176,13 @@ impl Scenario {
                 }
                 Step::Key(k) => {
                     state.explorer_key(k);
+                }
+                Step::Drag(from, over) => {
+                    state.drag_press(Some(from), (100.0, 100.0));
+                    state.drag_move(over, (140.0, 160.0), false, 1_000);
+                }
+                Step::ContextMenu(c) => {
+                    state.context_menu(Some(c), false);
                 }
                 Step::BeginFetch(k) => state.begin_fetch(k),
                 Step::CrashNotice => state.show_crash_notice(),
@@ -1652,6 +1688,8 @@ mod tests {
             (Scenario::ExploradorOutroDisco, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorSemLixeira, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorLixeiraDeLa, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorArrastando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorMenu, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),

@@ -41,6 +41,7 @@ mod state_tests;
 mod update_tests;
 
 pub use api::*;
+pub use interact::explorer_drag::{DRAG_START_DIPS, DragView, EDGE_DIPS, SPRING_MS, drag_autoscroll};
 pub use interact::explorer_manage::{ExplorerKey, ManageView};
 pub use interact::explorer_remote::{CardButton, CardStyle, CardView};
 pub use interact::{

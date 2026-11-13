@@ -27,6 +27,11 @@ pub enum Handling {
     OpenWebPage,
     /// The explorer's local file, with the app macOS has for it (`/usr/bin/open`).
     OpenLocalFile,
+    /// The explorer's context menu, at the pointer, from `UiState::context_items`; the choice goes back through
+    /// `UiState::context_chosen`.
+    ContextMenu,
+    /// The explorer's local item, shown in the Finder (`/usr/bin/open -R`).
+    RevealInFinder,
 }
 
 impl Handling {
@@ -34,13 +39,18 @@ impl Handling {
     /// for it was dispatched, with no borrow of the state held.
     pub fn waits_for_a_person(self) -> bool {
         match self {
-            Handling::Menu(_) | Handling::SaveLogPanel | Handling::ChooseFiles | Handling::ChooseFolder => true,
+            Handling::Menu(_)
+            | Handling::ContextMenu
+            | Handling::SaveLogPanel
+            | Handling::ChooseFiles
+            | Handling::ChooseFolder => true,
             Handling::Focus(_)
             | Handling::FocusControl(_)
             | Handling::Submit(_)
             | Handling::OpenLogsFolder
             | Handling::OpenWebPage
-            | Handling::OpenLocalFile => false,
+            | Handling::OpenLocalFile
+            | Handling::RevealInFinder => false,
         }
     }
 }
@@ -58,5 +68,7 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::PickReceiveFolder => Handling::ChooseFolder,
         Effect::OpenWebPage => Handling::OpenWebPage,
         Effect::OpenLocal => Handling::OpenLocalFile,
+        Effect::ContextMenu => Handling::ContextMenu,
+        Effect::RevealLocal => Handling::RevealInFinder,
     }
 }

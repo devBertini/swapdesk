@@ -141,6 +141,11 @@ impl UiState {
                 return a;
             }
             ExplorerKey::Escape => {
+                // A drag in the air: Esc ends it and nothing changes (FILES-UI.md 4.1).
+                if self.drag_active() {
+                    a.changed = self.drag_cancel();
+                    return a;
+                }
                 let m = &mut self.explorer.manage;
                 let here = m.renaming.take().is_some() || !m.forever.is_empty() || m.props.take().is_some();
                 m.rename_error = None;

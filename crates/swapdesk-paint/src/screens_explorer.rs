@@ -5,8 +5,8 @@
 
 use swapdesk_ui::tokens::text;
 use swapdesk_ui::{
-    CardStyle, CardView, ControlId, EditId, ManageView, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME, SORT_SIZE,
-    SORT_TYPE, TransferState, VolumeType,
+    CardStyle, CardView, ControlId, DragView, EditId, ManageView, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME,
+    SORT_SIZE, SORT_TYPE, TransferState, VolumeType,
 };
 
 use crate::painter::{Align, Rect};
@@ -150,6 +150,11 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
         transfers(f, Rect::new(body.x, body.bottom() - tr_h, body.w, tr_h));
     }
 
+    // ----- a drag, over the panes (slice 3) -----
+    if let Some(d) = f.st.explorer_drag() {
+        drag(f, &d);
+    }
+
     // ----- the cards, over the view -----
     if let Some(card) = m.trash_there.as_ref().or(m.conflict.as_ref()) {
         view_card(f, body, card);
@@ -211,6 +216,31 @@ fn explorer_card(f: &mut Frame, area: Rect, title: &str, lines: &[String], butto
     for ((id, s, k), bw) in buttons.iter().zip(&widths) {
         f.button(*id, Rect::new(x, y, *bw, 40.0), *k, s, false);
         x += bw + 8.0;
+    }
+}
+
+/// The drag of slice 3 (FILES-UI.md 4.1): the target outlined in `link` (a pane's border at 2 px), then the pill under
+/// the pointer (the first item's icon and name, or the count) and the caption under it.
+fn drag(f: &mut Frame, d: &DragView) {
+    let (p, pal) = (f.p, f.pal);
+    if let Some(target) = d.target
+        && let Some(w) = f.out.widgets.iter().rev().find(|w| w.id == target)
+    {
+        let width = if matches!(target, ControlId::ExpPane(_)) { 2.0 } else { 1.5 };
+        p.stroke_rrect(w.rect, w.radius.max(4.0), width, pal.link);
+    }
+    let name = p.label_ellipsis(&d.pill, text::SMALL_BOLD, 220.0);
+    let pill = Rect::new(p.snap(d.at.0 + 14.0), p.snap(d.at.1 + 14.0), name.w + 46.0, 30.0);
+    p.shadow(pill, 15.0, 4.0, 12.0, f.fx.shadow_dialog);
+    p.bordered(pill, 15.0, pal.line, pal.surface);
+    let icon = if d.is_dir { icons::FOLDER } else { FILE };
+    p.svg(icon, pill.x + 12.0, pill.y + 7.0, 16.0, 1.6, if d.is_dir { pal.link } else { pal.soft });
+    p.draw(&name, pill.x + 34.0, pill.y + (pill.h - name.h) / 2.0, pal.ink);
+    if let Some(c) = &d.caption {
+        let l = p.label_ellipsis(c, text::CAPTION, 320.0);
+        let cr = Rect::new(pill.x, pill.bottom() + 6.0, l.w + 16.0, l.h + 8.0);
+        p.fill_rrect(cr, 6.0, pal.surface);
+        p.draw(&l, cr.x + 8.0, cr.y + 4.0, if d.caption_is_reason { pal.soft } else { pal.link });
     }
 }
 
@@ -282,6 +312,8 @@ fn columns(r: Rect) -> (f32, Option<f32>, Option<f32>) {
 fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     let (p, pal) = (f.p, f.pal);
     f.panel(r, pal.surface);
+    // The pane itself is a place a click or a drop reaches (its empty area); registered first, so its rows win.
+    f.register(ControlId::ExpPane(v.there), r, 10.0);
     if v.focused {
         p.stroke_rrect(r, 10.0, 1.5, pal.link);
     }

@@ -87,6 +87,9 @@ pub(crate) struct Explorer {
     pub manage: super::explorer_manage::Manage,
     /// Slice 2b: the other computer's volumes, 1.1 listing and changes.
     pub there: super::explorer_remote::There,
+    /// Slice 3: the drag in progress, and the context menu that is open.
+    pub drag: super::explorer_drag::DragState,
+    pub menu: Option<super::explorer_menu::Menu>,
 }
 
 impl Default for Explorer {
@@ -106,6 +109,8 @@ impl Default for Explorer {
             here_shown: Vec::new(),
             manage: super::explorer_manage::Manage::default(),
             there: super::explorer_remote::There::default(),
+            drag: super::explorer_drag::DragState::default(),
+            menu: None,
         }
     }
 }
@@ -386,7 +391,7 @@ impl UiState {
     }
 
     /// The folder a pane shows (`None` before its first listing).
-    fn pane_folder(&self, there: bool) -> Option<String> {
+    pub(super) fn pane_folder(&self, there: bool) -> Option<String> {
         if there {
             (self.listing.is_some() || self.explorer.there.listed).then(|| self.there_folder())
         } else {
@@ -395,7 +400,7 @@ impl UiState {
     }
 
     /// Goes to `folder` in a pane, keeping the history (back, forward).
-    fn go(&mut self, there: bool, folder: String, a: &mut Activation) {
+    pub(super) fn go(&mut self, there: bool, folder: String, a: &mut Activation) {
         let current = self.pane_folder(there);
         let pane = &mut self.explorer.panes[idx(there)];
         if let Some(c) = current
@@ -472,7 +477,7 @@ impl UiState {
         }
     }
 
-    fn open_row(&mut self, there: bool, name: &str, is_dir: bool, a: &mut Activation) {
+    pub(super) fn open_row(&mut self, there: bool, name: &str, is_dir: bool, a: &mut Activation) {
         if there {
             if is_dir {
                 let folder = join(&self.there_folder(), name);
@@ -494,7 +499,7 @@ impl UiState {
 
     /// "Copiar para ...": the focused pane's selection goes to the other pane's folder (the conflict card first when
     /// names exist there, folders by the walk of a 1.1 peer).
-    fn explorer_copy(&mut self, a: &mut Activation) {
+    pub(super) fn explorer_copy(&mut self, a: &mut Activation) {
         self.start_copy(a);
     }
 
@@ -512,6 +517,14 @@ impl UiState {
             }
             ControlId::ExpCopy => self.explorer_copy(a),
             ControlId::ExpRow(there, n) => self.row_activated(there, usize::from(n), a),
+            // A click on a pane's empty area: that pane has the keyboard and nothing is selected in it.
+            ControlId::ExpPane(there) => {
+                self.explorer.focus_there = there;
+                let pane = &mut self.explorer.panes[idx(there)];
+                pane.selected.clear();
+                pane.anchor = None;
+                a.changed = Changed::VIEWER;
+            }
             ControlId::ExpSort(there, col) => {
                 let pane = &mut self.explorer.panes[idx(there)];
                 pane.sort = if pane.sort.0 == col { (col, !pane.sort.1) } else { (col, true) };
@@ -834,6 +847,7 @@ impl UiState {
             ] {
                 s.button(ControlId::ExpSort(there, col), self.name_of(key));
             }
+            s.button(ControlId::ExpPane(there), v.title.clone());
             for (i, r) in v.rows.iter().enumerate().take(usize::from(u16::MAX)) {
                 s.add(ControlId::ExpRow(there, i as u16), UiRole::Button, format!("{} {}", r.name, r.kind));
             }
