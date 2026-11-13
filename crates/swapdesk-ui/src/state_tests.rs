@@ -632,12 +632,10 @@ fn the_drawer_opens_per_tab_and_asks_for_its_data_once() {
     assert_eq!(s.drawer(), Some(DrawerTab::Terminal));
     s.apply(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } });
     assert_eq!(s.term_account(), Some("alex"));
-    s.activate(ControlId::DrawerTab(DrawerTab::Files));
-    assert_eq!(s.drawer(), Some(DrawerTab::Files));
+    s.activate(ControlId::DrawerTab(DrawerTab::Chat));
+    assert_eq!(s.drawer(), Some(DrawerTab::Chat));
     let a = s.activate(ControlId::DrawerTab(DrawerTab::Terminal));
     assert!(a.commands.is_empty(), "the terminal is already open");
-    let a = s.activate(ControlId::FilesChange);
-    assert!(matches!(a.commands[0], Command::FilesList { .. }));
     assert!(matches!(
         s.activate(ControlId::Action(ActionKind::Lock)).commands[0],
         Command::RunAction { action: ActionKind::Lock, .. }
@@ -2675,7 +2673,7 @@ fn a_refused_terminal_ends_the_question_and_a_question_of_another_session_is_ign
 #[test]
 fn the_files_say_that_the_host_asks_its_user_until_the_listing_comes() {
     let mut s = viewer();
-    s.activate(ControlId::DrawerTab(DrawerTab::Files));
+    s.activate(ControlId::TbFiles);
     s.apply(consent_pending(Feature::Files, 20));
     assert_eq!(s.consent_wait(Feature::Files).unwrap().text.as_deref(), Some("0:20"));
     s.apply(reply_ok(Reply::Listing(Listing { path: String::new(), entries: Vec::new(), truncated: false })));

@@ -16,8 +16,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSImage,
-    NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSObject,
@@ -55,32 +55,6 @@ pub struct ViewerHooks {
     pub note: Option<LaunchNote>,
     /// The folder of the app's logs, which "open the logs" shows in the Finder; none in a mock run.
     pub logs_dir: Option<std::path::PathBuf>,
-}
-
-/// The open panel of "Escolher arquivos": any number of files, no folder.
-fn files_panel(mtm: MainThreadMarker, title: &str) -> Retained<NSOpenPanel> {
-    let panel = NSOpenPanel::openPanel(mtm);
-    panel.setTitle(Some(&ns(title)));
-    panel.setCanChooseFiles(true);
-    panel.setCanChooseDirectories(false);
-    panel.setAllowsMultipleSelection(true);
-    panel
-}
-
-/// The open panel of the folder to receive files into: one folder, which the person may create there.
-fn folder_panel(mtm: MainThreadMarker, title: &str) -> Retained<NSOpenPanel> {
-    let panel = NSOpenPanel::openPanel(mtm);
-    panel.setTitle(Some(&ns(title)));
-    panel.setCanChooseFiles(false);
-    panel.setCanChooseDirectories(true);
-    panel.setCanCreateDirectories(true);
-    panel.setAllowsMultipleSelection(false);
-    panel
-}
-
-/// What the person chose in an open panel, as paths.
-fn paths_of(panel: &NSOpenPanel) -> Vec<std::path::PathBuf> {
-    panel.URLs().to_vec().iter().filter_map(|u| u.path()).map(|p| std::path::PathBuf::from(p.to_string())).collect()
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -864,38 +838,7 @@ impl Shell {
                 }
             }
             Handling::SaveLogPanel => self.save_log(),
-            Handling::ChooseFiles => {
-                let title = self.state.borrow().t(MsgKey::ChooseFiles);
-                let panel = files_panel(self.mtm, &title);
-                if panel.runModal() == NSModalResponseOK {
-                    self.files_chosen(paths_of(&panel));
-                }
-            }
-            Handling::ChooseFolder => {
-                let title = self.state.borrow().t(MsgKey::FilesPickFolder);
-                let panel = folder_panel(self.mtm, &title);
-                if panel.runModal() == NSModalResponseOK
-                    && let Some(dir) = paths_of(&panel).into_iter().next()
-                {
-                    self.folder_chosen(dir);
-                }
-            }
         }
-    }
-
-    /// The files the person chose to send go to the state, which starts the transfer.
-    fn files_chosen(&self, paths: Vec<std::path::PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        let act = self.state.borrow_mut().send_files(paths);
-        self.dispatch_from(WindowKind::Viewer, act);
-    }
-
-    /// The folder the person chose to receive files into goes to the state.
-    fn folder_chosen(&self, dir: std::path::PathBuf) {
-        let act = self.state.borrow_mut().set_receive_dir(dir);
-        self.dispatch_from(WindowKind::Viewer, act);
     }
 
     /// The folder of the app's logs, shown in the Finder.

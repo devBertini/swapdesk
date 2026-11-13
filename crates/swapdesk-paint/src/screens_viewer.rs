@@ -188,7 +188,7 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
     term.pressed = f.st.drawer() == Some(DrawerTab::Terminal);
     term.sep_before = true;
     let mut files = tool(ControlId::TbFiles, icons::FOLDER);
-    files.pressed = f.st.drawer() == Some(DrawerTab::Files);
+    files.pressed = f.st.explorer_open();
     let mut chat = tool(ControlId::TbChat, icons::CHAT);
     chat.pressed = f.st.drawer() == Some(DrawerTab::Chat);
     tools.extend([term, files, chat]);
@@ -519,7 +519,6 @@ fn drawer_panel(f: &mut Frame, r: Rect, open: DrawerTab, peer: &str) {
     let mut x = r.x + 12.0;
     for (tab, key) in [
         (DrawerTab::Terminal, MsgKey::DrawerTerminal),
-        (DrawerTab::Files, MsgKey::DrawerFiles),
         (DrawerTab::Chat, MsgKey::DrawerChat),
         (DrawerTab::Clipboard, MsgKey::DrawerClipboard),
     ] {
@@ -545,7 +544,6 @@ fn drawer_panel(f: &mut Frame, r: Rect, open: DrawerTab, peer: &str) {
     let body = Rect::new(r.x + bw, r.y + 44.0 + bw, r.w - bw, r.h - 44.0 - bw);
     match open {
         DrawerTab::Terminal => drawer_terminal(f, body, peer),
-        DrawerTab::Files => crate::screens_files::drawer_files(f, body, peer),
         DrawerTab::Chat => drawer_chat(f, body),
         DrawerTab::Clipboard => drawer_clipboard(f, body),
     }

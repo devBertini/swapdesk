@@ -73,15 +73,30 @@ fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
                 // The video view sits under the canvas, on the rectangle the frame left for it.
                 v.place_video();
                 let (video, hole) = (v.video.frame(), v.canvas.video_rect());
-                let hole = hole.ok_or_else(|| format!("{}: the viewer's frame has no video rectangle", sc.name()))?;
-                ensure!(
-                    (video.origin.x - f64::from(hole.x)).abs() < 1.0
-                        && (video.origin.y - f64::from(hole.y)).abs() < 1.0
-                        && (video.size.width - f64::from(hole.w)).abs() < 1.0
-                        && (video.size.height - f64::from(hole.h)).abs() < 1.0,
-                    "{}: the video view is at {video:?}, the frame's rectangle is {hole:?}",
-                    sc.name()
-                );
+                if shell.state.borrow().explorer_open() {
+                    // The Arquivos view: no video rectangle; the video view hides and gives up the keyboard (to the
+                    // canvas, or to a field of the explorer), so no key reaches the other computer meanwhile.
+                    ensure!(hole.is_none(), "{}: the explorer leaves no video rectangle", sc.name());
+                    ensure!(v.video.isHidden(), "{}: the video view hides under the explorer", sc.name());
+                    let video_has_keys = v.window.firstResponder().is_some_and(|f| {
+                        std::ptr::eq(
+                            objc2::rc::Retained::as_ptr(&f).cast::<()>(),
+                            objc2::rc::Retained::as_ptr(&v.video).cast::<()>(),
+                        )
+                    });
+                    ensure!(!video_has_keys, "{}: the video view keeps the keyboard under the explorer", sc.name());
+                } else {
+                    let hole =
+                        hole.ok_or_else(|| format!("{}: the viewer's frame has no video rectangle", sc.name()))?;
+                    ensure!(
+                        (video.origin.x - f64::from(hole.x)).abs() < 1.0
+                            && (video.origin.y - f64::from(hole.y)).abs() < 1.0
+                            && (video.size.width - f64::from(hole.w)).abs() < 1.0
+                            && (video.size.height - f64::from(hole.h)).abs() < 1.0,
+                        "{}: the video view is at {video:?}, the frame's rectangle is {hole:?}",
+                        sc.name()
+                    );
+                }
             }
             None => ensure!(shell.viewer.borrow().is_none(), "{}: no viewer window without a session", sc.name()),
         }
@@ -252,69 +267,6 @@ impl UiBackend for Recording {
     }
 }
 
-/// The two pickers of the files panel: "Escolher arquivos" opens a panel for any number of files and no folder, the
-/// receive folder one for a single folder that may be created there; the files chosen leave as one `FilesSend` of
-/// the viewer session, the folder chosen becomes the receive folder. (The panels are not shown: they wait for a
-/// person.) Opening the logs with no logs folder, as in a mock run, does nothing.
-fn the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm: MainThreadMarker) -> Result<(), String> {
-    let files = files_panel(mtm, "Escolher arquivos");
-    ensure!(
-        files.canChooseFiles() && !files.canChooseDirectories() && files.allowsMultipleSelection(),
-        "the files panel takes files {}, folders {}, several {}",
-        files.canChooseFiles(),
-        files.canChooseDirectories(),
-        files.allowsMultipleSelection()
-    );
-    let folder = folder_panel(mtm, "Escolher a pasta");
-    ensure!(
-        !folder.canChooseFiles()
-            && folder.canChooseDirectories()
-            && !folder.allowsMultipleSelection()
-            && folder.canCreateDirectories(),
-        "the folder panel takes files {}, folders {}, several {}, new folders {}",
-        folder.canChooseFiles(),
-        folder.canChooseDirectories(),
-        folder.allowsMultipleSelection(),
-        folder.canCreateDirectories()
-    );
-
-    let state = Scenario::Arquivos.prepared_state();
-    let waker = Arc::new(Waker::new());
-    let backend =
-        Arc::new(Recording { inner: Arc::new(MockBackend::new(waker.clone())), sent: std::sync::Mutex::default() });
-    let shell = start(mtm, state, backend.clone(), waker, Vec::new(), ViewerHooks::default());
-    let session = shell.state.borrow().viewer_session().map(|s| s.id).ok_or("the scenario has no viewer session")?;
-
-    let dir = std::path::PathBuf::from("/tmp/swapdesk-recebidos");
-    shell.folder_chosen(dir.clone());
-    ensure!(
-        shell.state.borrow().receive_dir() == Some(dir.as_path()),
-        "the receive folder is {:?}",
-        shell.state.borrow().receive_dir()
-    );
-
-    let chosen = vec![std::path::PathBuf::from("/tmp/relatório.pdf"), std::path::PathBuf::from("/tmp/fotos.zip")];
-    shell.files_chosen(Vec::new());
-    shell.files_chosen(chosen.clone());
-    let sends: Vec<Command> = backend
-        .sent
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .filter(|c| matches!(c, Command::FilesSend { .. }))
-        .cloned()
-        .collect();
-    ensure!(
-        matches!(sends.as_slice(), [Command::FilesSend { session_id, local_paths, .. }]
-            if *session_id == session && *local_paths == chosen),
-        "the files chosen left as {sends:?}"
-    );
-
-    shell.run(WindowKind::Main, Handling::OpenLogsFolder);
-    close(&shell);
-    Ok(())
-}
-
 /// A shell on `scenario` over a recording backend.
 fn open_recording(mtm: MainThreadMarker, scenario: Scenario) -> (Rc<Shell>, Arc<Recording>) {
     let waker = Arc::new(Waker::new());
@@ -373,6 +325,5 @@ pub fn run_window_checks() -> Result<(), String> {
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;
     render_slot_lifecycle(mtm)?;
     a_started_session_minimizes_the_main_window_once_in_a_real_run(mtm)?;
-    the_pickers_are_set_up_and_what_is_chosen_reaches_the_state(mtm)?;
     super::ax_checks::run(mtm)
 }

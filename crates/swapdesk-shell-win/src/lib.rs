@@ -11,7 +11,6 @@ mod cursor;
 mod dialogs;
 mod drag_out;
 mod drop_target;
-mod files_dialogs;
 mod fullscreen;
 mod gfx;
 mod live_region;
@@ -33,7 +32,6 @@ pub use terminal::terminal_output;
 pub use viewer::{HeadlessSurface, KeyMsg, MouseKind, MouseMsg, PointerButton, ViewerHost};
 
 #[cfg(test)]
-mod files_panel_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]

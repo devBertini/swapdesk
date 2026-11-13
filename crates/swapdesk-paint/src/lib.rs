@@ -9,7 +9,6 @@ pub mod grid;
 pub mod input;
 mod painter;
 mod screens_explorer;
-mod screens_files;
 mod screens_main;
 mod screens_viewer;
 pub mod svg;

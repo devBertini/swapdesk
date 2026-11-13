@@ -150,12 +150,6 @@ fn run_shell(
     let _ = state.set_contrast(crate::system::system_contrast());
     // The full-screen monitor setting offers one entry for each monitor.
     state.set_local_monitors(u8::try_from(crate::fullscreen::monitor_rects().len()).unwrap_or(1));
-    // Files are received into this user's Downloads folder until the user picks another (the file panel).
-    if state.receive_dir().is_none()
-        && let Some(dir) = crate::files_dialogs::default_receive_dir()
-    {
-        let _ = state.set_receive_dir(dir);
-    }
     let dark_now = state.dark();
     let shared = Rc::new(Shared {
         gfx: RefCell::new(Rc::new(gfx)),
@@ -462,14 +456,7 @@ impl Shared {
                 }
             }
             // Menus and dialogs wait for a person: queued, run after the message that asked (see `run_modal`).
-            Some(
-                effect @ (Effect::Menu(_)
-                | Effect::ContextMenu
-                | Effect::SaveLog
-                | Effect::PickFiles
-                | Effect::PickReceiveFolder
-                | Effect::SystemDrag),
-            ) => {
+            Some(effect @ (Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::SystemDrag)) => {
                 debug_assert_eq!(handling(&effect), Handling::Modal);
                 from.set_pending_effect(effect)
             }
@@ -509,25 +496,6 @@ impl Shared {
                 {
                     let export = self.state.borrow().activity_export(path);
                     self.send_commands(vec![export]);
-                }
-            }
-            Effect::PickFiles => {
-                let paths = crate::files_dialogs::pick_files(
-                    from.hwnd(),
-                    &self.state.borrow().t(swapdesk_ui::MsgKey::ChooseFiles),
-                );
-                if !paths.is_empty() {
-                    let act = self.state.borrow_mut().send_files(paths);
-                    self.send_commands(act.commands);
-                    self.refresh(act.changed);
-                }
-            }
-            Effect::PickReceiveFolder => {
-                let title = self.state.borrow().t(swapdesk_ui::MsgKey::FilesPickFolder);
-                if let Some(dir) = crate::files_dialogs::pick_folder(from.hwnd(), &title) {
-                    let act = self.state.borrow_mut().set_receive_dir(dir);
-                    self.send_commands(act.commands);
-                    self.refresh(act.changed);
                 }
             }
             Effect::SystemDrag => self.run_system_drag(from),
@@ -815,12 +783,7 @@ pub(crate) enum Handling {
 /// `dispatch` and `run_modal` handle each side.
 pub(crate) fn handling(effect: &Effect) -> Handling {
     match effect {
-        Effect::Menu(_)
-        | Effect::ContextMenu
-        | Effect::SaveLog
-        | Effect::PickFiles
-        | Effect::PickReceiveFolder
-        | Effect::SystemDrag => Handling::Modal,
+        Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::SystemDrag => Handling::Modal,
         Effect::FocusEdit(_)
         | Effect::Focus(_)
         | Effect::SubmitEdit(_)
@@ -844,8 +807,6 @@ mod effect_tests {
             Effect::SubmitEdit(EditId::Rename),
             Effect::SaveLog,
             Effect::OpenLogs,
-            Effect::PickFiles,
-            Effect::PickReceiveFolder,
             Effect::Focus(ControlId::ConnectCancel),
             Effect::OpenWebPage,
             Effect::OpenLocal,
@@ -861,8 +822,6 @@ mod effect_tests {
                 | Effect::SubmitEdit(_)
                 | Effect::SaveLog
                 | Effect::OpenLogs
-                | Effect::PickFiles
-                | Effect::PickReceiveFolder
                 | Effect::OpenWebPage
                 | Effect::OpenLocal
                 | Effect::ContextMenu
@@ -876,7 +835,7 @@ mod effect_tests {
     #[test]
     fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
         let all = every_effect();
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), 11);
         for e in &all {
             // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
             let _ = handling(e);

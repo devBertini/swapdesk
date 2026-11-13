@@ -66,7 +66,6 @@ pub enum DeviceTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DrawerTab {
     Terminal,
-    Files,
     Chat,
     Clipboard,
 }
@@ -555,10 +554,6 @@ pub enum Effect {
     SaveLog,
     /// Open the folder of the logs with the system shell (the crash notice's action).
     OpenLogs,
-    /// Ask which files to send, then call [`UiState::send_files`] with them (the file panel's "Escolher arquivos").
-    PickFiles,
-    /// Ask which folder to receive files into, then call [`UiState::set_receive_dir`] with it.
-    PickReceiveFolder,
     /// Move the keyboard focus to this control of the main window (the one that was activated has gone).
     Focus(ControlId),
     /// Open the web page of [`UiState::take_web_page`] in the system's browser (the release page of an update,
@@ -653,7 +648,6 @@ pub struct UiState {
     pub(crate) chat: Vec<ChatView>,
     pub(crate) transfers: Vec<TransferView>,
     pub(crate) listing: Option<Listing>,
-    pub(crate) files: crate::interact::FilesPanel,
     /// The files explorer of the session window (FILES-UI.md).
     pub(crate) explorer: crate::interact::Explorer,
     /// The local file `Effect::OpenLocal` opens.
@@ -785,7 +779,6 @@ impl UiState {
             chat: Vec::new(),
             transfers: Vec::new(),
             listing: None,
-            files: crate::interact::FilesPanel::default(),
             explorer: crate::interact::Explorer::default(),
             local_target: None,
             term_account: None,
@@ -2243,7 +2236,6 @@ impl UiState {
                 self.chat.clear();
                 self.transfers.clear();
                 self.listing = None;
-                self.files.waiting_download = None;
                 self.fetch.remove(&DataKind::Listing);
                 self.term_account = None;
                 self.term_id = None;
@@ -2478,7 +2470,6 @@ impl UiState {
                     return Changed::NONE;
                 }
                 self.listing = Some(l);
-                self.files.page = 0;
                 self.finish_fetch(DataKind::Listing);
                 Changed::ALL
             }

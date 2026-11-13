@@ -247,7 +247,6 @@ pub enum Scenario {
     Visualizador,
     VisualizadorEscuro,
     Terminal,
-    Arquivos,
     /// The files explorer (FILES-UI.md): both panes listed, two files selected on the right, transfers running.
     Explorador,
     /// Slice 2a: a row of this computer being renamed in place.
@@ -296,8 +295,6 @@ pub enum Scenario {
     TerminalAguardandoConsentimento,
     /// Permissões on a Mac: the administrator terminal is off and inert, with its line (ELEVATION-MAC.md M5).
     PermissoesNoMac,
-    /// The files panel while the host asks its user (D13), with the seconds left (R-UI-13).
-    ArquivosAguardandoConsentimento,
     /// An account with no pairing on a computer a 1.0 install left data on: the one-time note under Pareados (D55).
     PareadosAntesDa11,
     /// A session that entered without a prompt: "Elevar controle" on the bar (ACCOUNTS.md 9, D55).
@@ -323,7 +320,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 66] = [
+    pub const ALL: [Scenario; 64] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -350,7 +347,6 @@ impl Scenario {
         Scenario::Visualizador,
         Scenario::VisualizadorEscuro,
         Scenario::Terminal,
-        Scenario::Arquivos,
         Scenario::Explorador,
         Scenario::ExploradorRenomear,
         Scenario::ExploradorExcluirParaSempre,
@@ -377,7 +373,6 @@ impl Scenario {
         Scenario::AtividadeCarregando,
         Scenario::ArquivosCarregando,
         Scenario::TerminalAguardandoConsentimento,
-        Scenario::ArquivosAguardandoConsentimento,
         Scenario::PermissoesNoMac,
         Scenario::PareadosAntesDa11,
         Scenario::VisualizadorElevar,
@@ -421,7 +416,6 @@ impl Scenario {
             Scenario::Visualizador => "visualizador",
             Scenario::VisualizadorEscuro => "visualizador-escuro",
             Scenario::Terminal => "terminal",
-            Scenario::Arquivos => "arquivos",
             Scenario::Explorador => "explorador",
             Scenario::ExploradorRenomear => "explorador-renomear",
             Scenario::ExploradorExcluirParaSempre => "explorador-excluir-para-sempre",
@@ -459,7 +453,6 @@ impl Scenario {
             Scenario::AtividadeCarregando => "atividade-carregando",
             Scenario::ArquivosCarregando => "arquivos-carregando",
             Scenario::TerminalAguardandoConsentimento => "terminal-aguardando-consentimento",
-            Scenario::ArquivosAguardandoConsentimento => "arquivos-aguardando-consentimento",
             Scenario::PermissoesNoMac => "permissoes-no-mac",
         }
     }
@@ -497,7 +490,6 @@ impl Scenario {
             Scenario::Visualizador => "5. Visualizador",
             Scenario::VisualizadorEscuro => "5. Visualizador escuro",
             Scenario::Terminal => "8. Terminal e ações rápidas (shell only)",
-            Scenario::Arquivos => "9. Arquivos",
             Scenario::Explorador => "new: Arquivos, the explorer (FILES-UI.md slice 1)",
             Scenario::ExploradorRenomear => "new: Arquivos, renaming a row in place (slice 2a)",
             Scenario::ExploradorExcluirParaSempre => "new: Arquivos, the delete-for-good card (slice 2a)",
@@ -543,9 +535,8 @@ impl Scenario {
             Scenario::AtividadeVazia => "new: Atividade with nothing logged (D51)",
             Scenario::Carregando => "R-UI-1: Dispositivos before any answer (placeholder blocks)",
             Scenario::AtividadeCarregando => "R-UI-1: Atividade while the log loads",
-            Scenario::ArquivosCarregando => "R-UI-1: Arquivos while the folder lists",
+            Scenario::ArquivosCarregando => "R-UI-1: Arquivos (the explorer) while the folders list",
             Scenario::TerminalAguardandoConsentimento => "new: Terminal while the other side's user is asked (R-UI-13)",
-            Scenario::ArquivosAguardandoConsentimento => "new: Arquivos while the other side's user is asked (R-UI-13)",
             Scenario::PermissoesNoMac => "new: Permissões on a Mac, the administrator terminal unavailable (D32)",
         }
     }
@@ -816,49 +807,6 @@ impl Scenario {
                 Event(Self::viewer_session(15)),
                 Activate(ControlId::TbTerminal),
                 Event(UiEvent::Term { term_id: 1, event: TermEvent::Opened { account: "alex".into() } }),
-            ],
-            Scenario::Arquivos => vec![
-                mac(),
-                Event(Self::viewer_session(18)),
-                Activate(ControlId::DrawerTab(DrawerTab::Files)),
-                Event(UiEvent::Transfer {
-                    transfer_id: 1,
-                    session_id: 1,
-                    name: "fotos-viagem.zip".into(),
-                    outgoing: true,
-                    state: TransferState::Running {
-                        done: 1_100_000_000,
-                        total: 1_800_000_000,
-                        bytes_per_s: 94_000_000,
-                    },
-                }),
-                Event(UiEvent::Transfer {
-                    transfer_id: 2,
-                    session_id: 1,
-                    name: "instalador.exe".into(),
-                    outgoing: true,
-                    state: TransferState::Paused { done: 35, total: 100, why: ApiCode::ServiceDown },
-                }),
-                Event(UiEvent::Transfer {
-                    transfer_id: 3,
-                    session_id: 1,
-                    name: "relatorio-novembro.pdf".into(),
-                    outgoing: true,
-                    state: TransferState::Done,
-                }),
-                Event(reply(Ok(Reply::Listing(Listing {
-                    path: "Mesa".into(),
-                    entries: vec![
-                        DirEntryView {
-                            name: "contrato-assinado.pdf".into(),
-                            is_dir: false,
-                            size: 640_000,
-                            mtime_ms: at(9, 0, 1),
-                        },
-                        DirEntryView { name: "Capturas".into(), is_dir: true, size: 12, mtime_ms: at(9, 0, 2) },
-                    ],
-                    truncated: false,
-                })))),
             ],
             Scenario::Explorador => vec![
                 mac(),
@@ -1135,12 +1083,7 @@ impl Scenario {
             Scenario::Carregando => vec![Startup, ArmPlaceholders],
             Scenario::AtividadeCarregando => vec![Goto(Nav::Activity), BeginFetch(DataKind::Activity), ArmPlaceholders],
             Scenario::ArquivosCarregando => {
-                vec![
-                    mac(),
-                    Event(Self::viewer_session(18)),
-                    Activate(ControlId::DrawerTab(DrawerTab::Files)),
-                    ArmPlaceholders,
-                ]
+                vec![mac(), Event(Self::viewer_session(18)), Activate(ControlId::TbFiles), ArmPlaceholders]
             }
             Scenario::TerminalAguardandoConsentimento => vec![
                 mac(),
@@ -1156,14 +1099,6 @@ impl Scenario {
                 }),
                 mac(),
                 Tab(DeviceTab::Permissions),
-            ],
-            Scenario::ArquivosAguardandoConsentimento => vec![
-                mac(),
-                Event(Self::viewer_session(18)),
-                Activate(ControlId::DrawerTab(DrawerTab::Files)),
-                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Files, remaining_s: 20 }),
-                Ticks(6),
-                ArmPlaceholders,
             ],
         }
     }
@@ -1712,7 +1647,6 @@ mod tests {
             (Scenario::Visualizador, Screen::Devices, &[Main, Viewer]),
             (Scenario::VisualizadorEscuro, Screen::Devices, &[Main, Viewer]),
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
-            (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
             (Scenario::Explorador, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorRenomear, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorExcluirParaSempre, Screen::Devices, &[Main, Viewer]),
@@ -1739,7 +1673,6 @@ mod tests {
             (Scenario::AtividadeCarregando, Screen::Activity, &[Main]),
             (Scenario::ArquivosCarregando, Screen::Devices, &[Main, Viewer]),
             (Scenario::TerminalAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
-            (Scenario::ArquivosAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::PermissoesNoMac, Screen::Devices, &[Main]),
             (Scenario::PareadosAntesDa11, Screen::Home, &[Main]),
             (Scenario::VisualizadorElevar, Screen::Devices, &[Main, Viewer]),

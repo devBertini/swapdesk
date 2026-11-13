@@ -102,8 +102,6 @@ fn every_effect() -> Vec<Effect> {
         Effect::SubmitEdit(EditId::Rename),
         Effect::SaveLog,
         Effect::OpenLogs,
-        Effect::PickFiles,
-        Effect::PickReceiveFolder,
         Effect::OpenWebPage,
         Effect::OpenLocal,
         Effect::ContextMenu,
@@ -118,8 +116,6 @@ fn every_effect() -> Vec<Effect> {
             | Effect::SubmitEdit(_)
             | Effect::SaveLog
             | Effect::OpenLogs
-            | Effect::PickFiles
-            | Effect::PickReceiveFolder
             | Effect::OpenWebPage
             | Effect::OpenLocal
             | Effect::ContextMenu
@@ -142,8 +138,6 @@ fn every_effect_has_a_handler_of_its_own() {
         );
     }
     // What each one does on the Mac, as on Windows.
-    assert_eq!(handling(Effect::PickFiles), Handling::ChooseFiles);
-    assert_eq!(handling(Effect::PickReceiveFolder), Handling::ChooseFolder);
     assert_eq!(handling(Effect::OpenLogs), Handling::OpenLogsFolder);
     assert_eq!(handling(Effect::SaveLog), Handling::SaveLogPanel);
     assert_eq!(handling(Effect::Menu(SelectId::Theme)), Handling::Menu(SelectId::Theme));

@@ -19,10 +19,6 @@ pub enum Handling {
     SaveLogPanel,
     /// The folder of the app's logs opens in the Finder.
     OpenLogsFolder,
-    /// An open panel for the files to send, then `UiState::send_files`.
-    ChooseFiles,
-    /// An open panel for the folder to receive into, then `UiState::set_receive_dir`.
-    ChooseFolder,
     /// The page of `UiState::take_web_page` opens in the browser.
     OpenWebPage,
     /// The explorer's local file, with the app macOS has for it (`/usr/bin/open`).
@@ -41,11 +37,7 @@ impl Handling {
     /// for it was dispatched, with no borrow of the state held.
     pub fn waits_for_a_person(self) -> bool {
         match self {
-            Handling::Menu(_)
-            | Handling::ContextMenu
-            | Handling::SaveLogPanel
-            | Handling::ChooseFiles
-            | Handling::ChooseFolder => true,
+            Handling::Menu(_) | Handling::ContextMenu | Handling::SaveLogPanel => true,
             Handling::Focus(_)
             | Handling::FocusControl(_)
             | Handling::Submit(_)
@@ -67,8 +59,6 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::SubmitEdit(edit) => Handling::Submit(edit),
         Effect::SaveLog => Handling::SaveLogPanel,
         Effect::OpenLogs => Handling::OpenLogsFolder,
-        Effect::PickFiles => Handling::ChooseFiles,
-        Effect::PickReceiveFolder => Handling::ChooseFolder,
         Effect::OpenWebPage => Handling::OpenWebPage,
         Effect::OpenLocal => Handling::OpenLocalFile,
         Effect::ContextMenu => Handling::ContextMenu,

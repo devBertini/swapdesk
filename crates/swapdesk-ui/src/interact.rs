@@ -27,13 +27,11 @@ pub mod explorer_drop;
 pub mod explorer_manage;
 pub mod explorer_menu;
 pub mod explorer_remote;
-mod files_panel;
+mod transfers;
 pub(crate) use explorer::Explorer;
 pub use explorer::{
     PaneView, PlaceView, PointerMods, RowView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, natural_cmp, type_of,
 };
-pub use files_panel::FILES_PAGE;
-pub(crate) use files_panel::FilesPanel;
 
 /// Everything a window can focus or announce. `Static` ones are text the screen reader reads, never focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,16 +143,6 @@ pub enum ControlId {
     TermAdmin,
     /// "Abrir de novo" after the shell ended or the host refused.
     TermReopen,
-    FilesChange,
-    FilesChoose,
-    /// The panel goes up one folder of the other computer.
-    FilesUp,
-    /// Earlier (`false`) or later (`true`) entries of a long folder.
-    FilesPage(bool),
-    /// The row `n` of the folder's listing: opens a folder, downloads a file.
-    FilesRow(u16),
-    /// "Salvar em ...": choose the folder files are received into.
-    FilesRecvFolder,
     /// "Retomar" on the paused transfer with this number.
     TransferResume(u32),
     /// "Cancelar" on the transfer with this number.
@@ -1227,14 +1215,15 @@ impl UiState {
         let c = s.add(ControlId::TbGrab, UiRole::Button, self.name_of(MsgKey::TbGrab));
         c.toggled = Some(on);
         s.add(ControlId::TbKeys, UiRole::Button, self.name_of(MsgKey::TbKeys));
+        // Arquivos is not a drawer tab: its button opens the explorer (`explorer_open`).
         for (id, key, tab) in [
-            (ControlId::TbTerminal, MsgKey::TbTerminal, DrawerTab::Terminal),
-            (ControlId::TbFiles, MsgKey::TbFiles, DrawerTab::Files),
-            (ControlId::TbChat, MsgKey::TbChat, DrawerTab::Chat),
+            (ControlId::TbTerminal, MsgKey::TbTerminal, Some(DrawerTab::Terminal)),
+            (ControlId::TbFiles, MsgKey::TbFiles, None),
+            (ControlId::TbChat, MsgKey::TbChat, Some(DrawerTab::Chat)),
         ] {
-            let open = if tab == DrawerTab::Files { self.explorer_open() } else { self.drawer == Some(tab) };
+            let open = if tab.is_none() { self.explorer_open() } else { self.drawer == tab };
             let unread = self.chat_unread();
-            let label = if tab == DrawerTab::Chat && unread > 0 && !open {
+            let label = if tab == Some(DrawerTab::Chat) && unread > 0 && !open {
                 self.tm(&Msg::new(MsgKey::TbChatUnread).with(unread.to_string()))
             } else {
                 self.name_of(key)
@@ -1280,7 +1269,6 @@ impl UiState {
             s.region(Region::Drawer);
             for (tab, key) in [
                 (DrawerTab::Terminal, MsgKey::DrawerTerminal),
-                (DrawerTab::Files, MsgKey::DrawerFiles),
                 (DrawerTab::Chat, MsgKey::DrawerChat),
                 (DrawerTab::Clipboard, MsgKey::DrawerClipboard),
             ] {
@@ -1310,7 +1298,6 @@ impl UiState {
                         s.text(UiRole::Text, w.line);
                     }
                 }
-                DrawerTab::Files => self.files_controls(&mut s),
                 DrawerTab::Chat => {
                     // The conversation, oldest first; the newest message, when it came from the other side, is a
                     // polite live region, so a screen reader says it as it arrives.
@@ -1845,15 +1832,15 @@ impl UiState {
                 self.begin_term(admin, &mut a);
                 a.changed = Changed::VIEWER;
             }
-            ControlId::FilesChange
-            | ControlId::FilesUp
-            | ControlId::FilesPage(_)
-            | ControlId::FilesRow(_)
-            | ControlId::FilesChoose
-            | ControlId::FilesRecvFolder
-            | ControlId::TransferResume(_)
-            | ControlId::TransferCancel(_) => {
-                self.files_activate(id, &mut a);
+            // The explorer's transfers list: "Retomar" a paused one, "Cancelar" any that is not done.
+            ControlId::TransferResume(transfer_id) => {
+                a.commands.push(Command::TransferResume { transfer_id });
+                a.changed = Changed::VIEWER;
+            }
+            ControlId::TransferCancel(transfer_id) => {
+                a.commands.push(Command::TransferCancel { transfer_id });
+                self.transfers.retain(|t| t.id != transfer_id);
+                a.changed = Changed::VIEWER;
             }
             ControlId::ExpTela
             | ControlId::ExpCopy
@@ -1920,11 +1907,6 @@ impl UiState {
             // R-UI-11: the terminal is asked for the first time the panel opens (and again after a refusal).
             DrawerTab::Terminal if matches!(self.term, TermPhase::Idle | TermPhase::Failed { .. }) => {
                 self.begin_term(false, a)
-            }
-            // R-UI-11: the file browser's state is built the first time the panel opens.
-            DrawerTab::Files if self.listing.is_none() && self.fetch(DataKind::Listing) == Fetch::Missing => {
-                self.begin_fetch(DataKind::Listing);
-                a.commands.push(Command::FilesList { session_id, path: None });
             }
             _ => {}
         }

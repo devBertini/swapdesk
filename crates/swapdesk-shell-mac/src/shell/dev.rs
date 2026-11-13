@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSOpenPanel};
 use objc2_foundation::NSPoint;
 
 use super::*;
