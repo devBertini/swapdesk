@@ -85,20 +85,102 @@ fn after_a_loss_the_same_device_resumes_without_a_prompt_and_gets_a_new_token() 
 }
 
 #[test]
-fn the_hosts_user_ending_a_lost_session_kills_its_token_and_leaves_a_live_one_alone() {
+fn the_hosts_user_ending_a_lost_session_kills_its_token() {
     run_paused(async {
         let f = fx(CF, CF);
         let s = f.session(CF).await;
         let info = s.grant().clone();
-        // A live session is not its business: `disconnect` ends that one.
-        f.mem.host.drop_resume(info.session_id);
-        assert_eq!(f.mem.host.resumable_sessions(), 1, "the live session keeps its entry");
         f.lose(s).await;
         assert_eq!(f.mem.host.resumable_sessions(), 1, "the lost session waits for a resume");
         f.mem.host.drop_resume(info.session_id);
         assert_eq!(f.mem.host.resumable_sessions(), 0, "the token died with the host's user's end");
         f.decline_from_now();
         assert_not_resumed(f.resume(&f.who, &info, CF).await);
+    });
+}
+
+const CU: PermissionSet = PermissionSet::CONTROL.union(PermissionSet::UNATTENDED);
+
+/// F1 of the review of 13/11: the host's user ends a lost session of a device that holds `UNATTENDED`. The viewer
+/// redials with the same request and the old token for 60 s; the token must be refused for good (DECLINED, which the
+/// reconnect loop reads as final), not treated as unknown and let through `UNATTENDED` into a fresh session.
+#[test]
+fn a_killed_token_of_an_unattended_device_is_declined_not_let_through_unattended() {
+    run_paused(async {
+        let f = fx(PermissionSet::EMPTY, CU);
+        let s = f.session(CU).await;
+        assert_eq!(s.grant().mode, GrantMode::Unattended);
+        let info = s.grant().clone();
+        f.lose(s).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 1, "the lost session waits for a resume");
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "a killed token is no resumable session");
+        // The viewer redials every 0.5 s for the window: every try is declined and none starts a session.
+        let t0 = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(
+                f.resume(&f.who, &info, CU).await.err(),
+                Some(OpenError::Refused(ErrorCode::Declined)),
+                "a redial with the killed token"
+            );
+            assert!(f.mem.host.sessions().is_empty(), "no session started, so no banner");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(f.ui.prompt_count(), 0);
+        assert!(t0.elapsed() < Duration::from_secs(60));
+        // Past the window the entry is gone: an unknown token goes the normal way again.
+        tokio::time::sleep(Duration::from_secs(56)).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 0);
+        let r = f.resume(&f.who, &info, CU).await;
+        assert!(r.is_ok(), "past the window the token is unknown, and an unattended device enters on its own");
+    });
+}
+
+/// The same for a device without `UNATTENDED`: no new prompt card in front of the person who just ended it.
+#[test]
+fn a_killed_token_does_not_raise_a_new_prompt() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.ui.prompt_count(), 1);
+        for _ in 0..4 {
+            assert_eq!(f.resume(&f.who, &info, CF).await.err(), Some(OpenError::Refused(ErrorCode::Declined)));
+        }
+        assert_eq!(f.ui.prompt_count(), 1, "the person was asked once, at the first entry");
+        // Another device's guess at the token learns nothing: it falls through as any wrong token does.
+        let other = Who::new();
+        pin(&f.mem.trust, &other, CF);
+        f.decline_from_now();
+        assert_not_resumed(f.resume(&other, &info, CF).await);
+    });
+}
+
+/// The race of F1: the hub saw the session lost, but the viewer resumed before `drop_resume` ran. The session is
+/// live again, so the host's user's "Desconectar" ends it, under the lock that found it live.
+#[test]
+fn drop_resume_on_a_session_that_is_live_again_ends_it() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        let mut resumed = f.resume(&f.who, &info, CF).await.unwrap();
+        assert_eq!(resumed.grant().mode, GrantMode::Resumed);
+        f.mem.host.drop_resume(info.session_id);
+        let e =
+            wait_event(&mut resumed, Duration::from_secs(1), "the end", |e| matches!(e, ViewerEvent::Ended(_))).await;
+        assert_eq!(
+            e,
+            ViewerEvent::Ended(swapdesk_session::SessionEnd { kind: EndKind::PeerBye, code: ErrorCode::NoError })
+        );
+        eventually(Duration::from_secs(1), "the host to end", || f.mem.host.sessions().is_empty()).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "no token is left to resume it");
+        f.decline_from_now();
+        let fresh = resumed.grant().clone();
+        assert_not_resumed(f.resume(&f.who, &fresh, CF).await);
     });
 }
 

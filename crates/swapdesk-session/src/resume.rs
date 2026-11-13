@@ -25,6 +25,10 @@ pub enum ResumeError {
     NotLost,
     /// More than the window passed since the loss.
     Expired,
+    /// The host's user ended the lost session ("Desconectar"): the token is refused for good until its window ends,
+    /// not treated as unknown (an unknown token lets the request go the normal way, through `UNATTENDED` or a prompt,
+    /// which would start a fresh session a second after the user ended this one).
+    Killed,
 }
 
 struct Entry {
@@ -34,6 +38,8 @@ struct Entry {
     unattended: bool,
     token: Option<[u8; 16]>,
     lost_at: Option<Instant>,
+    /// The host's user ended the session while its link was lost: kept (refusing its token) until the window ends.
+    killed: bool,
 }
 
 pub struct ResumeTable {
@@ -50,7 +56,10 @@ impl ResumeTable {
     /// entered without a prompt.
     pub fn insert(&mut self, session_id: u64, device: DeviceId, granted: PermissionSet, unattended: bool) -> [u8; 16] {
         let token = random_token();
-        self.entries.insert(session_id, Entry { device, granted, unattended, token: Some(token), lost_at: None });
+        self.entries.insert(
+            session_id,
+            Entry { device, granted, unattended, token: Some(token), lost_at: None, killed: false },
+        );
         token
     }
 
@@ -71,6 +80,18 @@ impl ResumeTable {
         self.entries.remove(&session_id);
     }
 
+    /// The host's user ended a session whose link is lost: its token is refused (`ResumeError::Killed`) until the
+    /// window since the loss ends, when `purge` drops the entry. A session that is not lost has no window, so its
+    /// entry is simply dropped.
+    pub fn kill(&mut self, session_id: u64) {
+        match self.entries.get_mut(&session_id) {
+            Some(e) if e.lost_at.is_some() => e.killed = true,
+            _ => {
+                self.entries.remove(&session_id);
+            }
+        }
+    }
+
     /// Forget: every token of the device dies.
     pub fn invalidate_device(&mut self, device: &DeviceId) {
         self.entries.retain(|_, e| &e.device != device);
@@ -87,16 +108,18 @@ impl ResumeTable {
         self.entries.retain(|_, e| e.lost_at.is_none_or(|t| now.saturating_duration_since(t) <= window));
     }
 
+    /// Whether the session has an entry that can still be resumed (a killed one only waits out its window).
     pub fn contains(&self, session_id: u64) -> bool {
-        self.entries.contains_key(&session_id)
+        self.entries.get(&session_id).is_some_and(|e| !e.killed)
     }
 
+    /// The entries that can be resumed or are live; the killed ones, kept to refuse their token, do not count.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.values().filter(|e| !e.killed).count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// Whether `token` would be accepted from `device` now, without using it. `Err(NotLost)` means "ask again
@@ -109,6 +132,9 @@ impl ResumeTable {
         match &e.token {
             Some(t) if tokens_equal(t, token) => {}
             _ => return Err(ResumeError::BadToken),
+        }
+        if e.killed {
+            return Err(ResumeError::Killed);
         }
         match e.lost_at {
             None => Err(ResumeError::NotLost),
@@ -270,6 +296,31 @@ mod tests {
         t.mark_lost(7, now);
         t.invalidate_device(&B);
         assert!(t.resume(now, &A, 7, &tok, stored).is_ok());
+    }
+
+    #[test]
+    fn a_killed_token_is_refused_for_good_until_its_window_ends() {
+        let (mut t, now, tok) = table();
+        let stored = PermissionSet::CONTROL | PermissionSet::FILES;
+        t.mark_lost(7, now);
+        t.kill(7);
+        assert_eq!(t.resume(now, &A, 7, &tok, stored), Err(ResumeError::Killed));
+        assert_eq!(t.check(now + secs(59), &A, 7, &tok), Err(ResumeError::Killed), "refused all through the window");
+        assert!(!t.contains(7) && t.is_empty(), "it is not a resumable session");
+        // A guess or another device learns nothing: it is refused as any wrong try is.
+        let mut bad = tok;
+        bad[0] ^= 1;
+        assert_eq!(t.check(now, &A, 7, &bad), Err(ResumeError::BadToken));
+        assert_eq!(t.check(now, &B, 7, &tok), Err(ResumeError::WrongDevice));
+        t.purge(now + secs(61));
+        assert_eq!(t.check(now + secs(61), &A, 7, &tok), Err(ResumeError::Unknown), "the window is over");
+    }
+
+    #[test]
+    fn killing_a_session_that_is_not_lost_drops_its_entry() {
+        let (mut t, now, tok) = table();
+        t.kill(7);
+        assert_eq!(t.check(now, &A, 7, &tok), Err(ResumeError::Unknown));
     }
 
     #[test]

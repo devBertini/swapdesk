@@ -143,9 +143,6 @@ pub(crate) struct Viewer {
     pub view_only: bool,
     /// The host's display list as last relayed (`Notify::Displays`); what `ListDisplays` answers.
     pub displays: Vec<swapdesk_ipc::DisplayView>,
-    /// This machine elevated the session (op 50 after its confirmation): its administrator terminal needs no
-    /// second pass (ELEVATION.md 3.2). A session the host let in already elevated does not count.
-    pub elevated: bool,
     /// What the UI last chose for this session's video: `VideoSettings` carries everything at once, so a change of
     /// the preset keeps the view size and a change of the view size keeps the preset (F-VIEW-06).
     pub video: VideoPrefs,

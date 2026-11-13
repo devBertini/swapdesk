@@ -331,6 +331,10 @@ pub(crate) struct ElevationWait {
     waiting: Mutex<Option<tokio::sync::oneshot::Sender<Result<(), ErrorCode>>>>,
     /// D56: this machine confirmed "Elevar controle" for a session a host of minor 0 let in with `UNATTENDED`.
     released: AtomicBool,
+    /// This machine confirmed "Elevar controle" for this entry (the hub sets it after the host's answer): the
+    /// administrator terminal needs no second pass. Like `released` it belongs to one entry: a re-entry that is not a
+    /// resume clears it (F-SESS-02: an elevation does not survive a lost link).
+    confirmed: AtomicBool,
     /// How the host let the session in, as of its last entry (a reconnect that enters again changes it; a resume
     /// keeps it).
     mode: Mutex<swapdesk_proto::GrantMode>,
@@ -343,6 +347,7 @@ impl ElevationWait {
         Self {
             waiting: Mutex::new(None),
             released: AtomicBool::new(false),
+            confirmed: AtomicBool::new(false),
             mode: Mutex::new(mode),
             peer_stored: Mutex::new(None),
         }
@@ -357,6 +362,7 @@ impl ElevationWait {
         if mode != swapdesk_proto::GrantMode::Resumed {
             *lock(&self.mode) = mode;
             self.released.store(false, Ordering::Release);
+            self.confirmed.store(false, Ordering::Release);
         }
     }
 
@@ -493,6 +499,18 @@ impl ViewerHandle {
     pub fn wait_ended(&self, limit: Duration) -> Option<SessionEnd> {
         let ctx = self.inner.cell.get();
         self.inner.rt.block_on(async { tokio::time::timeout(limit, ctx.wait_ended()).await }).ok()
+    }
+
+    /// This machine elevated this entry of the session (op 50 after its confirmation): the administrator terminal
+    /// needs no second pass. A session the host let in already elevated does not count, and a fresh entry after a
+    /// lost link starts without it.
+    pub fn elevated_here(&self) -> bool {
+        self.inner.elevation.confirmed.load(Ordering::Acquire)
+    }
+
+    /// Records that this machine's confirmation was used for "Elevar controle" and the host elevated the session.
+    pub fn mark_elevated_here(&self) {
+        self.inner.elevation.confirmed.store(true, Ordering::Release);
     }
 
     /// D56: the machine-level reach of this session is held until this machine confirms "Elevar controle".

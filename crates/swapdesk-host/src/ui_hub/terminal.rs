@@ -35,10 +35,11 @@ impl Hub {
         if !dims_ok(cols, rows) {
             return reply(conn, req, Err(self.api_error(ApiCode::Invalid, "terminal size")));
         }
-        let Some((handle, elevated)) = lock(&conn.viewers).get(&session_id).map(|v| (v.handle.clone(), v.elevated))
-        else {
+        let Some(handle) = lock(&conn.viewers).get(&session_id).map(|v| v.handle.clone()) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
+        // Read from the handle, not kept in the hub: it is cleared by a fresh entry after a lost link (F-SESS-02).
+        let elevated = handle.elevated_here();
         // ELEVATION.md 3.2: the administrator terminal of another machine needs this machine's confirmation: an
         // administrator connection, a session this machine elevated (confirmed then), or the pass of a confirmation.
         // A session the host let in with the machine-level bits already (a 1.0 host) is not one this machine
@@ -97,9 +98,7 @@ impl Hub {
         rt.spawn(async move {
             let result = match handle.elevate().await {
                 Ok(()) => {
-                    if let Some(v) = lock(&c.viewers).get_mut(&session_id) {
-                        v.elevated = true;
-                    }
+                    handle.mark_elevated_here();
                     Ok(ReplyBody::Done)
                 }
                 Err(code) => {

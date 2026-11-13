@@ -537,12 +537,27 @@ impl HostService {
         }
     }
 
-    /// The host's user ended a session whose link is already lost: its token dies, so no viewer can resume it. A live
-    /// session is left alone (`disconnect` ends that one).
+    /// The host's user ended a session the interface shows as lost ("Desconectar" on a "Reconectando"). A session
+    /// that is lost has its token killed: refused for good until its window ends (`ResumeError::Killed`), not
+    /// forgotten, so the viewer's redials with it end in `DECLINED` instead of starting a fresh session. A session
+    /// that is live again (the viewer resumed before this call) is ended with `Bye`; what is found live and the token's
+    /// death are decided under the one table lock, so no resume commits in between.
     pub fn drop_resume(&self, session_id: u64) {
-        let mut t = lock(&self.inner.table);
-        if !t.live.contains_key(&session_id) {
-            t.resume.invalidate(session_id);
+        let live = {
+            let mut t = lock(&self.inner.table);
+            match t.live.get(&session_id).cloned() {
+                Some(ctx) => {
+                    t.resume.invalidate(session_id);
+                    Some(ctx)
+                }
+                None => {
+                    t.resume.kill(session_id);
+                    None
+                }
+            }
+        };
+        if let Some(ctx) = live {
+            ctx.bye(ErrorCode::NoError);
         }
     }
 
@@ -699,6 +714,9 @@ impl HostInner {
                             break;
                         }
                     }
+                    // The host's user ended this session: refused for good, so the redials of the viewer's 60 s end
+                    // here and start neither an unattended session nor a prompt in front of that person.
+                    Err(ResumeError::Killed) => return Decision::Refuse(ErrorCode::Declined),
                     // An unknown, expired, used or foreign token is not an error: the session goes the normal way
                     // (an unattended device reconnects through UNATTENDED, any other gets a fresh prompt).
                     Err(_) => break,

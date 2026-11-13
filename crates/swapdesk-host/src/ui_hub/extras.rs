@@ -243,7 +243,6 @@ impl Hub {
                 device,
                 view_only: false,
                 displays: Vec::new(),
-                elevated: false,
                 video: VideoPrefs::default(),
             },
         );

@@ -729,6 +729,13 @@ fn a_reconnect_after_elevate_enters_again_unelevated() {
     viewer_ui.clear();
     relay.cut(false);
     assert_eq!(elevation_of(&mut viewer_ui), 1, "back, unelevated, the button offered again");
+    // F4 of the review of 13/11: what this machine confirmed did not survive the lost link, so the administrator
+    // terminal is guarded again (F-SESS-02), not let through on the confirmation of the entry before.
+    assert_eq!(
+        viewer_ui.call(UiOp::TermOpen { session_id: s, cols: 80, rows: 24, admin: true }).unwrap_err(),
+        ApiCode::NeedsAdmin,
+        "a fresh entry carries no elevation of the last one"
+    );
     wait_for("the host's new session", || {
         let hosted = host.core.host().sessions();
         (hosted.len() == 1 && !hosted[0].granted.contains(PermissionSet::UNATTENDED)).then_some(())
