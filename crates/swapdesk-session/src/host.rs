@@ -30,6 +30,12 @@ use crate::util::{lock, random_session_id};
 /// host's interface shows as reconnecting before it calls the session ended.
 pub const RESUME_WINDOW: Duration = Duration::from_secs(60);
 
+/// How long a session waits for the banner's window (`HostConfig::banner_wait`'s default).
+pub const BANNER_WAIT: Duration = Duration::from_secs(15);
+
+/// How often an entry waiting for the banner's window looks for it.
+const BANNER_POLL: Duration = Duration::from_millis(100);
+
 /// The time source of the session's timers: tokio's clock, so a test can pause it.
 pub(crate) fn now() -> Instant {
     tokio::time::Instant::now().into_std()
@@ -54,6 +60,10 @@ pub struct HostConfig {
     pub resume_wait: Duration,
     /// How long an armed swap token lives (6.3 step 4: 10 s).
     pub swap_token_ttl: Duration,
+    /// How long a session may wait for the banner's window to be connected (F-SESS-03): an entry without a prompt
+    /// that finds it missing is refused `TIMEOUT` after this, and a live session whose window went away ends with
+    /// `TIMEOUT` after it.
+    pub banner_wait: Duration,
     /// Sessions that may be live at once; another request is refused `BUSY`.
     pub max_live_sessions: usize,
     pub liveness: LivenessConfig,
@@ -80,6 +90,7 @@ impl HostConfig {
             resume_window: RESUME_WINDOW,
             resume_wait: Duration::from_secs(8),
             swap_token_ttl: Duration::from_secs(10),
+            banner_wait: BANNER_WAIT,
             max_live_sessions: 1,
             liveness: LivenessConfig::default(),
             caps: Caps::default(),
@@ -236,6 +247,18 @@ pub trait HostUi: Send + Sync + 'static {
     /// The consent question is no longer waiting: close its card (answered, timed out, or the session or the
     /// permission went away first).
     fn consent_closed(&self, _request: &ConsentRequest, _how: PromptEnd) {}
+
+    /// Whether the banner of F-SESS-03 can be shown to this host's user now: `false` only where one is required (the
+    /// account is at the console, on an interactive desktop) and its window is not connected. An entry without a
+    /// prompt waits for it, and a live session pauses and then ends without it, so nobody is ever controlled with no
+    /// banner and no "Desconectar". A host that needs no window (the Mac: quitting the app stops hosting) says `true`.
+    fn banner_ready(&self) -> bool {
+        true
+    }
+
+    /// Asks the machine to start the window of this account in the console session (Windows: the service starts
+    /// `Swapdesk.exe` as that user). Idempotent: called again while the window is still missing.
+    fn start_banner_window(&self) {}
 
     /// "Bloquear ao terminar" (F-SESS-03).
     /// The desktop the sessions should be on now, as the interface side knows it (`None`: it does not track one).
@@ -738,6 +761,10 @@ impl HostInner {
         }
 
         if policy::unattended_grant(stored_grants, hello.requested, hello.proto_minor).is_some() {
+            // F-SESS-03: nothing is delivered to a device that enters without a prompt until the banner can show it.
+            if let Err(code) = self.await_banner().await {
+                return Decision::Refuse(code);
+            }
             return Decision::Grant { basis: Basis::Unattended, requested: hello.requested, slot: None };
         }
 
@@ -787,6 +814,25 @@ impl HostInner {
             Err(_) => {
                 guard.how = PromptEnd::TimedOut;
                 Decision::Refuse(ErrorCode::Timeout)
+            }
+        }
+    }
+
+    /// Waits, up to `banner_wait`, for the banner's window to be connected, asking the machine to start it first.
+    /// `TIMEOUT` when it does not come: the viewer is told the host did not answer in time.
+    async fn await_banner(&self) -> Result<(), ErrorCode> {
+        if self.ui.banner_ready() {
+            return Ok(());
+        }
+        self.ui.start_banner_window();
+        let deadline = tokio::time::Instant::now() + self.cfg.banner_wait;
+        loop {
+            tokio::time::sleep(BANNER_POLL).await;
+            if self.ui.banner_ready() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ErrorCode::Timeout);
             }
         }
     }

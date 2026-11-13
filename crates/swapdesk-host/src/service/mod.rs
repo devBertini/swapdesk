@@ -374,6 +374,14 @@ impl HostUi for CoreUi {
         self.inner.console_owner()
     }
 
+    fn banner_ready(&self) -> bool {
+        self.inner.banner_ready()
+    }
+
+    fn start_banner_window(&self) {
+        self.inner.start_banner_window();
+    }
+
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
         self.inner.prompt(request)
     }

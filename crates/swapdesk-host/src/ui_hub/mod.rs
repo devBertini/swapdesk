@@ -196,6 +196,12 @@ pub(crate) struct Hub {
     conns: Mutex<Vec<Arc<Conn>>>,
     next_conn: AtomicU64,
     console: Mutex<Option<u32>>,
+    /// Starts this account's window in the console session (Windows service: `Swapdesk.exe` as that user), so a
+    /// session never runs with no banner (F-SESS-03). Unset where the window is not the service's to start (the Mac:
+    /// quitting the app stops hosting; tests; development): then no window is required.
+    window_launcher: OnceLock<WindowLauncher>,
+    /// When the window was last asked for, so a burst of entries starts it once.
+    last_window_launch: Mutex<Option<std::time::Instant>>,
     desktop: Mutex<Desktop>,
     /// What the media helper's probe of the input desktop says (`Default` or `Secure`): a UAC prompt or the secure
     /// desktop is no event the session watcher sees (F-UNAT-01).
@@ -237,6 +243,9 @@ pub(crate) struct Hub {
     /// Host sessions: when they started (Unix ms) and what they hold, for the durations of the audit log and the
     /// `Active` states.
     started: Mutex<HashMap<u64, (u64, swapdesk_proto::PermissionSet)>>,
+    /// The device (hex) of each session in `started`, so a window that connects while the session runs is told of it
+    /// (`send_pending`).
+    hosted: Mutex<HashMap<u64, String>>,
     shutting: AtomicBool,
     /// A 1.0 install left its data on this computer (D55).
     had_1_0: AtomicBool,
@@ -264,6 +273,12 @@ pub struct MacState {
 /// Asks the Mac for its [`MacState`] ([`UiHub::set_mac_probe`]); it must be cheap and not prompt.
 pub type MacProbe = Arc<dyn Fn() -> MacState + Send + Sync>;
 
+/// Starts this account's interface window in the given console session; the error says why it could not.
+pub type WindowLauncher = Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>;
+
+/// How soon the window may be asked for again.
+const WINDOW_LAUNCH_SPACING: Duration = Duration::from_secs(5);
+
 /// Asks the platform which receiving folder it refuses ([`UiHub::set_receive_folder_probe`]).
 pub type ReceiveProbe = Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>;
 
@@ -285,6 +300,38 @@ impl Hub {
     pub fn effective_desktop(&self) -> Desktop {
         let (session, helper) = (*lock(&self.desktop), *lock(&self.helper_desktop));
         crate::service::effective_desktop(session, helper, self.console_owner())
+    }
+
+    /// F-SESS-03: whether the banner can be shown to this account's user now. Where no launcher is set, always. Else it
+    /// can unless the account is at the console on its interactive desktop with no window of it connected from the
+    /// console session. A locked screen, a secure desktop and the sign-in screen (nobody signed in) show no banner to
+    /// anyone, so a session there goes on (ACCOUNTS.md 5.1); the window is required again the moment the user's own
+    /// desktop is back.
+    pub fn banner_ready(&self) -> bool {
+        self.window_launcher.get().is_none()
+            || self.effective_desktop() != Desktop::Default
+            || !self.console_conns().is_empty()
+    }
+
+    /// Starts the account's window in the console session, at most once in [`WINDOW_LAUNCH_SPACING`].
+    pub fn start_window(&self) {
+        let Some(launcher) = self.window_launcher.get() else { return };
+        let Some(session) = *lock(&self.console) else {
+            self.log(Level::Warn, format_args!("the window cannot be started: no console session"));
+            return;
+        };
+        {
+            let mut last = lock(&self.last_window_launch);
+            let now = std::time::Instant::now();
+            if last.is_some_and(|t| now.saturating_duration_since(t) < WINDOW_LAUNCH_SPACING) {
+                return;
+            }
+            *last = Some(now);
+        }
+        match launcher(session) {
+            Ok(()) => self.log(Level::Info, format_args!("the window was started in session {session}")),
+            Err(e) => self.log(Level::Warn, format_args!("the window did not start in session {session}: {e}")),
+        }
     }
 
     /// Tells this account's sessions the desktop they are on ([`Hub::effective_desktop`]).
@@ -410,6 +457,8 @@ impl UiHub {
             conns: Mutex::new(Vec::new()),
             next_conn: AtomicU64::new(1),
             console: Mutex::new(None),
+            window_launcher: OnceLock::new(),
+            last_window_launch: Mutex::new(None),
             desktop: Mutex::new(Desktop::Default),
             helper_desktop: Mutex::new(Desktop::Default),
             mode,
@@ -432,6 +481,7 @@ impl UiHub {
             wake: Mutex::new(WakeSetup::default()),
             elevation: Mutex::new(elevation::Elevation::default()),
             started: Mutex::new(HashMap::new()),
+            hosted: Mutex::new(HashMap::new()),
             shutting: AtomicBool::new(false),
             had_1_0: AtomicBool::new(false),
             updater: std::sync::OnceLock::new(),
@@ -510,6 +560,12 @@ impl UiHub {
     /// The machine settings as they are now.
     pub fn settings(&self) -> MachineSettings {
         self.hub.settings()
+    }
+
+    /// How this account's window is started when a session finds it missing (F-SESS-03). Once, by the service, on a
+    /// machine whose service owns the user's interface; without it no window is required.
+    pub fn set_window_launcher(&self, launcher: WindowLauncher) {
+        let _ = self.hub.window_launcher.set(launcher);
     }
 
     /// The session whose UI is the host's user (the console session); `None` when nobody is at the machine.

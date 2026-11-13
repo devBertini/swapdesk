@@ -184,6 +184,9 @@ pub(crate) struct Actor {
     stored_told: Option<PermissionSet>,
     /// When the session's account left the console (host side; `None` while it is there).
     away_since: Option<Instant>,
+    /// When the banner's window of the session's account went missing (host side; `None` while it is connected or none
+    /// is required): the session is paused meanwhile and ends after `HostConfig::banner_wait`.
+    banner_missing_since: Option<Instant>,
     /// An `Elevate` was accepted and its grant change is on its way (host side).
     elevating: bool,
     /// The desktop the state machine last applied (host side).
@@ -272,6 +275,7 @@ impl Actor {
             reported: PermissionSet::EMPTY,
             stored_told: None,
             away_since: None,
+            banner_missing_since: None,
             elevating: false,
             applied_desktop: None,
             pending: VecDeque::new(),
@@ -465,6 +469,11 @@ impl Actor {
         if self.away_since.is_some_and(|t| at.saturating_duration_since(t) >= ACCOUNT_AWAY_LIMIT) {
             return Some(Finish::local_bye(ErrorCode::AccountAway));
         }
+        if self.phase == Phase::Active
+            && let Some(f) = self.check_banner(at)
+        {
+            return Some(f);
+        }
         match self.phase {
             Phase::Active => {
                 let tick = self.liveness.tick(at);
@@ -581,7 +590,10 @@ impl Actor {
                 let Some(hello) = hello.take() else { return Some(Finish::violation(ErrorCode::Internal)) };
                 // The decision task has its own timers (the prompt, the wait for an old connection); this is the net
                 // under it, for a task that crashed and will never answer.
-                *deadline = now() + service.cfg.prompt_timeout + service.cfg.resume_wait + DECISION_MARGIN;
+                *deadline = now()
+                    + service.cfg.prompt_timeout.max(service.cfg.banner_wait)
+                    + service.cfg.resume_wait
+                    + DECISION_MARGIN;
                 let (service, device, ctx, ev) =
                     (Arc::clone(service), *device, self.ctx.clone(), self.ctx.inner.ev.clone());
                 let task = tokio::spawn(async move {
@@ -613,7 +625,12 @@ impl Actor {
             }
         };
         let info = service.ui.start_info();
-        let paused = paused_for(info.desktop, committed.granted, service.ui.serves_other_desktops());
+        // F-SESS-03: a session whose banner cannot be shown starts paused and the window is asked for.
+        if !service.ui.banner_ready() {
+            self.banner_missing_since = Some(now());
+            service.ui.start_banner_window();
+        }
+        let paused = self.paused_now(info.desktop, committed.granted);
         self.ctx.inner.state.send_replace(DesktopState { desktop: info.desktop, paused });
         // What the viewer is about to be told; a change after the commit is reported right behind it.
         self.reported = committed.granted;
@@ -780,7 +797,7 @@ impl Actor {
 
     fn on_grants_changed(&mut self, old: PermissionSet, new: PermissionSet) -> Option<Finish> {
         let desktop = self.ctx.desktop_state().desktop;
-        let paused = paused_for(desktop, new, self.serves_other_desktops());
+        let paused = self.paused_now(desktop, new);
         if let Some(f) = self.emit(PermissionsChanged { granted: new }, true) {
             return Some(f);
         }
@@ -813,8 +830,54 @@ impl Actor {
         }
     }
 
+    /// Whether the host side is paused on `desktop` with `granted`: by the desktop (`paused_for`), or because the
+    /// banner's window is missing (F-SESS-03).
+    fn paused_now(&self, desktop: Desktop, granted: PermissionSet) -> bool {
+        paused_for(desktop, granted, self.serves_other_desktops()) || self.banner_missing_since.is_some()
+    }
+
+    /// F-SESS-03, "banner during every session": while the window of the account that shows it is not connected the
+    /// session is paused (no picture, input dropped), the window is asked for, and the session ends with `TIMEOUT`
+    /// after `HostConfig::banner_wait` if it does not come back. It goes on when the window is connected again.
+    fn check_banner(&mut self, at: Instant) -> Option<Finish> {
+        let Side::Host { service, .. } = &self.side else { return None };
+        let (ui, limit) = (Arc::clone(&service.ui), service.cfg.banner_wait);
+        match (ui.banner_ready(), self.banner_missing_since) {
+            (true, None) => None,
+            (true, Some(_)) => {
+                self.banner_missing_since = None;
+                self.repause()
+            }
+            (false, None) => {
+                self.banner_missing_since = Some(at);
+                ui.start_banner_window();
+                self.repause()
+            }
+            (false, Some(since)) => {
+                (at.saturating_duration_since(since) >= limit).then(|| Finish::local_bye(ErrorCode::Timeout))
+            }
+        }
+    }
+
+    /// Applies a change of `banner_missing_since` to the pause the viewer and the handlers see.
+    fn repause(&mut self) -> Option<Finish> {
+        let desktop = self.ctx.desktop_state().desktop;
+        let paused = self.paused_now(desktop, self.ctx.granted());
+        if paused == self.ctx.is_paused() {
+            return None;
+        }
+        self.ctx.inner.state.send_replace(DesktopState { desktop, paused });
+        if let Some(f) = self.emit(HostState { desktop, paused }, true) {
+            return Some(f);
+        }
+        for h in self.registry.handlers() {
+            h.on_state(&self.ctx, desktop, paused);
+        }
+        None
+    }
+
     fn on_desktop(&mut self, desktop: Desktop) -> Option<Finish> {
-        let paused = paused_for(desktop, self.ctx.granted(), self.serves_other_desktops());
+        let paused = self.paused_now(desktop, self.ctx.granted());
         // ACCOUNTS.md 5.1: another account took the console. The session waits for it to come back, then ends.
         if desktop == Desktop::AccountAway {
             self.away_since.get_or_insert_with(now);

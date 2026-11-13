@@ -34,6 +34,7 @@ use crate::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use crate::testpipe::{PipeWriter, duplex_blocking};
 
 mod accounts;
+mod banner;
 mod clip_actions;
 mod connect;
 mod elevation;

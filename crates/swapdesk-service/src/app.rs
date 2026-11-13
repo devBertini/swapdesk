@@ -389,6 +389,28 @@ type UiSessions = Arc<std::sync::OnceLock<Box<dyn Fn() -> Vec<u32> + Send + Sync
 /// The file in the update folder that lists the sessions whose interface closed for an update.
 const UI_SESSIONS: &str = "ui-sessions.txt";
 
+/// Starts `Swapdesk.exe` in `session` as that session's user: the user helper's token path, from an install folder the
+/// install policy already checked. Used after an update and when a session finds its banner's window missing.
+fn launch_interface(exe: &swapdesk_sys_win::VerifiedExe, session: u32) -> Result<(), String> {
+    swapdesk_sys_win::launch_helper(swapdesk_sys_win::HelperRole::User, exe, &[], session)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The launcher the account hubs use when a hosted session has no window to show its banner (F-SESS-03): the same
+/// start as after an update, with the install policy checked at every call (the folder is not trusted once).
+fn window_launcher() -> swapdesk_host::ui_hub::WindowLauncher {
+    Arc::new(|session| {
+        let exe = std::env::current_exe()
+            .map(|e| e.with_file_name("Swapdesk.exe"))
+            .map_err(|e| format!("this service's image: {e}"))?;
+        let verified = InstallPolicy::production()
+            .map_err(|e| e.to_string())
+            .and_then(|p| p.verify(&exe).map_err(|e| e.to_string()))?;
+        launch_interface(&verified, session)
+    })
+}
+
 /// UPDATES.md 6.2 step 7: after a commit, `Swapdesk.exe` opens again in each session that had it, as that session's
 /// user (the user helper's token path), from the install folder checked by the install policy. The list goes.
 fn reopen_interfaces(update: &std::path::Path, trace: &dyn TraceSink) {
@@ -410,8 +432,8 @@ fn reopen_interfaces(update: &std::path::Path, trace: &dyn TraceSink) {
         }
     };
     for session in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
-        match swapdesk_sys_win::launch_helper(swapdesk_sys_win::HelperRole::User, &verified, &[], session) {
-            Ok(_) => trace.log(Level::Info, "update", format_args!("the interface reopened in session {session}")),
+        match launch_interface(&verified, session) {
+            Ok(()) => trace.log(Level::Info, "update", format_args!("the interface reopened in session {session}")),
             Err(e) => {
                 trace.log(Level::Warn, "update", format_args!("the interface did not reopen in session {session}: {e}"))
             }
@@ -792,6 +814,11 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             core.set_terminal_env(term_env.clone());
             hub.set_console_session(active_console_session());
             hub.set_console_user(read_console(dev_mode).hub_user());
+            // F-SESS-03: the installed service starts the user's window when a session has none to show the banner.
+            // The development console runs as the user, who starts the window by hand.
+            if !dev_mode {
+                hub.set_window_launcher(window_launcher());
+            }
             core.set_console_probe(Arc::new(move || read_console(dev_mode)));
             // Ctrl+Alt+Del for a viewer's `SendSpecial`: only the installed service process can send it (the
             // development console runs as a user and never does; its `SendSpecial` is answered UNAVAILABLE).

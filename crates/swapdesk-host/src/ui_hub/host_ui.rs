@@ -88,6 +88,7 @@ impl Hub {
             lost
         };
         lock(&self.started).remove(&session_id);
+        lock(&self.hosted).remove(&session_id);
         // A window that ran out reads as the silence it was; the user's own end carries no reason.
         let reason = if number.is_some() { lost.reason } else { None };
         self.notify_console(Notify::Session {
@@ -121,6 +122,32 @@ impl Hub {
         for v in views {
             conn.queue.control(swapdesk_ipc::Message::UiNotify(Notify::IncomingRequest(v)));
         }
+        // The hosted sessions that run now: a window that starts while one runs (F-SESS-03: the service starts it when
+        // the user quit it) shows its banner at once, as it would have had it been there at the start.
+        for (session_id, device_id, state) in self.hosted_states() {
+            conn.queue.control(swapdesk_ipc::Message::UiNotify(Notify::Session { session_id, device_id, state }));
+        }
+    }
+
+    /// What the banner shows of each hosted session now: active, or reconnecting while its link is lost.
+    fn hosted_states(&self) -> Vec<(u64, String, SessionState)> {
+        let hosted = lock(&self.hosted).clone();
+        let started = lock(&self.started);
+        let lost = lock(&self.lost);
+        let mut states: Vec<(u64, String, SessionState)> = hosted
+            .into_iter()
+            .filter_map(|(id, device)| {
+                let (since_ms, granted) = *started.get(&id)?;
+                let state = if lost.contains_key(&id) {
+                    SessionState::Reconnecting { attempt: 0 }
+                } else {
+                    SessionState::Active { since_ms, role: Role::Host, granted: granted.bits(), elevation: 0 }
+                };
+                Some((id, device, state))
+            })
+            .collect();
+        states.sort_by_key(|(id, ..)| *id);
+        states
     }
 
     /// `AnswerIncoming`: the host's user decided. `grants` are validated by the caller.
@@ -186,6 +213,14 @@ impl HostUi for HubHostUi {
 
     fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
         self.hub.console_owner()
+    }
+
+    fn banner_ready(&self) -> bool {
+        self.hub.banner_ready()
+    }
+
+    fn start_banner_window(&self) {
+        self.hub.start_window();
     }
 
     fn prompt(&self, request: PromptRequest) -> oneshot::Receiver<PromptAnswer> {
@@ -330,6 +365,7 @@ impl HostUi for HubHostUi {
                     _ => now,
                 };
                 lock(&hub.started).insert(session_id, (began, granted));
+                lock(&hub.hosted).insert(session_id, device_id_hex(&device));
                 hub.audit(
                     device,
                     AuditEvent::SessionStarted {
@@ -367,6 +403,7 @@ impl HostUi for HubHostUi {
                     if resumable {
                         started.get(&session_id).map(|(t, _)| *t)
                     } else {
+                        lock(&hub.hosted).remove(&session_id);
                         started.remove(&session_id).map(|(t, _)| t)
                     }
                 }
