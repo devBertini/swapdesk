@@ -28,7 +28,14 @@ done
 if [ "${sign_args[0]}" = --release-identity ]; then
   if [ -n "${SWAPDESK_RELEASE_P12_BASE64:-}" ]; then
     ci_dir="$(mktemp -d "${TMPDIR:-/tmp}/swapdesk-release-kc.XXXXXX")"
-    trap 'security delete-keychain "$ci_dir/release.keychain-db" 2>/dev/null; rm -rf "$ci_dir"' EXIT
+    # The user's keychain search list as it was, put back at exit.
+    old_list=()
+    while IFS= read -r k; do
+      k="${k#"${k%%[![:space:]]*}"}"; k="${k#\"}"; k="${k%\"}"
+      [ -n "$k" ] && old_list+=("$k")
+    done < <(security list-keychains -d user)
+    trap 'security list-keychains -d user -s ${old_list[@]+"${old_list[@]}"} 2>/dev/null
+      security delete-keychain "$ci_dir/release.keychain-db" 2>/dev/null; rm -rf "$ci_dir"' EXIT
     bundle="$ci_dir/identity.bin"
     printf '%s' "$SWAPDESK_RELEASE_P12_BASE64" | base64 --decode > "$bundle"
     SWAPDESK_RELEASE_KEYCHAIN_PASSWORD="$(/usr/bin/openssl rand -hex 24)"
@@ -40,6 +47,9 @@ if [ "${sign_args[0]}" = --release-identity ]; then
       -P "${SWAPDESK_RELEASE_P12_PASSWORD:?the identity needs SWAPDESK_RELEASE_P12_PASSWORD}" -T /usr/bin/codesign >/dev/null
     security set-key-partition-list -S apple-tool:,apple: -s -k "$SWAPDESK_RELEASE_KEYCHAIN_PASSWORD" \
       "$SWAPDESK_RELEASE_KEYCHAIN" >/dev/null
+    # On a runner codesign finds the identity only in a keychain of the user's search list ("no identity found"
+    # otherwise, release run of 13/11/2026); GitHub's own recipe adds it the same way.
+    security list-keychains -d user -s "$SWAPDESK_RELEASE_KEYCHAIN" ${old_list[@]+"${old_list[@]}"}
     rm -f "$bundle"
   elif [ -z "${SWAPDESK_RELEASE_KEYCHAIN:-}" ]; then
     echo "no release identity: set the GitHub secrets, or SWAPDESK_RELEASE_KEYCHAIN(_PASSWORD), or pass --adhoc" >&2
