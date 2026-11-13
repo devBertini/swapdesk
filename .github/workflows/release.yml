@@ -66,10 +66,12 @@ jobs:
       - name: Find the zip
         id: zip
         run: |
-          zip="$(ls target/package/Swapdesk-macos-arm64-*.zip | head -1)"
+          zips=(target/package/Swapdesk-macos-arm64-*.zip)
+          zip="${zips[0]}"
           [ -f "$zip" ] || { echo "no release zip"; exit 1; }
           echo "path=$PWD/$zip" >> "$GITHUB_OUTPUT"
-          pkg="$(ls target/package/Swapdesk-macos-arm64-*.sdpkg | head -1)"
+          pkgs=(target/package/Swapdesk-macos-arm64-*.sdpkg)
+          pkg="${pkgs[0]}"
           [ -f "$pkg" ] || { echo "no update package"; exit 1; }
           echo "pkg=$PWD/$pkg" >> "$GITHUB_OUTPUT"
       - name: Provenance attestation
