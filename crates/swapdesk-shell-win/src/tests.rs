@@ -308,7 +308,7 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     let id = |r: &crate::offscreen::Rendered, c| r.output.widgets.iter().any(|x| x.id == c);
     assert!(id(&window, ControlId::TbKeys), "the bar shows in a window");
     let video = window.output.video.expect("video rectangle");
-    assert!(video.y >= swapdesk_ui::tokens::layout::VIEWER_BAR_H && video.w < w);
+    assert!(video.y > 0.0 && video.w < w, "a mock run keeps the design's framed picture");
 
     state.run_shortcut(ViewerAction::FullScreen);
     let full = render(&state, WindowKind::Viewer, (w, h), 1.0, &Interaction::default()).unwrap();
@@ -317,8 +317,8 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
     let v = full.output.video.expect("video rectangle");
     assert!((v.x - (w - v.w) / 2.0).abs() < 0.5 && (v.y - (h - v.h) / 2.0).abs() < 0.5, "centred: {v:?}");
     assert!(v.w == w || v.h == h, "the 16:10 picture touches two edges of the window: {v:?}");
-    // The viewer's top bar is gone too: its pixel is not the bar's surface colour any more.
-    assert_ne!(full.rgb_at(2, 2), window.rgb_at(2, 2));
+    // No top bar, in a window or in full screen (owner, 12/11): the corner pixel is the column's colour in both.
+    assert_eq!(full.rgb_at(2, 2), window.rgb_at(2, 2));
     let missing: Vec<_> =
         state.controls(WindowKind::Viewer).into_iter().filter(|c| c.id.focusable() && !id(&full, c.id)).collect();
     assert!(missing.is_empty(), "controls listed but not drawn in full screen: {missing:?}");

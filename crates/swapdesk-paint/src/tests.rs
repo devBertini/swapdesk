@@ -637,3 +637,24 @@ fn a_terminal_grid_paints_backgrounds_glyphs_lines_and_wide_cells() {
     assert_eq!(lines[0], Rect::new(c_x, 20.0 + 17.0 - 2.0, 8.0, 1.0), "underline");
     assert_eq!(lines[1], Rect::new(c_x, (20.0f32 + 17.0 * 0.55).round(), 8.0, 1.0), "strike");
 }
+
+/// Owner, 12/11: the viewer has no top bar; the peer's name and "você controla há …" ride on the session toolbar,
+/// and a real picture takes the window's whole height.
+#[test]
+fn the_viewer_has_no_top_bar_and_its_session_line_rides_on_the_toolbar() {
+    let mut state = Scenario::Visualizador.prepared_state();
+    let session = state.viewer_session().expect("a session").clone();
+    let peer = state.device_by_id(&session.device_id).expect("the peer").name.clone();
+    let status = state.viewer_status_text(&session);
+    state.set_live_picture(true);
+    let (kind, size) = (WindowKind::Viewer, design_size(WindowKind::Viewer));
+    let painter = Fixed::default();
+    let out = paint(Frame::new(&painter, &state, &Interaction::default(), size, true), kind);
+    let video = out.video.expect("a video");
+    assert_eq!((video.y, video.h), (0.0, size.1), "the picture takes the whole height: {video:?}");
+    let drawn = painter.drawn.borrow();
+    assert!(drawn.contains(&peer), "the peer's name is on the toolbar: {drawn:?}");
+    assert!(drawn.iter().any(|t| t.starts_with(&status)), "the session line is on the toolbar: {drawn:?}");
+    let screen = out.widgets.iter().find(|w| w.id == ControlId::TbScreen).expect("the toolbar");
+    assert!(screen.rect.y > 0.0 && screen.rect.y < 80.0, "the toolbar floats at the top of the picture");
+}

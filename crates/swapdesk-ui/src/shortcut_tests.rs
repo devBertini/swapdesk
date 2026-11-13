@@ -83,7 +83,7 @@ fn each_button_of_the_session_bar_has_a_hint_of_its_own_that_says_what_it_does()
         (ControlId::TbDisconnect, "Encerrar a sessão (Ctrl+Alt+Q)"),
     ];
     let specs = s.controls(WindowKind::Viewer);
-    let bar: Vec<_> = specs.iter().filter(|c| c.region == Region::Toolbar).collect();
+    let bar: Vec<_> = specs.iter().filter(|c| c.region == Region::Toolbar && c.id.focusable()).collect();
     assert_eq!(bar.len(), expected.len(), "every button of the bar is in the table");
     for (id, text) in expected {
         let hint = s.toolbar_hint(id).unwrap_or_else(|| panic!("{id:?} has no hint"));

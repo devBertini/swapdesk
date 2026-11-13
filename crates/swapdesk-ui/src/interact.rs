@@ -1157,6 +1157,8 @@ impl UiState {
             self.bar_progress(&mut s, Some(w.bar));
         }
         s.region(Region::Toolbar);
+        // The session line rides on the toolbar (owner, 12/11): read with it, after the peer's heading.
+        s.text(UiRole::Text, self.viewer_status_text(session));
         let screen_label = self.name_of(MsgKey::TbScreen);
         s.button(ControlId::TbScreen, screen_label);
         if self.viewer_extras {

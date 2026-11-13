@@ -359,7 +359,6 @@ pub mod layout {
     pub const SWITCH_W: f32 = 38.0;
     pub const SWITCH_H: f32 = 22.0;
     pub const FIELD_H: f32 = 36.0;
-    pub const VIEWER_BAR_H: f32 = 40.0;
     pub const DRAWER_W: f32 = 448.0;
     /// Pair strip geometry (Visão geral): column width, icon size, wire thickness, arrow size.
     pub const PAIR_COLUMN_W: f32 = 180.0;

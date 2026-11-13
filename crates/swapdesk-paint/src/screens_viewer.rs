@@ -2,7 +2,7 @@
 //! (its visual is stage 15), the terminal panel's grid is drawn by the window (stage 43). Toolbar, drawer, cards and the banner follow the design.
 
 use swapdesk_ui::format;
-use swapdesk_ui::tokens::{Color, layout, text};
+use swapdesk_ui::tokens::{Color, TextStyle, layout, text};
 use swapdesk_ui::{
     ActionKind, ControlId, DialogKind, DrawerTab, EditId, Msg, MsgKey, SessionState, SwapPhase, SwapWait, TermPhase,
     WindowKind,
@@ -27,35 +27,13 @@ pub fn paint_viewer(f: &mut Frame) {
         return;
     };
     let peer = f.st.device_by_id(&session.device_id).map(|d| d.name.clone()).unwrap_or_default();
-    let bw = p.hairline();
 
-    // Full screen (D30): no top bar, the picture fills the window.
+    // No top bar (owner, 12/11): who this is and for how long ride on the session toolbar, and the picture takes the
+    // whole window, in full screen (D30) and out of it.
     let fullscreen = f.st.fullscreen();
-    let bar_h = if fullscreen { 0.0 } else { layout::VIEWER_BAR_H };
-    if !fullscreen {
-        // Top bar: 40 px, padding 0 16, gap 10.
-        p.fill_rect(Rect::new(0.0, 0.0, f.w, layout::VIEWER_BAR_H), pal.surface);
-        p.fill_rect(Rect::new(0.0, layout::VIEWER_BAR_H - bw, f.w, bw), pal.line);
-        let cy = layout::VIEWER_BAR_H / 2.0;
-        p.fill_circle((16.0 + 4.0, cy), 4.0, pal.ok);
-        let name = p.label(&peer, text::NAME);
-        p.draw(&name, 16.0 + 8.0 + 10.0, (layout::VIEWER_BAR_H - name.h) / 2.0, pal.ink);
-        let status = p.label(&f.st.viewer_status_text(&session), text::BODY);
-        p.draw(&status, 16.0 + 8.0 + 10.0 + name.w + 10.0, (layout::VIEWER_BAR_H - status.h) / 2.0, pal.soft);
-        if let (Some(set), Some(stats)) = (f.st.settings(), session.stats)
-            && set.show_stats
-        {
-            let s = f.st.tm(&Msg::new(MsgKey::ViewerStats)
-                .with(stats.latency_ms.to_string())
-                .with(stats.fps.to_string())
-                .with(if stats.hevc { "HEVC" } else { "H.264" }));
-            let l = p.label(&s, text::CAPTION);
-            p.draw(&l, f.w - 16.0 - l.w, (layout::VIEWER_BAR_H - l.h) / 2.0, pal.soft);
-        }
-    }
 
     // The body: the video column and, when open, the drawer (448 px, border-left).
-    let body = Rect::new(0.0, bar_h, f.w, f.h - bar_h);
+    let body = Rect::new(0.0, 0.0, f.w, f.h);
     // The Arquivos view takes the whole body: no picture (the shells hide it while `video` is none), no drawer.
     if f.st.explorer_open() {
         crate::screens_explorer::explorer(f, body);
@@ -101,7 +79,8 @@ pub fn paint_viewer(f: &mut Frame) {
             swap_declined_card(f, video);
         }
         if f.st.session_bar_visible() {
-            toolbar(f, video_col, &session.device_id);
+            let line = session_line(f, &session);
+            toolbar(f, video_col, &peer, &line);
         }
     }
     if let Some(tab) = drawer {
@@ -146,9 +125,28 @@ struct Tool {
     sep_before: bool,
 }
 
-fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
+/// The second line of the toolbar's session segment: how long this has gone on ("você controla há 68 min"), and the
+/// latency, frame rate and codec when Ajustes shows them.
+fn session_line(f: &Frame, session: &swapdesk_ui::state::SessionView) -> String {
+    let status = f.st.viewer_status_text(session);
+    match (f.st.settings(), session.stats) {
+        (Some(set), Some(stats)) if set.show_stats => {
+            let s = f.st.tm(&Msg::new(MsgKey::ViewerStats)
+                .with(stats.latency_ms.to_string())
+                .with(stats.fps.to_string())
+                .with(if stats.hevc { "HEVC" } else { "H.264" }));
+            format!("{status} · {s}")
+        }
+        _ => status,
+    }
+}
+
+/// The toolbar's text styles of its session segment: the peer's name, then the session line, small and soft.
+const SEG_NAME: TextStyle = TextStyle::new(12.0, 600);
+const SEG_LINE: TextStyle = TextStyle::new(11.0, 400);
+
+fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
     let (p, _pal) = (f.p, f.pal);
-    let _ = device_id;
     let display = f.st.tm(&Msg::new(MsgKey::TbScreenN).with("1"));
     let white = f.fx.toolbar_ink;
     let tool = |id, icon: &str| Tool {
@@ -246,12 +244,26 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
             (content + 20.0).max(40.0)
         })
         .collect();
-    let seps = tools.iter().filter(|t| t.sep_before).count() as f32;
-    let total = 12.0 + widths.iter().sum::<f32>() + 2.0 * (tools.len() as f32 - 1.0) + seps * (1.0 + 12.0);
+    // The session segment at the leading edge: the connection dot, the peer's name and the session line, discreet,
+    // then a separator (owner, 12/11: the line that was the window's top bar).
+    let name = p.label(peer, SEG_NAME);
+    let sub = p.label(line, SEG_LINE);
+    let seg_w = 10.0 + 8.0 + 8.0 + name.w.max(sub.w) + 10.0;
+    let seps = tools.iter().filter(|t| t.sep_before).count() as f32 + 1.0;
+    let total = 12.0 + seg_w + widths.iter().sum::<f32>() + 2.0 * (tools.len() as f32 - 1.0) + seps * (1.0 + 12.0);
     let bar = Rect::new(p.snap(col.x + (col.w - total) / 2.0), col.y + 14.0, total, 52.0);
-    p.shadow(bar, 12.0, 10.0, 30.0, Color::rgba(0, 0, 0, 35));
+    p.shadow(bar, 12.0, 10.0, 30.0, f.fx.shadow_dialog);
     p.fill_rrect(bar, 12.0, f.fx.toolbar);
-    let mut x = bar.x + 6.0;
+    let seg_x = bar.x + 6.0;
+    p.fill_circle((seg_x + 10.0 + 4.0, bar.y + 26.0), 4.0, f.pal.ok);
+    let text_x = seg_x + 10.0 + 8.0 + 8.0;
+    let gap = 2.0;
+    let top = bar.y + (52.0 - name.h - gap - sub.h) / 2.0;
+    p.draw(&name, text_x, top, f.fx.toolbar_ink);
+    p.draw(&sub, text_x, top + name.h + gap, f.fx.toolbar_soft);
+    let mut x = seg_x + seg_w;
+    p.fill_rect(Rect::new(x + 6.0, bar.y + 14.0, 1.0, 24.0), f.fx.toolbar_sep);
+    x += 13.0;
     let mut pointed = None;
     for (n, (t, w)) in tools.iter().zip(&widths).enumerate() {
         if n > 0 {
