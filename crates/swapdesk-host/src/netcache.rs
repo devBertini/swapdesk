@@ -7,7 +7,7 @@
 //! known to have changed ([`CachedInterfaces::invalidate`], called with every `NetworkChanged`), so the answer is
 //! never older than the news. [`list_async`] reads the list from a runtime worker without blocking it.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use swapdesk_platform::{NetInterface, NetInterfaces, PlatformError, Result};
@@ -26,6 +26,8 @@ pub struct CachedInterfaces {
     ttl: Duration,
     warm_limit: Duration,
     slot: Arc<Mutex<Slot>>,
+    /// Signalled when a read ends: callers of `list` waiting for the refresh under way wake and take its copy.
+    done: Arc<Condvar>,
 }
 
 #[derive(Default)]
@@ -47,7 +49,7 @@ impl CachedInterfaces {
     }
 
     pub fn with_limits(inner: Arc<dyn NetInterfaces>, ttl: Duration, warm_limit: Duration) -> Self {
-        Self { inner, ttl, warm_limit, slot: Arc::new(Mutex::new(Slot::default())) }
+        Self { inner, ttl, warm_limit, slot: Arc::new(Mutex::new(Slot::default())), done: Arc::new(Condvar::new()) }
     }
 
     /// The network changed (or may have): the next `list` reads the real one.
@@ -59,20 +61,30 @@ impl CachedInterfaces {
 }
 
 impl NetInterfaces for CachedInterfaces {
+    /// Never older than the TTL: an expired copy is not returned even while another thread is reading the new one;
+    /// the caller waits for that read (callers are blocking threads, see [`list_async`]) and takes its copy, or reads
+    /// itself when the read failed or a network change overtook it. Only [`NetInterfaces::warm_copy`] hands over an
+    /// expired copy.
     fn list(&self) -> Result<Vec<NetInterface>> {
         let generation = {
             let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some((at, list)) = slot.kept.as_ref() {
-                // A fresh copy, or an expired one while another thread is already reading the new one: the caller takes
-                // what there is and does not wait for the OS (a worker thread may be the caller).
-                if at.elapsed() < self.ttl || slot.refreshing {
+            loop {
+                if let Some((at, list)) = slot.kept.as_ref()
+                    && at.elapsed() < self.ttl
+                {
                     return Ok(list.clone());
                 }
+                // Nothing kept, or an expired copy: a read under way is waited for (an invalidated copy is gone, and the
+                // caller then reads at once, as before).
+                if slot.refreshing && slot.kept.is_some() {
+                    slot = self.done.wait(slot).unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                }
+                slot.refreshing = true;
+                break slot.generation;
             }
-            slot.refreshing = true;
-            slot.generation
         };
-        read_and_keep(&*self.inner, &self.slot, generation)
+        read_and_keep(&*self.inner, &self.slot, &self.done, generation)
     }
 
     /// The copy, when there is one that is fresh or expired for less than the warm limit; an expired one starts the
@@ -96,15 +108,16 @@ impl NetInterfaces for CachedInterfaces {
             slot.refreshing = true;
             (list, slot.generation)
         };
-        let (inner, slot) = (Arc::clone(&self.inner), Arc::clone(&self.slot));
+        let (inner, slot, done) = (Arc::clone(&self.inner), Arc::clone(&self.slot), Arc::clone(&self.done));
         let started = std::thread::Builder::new().name("net-refresh".into()).spawn({
             let slot = Arc::clone(&slot);
             move || {
-                let _ = read_and_keep(&*inner, &slot, generation);
+                let _ = read_and_keep(&*inner, &slot, &done, generation);
             }
         });
         if started.is_err() {
             slot.lock().unwrap_or_else(PoisonError::into_inner).refreshing = false;
+            self.done.notify_all();
         }
         Some(list)
     }
@@ -112,16 +125,81 @@ impl NetInterfaces for CachedInterfaces {
 
 /// Reads the OS (the caller took `refreshing` and holds no lock) and keeps the answer unless a network change overtook
 /// the read. A failed read is not kept.
-fn read_and_keep(inner: &dyn NetInterfaces, slot: &Mutex<Slot>, generation: u64) -> Result<Vec<NetInterface>> {
+fn read_and_keep(
+    inner: &dyn NetInterfaces,
+    slot: &Mutex<Slot>,
+    done: &Condvar,
+    generation: u64,
+) -> Result<Vec<NetInterface>> {
+    /// A read that panics must not leave `refreshing` set: callers of `list` wait on it.
+    struct Ending<'a>(&'a Mutex<Slot>, &'a Condvar, bool);
+    impl Drop for Ending<'_> {
+        fn drop(&mut self) {
+            if !self.2 {
+                self.0.lock().unwrap_or_else(PoisonError::into_inner).refreshing = false;
+                self.1.notify_all();
+            }
+        }
+    }
+    let mut ending = Ending(slot, done, false);
     let read = inner.list();
     let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    ending.2 = true;
     slot.refreshing = false;
+    done.notify_all();
     let list = read?;
     // A network change during the read makes this answer old: it is returned, not kept.
     if slot.generation == generation {
         slot.kept = Some((Instant::now(), list.clone()));
     }
     Ok(list)
+}
+
+/// A copy of the interface list for a path that runs for every datagram (the socket filter of F5): it is read from
+/// memory under a short lock, never waits for the OS, and is refreshed on a thread of its own when it is older than
+/// [`TTL`] (one refresh at a time). While a refresh runs the older copy answers: this is a pre-filter that decides
+/// whether a datagram is answered at all, and the exact judgement of an incoming connection stays with the guard
+/// ([`NetInterfaces::list`], never older than [`TTL`]).
+pub struct Snapshot {
+    nets: Arc<dyn NetInterfaces>,
+    kept: Arc<Mutex<Kept>>,
+}
+
+struct Kept {
+    at: Instant,
+    list: Vec<NetInterface>,
+    refreshing: bool,
+}
+
+impl Snapshot {
+    /// Reads `nets` now (an unreadable list is an empty one, so nothing is approved until a read succeeds).
+    pub fn new(nets: Arc<dyn NetInterfaces>) -> Self {
+        let list = nets.list().unwrap_or_default();
+        Self { nets, kept: Arc::new(Mutex::new(Kept { at: Instant::now(), list, refreshing: false })) }
+    }
+
+    /// Runs `f` on the list, starting a refresh first when the copy is older than [`TTL`].
+    pub fn with<R>(&self, f: impl FnOnce(&[NetInterface]) -> R) -> R {
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.at.elapsed() >= TTL && !kept.refreshing {
+            kept.refreshing = true;
+            let (nets, slot) = (Arc::clone(&self.nets), Arc::clone(&self.kept));
+            let started = std::thread::Builder::new().name("net-snapshot".into()).spawn(move || {
+                let read = nets.list();
+                let mut kept = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                kept.refreshing = false;
+                // A failed read leaves the old copy and tries again after another TTL.
+                kept.at = Instant::now();
+                if let Ok(list) = read {
+                    kept.list = list;
+                }
+            });
+            if started.is_err() {
+                kept.refreshing = false;
+            }
+        }
+        f(&kept.list)
+    }
 }
 
 /// Reads `nets` on a blocking thread: the enumeration never runs on one of the runtime's workers.
@@ -256,8 +334,11 @@ mod tests {
         (g, entered_rx, release_tx)
     }
 
+    /// F8 (security review 13/11): the accept guard reads `list()`; an expired copy must never answer it, refresh or
+    /// not. The caller waits for the refresh under way (a blocking thread is the caller), and `warm_copy` alone hands
+    /// over an expired copy.
     #[test]
-    fn a_refresh_under_way_never_makes_another_caller_wait_for_the_os() {
+    fn an_expired_copy_is_never_returned_by_list_even_while_a_refresh_runs() {
         let (g, entered, release) = gated(false);
         let cache = Arc::new(CachedInterfaces::with_ttl(g.clone(), Duration::from_millis(30)));
         cache.list().unwrap();
@@ -269,17 +350,39 @@ mod tests {
             std::thread::spawn(move || cache.list().unwrap())
         };
         entered.recv_timeout(Duration::from_secs(5)).expect("the refresh is in the OS");
-        // Another caller (a worker thread) gets the expired copy at once instead of waiting behind the refresh.
+        // The warm copy (a dial) still answers at once with the expired copy.
+        assert!(cache.warm_copy().is_some(), "the dial's warm copy is for the expired copy");
+        // The guard's read does not: it waits for the refresh.
         let (tx, rx) = std::sync::mpsc::channel();
         let other = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || tx.send(cache.list().is_ok()).unwrap())
         };
-        let answered = rx.recv_timeout(Duration::from_secs(1));
+        let early = rx.recv_timeout(Duration::from_millis(300));
+        assert!(early.is_err(), "list() handed over an expired copy while a refresh was running");
         release.send(()).unwrap();
         refresher.join().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "list() answered once the refresh ended");
         other.join().unwrap();
-        assert_eq!(answered, Ok(true), "a caller waited for another caller's enumeration");
+    }
+
+    #[test]
+    fn a_waiting_caller_takes_the_fresh_read_and_does_not_read_again() {
+        let inner = Arc::new(Slowed { delay_ms: 0.into(), reads: AtomicUsize::new(0) });
+        let cache = Arc::new(CachedInterfaces::with_ttl(inner.clone(), Duration::from_millis(100)));
+        cache.list().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        inner.delay_ms.store(100, Ordering::SeqCst);
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                std::thread::spawn(move || cache.list().unwrap())
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 2, "one first read and one shared refresh");
     }
 
     #[test]

@@ -14,6 +14,7 @@
 
 pub mod accounts;
 pub mod blocking;
+pub mod datagrams;
 pub mod helper;
 mod helper_pty;
 pub mod netcache;

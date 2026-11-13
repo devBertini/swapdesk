@@ -371,6 +371,10 @@ pub fn quic_server_config(tls: rustls::ServerConfig, kind: EndpointKind) -> Resu
     let quic = QuicServerConfig::try_from(tls).map_err(|e| TrustError::Tls(e.to_string()))?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic));
     config.transport_config(transport_for(kind));
+    // No connection migration (quinn-proto's `ServerConfig::migration` is on by default): the LAN guard judges the
+    // address of the first packet only, so a live connection must stay on it. A peer that moves (a new address, a
+    // Wi-Fi change) opens a new connection and is judged again; resume does exactly that.
+    config.migration(false);
     Ok(config)
 }
 

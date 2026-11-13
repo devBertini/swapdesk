@@ -14,7 +14,7 @@ use quinn::Endpoint;
 use swapdesk_lan::guard::approved_addrs;
 use swapdesk_lan::socket::bind_quic_socket;
 use swapdesk_platform::{Level, NetInterface};
-use swapdesk_trust::{Identity, TrustHandle, open_session_endpoint};
+use swapdesk_trust::{Identity, TrustHandle, open_session_endpoint_filtered};
 use tokio::task::AbortHandle;
 
 use super::{Gate, Shared, accept_loop, lock};
@@ -185,7 +185,13 @@ impl Listeners {
             let endpoint = {
                 let _enter = self.shared.rt.enter();
                 bind_quic_socket(at).map_err(|e| e.to_string()).and_then(|s| {
-                    open_session_endpoint(s, &self.identity, self.trust.clone()).map_err(|e| e.to_string())
+                    open_session_endpoint_filtered(
+                        s,
+                        &self.identity,
+                        self.trust.clone(),
+                        Arc::clone(&self.gate.datagrams).into_filter(),
+                    )
+                    .map_err(|e| e.to_string())
                 })
             };
             match endpoint.and_then(|e| e.local_addr().map(|a| (e, a)).map_err(|e| e.to_string())) {

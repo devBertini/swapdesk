@@ -543,3 +543,148 @@ fn the_pairing_endpoint_allows_one_bidi_stream_no_uni_and_no_datagrams() {
         assert_eq!(conn.max_datagram_size(), None, "datagrams are on at the pairing endpoint");
     });
 }
+
+/// F3 (security review 13/11): a live connection must stay on the address it began on. The client moves to another
+/// source port (a rebind: to the server, a migration); the server must keep its peer address and drop what comes
+/// from the new one, so a pinned peer cannot carry a session to an address the guard never judged.
+async fn assert_no_migration(
+    client: &Endpoint,
+    client_addr: std::net::SocketAddr,
+    client_conn: &quinn::Connection,
+    served: &quinn::Connection,
+) {
+    assert_eq!(served.remote_address(), client_addr);
+    client.rebind(loopback_socket()).unwrap();
+    assert_ne!(client.local_addr().unwrap(), client_addr, "the client moved to another source address");
+    // A bidirectional stream: the pairing endpoint allows no other kind.
+    let (mut send, _recv) = client_conn.open_bi().await.unwrap();
+    send.write_all(b"from the new address").await.unwrap();
+    send.finish().unwrap();
+    let heard = tokio::time::timeout(Duration::from_millis(1500), served.accept_bi()).await;
+    assert!(heard.is_err(), "the server took a stream from a migrated address");
+    assert_eq!(served.remote_address(), client_addr, "the server followed the client to another address");
+}
+
+#[test]
+fn a_session_connection_does_not_migrate_to_another_source_address() {
+    run(async {
+        let a = Node::new("a", TestUi::answering(true));
+        let b = Node::new("b", TestUi::answering(true));
+        pin(&a, &b);
+        pin(&b, &a);
+        let (ep, addr) = session_server(&b);
+        let server = tokio::spawn(accept_one(ep, b.trust.clone()));
+        let client = client_endpoint();
+        let client_addr = client.local_addr().unwrap();
+        let conn = connect_session(&client, &a.identity, addr, *b.identity.spki()).await.unwrap();
+        let (served, _) = server.await.unwrap().unwrap();
+        assert_no_migration(&client, client_addr, &conn, &served).await;
+    });
+}
+
+#[test]
+fn a_pairing_connection_does_not_migrate_to_another_source_address() {
+    run(async {
+        let a = Node::new("a", TestUi::answering(true));
+        let b = Node::new("b", TestUi::answering(true));
+        let socket = loopback_socket();
+        let addr = socket.local_addr().unwrap();
+        let ep = swapdesk_trust::open_pairing_endpoint(socket, &b.identity).unwrap();
+        let server = tokio::spawn(async move { ep.accept().await.unwrap().accept().unwrap().await.unwrap() });
+        let client = client_endpoint();
+        let client_addr = client.local_addr().unwrap();
+        let cfg = swapdesk_trust::tls::pairing_client_config(&a.identity).unwrap();
+        let conn = client.connect_with(cfg, addr, SERVER_NAME).unwrap().await.unwrap();
+        let served = server.await.unwrap();
+        assert_no_migration(&client, client_addr, &conn, &served).await;
+    });
+}
+
+/// A QUIC long-header datagram of a version nobody speaks, padded to 1200 bytes: quinn answers it with Version
+/// Negotiation on its own, before any application code sees anything.
+fn unknown_version_datagram() -> Vec<u8> {
+    let mut p = vec![0xc0, 0x1a, 0x2a, 0x3a, 0x4a, 8];
+    p.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    p.push(8);
+    p.extend_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+    p.resize(1200, 0);
+    p
+}
+
+/// Sends the datagram from a plain UDP socket to `server` and reports whether anything came back within `wait`.
+fn probe_gets_answer(server: std::net::SocketAddr, wait: Duration) -> bool {
+    let probe = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    probe.set_read_timeout(Some(wait)).unwrap();
+    probe.send_to(&unknown_version_datagram(), server).unwrap();
+    let mut buf = [0u8; 2048];
+    probe.recv_from(&mut buf).is_ok()
+}
+
+/// F5 control (security review 13/11): without a filter quinn itself answers a stranger's datagram.
+#[test]
+fn control_an_unfiltered_session_endpoint_answers_an_unknown_version_with_version_negotiation() {
+    run(async {
+        let b = Node::new("b", TestUi::answering(true));
+        let (_ep, addr) = session_server(&b);
+        let answered =
+            tokio::task::spawn_blocking(move || probe_gets_answer(addr, Duration::from_secs(3))).await.unwrap();
+        assert!(answered, "the control must see the answer the filter is meant to remove");
+    });
+}
+
+#[test]
+fn datagrams_the_filter_refuses_get_no_answer_at_all_on_either_endpoint() {
+    run(async {
+        let b = Node::new("b", TestUi::answering(true));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for pairing in [false, true] {
+            let socket = loopback_socket();
+            let addr = socket.local_addr().unwrap();
+            let log = Arc::clone(&seen);
+            let refuse: swapdesk_trust::DatagramFilter = Arc::new(move |remote, local| {
+                log.lock().unwrap().push((remote, local));
+                false
+            });
+            let _ep = if pairing {
+                swapdesk_trust::open_pairing_endpoint_filtered(socket, &b.identity, refuse).unwrap()
+            } else {
+                swapdesk_trust::open_session_endpoint_filtered(socket, &b.identity, b.trust.clone(), refuse).unwrap()
+            };
+            let answered =
+                tokio::task::spawn_blocking(move || probe_gets_answer(addr, Duration::from_millis(800))).await.unwrap();
+            assert!(!answered, "a refused datagram got an answer (pairing endpoint: {pairing})");
+        }
+        let seen = seen.lock().unwrap();
+        let lo = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        assert!(seen.len() >= 2 && seen.iter().all(|(r, _)| *r == lo), "the filter judged the datagrams: {seen:?}");
+        assert!(seen.iter().all(|(_, l)| *l == Some(lo)), "the filter knows the arrival address: {seen:?}");
+    });
+}
+
+#[test]
+fn a_session_through_a_filter_that_accepts_works_like_one_without() {
+    run(async {
+        let a = Node::new("a", TestUi::answering(true));
+        let b = Node::new("b", TestUi::answering(true));
+        pin(&a, &b);
+        pin(&b, &a);
+        let socket = loopback_socket();
+        let addr = socket.local_addr().unwrap();
+        let ep =
+            swapdesk_trust::open_session_endpoint_filtered(socket, &b.identity, b.trust.clone(), Arc::new(|_, _| true))
+                .unwrap();
+        let server = tokio::spawn(accept_one(ep, b.trust.clone()));
+        let client = client_endpoint();
+        let conn = connect_session(&client, &a.identity, addr, *b.identity.spki()).await.unwrap();
+        let (served, id) = server.await.unwrap().unwrap();
+        assert_eq!(id, device_id(a.identity.spki()));
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"ping").await.unwrap();
+        send.finish().unwrap();
+        let (mut ss, mut sr) = served.accept_bi().await.unwrap();
+        assert_eq!(sr.read_to_end(16).await.unwrap(), b"ping");
+        ss.write_all(b"pong").await.unwrap();
+        ss.finish().unwrap();
+        assert_eq!(recv.read_to_end(16).await.unwrap(), b"pong");
+    });
+}

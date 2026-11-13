@@ -19,7 +19,7 @@ use swapdesk_proto::Sas;
 use swapdesk_trust::{
     Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
     PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex,
-    endpoint_from_socket, open_pairing_endpoint,
+    endpoint_from_socket, open_pairing_endpoint_filtered,
 };
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -233,10 +233,11 @@ impl Hub {
         );
         let mut endpoints = Vec::new();
         for socket in sockets {
-            let endpoint = open_pairing_endpoint(socket, &self.p.identity).map_err(|e| {
-                self.log(Level::Warn, format_args!("pairing endpoint: {e}"));
-                ApiCode::Internal
-            })?;
+            let endpoint =
+                open_pairing_endpoint_filtered(socket, &self.p.identity, self.pairing_datagrams()).map_err(|e| {
+                    self.log(Level::Warn, format_args!("pairing endpoint: {e}"));
+                    ApiCode::Internal
+                })?;
             let serving = Arc::clone(&self.pairing.serving);
             serving.fetch_add(1, Ordering::SeqCst);
             let (service, e2) = (Arc::clone(&service), endpoint.clone());
@@ -247,6 +248,16 @@ impl Hub {
             endpoints.push(endpoint);
         }
         Ok(endpoints)
+    }
+
+    /// What quinn may see on the pairing sockets (F5): a blocked source, or one off the approved links, gets no answer.
+    fn pairing_datagrams(&self) -> swapdesk_trust::DatagramFilter {
+        crate::datagrams::pairing_datagrams(
+            Arc::clone(&self.pairing.nets),
+            Arc::clone(&self.p.trust),
+            Arc::clone(&self.neighbors),
+            self.allow_loopback(),
+        )
     }
 
     /// The filter of the pairing endpoint: the LAN guard (PROTOCOL.md 1: on-link, not loopback, not this machine),

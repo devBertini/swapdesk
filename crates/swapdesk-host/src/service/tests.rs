@@ -31,6 +31,7 @@ use crate::testpipe::{End, PipeWriter, duplex_blocking};
 mod clip_actions;
 mod extras;
 mod files;
+mod handshakes;
 mod terminal;
 mod unattended;
 
@@ -877,17 +878,20 @@ fn the_guard_keeps_refusing_loopback_unless_the_development_option_is_on() {
     let a = Machine::new("a", false, true);
     let b = Machine::new("b", true, false);
     Machine::pair(&a, &b, ALL);
+    // F5 (security review 13/11): a peer the guard would refuse gets no answer at all, not a refusal: the socket
+    // drops its datagrams before quinn parses them (not even Version Negotiation).
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a loopback peer without the development option got an answer"
+    );
     let r = b.core.connect(a.addr(), a.device(), Intent::Control);
-    assert!(matches!(r, Err(ConnectError::Open(_))), "the host refused the connection");
+    assert!(r.is_err(), "the host let the peer in");
     assert!(a.core.host().sessions().is_empty());
     assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a refused peer");
-    wait_for("the refusal in A's trace", || {
-        a.trace
-            .lines()
-            .iter()
-            .any(|l| l.level == Level::Warn && l.text.contains("refused a connection") && l.text.contains("loopback"))
-            .then_some(())
-    });
+    assert!(
+        !a.trace.lines().iter().any(|l| l.text.contains("refused a connection")),
+        "the datagrams never reached the accept loop, so it refused nothing"
+    );
 
     // C has no development option: it will not even dial a loopback address.
     let c = Machine::new("c", false, false);
@@ -906,14 +910,20 @@ fn a_peer_at_a_blocked_address_is_dropped_before_the_handshake_and_costs_no_prom
     let a = Machine::new("a", true, false);
     let b = Machine::new("b", true, false);
     Machine::pair(&a, &b, ALL);
+    // Control: before the block the same datagram is answered (Version Negotiation), so the silence below is the
+    // block's doing.
+    assert!(answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_secs(3)));
     a.trust.update(|s| s.blocked.push([127, 0, 0, 1])).expect("host store");
+    // F5 (security review 13/11): the blocked address gets no answer at all, not even Version Negotiation, because the
+    // datagrams are dropped before quinn parses them.
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a blocked address got an answer"
+    );
     let r = b.core.connect(a.addr(), a.device(), Intent::Control);
     assert!(r.is_err(), "the blocked peer got a session");
     assert!(a.core.host().sessions().is_empty());
     assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked peer");
-    wait_for("the ignored connection in A's trace", || {
-        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
-    });
 }
 
 /// A neighbour table that gives one MAC to every address (every peer here dials from loopback).
@@ -942,13 +952,15 @@ fn a_peer_with_a_blocked_mac_under_another_address_is_dropped_before_the_handsha
         })
         .expect("host store");
     assert!(a.trust.read(|s| s.blocked.is_empty()), "no address is blocked, only the MAC");
+    // F5: no answer at all to the blocked device's datagrams, whatever address they come from.
+    assert!(
+        !answers_a_probe(a.addr().port(), &probe_unknown_version(), Duration::from_millis(800)),
+        "a blocked MAC got an answer"
+    );
     let r = b.core.connect(a.addr(), a.device(), Intent::Control);
     assert!(r.is_err(), "the blocked MAC got a session");
     assert!(a.core.host().sessions().is_empty());
     assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked MAC");
-    wait_for("the ignored connection in A's trace", || {
-        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
-    });
 }
 
 #[test]

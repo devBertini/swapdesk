@@ -16,6 +16,7 @@ mod clip_actions;
 mod config;
 mod extras;
 mod files;
+mod handshakes;
 mod helper_link;
 mod host_relay;
 mod listen;
@@ -33,8 +34,9 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::task::Poll;
 use std::time::Duration;
 
 use quinn::{Endpoint, Incoming};
@@ -52,7 +54,7 @@ use swapdesk_session::{
 use swapdesk_swap::{SwapHandler, SwapOutcome};
 use swapdesk_trust::{
     Admission, DeviceId, SessionLimits, TrustHandle, accept_session, connect_session, endpoint_from_socket,
-    open_session_endpoint, turn_away,
+    open_session_endpoint_filtered, turn_away,
 };
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot;
@@ -85,7 +87,7 @@ use terminal::{EnvCell, HostTerminals};
 /// Worker threads of the core's runtime: a session is one connection and a few tasks; the heavy work (capture,
 /// encode) lives in the helpers.
 const WORKERS: usize = 4;
-/// Handshakes in flight at once (PROTOCOL.md 1: 16 per machine); one more is ignored.
+/// Handshakes in flight at once (PROTOCOL.md 1: 16 per machine); one more drops the oldest.
 const MAX_HANDSHAKES: usize = 16;
 
 /// Why a core did not start.
@@ -441,7 +443,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct MachineShared {
     pub hosting: Arc<swapdesk_session::MachineHosting>,
-    handshakes: Arc<AtomicUsize>,
+    handshakes: Arc<handshakes::Handshakes>,
     limits: SessionLimits,
 }
 
@@ -449,14 +451,14 @@ impl MachineShared {
     pub fn new() -> Self {
         Self {
             hosting: swapdesk_session::MachineHosting::new(),
-            handshakes: Arc::new(AtomicUsize::new(0)),
+            handshakes: handshakes::Handshakes::new(),
             limits: SessionLimits::new(),
         }
     }
 
     /// Handshakes in flight now, across the machine.
     pub fn handshakes_in_flight(&self) -> usize {
-        self.handshakes.load(Ordering::SeqCst)
+        self.handshakes.in_flight()
     }
 }
 
@@ -475,19 +477,12 @@ struct Gate {
     trust: Arc<TrustHandle>,
     host: HostService,
     shared: Arc<Shared>,
-    /// Handshakes in flight, shared by the machine's cores.
-    handshakes: Arc<AtomicUsize>,
+    /// Handshakes in flight, shared by the machine's cores: one per address, the oldest dropped when the cap is full.
+    handshakes: Arc<handshakes::Handshakes>,
     /// Connections per remote address (PROTOCOL.md 1: 4 at once, `retry()` over the limit), shared likewise.
     limits: SessionLimits,
-}
-
-/// A place among the handshakes in flight, given back when dropped.
-struct Slot(Arc<Gate>);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.handshakes.fetch_sub(1, Ordering::SeqCst);
-    }
+    /// The filter of the session sockets: what quinn may see at all (F5).
+    datagrams: Arc<crate::datagrams::SessionDatagrams>,
 }
 
 impl Gate {
@@ -516,16 +511,11 @@ impl Gate {
 
     /// The peer's address is in the trust store's `blocked` list, or the device behind it is blocked by its MAC
     /// (D65): it gets no answer at all, before any other check and before a handshake or a place is spent on it.
+    /// The session sockets already drop such datagrams before quinn parses them ([`crate::datagrams`], F5); this is the
+    /// check that remains for what got past them: a MAC the neighbour table learned only after the first datagram.
     fn is_blocked(&self, incoming: &Incoming) -> bool {
         let ip = incoming.remote_address().ip();
         self.trust.read(|s| s.is_blocked(ip)) || crate::blocking::blocked_by_mac(&self.trust, &*self.neighbors, ip)
-    }
-
-    fn reserve(self: &Arc<Self>) -> Option<Slot> {
-        self.handshakes
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_HANDSHAKES).then_some(n + 1))
-            .ok()?;
-        Some(Slot(Arc::clone(self)))
     }
 }
 
@@ -559,19 +549,31 @@ async fn accept_loop(gate: Arc<Gate>, endpoint: Endpoint) {
                 continue;
             }
         };
-        let Some(slot) = gate.reserve() else {
-            incoming.ignore();
-            continue;
-        };
+        // A place among the handshakes in flight always comes: it displaces this address's oldest handshake past its share, and the
+        // oldest of the machine's when the cap is full (F4), so a handful of neighbours that stall cannot shut out a
+        // peer that follows.
+        let mut place = gate.handshakes.enter(incoming.remote_address().ip(), handshakes::PER_ADDRESS, MAX_HANDSHAKES);
         let gate = Arc::clone(&gate);
         tokio::spawn(async move {
-            let accepted = accept_session(incoming, &*gate.trust).await;
-            drop(slot);
+            let accepted = {
+                let mut handshake = std::pin::pin!(accept_session(incoming, &*gate.trust));
+                let mut evicted = std::pin::pin!(place.evicted());
+                std::future::poll_fn(|cx| {
+                    if let Poll::Ready(done) = handshake.as_mut().poll(cx) {
+                        return Poll::Ready(Some(done));
+                    }
+                    // Displaced by a newer handshake: the unfinished one is dropped with its connection.
+                    evicted.as_mut().poll(cx).is_ready().then_some(None).map_or(Poll::Pending, Poll::Ready)
+                })
+                .await
+            };
+            drop(place);
             match accepted {
-                Ok((conn, device)) => {
+                Some(Ok((conn, device))) => {
                     gate.host.serve(conn, device).await;
                 }
-                Err(e) => gate.shared.log(Level::Debug, format_args!("a session handshake failed: {e}")),
+                Some(Err(e)) => gate.shared.log(Level::Debug, format_args!("a session handshake failed: {e}")),
+                None => gate.shared.log(Level::Debug, format_args!("a stalled handshake gave way to a newer one")),
             }
             // The address's place is held until the connection is over, not only through the handshake.
             drop(address);
@@ -728,17 +730,29 @@ impl ServiceCore {
                 true,
             ));
         }
+        // What quinn may see on the session sockets: a blocked or off-link source gets no answer at all (F5).
+        let datagrams = Arc::new(crate::datagrams::SessionDatagrams::new(
+            Arc::clone(&cfg.interfaces),
+            Arc::clone(&cfg.trust),
+            Arc::clone(&cfg.neighbors),
+            cfg.allow_loopback_peers,
+        ));
         let mut endpoints = Vec::new();
         for (socket, extra) in sockets {
             let local = socket.local_addr().map_err(ServiceError::Runtime)?;
-            let endpoint =
-                open_session_endpoint(socket, &cfg.identity, cfg.trust.clone()).map_err(|e| ServiceError::Bind {
-                    addr: match local {
-                        SocketAddr::V4(v4) => v4,
-                        SocketAddr::V6(_) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
-                    },
-                    error: e.to_string(),
-                })?;
+            let endpoint = open_session_endpoint_filtered(
+                socket,
+                &cfg.identity,
+                cfg.trust.clone(),
+                Arc::clone(&datagrams).into_filter(),
+            )
+            .map_err(|e| ServiceError::Bind {
+                addr: match local {
+                    SocketAddr::V4(v4) => v4,
+                    SocketAddr::V6(_) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+                },
+                error: e.to_string(),
+            })?;
             shared.log(Level::Info, format_args!("session endpoint on {local}"));
             endpoints.push((endpoint, extra));
         }
@@ -752,6 +766,7 @@ impl ServiceCore {
             shared: Arc::clone(&shared),
             handshakes: Arc::clone(&machine.handshakes),
             limits: machine.limits.clone(),
+            datagrams,
         });
         let listeners = Arc::new(listen::Listeners::new(
             cfg.session_port,
