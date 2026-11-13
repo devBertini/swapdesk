@@ -555,7 +555,7 @@ impl UiState {
     }
 
     /// The macOS permissions the service says are missing (the list of the Mac permissions notice).
-    fn missing_os_permissions(&self) -> Vec<OsPermission> {
+    pub(crate) fn missing_os_permissions(&self) -> Vec<OsPermission> {
         self.network
             .as_ref()
             .and_then(|n| {
@@ -615,17 +615,22 @@ impl UiState {
                 } else {
                     self.tm(&Msg::new(MsgKey::NoticeMacPermsMany).with(missing.len().to_string()))
                 };
-                let body = missing
-                    .iter()
-                    .map(|p| {
-                        self.name_of(match p {
-                            OsPermission::ScreenRecording => MsgKey::OsPermScreen,
-                            OsPermission::Accessibility => MsgKey::OsPermAccessibility,
-                            OsPermission::InputMonitoring => MsgKey::OsPermInput,
+                // The button was pressed and the list has not changed since: the person is in System Settings.
+                let body = if self.os_wait.is_some() {
+                    self.name_of(MsgKey::MacPermsWaiting)
+                } else {
+                    missing
+                        .iter()
+                        .map(|p| {
+                            self.name_of(match p {
+                                OsPermission::ScreenRecording => MsgKey::OsPermScreen,
+                                OsPermission::Accessibility => MsgKey::OsPermAccessibility,
+                                OsPermission::InputMonitoring => MsgKey::OsPermInput,
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
                 (title, body, self.name_of(MsgKey::NoticeMacPermsButton))
             }
         }
@@ -1711,6 +1716,7 @@ impl UiState {
                 NoticeKind::Service => a.effect = Some(Effect::OpenLoginItems),
                 NoticeKind::MacPerms => {
                     self.os_request = self.missing_os_permissions();
+                    self.os_wait = Some(self.os_request.clone());
                     a.effect = Some(Effect::RequestOsPermissions);
                 }
                 NoticeKind::ReceiveFolder => {

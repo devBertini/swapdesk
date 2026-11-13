@@ -736,6 +736,9 @@ pub struct UiState {
     pub(crate) web_page: Option<String>,
     /// The permissions [`Effect::RequestOsPermissions`] asks for (what the notice listed at the click).
     pub(crate) os_request: Vec<OsPermission>,
+    /// The list the notice showed when "Conceder permissões" was pressed: the person is in System Settings, and the
+    /// notice says it waits until that list changes or the notice goes (R-UI-13).
+    pub(crate) os_wait: Option<Vec<OsPermission>>,
 }
 
 /// Windows Settings > Network & internet ("ms-settings:network-status", Microsoft's ms-settings reference, read
@@ -871,6 +874,7 @@ impl UiState {
             quit_request: false,
             web_page: None,
             os_request: Vec::new(),
+            os_wait: None,
             empty_s: 0,
             rename: None,
         }
@@ -2005,6 +2009,7 @@ impl UiState {
             }
             UiEvent::NetworkChanged(n) => {
                 self.network = Some(n);
+                self.settle_os_wait();
                 self.finish_fetch(DataKind::Network);
                 Changed::MAIN
             }
@@ -2220,6 +2225,14 @@ impl UiState {
     /// The page an [`Effect::OpenWebPage`] opens (once).
     pub fn take_web_page(&mut self) -> Option<String> {
         self.web_page.take()
+    }
+
+    /// The wait for System Settings ends when the missing list is no longer the one the button was pressed on: one
+    /// was allowed, or the notice went. A notice that comes back later starts without it.
+    fn settle_os_wait(&mut self) {
+        if self.os_wait.as_ref().is_some_and(|w| *w != self.missing_os_permissions()) {
+            self.os_wait = None;
+        }
     }
 
     /// The permissions an [`Effect::RequestOsPermissions`] asks macOS for (once), in the order the notice lists them.
@@ -2570,6 +2583,7 @@ impl UiState {
                         n.notices.push(Notice::MacPermissionsMissing(missing));
                     }
                 }
+                self.settle_os_wait();
                 Changed::MAIN
             }
             Reply::Displays(d) => {

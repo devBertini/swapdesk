@@ -35,7 +35,7 @@ pub use ctx::{DesktopState, EndKind, SessionCtx, SessionEnd};
 pub use forward::{ForwardHandler, Forwarded, VIDEO_CONTROL_TYPES};
 pub use host::{
     ConsentRequest, ConsoleOwner, HostConfig, HostEvent, HostService, HostUi, PromptAnswer, PromptEnd, PromptRequest,
-    SessionInfo, StartInfo,
+    RESUME_WINDOW, SessionInfo, StartInfo,
 };
 pub use link::{CONTROL_PRIORITY, ControlIo, Inbound, LinkError, Outbox, SendError, memory_pair};
 pub use liveness::{Liveness, LivenessConfig, Verdict};

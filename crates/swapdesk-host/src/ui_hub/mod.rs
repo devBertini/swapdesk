@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Duration;
 
 use swapdesk_files::{Pending, PipeCaller};
 use swapdesk_ipc::{ApiCode, FrameReader, FrameWriter, IpcError, Message as Ipc, Notify};
@@ -214,6 +215,13 @@ pub(crate) struct Hub {
     minors: Mutex<peer_minor::PeerMinors>,
     /// The writes of what each paired device reported it allows here (`grants_there`), at most one a second.
     peer_writes: Mutex<grants_sync::PeerWrites>,
+    /// The window a lost hosted session may be resumed in (the core's own, 60 s; a test shortens it).
+    resume_window: Mutex<Duration>,
+    /// Hosted sessions the core keeps resumable after a lost link: the UI shows them reconnecting until they resume
+    /// or the window ends.
+    lost: Mutex<HashMap<u64, host_ui::LostSession>>,
+    /// Numbers each loss, so a window never ends a later loss of the same session.
+    lost_gen: AtomicU64,
     /// The grants sync outside a session, per paired device (GRANTS-SYNC.md 4.3).
     sync: Mutex<sync_dial::SyncState>,
     /// The session port each paired device was last seen on (`peers.bin`, ACCOUNTS.md 5.2), and when it was written.
@@ -415,6 +423,9 @@ impl UiHub {
             learned: Mutex::new(HashMap::new()),
             minors: Mutex::new(peer_minor::PeerMinors::default()),
             peer_writes: Mutex::new(grants_sync::PeerWrites::default()),
+            resume_window: Mutex::new(swapdesk_session::RESUME_WINDOW),
+            lost: Mutex::new(HashMap::new()),
+            lost_gen: AtomicU64::new(0),
             sync: Mutex::new(sync_dial::SyncState::default()),
             peer_ports: Mutex::new((store::load_peer_ports(&*params_secrets), HashMap::new())),
             live_sessions: AtomicUsize::new(0),
@@ -461,6 +472,12 @@ impl UiHub {
     /// a session that is not the console's may still narrow the account's reach (ACCOUNTS.md 5.6).
     pub fn set_account(&self, sid: &str) {
         let _ = self.hub.account.set(sid.to_string());
+    }
+
+    /// A test shortens the window a lost hosted session stays reconnecting in the UI.
+    #[cfg(test)]
+    pub fn set_resume_window(&self, window: Duration) {
+        *lock(&self.hub.resume_window) = window;
     }
 
     /// Hands the started core to the hub (weakly) and takes its runtime. Call it once, right after

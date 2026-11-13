@@ -6,6 +6,7 @@
 //! `Session` notifications and the audit entries of F-SESS-04.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use swapdesk_ipc::{ApiCode, IncomingRequest, Notify, RequestKind, Role, SessionState};
 use swapdesk_proto::{Desktop, Feature, PermissionSet};
@@ -19,6 +20,14 @@ use crate::service::end_reason;
 pub(crate) enum PendingKind {
     Prompt { host_request: u64, tx: oneshot::Sender<PromptAnswer> },
     Consent { device: DeviceId, feature: Feature, tx: oneshot::Sender<bool> },
+}
+
+/// A hosted session whose link was lost and that the core keeps resumable (what its end said, for the end that
+/// follows when the window does).
+pub(crate) struct LostSession {
+    pub number: u64,
+    pub device_id: String,
+    pub reason: Option<ApiCode>,
 }
 
 /// A request waiting for the host's user.
@@ -38,6 +47,71 @@ impl HubHostUi {
 }
 
 impl Hub {
+    /// A hosted session lost its link and the core keeps it resumable for its window: the console's banner shows it
+    /// reconnecting until the viewer is back (`SessionStarted` again) or the window ends, never ended at once.
+    fn session_lost(self: &Arc<Self>, session_id: u64, device_id: String, reason: Option<ApiCode>) {
+        let number = self.lost_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        lock(&self.lost).insert(session_id, LostSession { number, device_id: device_id.clone(), reason });
+        self.notify_console(Notify::Session {
+            session_id,
+            device_id,
+            state: SessionState::Reconnecting { attempt: 0 },
+        });
+        let window = *lock(&self.resume_window);
+        match self.rt() {
+            Some(rt) => {
+                let hub = Arc::downgrade(self);
+                rt.spawn(async move {
+                    tokio::time::sleep(window).await;
+                    if let Some(hub) = hub.upgrade() {
+                        hub.end_lost(session_id, Some(number));
+                    }
+                });
+            }
+            // No runtime to count the window on: nothing would ever end it.
+            None => {
+                self.end_lost(session_id, None);
+            }
+        }
+    }
+
+    /// The end of a lost hosted session the core kept resumable: its window ran out (`number` is the loss the
+    /// window belongs to, so an older window never ends a later loss), or the host's user or a forget ended it.
+    /// Nothing happens when it resumed or ended meanwhile.
+    pub(super) fn end_lost(&self, session_id: u64, number: Option<u64>) -> bool {
+        let lost = {
+            let mut table = lock(&self.lost);
+            if number.is_some_and(|n| table.get(&session_id).is_none_or(|l| l.number != n)) {
+                return false;
+            }
+            let Some(lost) = table.remove(&session_id) else { return false };
+            lost
+        };
+        lock(&self.started).remove(&session_id);
+        // A window that ran out reads as the silence it was; the user's own end carries no reason.
+        let reason = if number.is_some() { lost.reason } else { None };
+        self.notify_console(Notify::Session {
+            session_id,
+            device_id: lost.device_id,
+            state: SessionState::Ended { reason },
+        });
+        true
+    }
+
+    /// Whether the core keeps this hosted session resumable after a lost link.
+    pub(super) fn is_lost(&self, session_id: u64) -> bool {
+        lock(&self.lost).contains_key(&session_id)
+    }
+
+    /// A forgotten device's lost sessions end with its tokens.
+    pub(super) fn end_lost_of(&self, device_id: &str) {
+        let ids: Vec<u64> =
+            lock(&self.lost).iter().filter(|(_, l)| l.device_id == device_id).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.end_lost(id, None);
+        }
+    }
+
     /// Shows the requests still waiting to a UI that just connected (or became the console's).
     pub fn send_pending(&self, conn: &Arc<Conn>) {
         if !self.console_conns().iter().any(|c| c.id == conn.id) {
@@ -249,7 +323,13 @@ impl HostUi for HubHostUi {
         let now = hub.p.wall.unix_ms();
         match event {
             HostEvent::SessionStarted { device, session_id, mode, granted } => {
-                lock(&hub.started).insert(session_id, (now, granted));
+                // A resume starts the same session again: it keeps the time it began, not the time it came back.
+                lock(&hub.lost).remove(&session_id);
+                let began = match mode {
+                    swapdesk_proto::GrantMode::Resumed => lock(&hub.started).get(&session_id).map_or(now, |(t, _)| *t),
+                    _ => now,
+                };
+                lock(&hub.started).insert(session_id, (began, granted));
                 hub.audit(
                     device,
                     AuditEvent::SessionStarted {
@@ -266,7 +346,7 @@ impl HostUi for HubHostUi {
                     session_id,
                     device_id: device_id_hex(&device),
                     state: SessionState::Active {
-                        since_ms: now,
+                        since_ms: began,
                         role: Role::Host,
                         granted: granted.bits(),
                         elevation: 0,
@@ -279,16 +359,31 @@ impl HostUi for HubHostUi {
                     format_args!("a request from {} was refused: {code:?}", device_id_hex(&device)),
                 );
             }
-            HostEvent::Ended { device, session_id, end, .. } => {
-                let since = lock(&hub.started).remove(&session_id).map_or(now, |(t, _)| t);
+            HostEvent::Ended { device, session_id, end, resumable } => {
+                // A lost link the core keeps resumable stays the host's session: its time and grants wait for the
+                // resume, and the end the UI shows comes when the window does.
+                let since = {
+                    let mut started = lock(&hub.started);
+                    if resumable {
+                        started.get(&session_id).map(|(t, _)| *t)
+                    } else {
+                        started.remove(&session_id).map(|(t, _)| t)
+                    }
+                }
+                .unwrap_or(now);
                 let duration = u32::try_from(now.saturating_sub(since) / 1000).unwrap_or(u32::MAX);
                 hub.audit(device, AuditEvent::SessionEnded(end.code), Some(duration));
                 hub.session_ended();
-                hub.notify_console(Notify::Session {
-                    session_id,
-                    device_id: device_id_hex(&device),
-                    state: SessionState::Ended { reason: end_reason(&end) },
-                });
+                if resumable {
+                    hub.session_lost(session_id, device_id_hex(&device), end_reason(&end));
+                } else {
+                    lock(&hub.lost).remove(&session_id);
+                    hub.notify_console(Notify::Session {
+                        session_id,
+                        device_id: device_id_hex(&device),
+                        state: SessionState::Ended { reason: end_reason(&end) },
+                    });
+                }
                 hub.devices_changed();
             }
             HostEvent::GrantsChanged { device, session_id, from, to } => {

@@ -60,10 +60,9 @@ pub struct BannerModel {
 impl BannerModel {
     /// The whole line: the panel is put in front again when it changes.
     pub fn label(&self) -> String {
-        match &self.files {
-            Some(files) => format!("{} {} {files}", self.who, self.since),
-            None => format!("{} {}", self.who, self.since),
-        }
+        // The second part is empty while the session reconnects or a swap waits: no stray space then.
+        let parts = [Some(self.who.as_str()), Some(self.since.as_str()), self.files.as_deref()];
+        parts.into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
     }
 }
 

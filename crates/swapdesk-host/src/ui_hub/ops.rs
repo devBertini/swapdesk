@@ -485,6 +485,7 @@ impl Hub {
         if let Some(core) = self.core() {
             core.host().forget_device(&id);
         }
+        self.end_lost_of(&device_id_hex(&id));
         // Sessions this machine runs as a viewer to that device end too.
         for c in self.conns_of_device(&id) {
             for v in lock(&c.viewers).values().filter(|v| v.device == id) {
@@ -549,6 +550,15 @@ impl Hub {
         }
         if !self.is_console(conn) {
             return Err(ApiCode::NotFound);
+        }
+        // A hosted session whose link was lost: the core holds no connection to close, only the resume token, which
+        // dies with the host's user's "Desconectar" as it does with a live session's.
+        if self.is_lost(session_id) {
+            if let Some(core) = self.core() {
+                core.host().drop_resume(session_id);
+            }
+            self.end_lost(session_id, None);
+            return Ok(());
         }
         match self.core() {
             Some(core) if core.host().disconnect(session_id) => Ok(()),

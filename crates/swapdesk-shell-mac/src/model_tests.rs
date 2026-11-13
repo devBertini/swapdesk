@@ -93,6 +93,33 @@ fn the_host_banner_says_who_and_since_when_and_goes_with_the_session() {
     assert_eq!(banner_model(&state), None, "the banner goes with the session");
 }
 
+#[test]
+fn a_hosted_session_that_loses_its_link_keeps_its_banner_and_opens_no_viewer_window() {
+    // WAITING.md row 22: the viewer's link drops, the host's session reconnects. The window the shell opens follows
+    // `viewer_session()`: it must stay shut on the host, and the banner says it reconnects.
+    let mut state = shell_state(Scenario::Banner);
+    let h = state.host_session().expect("the scenario hosts a session").clone();
+    assert_eq!(viewer_title(&state), None);
+    for lost in
+        [SessionState::Reconnecting { attempt: 0 }, SessionState::Paused { desktop: swapdesk_ui::DesktopKind::Locked }]
+    {
+        state.apply(UiEvent::Session { session_id: h.id, device_id: h.device_id.clone(), state: lost.clone() });
+        assert_eq!(viewer_title(&state), None, "no viewer window on the host ({lost:?})");
+        assert_eq!(state.windows(), vec![WindowKind::Main, WindowKind::Banner], "{lost:?}");
+        assert!(banner_model(&state).is_some(), "the banner stays ({lost:?})");
+    }
+    state.apply(UiEvent::Session {
+        session_id: h.id,
+        device_id: h.device_id.clone(),
+        state: SessionState::Reconnecting { attempt: 0 },
+    });
+    let m = banner_model(&state).expect("banner");
+    let peer = state.device_by_id(&h.device_id).unwrap().name.clone();
+    assert_eq!(m.who, format!("Reconectando ao {peer}"));
+    assert_eq!(m.since, "");
+    assert_eq!(m.label(), m.who, "no trailing space");
+}
+
 /// One effect of every kind the state can ask the shell for. The match has no catch-all: a new `Effect` variant does
 /// not build until it is listed here, and then [`every_effect_has_a_handler_of_its_own`] asks for its handler.
 fn every_effect() -> Vec<Effect> {

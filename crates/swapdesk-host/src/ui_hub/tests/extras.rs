@@ -427,6 +427,24 @@ fn a_cut_link_is_resumed_with_the_same_session_and_no_new_prompt() {
             .nothing_within(Duration::from_millis(300), |m| matches!(m, Ipc::UiNotify(Notify::IncomingRequest(_)))),
         "a resume asks nobody"
     );
+    // The host's UI watched the same loss: its session was reconnecting and is active again, and it was never ended
+    // (WAITING.md row 22: the banner stays and no viewer window opens on the host).
+    d.host_ui.notify("the hosted session reconnecting", |n| match n {
+        Notify::Session { session_id, state: SessionState::Reconnecting { .. }, .. } if *session_id == s => Some(()),
+        _ => None,
+    });
+    let (role, granted) = d.host_ui.notify("the hosted session is back", |n| match n {
+        Notify::Session { session_id, state, .. } if *session_id == s => grants_active(state),
+        _ => None,
+    });
+    assert_eq!((role, granted), (Role::Host, ALL.bits()));
+    assert!(
+        d.host_ui.nothing_within(Duration::from_millis(300), |m| matches!(
+            m,
+            Ipc::UiNotify(Notify::Session { session_id, state: SessionState::Ended { .. }, .. }) if *session_id == s
+        )),
+        "a session the core resumed never ended for the host's UI"
+    );
     // The handle works on the new connection: a control message, a chat message and media all cross it.
     assert!(d.viewer_ui.call(UiOp::SetAudio { session_id: s, on: true }).is_ok());
     assert!(d.viewer_ui.call(UiOp::ChatSend { session_id: s, text: swapdesk_ipc::Text("voltei".into()) }).is_ok());

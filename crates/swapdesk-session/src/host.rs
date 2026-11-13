@@ -26,6 +26,10 @@ use crate::registry::Registry;
 use crate::resume::{ResumeError, ResumeTable, SwapTokens};
 use crate::util::{lock, random_session_id};
 
+/// How long after a lost link a hosted session may be resumed (`HostConfig::resume_window`'s default): what the
+/// host's interface shows as reconnecting before it calls the session ended.
+pub const RESUME_WINDOW: Duration = Duration::from_secs(60);
+
 /// The time source of the session's timers: tokio's clock, so a test can pause it.
 pub(crate) fn now() -> Instant {
     tokio::time::Instant::now().into_std()
@@ -73,7 +77,7 @@ impl HostConfig {
             prompt_timeout: Duration::from_secs(20),
             consent_timeout: Duration::from_secs(20),
             handshake_timeout: Duration::from_secs(10),
-            resume_window: Duration::from_secs(60),
+            resume_window: RESUME_WINDOW,
             resume_wait: Duration::from_secs(8),
             swap_token_ttl: Duration::from_secs(10),
             max_live_sessions: 1,
@@ -530,6 +534,15 @@ impl HostService {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The host's user ended a session whose link is already lost: its token dies, so no viewer can resume it. A live
+    /// session is left alone (`disconnect` ends that one).
+    pub fn drop_resume(&self, session_id: u64) {
+        let mut t = lock(&self.inner.table);
+        if !t.live.contains_key(&session_id) {
+            t.resume.invalidate(session_id);
         }
     }
 

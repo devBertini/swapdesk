@@ -163,6 +163,43 @@ fn the_banner_grows_by_one_line_when_it_has_a_files_line_and_draws_it_under_the_
     assert!(!texts.iter().any(|t| t.contains("arquivos")), "no files, no line: {texts:?}");
 }
 
+/// WAITING.md row 25: after "Conceder permissões" the notice card draws the wait line in place of the list, keeps its
+/// button, and draws the list again once the missing list changes.
+#[test]
+fn the_mac_permissions_card_draws_its_wait_line_after_the_button_and_the_list_when_it_changes() {
+    use swapdesk_ui::{NoticeKind, OsPermission, Reply, Ticket, UiEvent};
+    const WAITING: &str = "Esperando você permitir nos Ajustes do Sistema…";
+    let mut state = Scenario::EstadoPermissoesMac.prepared_state();
+    let ix = Interaction::default();
+    let card = |st: &swapdesk_ui::UiState| {
+        let p = Fixed::default();
+        let out = paint(Frame::new(&p, st, &ix, design_size(WindowKind::Main), true), WindowKind::Main);
+        let drawn = p.drawn.borrow().clone();
+        (out, drawn)
+    };
+    let (_, texts) = card(&state);
+    assert!(texts.iter().any(|t| t.contains("Acessibilidade")), "the list before the click: {texts:?}");
+    assert!(!texts.iter().any(|t| t == WAITING));
+
+    state.activate(ControlId::Notice(NoticeKind::MacPerms));
+    let (out, texts) = card(&state);
+    assert!(texts.iter().any(|t| t == WAITING), "the wait line is drawn: {texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("Acessibilidade")), "in place of the list: {texts:?}");
+    assert!(
+        out.widgets.iter().any(|w| w.id == ControlId::Notice(NoticeKind::MacPerms)),
+        "the button stays, for another try"
+    );
+
+    // One permission allowed: the card lists what is still missing, no wait line.
+    state.apply(UiEvent::Reply {
+        ticket: Ticket(0),
+        result: Ok(Reply::MissingPermissions(vec![OsPermission::InputMonitoring])),
+    });
+    let (_, texts) = card(&state);
+    assert!(!texts.iter().any(|t| t == WAITING), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("Monitoramento de Entrada")), "{texts:?}");
+}
+
 #[test]
 fn a_label_hands_back_only_the_handle_type_it_was_made_with() {
     let l = Label::new(10.0, 12.0, 9.0, 7u32);

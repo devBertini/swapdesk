@@ -566,6 +566,69 @@ fn network_notices_replace_the_content_with_their_card() {
     assert!(s.notices().is_empty());
 }
 
+fn network_with(notices: Vec<Notice>) -> NetworkStatus {
+    NetworkStatus {
+        label: "Wi-Fi Casa".into(),
+        address: Some("192.168.0.12".into()),
+        category: Some(NetCategoryView::Private),
+        notices,
+    }
+}
+
+/// WAITING.md row 25: after "Conceder permissões" the notice says it waits for the person in System Settings, until
+/// the list of missing permissions changes or the notice goes.
+#[test]
+fn after_conceder_permissoes_the_notice_waits_until_the_missing_list_changes_or_the_notice_goes() {
+    const WAITING: &str = "Esperando você permitir nos Ajustes do Sistema…";
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    let (title, listed, button) = s.notice_texts(NoticeKind::MacPerms);
+    assert!(listed.contains("Acessibilidade") && !listed.contains(WAITING), "before the click: the list. {listed}");
+    // The click asks macOS and the notice says it waits, keeping its title and its button (a second try is allowed).
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    let (t, body, b) = s.notice_texts(NoticeKind::MacPerms);
+    assert_eq!((t.as_str(), body.as_str(), b.as_str()), (title.as_str(), WAITING, button.as_str()));
+    // The same list again (the Mac re-read the grants on activation and nothing changed): still waiting.
+    s.apply(UiEvent::NetworkChanged(network_with(vec![Notice::MacPermissionsMissing(vec![
+        OsPermission::Accessibility,
+        OsPermission::InputMonitoring,
+    ])])));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::Accessibility, OsPermission::InputMonitoring])));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    // The person allowed one: the list changed, so the notice lists what is still missing and waits no more.
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::InputMonitoring])));
+    let (t, body, _) = s.notice_texts(NoticeKind::MacPerms);
+    assert_eq!(t, "Falta 1 permissão no Mac");
+    assert!(body.contains("Monitoramento de Entrada") && !body.contains(WAITING), "{body}");
+    // Pressing the button again waits again, for the new list.
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    assert_eq!(s.take_os_permission_request(), vec![OsPermission::InputMonitoring]);
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    // The last one allowed: the notice goes, and a notice that comes back later with the same list does not wait.
+    s.apply(reply_ok(Reply::MissingPermissions(Vec::new())));
+    assert!(s.notices().is_empty());
+    s.apply(reply_ok(Reply::MissingPermissions(vec![OsPermission::InputMonitoring])));
+    assert!(!s.notice_texts(NoticeKind::MacPerms).1.contains(WAITING), "a new notice is not the old wait");
+    // The service's own push (the network status) that drops the notice ends the wait too.
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, WAITING);
+    s.apply(UiEvent::NetworkChanged(network_with(Vec::new())));
+    assert!(s.notices().is_empty());
+    s.apply(UiEvent::NetworkChanged(network_with(vec![Notice::MacPermissionsMissing(vec![
+        OsPermission::InputMonitoring,
+    ])])));
+    assert!(!s.notice_texts(NoticeKind::MacPerms).1.contains(WAITING));
+}
+
+/// The wait line follows the interface's language.
+#[test]
+fn the_mac_permissions_wait_line_is_in_the_interface_language() {
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    s.set_language(Language::En);
+    assert_eq!(s.notice_texts(NoticeKind::MacPerms).1, "Waiting for you to allow it in System Settings…");
+}
+
 #[test]
 fn a_refused_receiving_folder_shows_a_notice_with_its_name_and_the_button_opens_files_and_folders() {
     let mut s = Scenario::EstadoPastaRecebimentoMac.prepared_state();

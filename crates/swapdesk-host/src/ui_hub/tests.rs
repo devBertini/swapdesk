@@ -41,6 +41,7 @@ mod extras;
 mod files;
 mod grants_sync;
 mod presence;
+mod resume;
 mod security;
 mod terminal;
 

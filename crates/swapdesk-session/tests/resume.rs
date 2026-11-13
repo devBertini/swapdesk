@@ -85,6 +85,24 @@ fn after_a_loss_the_same_device_resumes_without_a_prompt_and_gets_a_new_token() 
 }
 
 #[test]
+fn the_hosts_user_ending_a_lost_session_kills_its_token_and_leaves_a_live_one_alone() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let s = f.session(CF).await;
+        let info = s.grant().clone();
+        // A live session is not its business: `disconnect` ends that one.
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.mem.host.resumable_sessions(), 1, "the live session keeps its entry");
+        f.lose(s).await;
+        assert_eq!(f.mem.host.resumable_sessions(), 1, "the lost session waits for a resume");
+        f.mem.host.drop_resume(info.session_id);
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "the token died with the host's user's end");
+        f.decline_from_now();
+        assert_not_resumed(f.resume(&f.who, &info, CF).await);
+    });
+}
+
+#[test]
 fn a_token_is_single_use() {
     run_paused(async {
         let f = fx(CF, CF);
