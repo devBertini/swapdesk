@@ -707,6 +707,11 @@ strings! {
     ExplorerPropsKind => "Tipo: {0}", "Type: {0}";
     ExplorerPropsSize => "Tamanho: {0}", "Size: {0}";
     ExplorerPropsModified => "Modificado: {0}", "Modified: {0}";
+    // F-FILE-03: why a transfer stopped, and the Mac's receiving folder without macOS access
+    TransferNoSpace => "Sem espaço livre no outro computador", "Not enough free space on the other computer";
+    RecvFolderDeniedTitle => "O Swapdesk não pode salvar na pasta de recebimento", "Swapdesk cannot save to the receiving folder";
+    RecvFolderDeniedBody => "O macOS ainda não deixou o Swapdesk usar {0}. Abra Arquivos e Pastas e ligue essa pasta.", "macOS has not let Swapdesk use {0} yet. Open Files and Folders and switch that folder on.";
+    RecvFolderDeniedOpen => "Abrir Arquivos e Pastas", "Open Files and Folders";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
