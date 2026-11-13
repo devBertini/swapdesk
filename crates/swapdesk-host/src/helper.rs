@@ -31,6 +31,7 @@ use swapdesk_proto::{
 use crate::helper_pty::{PtyFactory, PtyServer};
 use crate::outbox::{DEFAULT_BYTES, Limits, Outbox, TryControl, spawn_writer};
 use crate::proxy::{answer_action, answer_clipboard, no_actions, no_clipboard};
+use crate::retry;
 use crate::scale::SizeDebounce;
 
 /// Longest wait of the capture loop for a frame: also how fast `StopVideo` is noticed.
@@ -483,17 +484,52 @@ fn capture_main<S: ScreenSource, E: VideoEncoder>(
     }
 }
 
+/// How often a helper that started with no display lists them again.
+const DISPLAY_WAIT: Duration = Duration::from_secs(1);
+
 fn capture_run<S: ScreenSource, E: VideoEncoder>(
     env: &CaptureEnv<S, E>,
     p: StartParams,
     ctl: &VideoCtl,
     ids: &AtomicU32,
 ) -> PResult<()> {
-    let mut source = (env.screen)(DisplayId(p.display))?;
-    if let Err(e) = source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps }) {
-        // The display may have gone between the listing and now: the service learns the displays that exist.
-        env.refresh_displays();
-        return Err(e);
+    let made = retry::retry(
+        || (env.screen)(DisplayId(p.display)),
+        retry::is_unavailable,
+        |failed, e| {
+            if failed == 1 {
+                note(&env.outbox, format!("video {}: waiting for the display ({e})", p.display));
+            }
+        },
+        |pause| retry::sleep_unless(pause, || ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed()),
+    );
+    let mut source = match made {
+        Some(made) => made?,
+        None => return Ok(()),
+    };
+    // Nothing to capture right now (a Mac whose display sleeps lists none) passes by itself: ask again, quietly, until
+    // the display is there. Any other failure ends the start.
+    let opened = retry::retry(
+        || source.open(DisplayId(p.display), CaptureConfig { max_fps: p.fps }),
+        retry::is_unavailable,
+        |failed, e| {
+            if failed == 1 {
+                note(&env.outbox, format!("video {}: waiting for the display ({e})", p.display));
+            }
+        },
+        |pause| retry::sleep_unless(pause, || ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed()),
+    );
+    match opened {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            // The display may have gone between the listing and now: the service learns the displays that exist.
+            env.refresh_displays();
+            return Err(e);
+        }
+        None => {
+            source.close();
+            return Ok(());
+        }
     }
     // The service hears which desktop this is before the first picture of it.
     env.report_desktop();
@@ -971,7 +1007,22 @@ fn audio_main<A: AudioSource>(env: &AudioEnv<A>, exclude_pid: Option<u32>, stop:
         let mut sender = AudioSender::new(source, exclude_pid).map_err(|e| format!("audio: {e}"))?;
         let mut is_muted = muted.load(Ordering::Acquire);
         sender.set_muted(is_muted).map_err(|e| format!("audio: {e}"))?;
-        sender.set_enabled(true).map_err(|e| format!("audio: {e}"))?;
+        // The capture is not there yet (a Mac whose display sleeps): ask again, quietly, until it is.
+        let enabled = retry::retry(
+            || sender.set_enabled(true),
+            |e| matches!(e, swapdesk_audio::AudioError::Platform(p) if retry::is_unavailable(p)),
+            |failed, e| {
+                if failed == 1 {
+                    note(outbox, format!("audio: waiting for the capture ({e})"));
+                }
+            },
+            |pause| retry::sleep_unless(pause, || stop.load(Ordering::Acquire) || outbox.is_closed()),
+        );
+        match enabled {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(format!("audio: {e}")),
+            None => return Ok(()),
+        }
         outbox.send_control(Message::AudioMode { mode: (env.mode)(sender.source()) });
         let result = loop {
             if stop.load(Ordering::Acquire) || outbox.is_closed() {
@@ -1151,7 +1202,9 @@ where
         // The list sent at the start can be hours old: a monitor plugged in since then changed the ids. A session
         // that starts now must find the displays of now (the service asks again with the list this sends).
         self.capture.refresh_displays();
-        if self.capture.display(p.display).is_none() {
+        // An id the system does not list is refused; a list that is empty (a Mac whose display sleeps lists none)
+        // is no answer yet: the capture thread waits for the display.
+        if self.capture.display(p.display).is_none() && !self.capture.display_list().is_empty() {
             fault(&self.outbox, ErrorCode::NotFound, format!("video {}: no such display", p.display));
             return;
         }
@@ -1304,11 +1357,19 @@ where
         desktop: desktop_probe,
     } = deps;
 
+    // A Mac whose display sleeps lists none: the helper starts with an empty list, and the refresh that comes with
+    // the first video start lists them once the display is back.
     let displays = {
-        let mut source = screen(DisplayId(0)).map_err(HelperError::Platform)?;
-        let list = source.displays().map_err(HelperError::Platform)?;
-        source.close();
-        list
+        let listed = screen(DisplayId(0)).and_then(|mut source| {
+            let list = source.displays();
+            source.close();
+            list
+        });
+        match listed {
+            Ok(list) => list,
+            Err(e) if retry::is_unavailable(&e) => Vec::new(),
+            Err(e) => return Err(HelperError::Platform(e)),
+        }
     };
     let wire_list = DisplayList { displays: displays.iter().take(swapdesk_ipc::MAX_DISPLAYS).map(to_proto).collect() };
 
@@ -1332,6 +1393,17 @@ where
         desktop_probe,
         desktop_sent: Mutex::new(None),
     });
+    // Nothing listed at the start (a Mac whose display sleeps): list again every second until a display is there, so
+    // the service learns it and starts the video it could not ask for. Ends with the helper.
+    if capture.display_list().is_empty() {
+        let env = Arc::clone(&capture);
+        let _ = std::thread::Builder::new().name("helper-displays".into()).spawn(move || {
+            while env.display_list().is_empty() && !env.outbox.is_closed() {
+                std::thread::sleep(DISPLAY_WAIT);
+                env.refresh_displays();
+            }
+        });
+    }
     let input_thread = {
         let outbox = outbox.clone();
         let epoch = Arc::clone(&desktop_epoch);

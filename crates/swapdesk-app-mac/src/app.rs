@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swapdesk_core_mac::macos_version;
+use swapdesk_host::ui_hub::SystemHooks;
 use swapdesk_net_mac::MacNetInterfaces;
 use swapdesk_platform::{Clock, Level, MonoMicros, SecretStore, TraceSink};
 use swapdesk_secret_mac::{
@@ -216,7 +217,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
     if options.selftest.is_none() {
         // "Bloquear ao terminar" (F-SESS-03): the end of a hosted session locks the screen as the quick action does.
-        params.hooks = Arc::new(crate::lock_end::LockOnEnd::new(MacActions::user, Arc::clone(&trace)));
+        let lock_on_end: Arc<dyn SystemHooks> =
+            Arc::new(crate::lock_end::LockOnEnd::new(MacActions::user, Arc::clone(&trace)));
+        // A hosted session keeps the display on (a sleeping display lists nothing to capture).
+        let display_awake: Arc<dyn SystemHooks> = Arc::new(crate::display_awake::DisplayAwake::new(
+            Arc::new(crate::display_awake::IoKitPower),
+            Arc::clone(&trace),
+        ));
+        params.hooks = Arc::new(crate::display_awake::Both(lock_on_end, display_awake));
         params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
     }
     // The administrator confirmation (docs/ELEVATION-MAC.md): macOS's own dialog on a normal run. The self-test, the

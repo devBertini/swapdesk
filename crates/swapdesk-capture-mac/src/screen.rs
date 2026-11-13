@@ -739,8 +739,10 @@ mod mac {
                 .map(|i| all.objectAtIndex(i))
                 // SAFETY: `displayID` is a plain property read.
                 .find(|d| unsafe { d.displayID() } == cg)
+                // ScreenCaptureKit lists no display while the display sleeps: nothing to capture right now, which
+                // passes when it wakes (the host helper asks again).
                 .ok_or_else(|| PlatformError {
-                    kind: ErrorKind::AccessLost,
+                    kind: ErrorKind::Unavailable,
                     op: "SCShareableContent",
                     os_code: None,
                     detail: format!("display {cg} is not shareable"),

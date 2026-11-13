@@ -14,9 +14,10 @@
 //! [`selftest`].
 //!
 //! The crate holds the one `unsafe` of this lane (a decoded picture moved to the main thread, [`main_side::MainFrame`])
-//! and the `atexit` registration of [`app`].
+//! and the `atexit` registration of [`app`], and the three IOKit power calls of [`display_awake`].
 
 pub mod cli;
+pub mod display_awake;
 pub mod elevate;
 pub mod handoff;
 pub mod layout_state;

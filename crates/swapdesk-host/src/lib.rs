@@ -20,6 +20,7 @@ mod helper_pty;
 pub mod netcache;
 pub mod outbox;
 pub mod proxy;
+mod retry;
 pub mod rpc;
 pub mod scale;
 pub mod service;
@@ -33,5 +34,7 @@ mod helper_fs_tests;
 mod helper_pty_tests;
 #[cfg(test)]
 mod helper_tests;
+#[cfg(test)]
+mod helper_wake_tests;
 #[cfg(test)]
 mod testpipe;

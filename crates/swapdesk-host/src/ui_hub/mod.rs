@@ -66,6 +66,10 @@ pub trait SystemHooks: Send + Sync {
     /// itself (never for a lost link the core keeps resumable), and never when another account owns the console or
     /// nobody is at it: there is nothing of this account to lock. It may block briefly; it must not panic.
     fn lock_screen(&self, _console_session: u32) {}
+    /// How many sessions this machine hosts now, called at each start and end (0 once the last has ended). Unlike
+    /// [`Self::keep_awake`] it does not depend on the "keep awake" setting: a host whose display sleeps must still
+    /// deliver the session (a Mac's display, kept on while any session lasts).
+    fn hosted_sessions(&self, _live: usize) {}
     /// The "service" switch of Ajustes changed.
     fn service_enabled(&self, _on: bool) {}
 }
@@ -234,6 +238,8 @@ pub(crate) struct Hub {
     peer_ports: Mutex<(store::PeerPorts, HashMap<DeviceId, std::time::Instant>)>,
     /// Live sessions in either role, for "keep awake".
     live_sessions: AtomicUsize,
+    /// Sessions of this machine as the host (a subset of `live_sessions`).
+    hosted_live: AtomicUsize,
     /// Swap questions waiting for this machine's user, by the swap handler's request number.
     swaps: Mutex<HashMap<u32, PendingSwap>>,
     /// Connect attempts in flight (a wake, a connect waiting for the host), by the id of their entry.
@@ -432,6 +438,20 @@ impl Hub {
         self.p.hooks.keep_awake(before > 1 && self.settings().keep_awake);
     }
 
+    /// A session of this machine as the host began: tell the hooks how many there are now.
+    pub fn hosted_began(&self) {
+        let n = self.hosted_live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.p.hooks.hosted_sessions(n);
+    }
+
+    /// A session of this machine as the host ended (a lost link the core keeps resumable counts as ended: it
+    /// begins again on the resume).
+    pub fn hosted_ended(&self) {
+        let before =
+            self.hosted_live.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1))).unwrap_or(0);
+        self.p.hooks.hosted_sessions(before.saturating_sub(1));
+    }
+
     pub fn api_error(&self, code: ApiCode, what: &str) -> ApiCode {
         self.log(Level::Debug, format_args!("refused: {what} ({code:?})"));
         code
@@ -478,6 +498,7 @@ impl UiHub {
             sync: Mutex::new(sync_dial::SyncState::default()),
             peer_ports: Mutex::new((store::load_peer_ports(&*params_secrets), HashMap::new())),
             live_sessions: AtomicUsize::new(0),
+            hosted_live: AtomicUsize::new(0),
             swaps: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
             files: Mutex::new(files::FilesTable::default()),

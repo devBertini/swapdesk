@@ -76,6 +76,8 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 #[derive(Default)]
 struct TestHooks {
     awake: Mutex<Vec<bool>>,
+    /// The counts `hosted_sessions` was told, in order (the host's display is kept on by it).
+    hosted: Mutex<Vec<usize>>,
     /// The console sessions `lock_screen` was asked to lock, in order.
     locks: Mutex<Vec<u32>>,
 }
@@ -87,6 +89,10 @@ impl SystemHooks for TestHooks {
 
     fn lock_screen(&self, console_session: u32) {
         lock(&self.locks).push(console_session);
+    }
+
+    fn hosted_sessions(&self, live: usize) {
+        lock(&self.hosted).push(live);
     }
 }
 
@@ -970,6 +976,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     });
     assert_eq!((role, granted), (Role::Host, ALL.bits()));
     wait_for("keep awake on the host", || (lock(&host.hooks.awake).last() == Some(&true)).then_some(()));
+    wait_for("one hosted session on the host", || (lock(&host.hooks.hosted).last() == Some(&1)).then_some(()));
+    assert!(lock(&viewer.hooks.hosted).is_empty(), "a viewer hosts nothing");
 
     // Video reaches the viewer's UI as ViewerVideo with the session id; the display list as a notification.
     let header = viewer_ui.take("a ViewerVideo", |m| match m {
@@ -1058,6 +1066,8 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert_eq!(viewer_ui.notify("Ended on the viewer", ended), None);
     assert_eq!(host_ui.notify("Ended on the host", ended), None);
     wait_for("keep awake off", || (lock(&host.hooks.awake).last() == Some(&false)).then_some(()));
+    wait_for("no hosted session left", || (lock(&host.hooks.hosted).last() == Some(&0)).then_some(()));
+    assert_eq!(*lock(&host.hooks.hosted), vec![1, 0]);
     wait_for("the end in the host's audit", || {
         host.audit.entries().iter().any(|e| matches!(e.event, AuditEvent::SessionEnded(_))).then_some(())
     });

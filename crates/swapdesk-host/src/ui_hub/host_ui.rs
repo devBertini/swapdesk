@@ -389,6 +389,7 @@ impl HostUi for HubHostUi {
                 );
                 // `session_began` also pushes the device list, which now shows the viewer on the network.
                 hub.session_began();
+                hub.hosted_began();
                 hub.notify_console(Notify::Session {
                     session_id,
                     device_id: device_id_hex(&device),
@@ -422,6 +423,7 @@ impl HostUi for HubHostUi {
                 let duration = u32::try_from(now.saturating_sub(since) / 1000).unwrap_or(u32::MAX);
                 hub.audit(device, AuditEvent::SessionEnded(end.code), Some(duration));
                 hub.session_ended();
+                hub.hosted_ended();
                 if resumable {
                     hub.session_lost(session_id, device_id_hex(&device), end_reason(&end));
                 } else {
