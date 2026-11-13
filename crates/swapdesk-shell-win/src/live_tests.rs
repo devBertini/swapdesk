@@ -650,3 +650,33 @@ fn a_viewer_window_reports_its_video_area_and_a_resize_reports_it_again() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(backend.view_sizes().len(), 2, "nothing more while the size holds");
 }
+
+/// Slice 4 (FILES-UI.md 4.2): the viewer window is an OLE drop target, the main window is not. OLE marks a registered
+/// window with the property `OleDropTargetInterface`; that it is set proves `OleInitialize` ran on the UI thread
+/// (`RegisterDragDrop` fails on a thread that only called `CoInitializeEx`) and the registration went through.
+#[test]
+fn the_viewer_window_is_registered_as_a_drop_target_and_the_main_window_is_not() {
+    use windows::Win32::Foundation::TRUE;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetPropW};
+    use windows::core::{BOOL, w};
+
+    // A mock run of the viewer scenario: its viewer window exists next to the main one.
+    let live = Live::start(Scenario::Visualizador);
+    let main = live.hwnd();
+    struct Found(Vec<HWND>);
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `Found` of the caller, alive for the whole enumeration.
+        unsafe { (*(lparam.0 as *mut Found)).0.push(hwnd) };
+        TRUE
+    }
+    let mut found = Found(Vec::new());
+    // SAFETY: enumerates the windows of the shell thread; the pointer outlives the call.
+    unsafe {
+        let _ = EnumThreadWindows(live.thread_id, Some(collect), LPARAM(&mut found as *mut Found as isize));
+    }
+    // SAFETY: plain property reads of our windows.
+    let registered = |h: HWND| !unsafe { GetPropW(h, w!("OleDropTargetInterface")) }.0.is_null();
+    let top = found.0;
+    assert!(!registered(main), "the main window takes no drops");
+    assert!(top.iter().any(|&h| h != main && registered(h)), "the viewer window is a drop target ({top:?})");
+}

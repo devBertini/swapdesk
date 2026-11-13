@@ -225,6 +225,10 @@ impl Window {
                     let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
                 }
                 window.place_and_show();
+                if kind == WindowKind::Viewer {
+                    // Files dragged from Explorer (FILES-UI.md 4.2); revoked in WM_DESTROY.
+                    crate::drop_target::register(h, Rc::downgrade(&window));
+                }
                 Ok(window)
             }
             Err(e) => {
@@ -350,6 +354,58 @@ impl Window {
         use windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
         // SAFETY: plain key state read.
         unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+    }
+
+    // ----- a drag from the system's file manager (slice 4; the OLE target is `drop_target.rs`) -----
+
+    /// The control a system drag at the client pixel (`x`, `y`) is over. `None` is the picture of the Tela view; a
+    /// point of the viewer outside the picture and over no control gets a control that is no drop target.
+    fn drop_under(&self, x: i32, y: i32) -> Option<ControlId> {
+        let hit = self.hit_test(x, y);
+        if hit.is_some() || self.explorer_on() {
+            return hit;
+        }
+        match self.video_area() {
+            Some(r) if !r.contains(x as f32, y as f32) => Some(ControlId::NavHome),
+            _ => None,
+        }
+    }
+
+    /// A screen point as the client pixel of this window.
+    fn client_pixel(&self, screen: (i32, i32)) -> (i32, i32) {
+        let mut p = windows::Win32::Foundation::POINT { x: screen.0, y: screen.1 };
+        // SAFETY: our own window; plain coordinate conversion.
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd(), &mut p);
+        }
+        (p.x, p.y)
+    }
+
+    /// OLE `DragEnter`: files (or not) came over the window.
+    pub(crate) fn system_drag_enter(
+        &self,
+        data: swapdesk_ui::SystemDragData,
+        screen: (i32, i32),
+    ) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drag_enter(data, self.drop_under(x, y), self.dips(x, y), self)
+    }
+
+    /// OLE `DragOver`.
+    pub(crate) fn system_drag_over(&self, screen: (i32, i32)) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drag_over(self.drop_under(x, y), self.dips(x, y), self)
+    }
+
+    /// OLE `DragLeave`.
+    pub(crate) fn system_drag_leave(&self) {
+        self.shared.system_drag_leave();
+    }
+
+    /// OLE `Drop`.
+    pub(crate) fn system_drop(&self, screen: (i32, i32)) -> swapdesk_ui::DropEffect {
+        let (x, y) = self.client_pixel(screen);
+        self.shared.system_drop(self.drop_under(x, y), self.dips(x, y), self)
     }
 
     /// The drag timer runs while a drag does: 50 ms ticks for the spring-loaded folders and the auto-scroll.
@@ -1667,6 +1723,9 @@ impl Window {
                 None
             }
             WM_DESTROY => {
+                if self.kind == WindowKind::Viewer {
+                    crate::drop_target::revoke(self.hwnd());
+                }
                 if self.announced.take().is_some()
                     && let Some(host) = self.host()
                 {

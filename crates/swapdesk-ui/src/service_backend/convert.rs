@@ -719,6 +719,7 @@ pub fn route(c: &a::Command) -> Route {
         }
         C::LocalList { .. }
         | C::LocalPlaces
+        | C::LocalKinds { .. }
         | C::LocalMakeDir { .. }
         | C::LocalRename { .. }
         | C::LocalMove { .. }

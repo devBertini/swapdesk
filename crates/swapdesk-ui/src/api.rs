@@ -963,6 +963,11 @@ pub enum Command {
     },
     /// This computer's places and drives or volumes for the navigation pane. Answered `LocalPlaces`.
     LocalPlaces,
+    /// Which of `paths` are folders (slice 4: files dropped from the system's file manager are stat-ed on a worker
+    /// thread, never on the UI thread). Answered `LocalKinds`; a path that cannot be read is left out.
+    LocalKinds {
+        paths: Vec<PathBuf>,
+    },
     /// Creates the folder `path` on this computer (slice 2a). `Refused`: something has that name already.
     LocalMakeDir {
         path: PathBuf,
@@ -1111,6 +1116,7 @@ impl core::fmt::Debug for Command {
             Self::LocalTrash { paths } => dbg_fields!("LocalTrash", paths),
             Self::LocalProps { path } => dbg_fields!("LocalProps", path),
             Self::LocalPlaces => f.write_str("LocalPlaces"),
+            Self::LocalKinds { paths } => dbg_fields!("LocalKinds", paths),
             Self::ActivityExport { path, language, utc_offset_min } => {
                 dbg_fields!("ActivityExport", path, language, utc_offset_min)
             }
@@ -1169,6 +1175,8 @@ pub enum Reply {
     /// What `LocalProps` counted.
     LocalProps(LocalProps),
     LocalPlaces(Vec<LocalPlace>),
+    /// What `LocalKinds` found: each readable path with whether it is a folder.
+    LocalKinds(Vec<(PathBuf, bool)>),
     Blocked(Vec<BlockedItem>),
 }
 
@@ -1369,6 +1377,7 @@ impl Command {
                 | Command::LocalList { .. }
                 | Command::LocalProps { .. }
                 | Command::LocalPlaces
+                | Command::LocalKinds { .. }
                 | Command::SetGrants { .. }
                 | Command::SetSettings { .. }
                 | Command::SelectDisplay { .. }
@@ -1408,6 +1417,7 @@ impl Command {
             // A slow volume (a network share, a sleeping disk) fails visibly instead of freezing the pane (R-UI-7).
             Command::LocalList { .. }
             | Command::LocalPlaces
+            | Command::LocalKinds { .. }
             | Command::LocalMakeDir { .. }
             | Command::LocalRename { .. }
             | Command::LocalMove { .. }

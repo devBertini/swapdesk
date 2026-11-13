@@ -221,7 +221,7 @@ fn explorer_card(f: &mut Frame, area: Rect, title: &str, lines: &[String], butto
 
 /// The drag of slice 3 (FILES-UI.md 4.1): the target outlined in `link` (a pane's border at 2 px), then the pill under
 /// the pointer (the first item's icon and name, or the count) and the caption under it.
-fn drag(f: &mut Frame, d: &DragView) {
+pub(crate) fn drag(f: &mut Frame, d: &DragView) {
     let (p, pal) = (f.p, f.pal);
     if let Some(target) = d.target
         && let Some(w) = f.out.widgets.iter().rev().find(|w| w.id == target)

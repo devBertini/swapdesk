@@ -169,6 +169,9 @@ pub fn answer(command: &crate::api::Command) -> Result<crate::api::Reply, crate:
             list(&dir).map(Reply::LocalListing).map_err(ApiError::new)
         }
         Command::LocalPlaces => Ok(Reply::LocalPlaces(places())),
+        Command::LocalKinds { paths } => Ok(Reply::LocalKinds(
+            paths.iter().filter_map(|p| std::fs::metadata(p).ok().map(|m| (p.clone(), m.is_dir()))).collect(),
+        )),
         Command::LocalMakeDir { path } => done(make_dir(path)),
         Command::LocalRename { path, name } => done(rename(path, name).map(|_| ())),
         Command::LocalMove { paths, into } => done(move_into(paths, into)),

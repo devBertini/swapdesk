@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSEventPhase, NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
-    NSWindowDidResignKeyNotification,
+    NSCursor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventPhase,
+    NSImage, NSView, NSWindow, NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -271,6 +272,30 @@ define_class!(
             self.mouse(event, MouseKind::Magnify { amount: event.magnification(), ends });
         }
     }
+    // Files dragged from the Finder over the picture (FILES-UI.md 4.2): the canvas lets the mouse through over the
+    // video rectangle, so the window offers the drag to this view; the functions are the canvas's.
+    // SAFETY: the selectors and signatures are the protocol's.
+    unsafe impl NSDraggingDestination for VideoView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::entered(self, sender)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::updated(self, sender)
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            crate::drop::exited();
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            crate::drop::perform(self, sender)
+        }
+    }
 );
 
 fn other_button(event: &NSEvent) -> PointerButton {
@@ -303,6 +328,7 @@ impl VideoView {
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<VideoView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
+        crate::drop::register(&view);
         view
     }
 

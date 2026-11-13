@@ -198,6 +198,9 @@ pub enum Step {
     Drag(ControlId, Option<ControlId>),
     /// Slice 3: a right click on a control (the menu is native; the state holds it open).
     ContextMenu(ControlId),
+    /// Slice 4: a drag from the system's file manager hovers the window (the paths, whether each is a folder, and the
+    /// control under the pointer; `None` is the picture).
+    SystemDrag(&'static [(&'static str, bool)], Option<ControlId>),
     /// The launch requests (R-UI-6), sent and not yet answered.
     Startup,
     /// A request for `DataKind` went out and has not been answered.
@@ -261,6 +264,10 @@ pub enum Scenario {
     ExploradorLixeiraDeLa,
     /// Slice 3: a file of this computer dragged over a folder row of the same pane (the pill says "Mover para ...").
     ExploradorArrastando,
+    /// Slice 4: a file of the system's file manager hovering a folder row of the right pane.
+    ExploradorSoltando,
+    /// Slice 4: a file of the system's file manager hovering the picture of the Tela view, with its caption.
+    TelaSoltando,
     /// Slice 3: the state right after a right click on a row (the menu itself is the system's and is not painted).
     ExploradorMenu,
     Chat,
@@ -316,7 +323,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 64] = [
+    pub const ALL: [Scenario; 66] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -352,6 +359,8 @@ impl Scenario {
         Scenario::ExploradorSemLixeira,
         Scenario::ExploradorLixeiraDeLa,
         Scenario::ExploradorArrastando,
+        Scenario::ExploradorSoltando,
+        Scenario::TelaSoltando,
         Scenario::ExploradorMenu,
         Scenario::Chat,
         Scenario::AreaTransferencia,
@@ -421,6 +430,8 @@ impl Scenario {
             Scenario::ExploradorSemLixeira => "explorador-sem-lixeira",
             Scenario::ExploradorLixeiraDeLa => "explorador-lixeira-de-la",
             Scenario::ExploradorArrastando => "explorador-arrastando",
+            Scenario::ExploradorSoltando => "explorador-soltando",
+            Scenario::TelaSoltando => "tela-soltando",
             Scenario::ExploradorMenu => "explorador-menu",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
@@ -497,6 +508,10 @@ impl Scenario {
             Scenario::ExploradorArrastando => {
                 "new: Arquivos, a file dragged over a folder row, the pill and caption (slice 3)"
             }
+            Scenario::ExploradorSoltando => {
+                "new: Arquivos, a file of the system's file manager over a folder row of the right pane (slice 4)"
+            }
+            Scenario::TelaSoltando => "new: Tela, a file of the system's file manager over the picture (slice 4)",
             Scenario::ExploradorMenu => {
                 "new: Arquivos, right after a right click on a row; the menu is native (slice 3)"
             }
@@ -956,6 +971,17 @@ impl Scenario {
                 v.push(Drag(ControlId::ExpRow(false, 2), Some(ControlId::ExpRow(false, 0))));
                 v
             }
+            Scenario::ExploradorSoltando => {
+                let mut v = Scenario::Explorador.script();
+                // Row 0 of the other computer's pane is the folder "Contratos".
+                v.push(SystemDrag(&[("C:/Users/ana/Desktop/proposta.pdf", false)], Some(ControlId::ExpRow(true, 0))));
+                v
+            }
+            Scenario::TelaSoltando => vec![
+                mac(),
+                Event(Self::viewer_session(21)),
+                SystemDrag(&[("C:/Users/ana/Desktop/proposta.pdf", false)], None),
+            ],
             Scenario::ExploradorMenu => {
                 let mut v = Scenario::Explorador.script();
                 v.push(ContextMenu(ControlId::ExpRow(false, 2)));
@@ -1180,6 +1206,10 @@ impl Scenario {
                 Step::Drag(from, over) => {
                     state.drag_press(Some(from), (100.0, 100.0));
                     state.drag_move(over, (140.0, 160.0), false, 1_000);
+                }
+                Step::SystemDrag(paths, over) => {
+                    let items = paths.iter().map(|(p, _)| (*p).into()).collect();
+                    state.system_drag_enter(crate::SystemDragData::Files(items), over, (420.0, 300.0), 1_000);
                 }
                 Step::ContextMenu(c) => {
                     state.context_menu(Some(c), false);
@@ -1610,6 +1640,8 @@ impl World {
                 hidden: Vec::new(),
             })),
             Command::LocalPlaces => Ok(Reply::LocalPlaces(local_places())),
+            // [UI] made up: no dropped path is a folder.
+            Command::LocalKinds { paths } => Ok(Reply::LocalKinds(paths.into_iter().map(|p| (p, false)).collect())),
             Command::ChatSend { text, .. } => {
                 Ok(Reply::Chat(ChatView { msg_id: 100, mine: true, text, sent_at_ms: NOW_MS, read: false }))
             }
@@ -1689,6 +1721,8 @@ mod tests {
             (Scenario::ExploradorSemLixeira, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorLixeiraDeLa, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorArrastando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorSoltando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::TelaSoltando, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorMenu, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),

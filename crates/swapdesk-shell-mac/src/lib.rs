@@ -32,6 +32,8 @@ mod canvas;
 #[cfg(target_os = "macos")]
 mod cg;
 #[cfg(target_os = "macos")]
+mod drop;
+#[cfg(target_os = "macos")]
 pub mod painter;
 #[cfg(target_os = "macos")]
 mod shell;

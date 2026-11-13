@@ -23,6 +23,7 @@ const MAX_DEVICE_NAME: usize = 64;
 
 mod explorer;
 pub mod explorer_drag;
+pub mod explorer_drop;
 pub mod explorer_manage;
 pub mod explorer_menu;
 pub mod explorer_remote;

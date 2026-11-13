@@ -26,9 +26,9 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSControl, NSControlStateValueOn, NSControlTextEditingDelegate, NSCursor,
-    NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem, NSTextField, NSTextFieldDelegate,
-    NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventType,
+    NSFocusRingType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu,
+    NSMenuItem, NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRange,
@@ -426,6 +426,31 @@ define_class!(
 
     // SAFETY: `NSTextFieldDelegate` adds only optional methods, none implemented here.
     unsafe impl NSTextFieldDelegate for CanvasView {}
+
+    // Files dragged from the Finder (FILES-UI.md 4.2): the viewer's canvas registers in `create`; the video view
+    // below takes the drags over the picture and calls the same functions.
+    // SAFETY: the selectors and signatures are the protocol's.
+    unsafe impl NSDraggingDestination for CanvasView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::entered(self, sender)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            crate::drop::updated(self, sender)
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            crate::drop::exited();
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            crate::drop::perform(self, sender)
+        }
+    }
 );
 
 impl CanvasView {
@@ -466,6 +491,9 @@ impl CanvasView {
             )
         };
         view.addTrackingArea(&area);
+        if kind == WindowKind::Viewer {
+            crate::drop::register(&view);
+        }
         view
     }
 
@@ -559,6 +587,20 @@ impl CanvasView {
     fn hit(&self, event: &NSEvent) -> Option<ControlId> {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         input::hit_test(&self.ivars().out.borrow().widgets, p.x as f32, p.y as f32)
+    }
+
+    /// The control a drag from the Finder is over at `at` (the frame's DIPs). `None` is the picture of the Tela view;
+    /// a point outside the picture and over no control gets a control that is no drop target.
+    pub fn drop_under(&self, at: (f32, f32)) -> Option<ControlId> {
+        let out = self.ivars().out.borrow();
+        let hit = input::hit_test(&out.widgets, at.0, at.1);
+        if hit.is_some() || crate::shell::explorer_open() {
+            return hit;
+        }
+        match out.video {
+            Some(v) if !v.contains(at.0, at.1) => Some(ControlId::NavHome),
+            _ => None,
+        }
     }
 
     /// The explorer of this viewer window is open: its rows take the mouse (drag, context menu).

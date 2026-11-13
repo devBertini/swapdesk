@@ -85,6 +85,10 @@ pub fn paint_viewer(f: &mut Frame) {
             bar_handle(f, video_col);
         }
     }
+    // Slice 4: files dragged from the system over the picture: the pill and "Solte para enviar ao ..." (no outline).
+    if let Some(d) = f.st.explorer_drag() {
+        crate::screens_explorer::drag(f, &d);
+    }
     if let Some(tab) = drawer {
         drawer_panel(f, Rect::new(body.w - layout::DRAWER_W, body.y, layout::DRAWER_W, body.h), tab, &peer);
     }

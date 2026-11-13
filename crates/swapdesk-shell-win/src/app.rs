@@ -11,7 +11,7 @@ use swapdesk_ui::{
     Activation, Changed, Command, ControlId, EditId, Effect, SelectId, Ticket, UiBackend, UiEvent, UiState, WindowKind,
 };
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, Result};
@@ -48,6 +48,8 @@ pub struct Shared {
 
 thread_local! {
     static SHARED: RefCell<Option<Rc<Shared>>> = const { RefCell::new(None) };
+    /// This thread started OLE (`OleInitialize`), so the run ends with `OleUninitialize`.
+    static OLE_STARTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The composition-tree handles of a window kind, for the renderer of stage 15 to attach its video visual to (C3
@@ -123,7 +125,10 @@ fn run_shell(
     // SAFETY: called once at startup, before any window exists; failures (already set by a manifest) are harmless.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // OleInitialize starts COM as a single-threaded apartment and OLE: RegisterDragDrop (files dragged from
+        // Explorer onto the viewer window) fails on a thread that only called CoInitializeEx.
+        let ole = OleInitialize(None).is_ok();
+        OLE_STARTED.with(|o| o.set(ole));
     }
     // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
     state.set_live_picture(host.is_some());
@@ -192,6 +197,10 @@ fn run_shell(
         crate::tray::remove(tray_hwnd);
     }
     SHARED.with(|s| *s.borrow_mut() = None);
+    if OLE_STARTED.with(|o| o.replace(false)) {
+        // SAFETY: balances the successful OleInitialize of this thread.
+        unsafe { OleUninitialize() };
+    }
     Ok(shared)
 }
 
@@ -346,6 +355,49 @@ impl Shared {
             }
             None => false,
         }
+    }
+
+    /// A drag from the system's file manager came over the viewer window (slice 4): the effect for the OS.
+    pub fn system_drag_enter(
+        self: &Rc<Self>,
+        data: swapdesk_ui::SystemDragData,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drag_enter(data, under, at, now_ms());
+        self.dispatch(r.activation, from);
+        r.effect
+    }
+
+    /// The system drag moved or rested.
+    pub fn system_drag_over(
+        self: &Rc<Self>,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drag_over(under, at, now_ms());
+        self.dispatch(r.activation, from);
+        r.effect
+    }
+
+    /// The system drag left the window.
+    pub fn system_drag_leave(self: &Rc<Self>) {
+        let changed = self.state.borrow_mut().system_drag_leave();
+        self.refresh(changed);
+    }
+
+    /// The system drag was released over the viewer window.
+    pub fn system_drop(
+        self: &Rc<Self>,
+        under: Option<ControlId>,
+        at: (f32, f32),
+        from: &Window,
+    ) -> swapdesk_ui::DropEffect {
+        let r = self.state.borrow_mut().system_drop(under, at);
+        self.dispatch(r.activation, from);
+        r.effect
     }
 
     /// Capture or focus was lost while a drag runs.

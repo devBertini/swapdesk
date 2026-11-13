@@ -2466,6 +2466,7 @@ impl UiState {
             }
             Reply::LocalProps(p) => self.props_counted(p),
             Reply::LocalPlaces(p) => self.places_listed(p),
+            Reply::LocalKinds(k) => self.drop_resolved(k),
             Reply::Listing(l) => {
                 self.consent_answered(Feature::Files);
                 // A 1.1 peer lists through pages (slice 2b); a late FilesList answer is not the pane's any more.
@@ -2568,6 +2569,7 @@ impl UiState {
             c @ Command::FilesListPage { .. } => return self.there_page_failed(c, error.code),
             c @ Command::FilesChange { .. } => return self.there_change_failed(c, error.code),
             Command::LocalPlaces => return Changed::NONE,
+            Command::LocalKinds { .. } => return self.drop_failed(),
             c @ (Command::LocalMakeDir { .. }
             | Command::LocalRename { .. }
             | Command::LocalMove { .. }

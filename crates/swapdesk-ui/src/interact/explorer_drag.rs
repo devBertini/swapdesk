@@ -61,6 +61,10 @@ struct Active {
 /// What the explorer remembers of a drag between events.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DragState {
+    /// Slice 4: a drag from the system's file manager hovers the window (see `explorer_drop.rs`).
+    pub(super) sys: Option<super::explorer_drop::SystemDrop>,
+    /// A system drop released and waiting for the worker's `LocalKinds`.
+    pub(super) drop_wait: Option<super::explorer_drop::PendingDrop>,
     press: Option<(ControlId, (f32, f32))>,
     active: Option<Active>,
     /// A drag was cancelled with the button still down: its release is not a click.
@@ -89,11 +93,11 @@ pub struct DragView {
 
 /// Where a drop would land.
 #[derive(Debug, Clone, PartialEq)]
-struct Target {
-    there: bool,
-    folder: String,
-    label: String,
-    highlight: ControlId,
+pub(super) struct Target {
+    pub(super) there: bool,
+    pub(super) folder: String,
+    pub(super) label: String,
+    pub(super) highlight: ControlId,
 }
 
 /// What releasing now would do.
@@ -211,7 +215,7 @@ impl UiState {
     }
 
     /// The control under the pointer is, or stands for, a folder this drag could land in.
-    fn drag_target(&self, under: Option<ControlId>) -> Option<Target> {
+    pub(super) fn drag_target(&self, under: Option<ControlId>) -> Option<Target> {
         let pane = |there: bool| -> Option<Target> {
             let folder = self.pane_folder(there)?;
             let crumbs = if there { self.crumbs_there() } else { self.crumbs_here() };
@@ -301,7 +305,7 @@ impl UiState {
 
     /// The pill, its caption and the highlighted target of the drag that runs.
     pub fn explorer_drag(&self) -> Option<DragView> {
-        let drag = self.explorer.drag.active.as_ref()?;
+        let Some(drag) = self.explorer.drag.active.as_ref() else { return self.system_drop_view() };
         let pill = match drag.items.as_slice() {
             [(name, _)] => name.clone(),
             many => self.tm(&Msg::new(MsgKey::ExplorerDragItems).with(many.len().to_string())),

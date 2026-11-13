@@ -344,6 +344,52 @@ pub(crate) fn drag_release(hit: Option<ControlId>, at: (f32, f32), copy: bool) -
     .unwrap_or(false)
 }
 
+/// The control of the viewer window a Finder drag at `at` is over (see `CanvasView::drop_under`).
+fn drop_under(s: &Shell, at: (f32, f32)) -> Option<ControlId> {
+    s.canvas(WindowKind::Viewer).and_then(|c| c.drop_under(at))
+}
+
+/// A drag from the Finder came over the session window (slice 4): what the drop would do, for AppKit.
+pub(crate) fn system_drag_enter(data: swapdesk_ui::SystemDragData, at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drag_enter(data, under, at, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
+/// The Finder drag moved or rested.
+pub(crate) fn system_drag_over(at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drag_over(under, at, s.now_ms());
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
+/// The Finder drag left the window or was cancelled.
+pub(crate) fn system_drag_leave() {
+    with_shell(|s| {
+        let changed = s.state.borrow_mut().system_drag_leave();
+        s.refresh(changed);
+    });
+}
+
+/// The Finder drag was released over the session window.
+pub(crate) fn system_drop(at: (f32, f32)) -> swapdesk_ui::DropEffect {
+    with_shell(|s| {
+        let under = drop_under(s, at);
+        let reply = s.state.borrow_mut().system_drop(under, at);
+        s.dispatch_from(WindowKind::Viewer, reply.activation);
+        reply.effect
+    })
+    .unwrap_or(swapdesk_ui::DropEffect::None)
+}
+
 /// A right click or Control+click at `at` on `hit` in the explorer: the menu opens after the activation.
 pub(crate) fn context_menu(hit: Option<ControlId>, at: (f32, f32)) {
     with_shell(|s| {
