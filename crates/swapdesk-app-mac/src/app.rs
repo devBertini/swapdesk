@@ -261,6 +261,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // F-FILE-03: the hub tells the UI when macOS refuses the receiving folder (checked at each status and after each
     // transfer that ends).
     service.hub().set_receive_folder_probe(Arc::new(crate::host::receive_folder_denied));
+    // The main window's notices about the Mac's grants and login item: read at each status, and again at start and
+    // whenever the app comes back to the front (the person grants them in System Settings).
+    if options.selftest.is_none() {
+        let login_item = options.registers_login_item();
+        service.hub().set_mac_probe(Arc::new(move || crate::host::mac_state(login_item)));
+        let hub = service.hub().clone();
+        hub.mac_status_changed();
+        // Registered for the whole run of the app, like the session observer.
+        std::mem::forget(crate::app_active::observe(move || hub.mac_status_changed()));
+    }
     // UPDATES.md 2.2, 7: the installed app's updater (never a scratch run); a version that started after a swap commits.
     if !options.use_scratch()
         && let Some(home) = std::env::var_os("HOME")

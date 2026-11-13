@@ -836,6 +836,59 @@ fn a_refused_receiving_folder_shows_in_the_network_status_and_goes_when_access_w
 }
 
 #[test]
+fn the_mac_grants_and_login_item_show_in_the_network_status_and_go_when_given() {
+    // The Mac's probe names what is missing and whether the login item waits for approval; the status carries the
+    // notices, the UIs hear of a change once, and the notices go when the probe says all is given.
+    use swapdesk_ipc::{Notice, OsPermission};
+    let m = Machine::with_interfaces("sala", swapdesk_fakes::FakeNetInterfaces::windows_typical());
+    let state: Arc<std::sync::Mutex<crate::ui_hub::MacState>> = Arc::default();
+    let probe = Arc::clone(&state);
+    m.hub.set_mac_probe(Arc::new(move || probe.lock().unwrap().clone()));
+    let mut ui = m.client(info(false));
+    let notices = |ui: &mut Client| match ui.call(UiOp::GetNetwork).unwrap() {
+        ReplyBody::Network(n) => n.notices,
+        other => panic!("not a network: {other:?}"),
+    };
+    assert!(notices(&mut ui).is_empty(), "nothing missing yet");
+    m.hub.mac_status_changed();
+
+    let missing = vec![OsPermission::ScreenRecording, OsPermission::InputMonitoring];
+    *state.lock().unwrap() = crate::ui_hub::MacState { missing: missing.clone(), login_item_needs_approval: true };
+    let both = vec![Notice::ServiceNeedsApproval, Notice::MacPermissionsMissing(missing)];
+    assert_eq!(notices(&mut ui), both);
+    m.hub.mac_status_changed();
+    let want = both.clone();
+    ui.notify("the notices pushed", move |n| match n {
+        Notify::NetworkChanged(s) if s.notices == want => Some(()),
+        _ => None,
+    });
+
+    // One grant given: the list shrinks.
+    state.lock().unwrap().missing = vec![OsPermission::InputMonitoring];
+    m.hub.mac_status_changed();
+    ui.notify("the shorter list", |n| match n {
+        Notify::NetworkChanged(s)
+            if s.notices
+                == vec![
+                    Notice::ServiceNeedsApproval,
+                    Notice::MacPermissionsMissing(vec![OsPermission::InputMonitoring]),
+                ] =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+
+    *state.lock().unwrap() = crate::ui_hub::MacState::default();
+    m.hub.mac_status_changed();
+    ui.notify("the notices gone", |n| match n {
+        Notify::NetworkChanged(s) if s.notices.is_empty() => Some(()),
+        _ => None,
+    });
+    assert!(notices(&mut ui).is_empty());
+}
+
+#[test]
 fn a_no_space_refusal_reaches_the_ui_as_its_own_code() {
     assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::NoSpace), ApiCode::NoSpace);
     assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::IoFailed), ApiCode::Internal);

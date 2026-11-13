@@ -16,8 +16,9 @@ use swapdesk_capture_mac::screen::{DisplayRegistry, MacScreen};
 use swapdesk_codec_mac::VtH264Encoder;
 use swapdesk_files::{Fs, FsServer, LocalFs, Roots};
 use swapdesk_host::helper::{HelperDeps, run_helper};
+use swapdesk_host::ui_hub::MacState;
 use swapdesk_input_mac::{MacClipboard, MacInputSink};
-use swapdesk_ipc::IpcRole;
+use swapdesk_ipc::{IpcRole, OsPermission as IpcPermission};
 use swapdesk_platform::{Clock, Level, PtySpawner, TraceSink};
 use swapdesk_sys_mac::actions::MacActions;
 use swapdesk_sys_mac::pty::MacPtySpawner;
@@ -32,6 +33,36 @@ static USER_DISK: OnceLock<Arc<LocalFs>> = OnceLock::new();
 /// works again. The UI says so and offers [`swapdesk_sys_mac::FILES_AND_FOLDERS_PANE`].
 pub fn receive_folder_denied() -> Option<PathBuf> {
     USER_DISK.get().and_then(|d| d.access_denied())
+}
+
+/// The grants the host needs that macOS has not given, in the wire's order (Screen Recording, Accessibility, Input
+/// Monitoring), and the login item's wait for approval, from what the system reported.
+pub fn mac_state_from(
+    input: swapdesk_input_mac::Access,
+    screen_recording: bool,
+    login_item: Option<crate::login_item::Status>,
+) -> MacState {
+    let mut missing = Vec::new();
+    if !screen_recording {
+        missing.push(IpcPermission::ScreenRecording);
+    }
+    if !input.accessibility {
+        missing.push(IpcPermission::Accessibility);
+    }
+    if !input.input_monitoring {
+        missing.push(IpcPermission::InputMonitoring);
+    }
+    MacState { missing, login_item_needs_approval: crate::login_item::needs_approval(login_item) }
+}
+
+/// The Mac's answer now, without prompting: the three grants and, when this run follows the login item, its status.
+/// `login_item` is false for a run that does not register one (a scratch run), which never shows its notice.
+pub fn mac_state(login_item: bool) -> MacState {
+    mac_state_from(
+        swapdesk_input_mac::access(),
+        swapdesk_capture_mac::screen_access(),
+        login_item.then(crate::login_item::status).flatten(),
+    )
 }
 
 /// The helper loop the supervisor runs, again after each end.
@@ -110,4 +141,43 @@ pub fn request_grants(missing: &[OsPermission], trace: &dyn TraceSink) {
         "app",
         format_args!("grants asked for: screen recording {screen_now:?}, input {input_now:?} (answers come later)"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::login_item::Status;
+    use swapdesk_input_mac::Access;
+
+    const ALL: Access = Access { input_monitoring: true, accessibility: true };
+
+    #[test]
+    fn nothing_is_missing_when_everything_is_granted() {
+        assert_eq!(mac_state_from(ALL, true, Some(Status::Enabled)), MacState::default());
+    }
+
+    #[test]
+    fn each_missing_grant_is_listed_in_the_wire_order() {
+        let none = Access { input_monitoring: false, accessibility: false };
+        assert_eq!(
+            mac_state_from(none, false, None).missing,
+            vec![IpcPermission::ScreenRecording, IpcPermission::Accessibility, IpcPermission::InputMonitoring]
+        );
+        assert_eq!(
+            mac_state_from(Access { accessibility: false, ..ALL }, true, None).missing,
+            vec![IpcPermission::Accessibility]
+        );
+        assert_eq!(
+            mac_state_from(Access { input_monitoring: false, ..ALL }, true, None).missing,
+            vec![IpcPermission::InputMonitoring]
+        );
+        assert_eq!(mac_state_from(ALL, false, None).missing, vec![IpcPermission::ScreenRecording]);
+    }
+
+    #[test]
+    fn the_login_item_waits_only_when_the_system_says_requires_approval() {
+        assert!(mac_state_from(ALL, true, Some(Status::RequiresApproval)).login_item_needs_approval);
+        assert!(!mac_state_from(ALL, true, Some(Status::NotRegistered)).login_item_needs_approval);
+        assert!(!mac_state_from(ALL, true, None).login_item_needs_approval);
+    }
 }

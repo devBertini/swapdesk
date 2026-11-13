@@ -241,7 +241,23 @@ pub(crate) struct Hub {
     receive_probe: Mutex<Option<ReceiveProbe>>,
     /// The folder the UIs were last told about, so a change is pushed once.
     receive_told: Mutex<Option<String>>,
+    /// The Mac's own grants and login item, read when the network status is built (docs/PARITY.md, the macOS notices).
+    mac_probe: Mutex<Option<MacProbe>>,
+    /// What the UIs were last told about them, so a change is pushed once.
+    mac_told: Mutex<MacState>,
 }
+
+/// What the Mac says about its own grants and login item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MacState {
+    /// The grants the host needs and macOS has not given (Screen Recording, Accessibility, Input Monitoring).
+    pub missing: Vec<swapdesk_ipc::OsPermission>,
+    /// The login item waits for the person's approval in System Settings > Login Items (`requiresApproval`).
+    pub login_item_needs_approval: bool,
+}
+
+/// Asks the Mac for its [`MacState`] ([`UiHub::set_mac_probe`]); it must be cheap and not prompt.
+pub type MacProbe = Arc<dyn Fn() -> MacState + Send + Sync>;
 
 /// Asks the platform which receiving folder it refuses ([`UiHub::set_receive_folder_probe`]).
 pub type ReceiveProbe = Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>;
@@ -413,6 +429,8 @@ impl UiHub {
             updater: std::sync::OnceLock::new(),
             receive_probe: Mutex::new(None),
             receive_told: Mutex::new(None),
+            mac_probe: Mutex::new(None),
+            mac_told: Mutex::new(MacState::default()),
         });
         let weak = Arc::downgrade(&hub);
         hub.p.presence.set_listener(Arc::new(move || {
@@ -511,6 +529,18 @@ impl UiHub {
     /// right after a refused receive and goes once access works.
     pub fn set_receive_folder_probe(&self, probe: ReceiveProbe) {
         *lock(&self.hub.receive_probe) = Some(probe);
+    }
+
+    /// The Mac's way to say which grants are missing and whether the login item waits for approval. The network status
+    /// carries `MacPermissionsMissing` and `ServiceNeedsApproval` while the probe says so; the app calls
+    /// [`UiHub::mac_status_changed`] when the answer may have changed (at start, when the app becomes active again).
+    pub fn set_mac_probe(&self, probe: MacProbe) {
+        *lock(&self.hub.mac_probe) = Some(probe);
+    }
+
+    /// Reads the Mac probe again and tells the UIs the network status when its answer changed since they last heard.
+    pub fn mac_status_changed(&self) {
+        self.hub.mac_status_changed();
     }
 
     /// A 1.0 install left its data on this computer (ACCOUNTS.md 10.2): this account's empty Pareados list shows the

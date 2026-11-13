@@ -18,7 +18,7 @@ use swapdesk_trust::{AuditEntry, AuditEvent, AuditSink, DeviceId, DeviceRef, Dir
 use swapdesk_ui::strings::MsgKey;
 
 use super::presence::PresencePeer;
-use super::{Hub, lock};
+use super::{Hub, MacState, lock};
 
 /// How many audit entries the device list reads for "last session".
 const LAST_SESSION_SCAN: usize = 2000;
@@ -211,6 +211,31 @@ impl Hub {
         }
     }
 
+    /// The Mac's notices from its probe: the missing grants (with the list) and the login item waiting for approval.
+    fn mac_state(&self) -> MacState {
+        lock(&self.mac_probe).clone().map(|probe| probe()).unwrap_or_default()
+    }
+
+    fn mac_notices(state: MacState) -> Vec<Notice> {
+        let mut out = Vec::new();
+        if state.login_item_needs_approval {
+            out.push(Notice::ServiceNeedsApproval);
+        }
+        if !state.missing.is_empty() {
+            out.push(Notice::MacPermissionsMissing(state.missing));
+        }
+        out
+    }
+
+    /// Tells the UIs the network status again when the Mac's grants or login item changed since it last did.
+    pub(crate) fn mac_status_changed(&self) {
+        let now = self.mac_state();
+        let changed = std::mem::replace(&mut *lock(&self.mac_told), now.clone()) != now;
+        if changed {
+            self.notify(Notify::NetworkChanged(self.network_status()));
+        }
+    }
+
     /// The first approved interface that is up, its address and category; the notices the UI shows as banners.
     pub fn network_status(&self) -> NetworkStatus {
         let list = self.interfaces();
@@ -220,7 +245,7 @@ impl Hub {
                 label: String::new(),
                 address: None,
                 category: None,
-                notices: self.receive_notice().into_iter().collect(),
+                notices: Self::mac_notices(self.mac_state()).into_iter().chain(self.receive_notice()).collect(),
             };
         };
         let iface = list.iter().find(|i| i.index == first.if_index);
@@ -232,6 +257,7 @@ impl Hub {
         if iface.is_some_and(|i| i.inbound_blocked == Some(true)) {
             notices.push(Notice::FirewallBlocks);
         }
+        notices.extend(Self::mac_notices(self.mac_state()));
         notices.extend(self.receive_notice());
         NetworkStatus {
             label: first.if_name.clone(),

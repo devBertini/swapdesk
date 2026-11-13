@@ -31,6 +31,8 @@ pub mod ui_script;
 #[cfg(target_os = "macos")]
 pub mod app;
 #[cfg(target_os = "macos")]
+pub mod app_active;
+#[cfg(target_os = "macos")]
 pub mod decode;
 #[cfg(target_os = "macos")]
 pub mod drive;

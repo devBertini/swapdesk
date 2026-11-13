@@ -52,6 +52,12 @@ impl Status {
     }
 }
 
+/// Whether the login item waits for the person's approval in Login Items (`requiresApproval`, which the system also
+/// returns after the person revokes consent).
+pub fn needs_approval(status: Option<Status>) -> bool {
+    status == Some(Status::RequiresApproval)
+}
+
 /// The trace line and its level for a registration attempt: `error` is the registration's error text, if it failed.
 pub fn describe(status: Option<Status>, error: Option<&str>) -> (Level, String) {
     let status_text = status.map_or_else(|| "unavailable".to_owned(), Status::name);
@@ -136,6 +142,15 @@ mod tests {
         assert_eq!(Status::from_raw(1).name(), "enabled");
         assert_eq!(Status::from_raw(2).name(), "requiresApproval");
         assert_eq!(Status::from_raw(9).name(), "unknown(9)");
+    }
+
+    #[test]
+    fn only_requires_approval_waits_for_the_person() {
+        assert!(needs_approval(Some(Status::RequiresApproval)));
+        for s in [Status::NotRegistered, Status::Enabled, Status::NotFound, Status::Other(7)] {
+            assert!(!needs_approval(Some(s)), "{s:?}");
+        }
+        assert!(!needs_approval(None), "no answer is not a request for approval");
     }
 
     #[test]

@@ -56,7 +56,6 @@ These controls exist in the shared state but no shell opens them, so they do not
 - **Choose display:** the button asks the host for its displays, but no list opens to pick one (switching displays is in 1.2, F-VIEW-02).
 - **Quality and view-only in the toolbar:** never drawn (Settings holds the default quality, and "Assistir" is chosen when connecting).
 - **Blocking an address from the activity alert:** the button is shown, but the service has no way to add an address to its block list yet.
-- **The macOS notices** (the login item waiting for approval, missing permissions) are designed and drawn, but the Mac app does not raise them yet.
 
 The Windows network notices open Settings > Network & internet, and "Export log" writes the newest 1000 entries of the activity log as CSV, on both systems.
 
