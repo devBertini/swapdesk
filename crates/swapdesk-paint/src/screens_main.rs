@@ -5,7 +5,7 @@
 use swapdesk_ui::format;
 use swapdesk_ui::home::{HomeCard, RecentLine};
 use swapdesk_ui::list::{max_scroll, visible_rows};
-use swapdesk_ui::tokens::{Color, fixed, layout, text};
+use swapdesk_ui::tokens::{Color, layout, text};
 use swapdesk_ui::{
     ControlId, DataKind, DeviceStatus, DeviceTab, DeviceView, DialogKind, EditId, Msg, MsgKey, Nav, NoticeKind,
     PairingState, Screen, SelectId, WaitCard, WaitIcon, WindowKind,
@@ -1684,7 +1684,7 @@ fn card(f: &Frame, content_h: f32) -> Rect {
         return r;
     }
     f.p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), f.pal.remote);
-    f.p.shadow(r, layout::DIALOG_RADIUS, 30.0, 80.0, fixed::SHADOW_DIALOG);
+    f.p.shadow(r, layout::DIALOG_RADIUS, 30.0, 80.0, f.fx.shadow_dialog);
     f.p.fill_rrect(r, layout::DIALOG_RADIUS, f.pal.surface);
     r
 }

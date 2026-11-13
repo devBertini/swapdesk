@@ -117,7 +117,7 @@ impl UiState {
     pub(crate) fn home_controls(&self, s: &mut Specs) {
         let home = self.home();
         if let Some(name) = &home.name {
-            s.text(UiRole::Heading, name.clone());
+            s.heading(1, name.clone());
         }
         if let Some(status) = &home.status {
             s.text(UiRole::Text, status.clone());
@@ -133,7 +133,7 @@ impl UiState {
             if waits {
                 s.region(crate::interact::Region::Status);
             }
-            s.text(UiRole::Heading, c.title);
+            s.heading(2, c.title);
             for text in c.body.into_iter().chain(c.note) {
                 s.text(UiRole::Text, text);
             }
@@ -150,7 +150,7 @@ impl UiState {
             }
         }
         if let Some((title, body)) = self.guide_card() {
-            s.text(UiRole::Heading, title);
+            s.heading(2, title);
             s.text(UiRole::Text, body);
             s.button(ControlId::GuideSkip, self.t(MsgKey::GuideSkip));
             s.button(ControlId::GuideDone, self.t(MsgKey::GuideDone));
@@ -159,7 +159,7 @@ impl UiState {
         for card in &home.cards {
             match card {
                 HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
-                    s.text(UiRole::Heading, title.clone());
+                    s.heading(2, title.clone());
                     s.text(UiRole::Text, body.clone());
                     s.button(ControlId::PairThisComputer, button.clone());
                     let c = s.add(ControlId::Edit(EditId::Address), UiRole::TextInput, address_label.clone());
@@ -167,7 +167,7 @@ impl UiState {
                     s.button(ControlId::AddAddress, add.clone());
                 }
                 HomeCard::Recent { title, lines, empty, all } => {
-                    s.text(UiRole::Heading, title.clone());
+                    s.heading(2, title.clone());
                     s.button(ControlId::HomeActivityAll, all.clone());
                     if lines.is_empty() && !self.placeholder(DataKind::Activity) {
                         s.text(UiRole::Text, empty.clone());

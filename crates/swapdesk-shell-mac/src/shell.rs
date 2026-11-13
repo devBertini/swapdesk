@@ -406,6 +406,10 @@ fn start_with(
     swapdesk_paint::term::set_terminal_waker(shell.waker.clone());
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
+    // "Increase contrast" on at launch: the first paint uses the stronger palette.
+    {
+        let _ = shell.state.borrow_mut().set_contrast(crate::system::system_contrast());
+    }
     shell.apply_forced_appearance();
 
     // The window appears before any answer; the requests go out right after, all together.
@@ -550,6 +554,14 @@ impl Shell {
                 ctl,
                 sel!(themeChanged:),
                 Some(ns_string!("AppleInterfaceThemeChangedNotification")),
+                None,
+            );
+            // "Increase contrast" and the other display options: posted to the workspace's own center
+            // (NSAccessibility.h).
+            NSWorkspace::sharedWorkspace().notificationCenter().addObserver_selector_name_object(
+                ctl,
+                sel!(themeChanged:),
+                Some(objc2_app_kit::NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
                 None,
             );
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
@@ -982,9 +994,13 @@ impl Shell {
         self.refresh(c);
     }
 
+    /// The system's appearance changed: light or dark, or "Increase contrast" turned on or off.
     fn system_theme_changed(&self) {
         let dark = system_dark();
-        let c = self.state.borrow_mut().set_dark(dark);
+        let c = {
+            let mut st = self.state.borrow_mut();
+            st.set_dark(dark).union(st.set_contrast(crate::system::system_contrast()))
+        };
         self.refresh(c);
     }
 

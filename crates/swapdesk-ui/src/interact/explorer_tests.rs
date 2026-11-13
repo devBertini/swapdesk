@@ -84,7 +84,7 @@ fn a_click_selects_one_ctrl_click_toggles_and_shift_click_extends_from_the_ancho
     assert_eq!(sel(&s), 3, "from the anchor (row 2) to row 0");
     s.activate(ControlId::ExpRow(false, 1));
     assert_eq!(sel(&s), 1, "a plain click selects one again");
-    assert!(s.explorer_pane(false).status.contains("1 selecionados"), "{}", s.explorer_pane(false).status);
+    assert!(s.explorer_pane(false).status.contains("1 selecionado,"), "{}", s.explorer_pane(false).status);
 }
 
 #[test]

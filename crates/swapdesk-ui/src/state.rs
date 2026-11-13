@@ -602,6 +602,8 @@ pub struct UiState {
     pub(crate) lang: Language,
     /// What the OS says (`ThemeChanged`); used while `theme` is `System`.
     pub(crate) dark: bool,
+    /// What the system asks for beyond light and dark (a contrast theme, "Increase contrast").
+    pub(crate) contrast: crate::tokens::Contrast,
     /// The theme chosen in Ajustes (per user, like the language: the UI's copy wins over the service's).
     pub(crate) theme: Theme,
     /// The per-user record of C5.1 once a store is attached (`load_prefs`): the UI's own copy of the per-user
@@ -732,6 +734,7 @@ impl UiState {
             activity_refresh: false,
             lang,
             dark,
+            contrast: crate::tokens::Contrast::Standard,
             theme: Theme::System,
             ui: None,
             prefs_store: None,
@@ -1567,6 +1570,35 @@ impl UiState {
         let before = self.dark();
         self.dark = dark;
         if self.dark() == before { Changed::NONE } else { Changed::ALL }
+    }
+
+    /// The system's contrast setting changed (or was read): a Windows contrast theme or macOS "Increase contrast".
+    pub fn set_contrast(&mut self, contrast: crate::tokens::Contrast) -> Changed {
+        if self.contrast == contrast {
+            return Changed::NONE;
+        }
+        self.contrast = contrast;
+        Changed::ALL
+    }
+
+    /// The colours to draw with now: a Windows contrast theme's own colours whatever the theme; with "Increase
+    /// contrast", the stronger light or dark palette; else the design's (F-UI-01).
+    pub fn palette(&self) -> crate::tokens::Palette {
+        use crate::tokens::{Contrast, DARK_MORE_CONTRAST, LIGHT_MORE_CONTRAST, contrast_palette, palette};
+        match self.contrast {
+            Contrast::Theme(colors) => contrast_palette(&colors),
+            Contrast::More if self.dark() => DARK_MORE_CONTRAST,
+            Contrast::More => LIGHT_MORE_CONTRAST,
+            Contrast::Standard => *palette(self.dark()),
+        }
+    }
+
+    /// The colours that do not follow light and dark: the design's, or a Windows contrast theme's own.
+    pub fn fixed_colors(&self) -> crate::tokens::FixedColors {
+        match self.contrast {
+            crate::tokens::Contrast::Theme(colors) => crate::tokens::contrast_fixed(&colors),
+            _ => crate::tokens::FIXED,
+        }
     }
 
     /// Attaches the per-user record (C5.1) and applies it: language, theme, release key and the rest of the

@@ -146,3 +146,70 @@ fn the_wait_card_is_a_polite_live_region_and_the_countdown_is_not() {
     let tree = build_tree(&Scenario::Dispositivos.prepared_state(), WindowKind::Main, &|_| None, None);
     assert!(live_nodes(&tree).is_empty());
 }
+
+/// F-UI-01: the chat is read line by line, and a message from the other side is said as it arrives (the newest one
+/// it sent is the live region); what this side wrote is never announced back.
+#[test]
+fn the_chat_is_listed_and_the_newest_message_from_the_other_side_is_announced() {
+    let mut s = Scenario::Chat.prepared_state();
+    let lines = |s: &UiState| -> Vec<(String, Region)> {
+        s.controls(WindowKind::Viewer)
+            .into_iter()
+            .filter(|c| c.role == UiRole::Text && (c.label.starts_with("Você: ") || c.label.contains(": Pode")))
+            .map(|c| (c.label, c.region))
+            .collect()
+    };
+    let before = lines(&s);
+    assert!(before.iter().any(|(l, _)| l == "Você: Pode, já salvei tudo."), "{before:?}");
+    assert!(
+        before.iter().all(|(_, r)| *r == Region::Drawer),
+        "the newest is this side's: nothing to announce {before:?}"
+    );
+
+    let session_id = s.viewer_session().expect("a session").id;
+    let _ = s.apply(UiEvent::Chat {
+        session_id,
+        message: crate::api::ChatView {
+            msg_id: 99,
+            mine: false,
+            text: "Pode reiniciar".into(),
+            sent_at_ms: 0,
+            read: false,
+        },
+    });
+    let after = lines(&s);
+    let (newest, region) = after.last().expect("the new line").clone();
+    assert!(newest.ends_with(": Pode reiniciar"), "{after:?}");
+    assert_eq!(region, Region::Status, "the message that just came is announced");
+    assert!(after[..after.len() - 1].iter().all(|(_, r)| *r == Region::Drawer), "older lines are only read: {after:?}");
+}
+
+/// F-UI-01: a pause that comes over the picture (the other computer locked) is said when it appears.
+#[test]
+fn a_pause_over_the_picture_is_announced() {
+    let mut s = Scenario::Chat.prepared_state();
+    let v = s.viewer_session().expect("a session").clone();
+    let _ = s.apply(UiEvent::Session {
+        session_id: v.id,
+        device_id: v.device_id.clone(),
+        state: crate::api::SessionState::Paused { desktop: crate::api::DesktopKind::Locked },
+    });
+    let (body, _) = s.paused_card().expect("the pause card");
+    let spec = s.controls(WindowKind::Viewer).into_iter().find(|c| c.label == body).expect("the pause text is listed");
+    assert_eq!(spec.region, Region::Status);
+    let heading = s.controls(WindowKind::Viewer).into_iter().find(|c| c.role == UiRole::Heading).expect("a heading");
+    assert_eq!(heading.level, 1, "the peer's name is the viewer's title");
+}
+
+/// Owner, 12/11: "Nome na janela é o nome do app e nada mais": the viewer window is titled Swapdesk, without the
+/// computer it shows (before: "Helios Neo, Swapdesk").
+#[test]
+fn every_window_with_a_title_bar_is_titled_with_the_apps_name_alone() {
+    let s = Scenario::Visualizador.prepared_state();
+    let peer = s.device_by_id(&s.viewer_session().expect("a session").device_id).expect("the peer").name.clone();
+    for kind in [WindowKind::Main, WindowKind::Viewer] {
+        let title = crate::a11y::window_title(&s, kind);
+        assert_eq!(title, "Swapdesk", "{kind:?}");
+        assert!(!title.contains(&peer));
+    }
+}

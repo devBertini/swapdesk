@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use swapdesk_ui::a11y;
 use swapdesk_ui::debounce::{DEBOUNCE_MS, Debouncer};
-use swapdesk_ui::tokens::{layout, palette};
+use swapdesk_ui::tokens::layout;
 use swapdesk_ui::trace::SlowGuard;
 use swapdesk_ui::{ControlId, EditId, Effect, WindowKind};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -89,7 +89,7 @@ pub struct Window {
     /// The last click on a control: which and when (ms), for a double click on the explorer's rows.
     last_click: Cell<Option<(ControlId, u64)>>,
     edit_font: Cell<Option<windows::Win32::Graphics::Gdi::HFONT>>,
-    edit_brush: Cell<Option<(bool, HBRUSH)>>,
+    edit_brush: Cell<Option<(u32, HBRUSH)>>,
     /// A modal effect (menu, file dialog) to run after the message that asked for it has finished.
     pending_effect: RefCell<Option<Effect>>,
     /// The text of the address field while it waits for 150 ms of quiet (R-UI-4).
@@ -1112,9 +1112,16 @@ impl Window {
                     && unsafe { PCWSTR(lparam.0 as *const u16).to_string().is_ok_and(|s| s == "ImmersiveColorSet") };
                 // Every top-level window gets the broadcast; the handler updates all the windows (palette, title bar
                 // and repaint), whichever kind received it first.
-                if is_theme {
+                // A contrast theme turned on or off arrives as SPI_SETHIGHCONTRAST.
+                let contrast = wparam.0 == windows::Win32::UI::WindowsAndMessaging::SPI_SETHIGHCONTRAST.0 as usize;
+                if is_theme || contrast {
                     self.shared.system_theme_changed();
                 }
+                None
+            }
+            // The colours of the contrast theme were edited.
+            windows::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE => {
+                self.shared.system_theme_changed();
                 None
             }
             WM_MOUSEMOVE => {
@@ -1335,10 +1342,9 @@ impl Window {
                 result.map(Into::into)
             }
             WM_CTLCOLOREDIT => {
-                let dark = self.shared.state.borrow().dark();
-                let pal = palette(dark);
+                let pal = self.shared.state.borrow().palette();
                 let brush = match self.edit_brush.get() {
-                    Some((d, b)) if d == dark => b,
+                    Some((surface, b)) if surface == pal.surface.hex() => b,
                     old => {
                         if let Some((_, b)) = old {
                             // SAFETY: the old brush is ours and no longer selected anywhere.
@@ -1348,7 +1354,7 @@ impl Window {
                         }
                         // SAFETY: plain brush creation.
                         let b = unsafe { CreateSolidBrush(colorref(pal.surface.hex())) };
-                        self.edit_brush.set(Some((dark, b)));
+                        self.edit_brush.set(Some((pal.surface.hex(), b)));
                         b
                     }
                 };

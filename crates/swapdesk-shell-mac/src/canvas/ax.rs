@@ -296,6 +296,10 @@ impl Build<'_> {
             Some(object(&NSNumber::new_i32(i32::from(on))))
         } else if node.role() == Role::Tab {
             Some(object(&NSNumber::new_i32(i32::from(selected))))
+        } else if node.role() == Role::Heading {
+            // VoiceOver reads a heading's level from its value, a number (WebKit's AXHeading, LayoutTests
+            // accessibility/mac/element-level.html).
+            Some(object(&NSNumber::new_i32(i32::try_from(node.level().unwrap_or(1)).unwrap_or(1))))
         } else {
             node.value().map(|v| object(&ns(v)))
         };

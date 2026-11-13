@@ -100,6 +100,48 @@ pub fn system_language() -> swapdesk_ui::Language {
     if id & 0x3FF == 0x16 { Language::PtBr } else { Language::En }
 }
 
+/// Whether a contrast theme is on (`SPI_GETHIGHCONTRAST`, `HCF_HIGHCONTRASTON`) and, if so, its colours
+/// (`GetSysColor`), learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getsyscolor.
+pub fn system_contrast() -> swapdesk_ui::tokens::Contrast {
+    use windows::Win32::Graphics::Gdi::{
+        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_HOTLIGHT,
+        COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+    };
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut hc = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    // SAFETY: `hc` outlives the call and its size is in `cbSize` and in the second argument.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some(std::ptr::from_mut(&mut hc).cast::<c_void>()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    if read.is_err() || !hc.dwFlags.contains(HCF_HIGHCONTRASTON) {
+        return swapdesk_ui::tokens::Contrast::Standard;
+    }
+    // A COLORREF is 0x00BBGGRR; the palette takes 0xRRGGBB.
+    let rgb = |index: SYS_COLOR_INDEX| {
+        // SAFETY: a plain query.
+        let c = unsafe { GetSysColor(index) };
+        ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+    };
+    swapdesk_ui::tokens::Contrast::Theme(swapdesk_ui::tokens::SystemColors {
+        window: rgb(COLOR_WINDOW),
+        window_text: rgb(COLOR_WINDOWTEXT),
+        hotlight: rgb(COLOR_HOTLIGHT),
+        gray_text: rgb(COLOR_GRAYTEXT),
+        highlight: rgb(COLOR_HIGHLIGHT),
+        highlight_text: rgb(COLOR_HIGHLIGHTTEXT),
+        button_face: rgb(COLOR_BTNFACE),
+        button_text: rgb(COLOR_BTNTEXT),
+    })
+}
+
 /// `AppsUseLightTheme` under HKCU (0 means dark); `SWAPDESK_THEME=dark|light` overrides it in development.
 pub fn system_dark() -> bool {
     match std::env::var("SWAPDESK_THEME").as_deref() {

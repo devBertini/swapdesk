@@ -115,7 +115,7 @@ fn control_node(c: &ControlSpec, bounds: Option<(f64, f64, f64, f64)>) -> Node {
         n.set_disabled();
     }
     if c.role == UiRole::Heading {
-        n.set_level(1);
+        n.set_level(usize::from(c.level.max(1)));
     }
     if c.id.focusable() {
         n.add_action(Action::Focus);
@@ -194,18 +194,12 @@ pub fn build_tree(
     TreeUpdate { nodes, tree: Some(TreeInfo::new(ROOT)), tree_id: TreeId::ROOT, focus: focus_node }
 }
 
-/// The accessible title of a window.
+/// The title of a window: the app's name and nothing more, the viewer's included (owner, 12/11: "Nome na janela é o
+/// nome do app e nada mais"); the peer's name is the viewer's first heading and is on its session toolbar. The banner,
+/// which has no title bar, is named for what it is.
 pub fn window_title(state: &UiState, kind: WindowKind) -> String {
     match kind {
-        WindowKind::Main => state.t(MsgKey::AppName),
-        WindowKind::Viewer => {
-            let peer = state
-                .viewer_session()
-                .and_then(|s| state.device_by_id(&s.device_id))
-                .map(|d| d.name.clone())
-                .unwrap_or_default();
-            state.tm(&crate::api::Msg::new(MsgKey::ViewerTitle).with(peer))
-        }
+        WindowKind::Main | WindowKind::Viewer => state.t(MsgKey::AppName),
         WindowKind::Banner => state.t(MsgKey::BannerLabel),
     }
 }
@@ -288,6 +282,35 @@ mod tests {
                 assert!(tree.nodes.len() > 1, "{} {kind:?} has an empty tree", sc.name());
             }
         }
+    }
+
+    /// A screen reader moves through a page by its headings: the page's title is the one heading of level 1, each
+    /// section and card under it is level 2, and a page with sections has its title before them (F-UI-01).
+    #[test]
+    fn each_window_has_at_most_one_level_one_heading_and_it_comes_before_the_sections() {
+        for sc in Scenario::ALL {
+            let state = sc.prepared_state();
+            for kind in state.windows() {
+                let levels: Vec<u8> =
+                    state.controls(kind).iter().filter(|c| c.role == UiRole::Heading).map(|c| c.level).collect();
+                let name = sc.name();
+                assert!(levels.iter().all(|l| (1..=2).contains(l)), "{name} {kind:?}: levels {levels:?}");
+                let ones: Vec<usize> = (0..levels.len()).filter(|&i| levels[i] == 1).collect();
+                assert!(ones.len() <= 1, "{name} {kind:?}: several page titles {levels:?}");
+                if let Some(&first) = ones.first() {
+                    assert!(
+                        levels[..first].iter().all(|&l| l == 1),
+                        "{name} {kind:?}: a section before the title {levels:?}"
+                    );
+                }
+            }
+        }
+        let state = Scenario::Ajustes.prepared_state();
+        let tree = build_tree(&state, WindowKind::Main, &|_| None, None);
+        let levels: Vec<usize> =
+            tree.nodes.iter().filter(|(_, n)| n.role() == Role::Heading).filter_map(|(_, n)| n.level()).collect();
+        assert_eq!(levels.first(), Some(&1), "Ajustes: its title is level 1 in the tree: {levels:?}");
+        assert!(levels.contains(&2), "Ajustes: its sections are level 2: {levels:?}");
     }
 
     #[test]

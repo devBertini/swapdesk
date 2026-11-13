@@ -35,7 +35,7 @@ use objc2_foundation::{
     NSRect, NSSize, NSString,
 };
 use swapdesk_paint::{EditSlot, Frame, Interaction, Output, Rect, Widget, input, layout_dump};
-use swapdesk_ui::tokens::{Palette, palette, text};
+use swapdesk_ui::tokens::{Palette, text};
 use swapdesk_ui::{ControlId, EditId, WindowKind};
 
 use crate::appkit::color;
@@ -91,7 +91,7 @@ pub struct CanvasIvars {
     /// A placement of the fields is queued on the main queue.
     placing: Cell<bool>,
     /// The theme the fields' colours were set for.
-    fields_dark: Cell<Option<bool>>,
+    fields_dark: Cell<Option<u32>>,
     /// The view that has the keyboard while no text field does: the video view of a viewer window (its keys go to
     /// the host), else the canvas itself.
     home: RefCell<Option<Retained<NSView>>>,
@@ -711,9 +711,9 @@ impl CanvasView {
     pub fn place_fields(&self) {
         let iv = self.ivars();
         iv.placing.set(false);
-        let Some(dark) = crate::shell::with_state(|st| st.dark()) else { return };
-        let pal = palette(dark);
-        let recolour = iv.fields_dark.replace(Some(dark)) != Some(dark);
+        let Some(pal) = crate::shell::with_state(|st| st.palette()) else { return };
+        // The fields are coloured again when the palette's surface changes (theme, "Increase contrast").
+        let recolour = iv.fields_dark.replace(Some(pal.surface.hex())) != Some(pal.surface.hex());
         let slots: Vec<EditSlot> = iv.out.borrow().edits.clone();
         let known: Vec<Field> = iv.fields.borrow().clone();
         for slot in &slots {
@@ -729,7 +729,7 @@ impl CanvasView {
             };
             let view = &field.view;
             if created || recolour {
-                style_field(view, pal, &slot.placeholder);
+                style_field(view, &pal, &slot.placeholder);
             }
             // One line of text, centred in the slot; the cell's own inset is taken back so the text starts where the
             // frame would draw it.

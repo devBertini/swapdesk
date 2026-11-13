@@ -58,6 +58,16 @@ pub fn system_language() -> Language {
     language_from_tags(tags.iter().map(String::as_str))
 }
 
+/// "Increase contrast" in System Settings > Accessibility > Display (`NSWorkspace`
+/// `accessibilityDisplayShouldIncreaseContrast`, AppKit NSAccessibility.h, macOS 10.10).
+pub fn system_contrast() -> swapdesk_ui::tokens::Contrast {
+    if objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldIncreaseContrast() {
+        swapdesk_ui::tokens::Contrast::More
+    } else {
+        swapdesk_ui::tokens::Contrast::Standard
+    }
+}
+
 /// True in Dark appearance; `SWAPDESK_THEME=dark|light` overrides in development. Needs the main thread.
 pub fn system_dark() -> bool {
     if let Some(d) = theme_override(std::env::var("SWAPDESK_THEME").ok().as_deref()) {

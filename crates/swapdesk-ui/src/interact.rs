@@ -224,6 +224,8 @@ pub struct ControlSpec {
     pub value: Option<String>,
     pub region: Region,
     pub disabled: bool,
+    /// A heading's level: 1 for the title of the page, 2 for a section or a card in it; 0 for anything else.
+    pub level: u8,
 }
 
 impl ControlSpec {
@@ -238,6 +240,7 @@ impl ControlSpec {
             value: None,
             region,
             disabled: false,
+            level: 0,
         }
     }
 }
@@ -261,6 +264,12 @@ impl Specs {
     }
     pub(crate) fn button(&mut self, id: ControlId, label: impl Into<String>) {
         self.add(id, UiRole::Button, label);
+    }
+    /// A heading of `level` (1: the page's title, 2: a section or a card).
+    pub(crate) fn heading(&mut self, level: u8, label: impl Into<String>) {
+        let id = ControlId::Static(self.next_static);
+        self.next_static += 1;
+        self.add(id, UiRole::Heading, label).level = level;
     }
     pub(crate) fn text(&mut self, role: UiRole, label: impl Into<String>) {
         let id = ControlId::Static(self.next_static);
@@ -385,7 +394,7 @@ impl UiState {
     /// the countdown is a progress node outside it (read when focused, never announced each second), then the buttons.
     fn wait_card_controls(&self, s: &mut Specs, card: &WaitCard) {
         s.region(Region::Status);
-        s.text(UiRole::Heading, card.title.clone());
+        s.heading(2, card.title.clone());
         s.text(UiRole::Text, card.body.clone());
         s.region(Region::Content);
         if card.phase == WaitPhase::Prompted
@@ -406,12 +415,12 @@ impl UiState {
     pub(crate) fn crash_and_empty_controls(&self, s: &mut Specs) {
         if self.crash_notice {
             let (title, body, button) = self.notice_texts(NoticeKind::Crash);
-            s.text(UiRole::Heading, title);
+            s.heading(2, title);
             s.text(UiRole::Text, body);
             s.button(ControlId::Notice(NoticeKind::Crash), button);
         }
         if self.no_computer_card() {
-            s.text(UiRole::Heading, self.name_of(MsgKey::NoComputerTitle));
+            s.heading(2, self.name_of(MsgKey::NoComputerTitle));
             s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
             s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
         } else if self.devices.is_empty() && self.fetch(DataKind::Devices) == Fetch::Ready {
@@ -436,7 +445,7 @@ impl UiState {
                 }
             }
             None => {
-                s.text(UiRole::Heading, d.name.clone());
+                s.heading(1, d.name.clone());
                 if self.rename_available(d) {
                     s.button(ControlId::RenameDevice, self.name_of(MsgKey::RenameAction));
                 }
@@ -469,7 +478,7 @@ impl UiState {
         if !notices.is_empty() {
             for k in notices {
                 let (title, body, button) = self.notice_texts(k);
-                s.text(UiRole::Heading, title);
+                s.heading(2, title);
                 s.text(UiRole::Text, body);
                 s.button(ControlId::Notice(k), button);
             }
@@ -482,14 +491,14 @@ impl UiState {
         match self.tab {
             DeviceTab::Overview => {
                 s.text(UiRole::Text, self.name_of(MsgKey::SwapNote));
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
                 s.text(UiRole::Text, self.permission_summary(d.grants_here));
                 s.add(ControlId::EditGrants, UiRole::Link, self.name_of(MsgKey::PermsPanelEdit));
-                s.text(UiRole::Heading, self.name_of(MsgKey::LastSessionTitle));
+                s.heading(2, self.name_of(MsgKey::LastSessionTitle));
                 s.text(UiRole::Text, self.last_session_text(d));
             }
             DeviceTab::Permissions => {
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PermsHereTitle).with(d.name.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PermsHereTitle).with(d.name.clone())));
                 for (p, label, hint) in self.permission_rows() {
                     let available = self.grant_available(p);
                     s.switch(ControlId::Grant(p), label, available && d.grants_here.has(p), hint);
@@ -499,7 +508,7 @@ impl UiState {
                         c.disabled = true;
                     }
                 }
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PermsThereTitle).with(d.name.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PermsThereTitle).with(d.name.clone())));
                 for (label, answer) in self.there_rows(d) {
                     s.text(UiRole::Text, format!("{label}: {answer}"));
                 }
@@ -507,7 +516,7 @@ impl UiState {
                 s.button(ControlId::Forget, self.name_of(MsgKey::ForgetDevice));
             }
             DeviceTab::History => {
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::HistoryTitle).with(d.name.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::HistoryTitle).with(d.name.clone())));
                 s.text(UiRole::Text, self.name_of(MsgKey::HistoryPlaceholder));
             }
         }
@@ -675,7 +684,7 @@ impl UiState {
     }
 
     fn activity_controls(&self, s: &mut Specs) {
-        s.text(UiRole::Heading, self.name_of(MsgKey::ActivityTitle));
+        s.heading(1, self.name_of(MsgKey::ActivityTitle));
         s.button(ControlId::Export, self.name_of(MsgKey::ExportLog));
         if let Some(a) = &self.alert {
             let addr = a.what.args.first().cloned().unwrap_or_default();
@@ -737,7 +746,7 @@ impl UiState {
     }
 
     fn settings_controls(&self, s: &mut Specs) {
-        s.text(UiRole::Heading, self.name_of(MsgKey::SettingsTitle));
+        s.heading(1, self.name_of(MsgKey::SettingsTitle));
         let Some(set) = &self.settings else { return };
         let c = s.add(ControlId::Edit(EditId::Name), UiRole::TextInput, self.name_of(MsgKey::FieldName));
         c.value = Some(set.name.clone());
@@ -758,7 +767,7 @@ impl UiState {
         // UPDATES.md 10.1: "Atualizações", the last group of the left column.
         if let (Some(u), Some(lines)) = (&self.update, self.update_lines()) {
             use crate::update_card::UpdAction;
-            s.text(UiRole::Heading, self.name_of(MsgKey::UpdSection));
+            s.heading(2, self.name_of(MsgKey::UpdSection));
             s.switch(
                 ControlId::Update(UpdAction::Switch),
                 self.name_of(MsgKey::UpdSwitch),
@@ -777,7 +786,7 @@ impl UiState {
         c.value = Some(self.select_value(SelectId::Keyboard));
         c.description = Some(self.name_of(MsgKey::SendKeysHint));
         s.switch(ControlId::SwapCtrlCmd, self.name_of(MsgKey::SwapCtrlCmd), set.swap_ctrl_cmd, None);
-        s.text(UiRole::Heading, self.name_of(MsgKey::GroupShortcuts));
+        s.heading(2, self.name_of(MsgKey::GroupShortcuts));
         let c = s.add(ControlId::Select(SelectId::ReleaseKey), UiRole::ComboBox, self.name_of(MsgKey::ReleaseKeyLabel));
         c.value = Some(self.select_value(SelectId::ReleaseKey));
         c.description = Some(self.name_of(MsgKey::ReleaseKeyHint));
@@ -860,7 +869,7 @@ impl UiState {
         let name = p.device_id.as_ref().and_then(|id| self.device_by_id(id)).map(|d| d.name.clone());
         match &p.state {
             PairingState::Open { remaining_s } => {
-                s.text(UiRole::Heading, self.name_of(MsgKey::PairThisComputer));
+                s.heading(2, self.name_of(MsgKey::PairThisComputer));
                 s.text(UiRole::Text, self.name_of(MsgKey::PairOpenBody));
                 // The time the body refers to, next to it: the value is what the screen draws large ("1:42").
                 let left = format::countdown(*remaining_s);
@@ -872,14 +881,14 @@ impl UiState {
                 s.button(ControlId::PairCancel, self.name_of(MsgKey::PairCancel));
             }
             PairingState::Waiting => {
-                s.text(UiRole::Heading, self.name_of(MsgKey::PairWaitingTitle));
+                s.heading(2, self.name_of(MsgKey::PairWaitingTitle));
                 s.text(UiRole::Text, self.name_of(MsgKey::PairWaitingBody));
                 s.button(ControlId::PairCancel, self.name_of(MsgKey::PairCancel));
             }
             PairingState::ShowCode { code, peer_name } => {
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PairTitleWith).with(peer_name.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PairTitleWith).with(peer_name.clone())));
                 s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::PairCompare).with(peer_name.clone())));
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PairCodeLabel).with(code.clone())));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PairCodeLabel).with(code.clone())));
                 if let Some(wait) = self.pair_wait() {
                     // This side confirmed: the warning gives way to what is waited for, and the only way out is "Cancelar".
                     s.text(UiRole::Text, wait.body);
@@ -894,12 +903,12 @@ impl UiState {
             }
             PairingState::Done { device_id } => {
                 let who = self.device_by_id(device_id).map(|d| d.name.clone()).or(name).unwrap_or_default();
-                s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::PairDoneTitle).with(who)));
+                s.heading(2, self.tm(&Msg::new(MsgKey::PairDoneTitle).with(who)));
                 s.text(UiRole::Text, self.name_of(MsgKey::PairDoneBody));
                 s.button(ControlId::PairDone, self.name_of(MsgKey::PairDoneButton));
             }
             PairingState::Failed { reason } => {
-                s.text(UiRole::Heading, self.name_of(MsgKey::PairFailedTitle));
+                s.heading(2, self.name_of(MsgKey::PairFailedTitle));
                 s.text(
                     UiRole::Text,
                     format!("{} {}", self.error_text(&ApiError::new(*reason)), self.name_of(MsgKey::PairFailedBody)),
@@ -933,7 +942,7 @@ impl UiState {
     fn incoming_controls(&self, s: &mut Specs) {
         s.region(Region::Dialog);
         let Some(i) = &self.incoming else { return };
-        s.text(UiRole::Heading, self.incoming_title(i));
+        s.heading(2, self.incoming_title(i));
         s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::IncomingSub).with(i.remaining_s.to_string())));
         for (p, key) in self.incoming_boxes() {
             let c = s.add(ControlId::Allow(p), UiRole::CheckBox, self.name_of(key));
@@ -1084,7 +1093,7 @@ impl UiState {
     fn dialog_controls(&self, s: &mut Specs, kind: DialogKind) {
         s.region(Region::Dialog);
         let t = self.dialog_texts(&kind);
-        s.text(UiRole::Heading, t.title);
+        s.heading(2, t.title);
         for b in t.body {
             s.text(UiRole::Text, b);
         }
@@ -1110,10 +1119,14 @@ impl UiState {
             return s.v;
         }
         s.region(Region::Content);
-        s.text(UiRole::Heading, peer.clone());
+        s.heading(1, peer.clone());
+        // What changes over the picture without the person acting (reconnecting, a pause, a swap's answer) is a polite
+        // live region: a screen reader says it when it appears or changes, never each second (F-UI-01, R-UI-13).
         if let SessionState::Reconnecting { attempt } = &session.state {
-            s.text(UiRole::Heading, self.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer)));
+            s.region(Region::Status);
+            s.heading(2, self.tm(&Msg::new(MsgKey::ReconnectingTitle).with(peer)));
             s.text(UiRole::Text, self.tm(&Msg::new(MsgKey::ReconnectingBody).with(attempt.to_string())));
+            s.region(Region::Content);
             self.bar_progress(&mut s, self.reconnect_wait());
             s.button(ControlId::ReconnectDisconnect, self.name_of(MsgKey::Disconnect));
             return s.v;
@@ -1121,20 +1134,26 @@ impl UiState {
         // The card over the picture: as the painter picks it (a swap wait, else a pause, else a declined swap).
         let paused = if self.swap_wait().is_none() { self.paused_card() } else { None };
         if let Some((body, elevate)) = &paused {
+            s.region(Region::Status);
             s.text(UiRole::Text, body.clone());
+            s.region(Region::Content);
             if *elevate {
                 s.button(ControlId::PausedElevate, self.name_of(MsgKey::ElevateButton));
             }
         }
         if let (None, Some(SwapView { phase: SwapPhase::Declined(_), .. })) = (&paused, &self.swap) {
             let (title, body) = self.swap_declined_texts();
-            s.text(UiRole::Heading, title);
+            s.region(Region::Status);
+            s.heading(2, title);
             s.text(UiRole::Text, body);
+            s.region(Region::Content);
             s.button(ControlId::SwapDeclinedClose, self.name_of(MsgKey::Close));
         }
         if let Some(w) = self.swap_wait() {
-            s.text(UiRole::Heading, w.title);
+            s.region(Region::Status);
+            s.heading(2, w.title);
             s.text(UiRole::Text, w.body);
+            s.region(Region::Content);
             self.bar_progress(&mut s, Some(w.bar));
         }
         s.region(Region::Toolbar);
@@ -1238,6 +1257,24 @@ impl UiState {
                 }
                 DrawerTab::Files => self.files_controls(&mut s),
                 DrawerTab::Chat => {
+                    // The conversation, oldest first; the newest message, when it came from the other side, is a
+                    // polite live region, so a screen reader says it as it arrives.
+                    let newest_in = self.chat.last().filter(|m| !m.mine).map(|m| m.msg_id);
+                    for m in &self.chat {
+                        let line = if m.mine {
+                            self.tm(&Msg::new(MsgKey::ChatLineMine).with(m.text.clone()))
+                        } else {
+                            self.tm(&Msg::new(MsgKey::ChatLinePeer).with(peer.clone()).with(m.text.clone()))
+                        };
+                        let live = newest_in == Some(m.msg_id);
+                        if live {
+                            s.region(Region::Status);
+                        }
+                        s.text(UiRole::Text, line);
+                        if live {
+                            s.region(Region::Drawer);
+                        }
+                    }
                     s.add(ControlId::Edit(EditId::Chat), UiRole::TextInput, self.name_of(MsgKey::ChatLabel));
                     s.button(ControlId::ChatSend, self.name_of(MsgKey::ChatSendButton));
                 }

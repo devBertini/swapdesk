@@ -29,13 +29,14 @@ fn the_theme_setting_decides_the_appearance_to_apply() {
 }
 
 #[test]
-fn a_viewer_window_exists_exactly_while_a_viewer_session_does_and_is_titled_after_the_peer() {
+fn a_viewer_window_exists_exactly_while_a_viewer_session_does_and_is_titled_with_the_apps_name_alone() {
     assert_eq!(viewer_title(&shell_state(Scenario::Inicio)), None, "no session, no viewer window");
     let mut state = shell_state(Scenario::Visualizador);
     let session = state.viewer_session().expect("the scenario has a viewer session").clone();
     let peer = state.device_by_id(&session.device_id).expect("the peer").name.clone();
     let title = viewer_title(&state).expect("a viewer window");
-    assert!(title.contains(&peer), "{title}");
+    assert_eq!(title, "Swapdesk", "the app's name and nothing more (owner, 12/11)");
+    assert!(!title.contains(&peer), "{title}");
     state.apply(UiEvent::Session {
         session_id: session.id,
         device_id: session.device_id,

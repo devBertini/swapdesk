@@ -2,7 +2,7 @@
 //! content is centred (icon, title, text, the buttons as one group) and it is wide enough to be read at a glance.
 //! Every such card of both windows is painted here, so they share one look.
 
-use swapdesk_ui::tokens::{Color, TextStyle, fixed, layout, text};
+use swapdesk_ui::tokens::{Color, TextStyle, layout, text};
 use swapdesk_ui::{ControlId, WaitBar};
 
 use crate::painter::{Align, Rect};
@@ -135,9 +135,9 @@ impl Card<'_> {
         let m = self.look.metrics();
         let dark = self.look == Look::Dark;
         let bw = p.hairline();
-        let (ink, soft) = if dark { (fixed::CARD_DARK_INK, fixed::CARD_DARK_SOFT) } else { (pal.ink, pal.soft) };
+        let (ink, soft) = if dark { (f.fx.card_dark_ink, f.fx.card_dark_soft) } else { (pal.ink, pal.soft) };
         if dark {
-            p.bordered(r, layout::PANEL_RADIUS, fixed::CARD_DARK_BORDER, pal.remote);
+            p.bordered(r, layout::PANEL_RADIUS, f.fx.card_dark_border, pal.remote);
         } else {
             f.panel(r, pal.surface);
         }
@@ -164,7 +164,7 @@ impl Card<'_> {
                     p.stroke_circle(c, 19.5, 1.0, pal.line);
                     p.svg(path, x + 10.0, y + 10.0, 20.0, 2.0, pal.soft);
                 }
-                Icon::Spinner => p.arc_stroke(c, 18.5, -90.0 + 45.0, 270.0, 3.0, fixed::SPINNER),
+                Icon::Spinner => p.arc_stroke(c, 18.5, -90.0 + 45.0, 270.0, 3.0, f.fx.spinner),
             }
             y += ICON;
         }
@@ -183,7 +183,7 @@ impl Card<'_> {
         if let Some(bar) = self.bar {
             step(&mut y, m.before_bar);
             let colors = if dark {
-                [fixed::CARD_DARK_BORDER, fixed::SPINNER, fixed::CARD_DARK_SOFT]
+                [f.fx.card_dark_border, f.fx.spinner, f.fx.card_dark_soft]
             } else {
                 [pal.line, pal.link, pal.soft]
             };
@@ -219,9 +219,9 @@ pub fn actions(f: &mut Frame, x: f32, y: f32, w: f32, list: &[(ControlId, String
 fn dark_button(f: &mut Frame, id: ControlId, r: Rect, label: &str) {
     let p = f.p;
     let radius = layout::BUTTON_RADIUS;
-    p.stroke_rrect(r.inset(0.5), radius, 1.0, fixed::CARD_DARK_BORDER);
+    p.stroke_rrect(r.inset(0.5), radius, 1.0, f.fx.card_dark_border);
     f.tint(id, r, radius, Color::rgb(0xFFFFFF), 0.08, 0.14);
     let l = p.label(label, text::BTN);
-    p.draw(&l, r.x + (r.w - l.w) / 2.0, r.y + (r.h - l.h) / 2.0, fixed::CARD_DARK_INK);
+    p.draw(&l, r.x + (r.w - l.w) / 2.0, r.y + (r.h - l.h) / 2.0, f.fx.card_dark_ink);
     f.register(id, r, radius);
 }

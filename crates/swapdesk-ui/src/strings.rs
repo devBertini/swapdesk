@@ -34,7 +34,7 @@ strings! {
     SidebarOnNetwork => "Na rede", "On the network";
     AddressLabel => "Adicionar por endereço", "Add by address";
     AddressPlaceholder => "192.168.0.21", "192.168.0.21";
-    AddressRefusedWhy => "Só endereços desta rede local servem: não o de outra rede, não o de loopback e não o deste computador.", "Only addresses on this local network work: not one from another network, not loopback and not this computer's own.";
+    AddressRefusedWhy => "Só endereços desta rede local servem: não o de outra rede, não o de loopback e não o deste computador.", "Only addresses on this local network work, not ones from another network, loopback addresses or this computer’s own.";
     SidebarNavLabel => "Dispositivos", "Devices";
     NavHome => "Início", "Home";
     NavSettings => "Ajustes", "Settings";
@@ -58,7 +58,7 @@ strings! {
     // Home (D35)
     HomePairTitle => "Parear", "Pair";
     HomePairBody => "Os dois computadores se conhecem uma vez, conferindo o mesmo código de 6 dígitos nas duas telas. Depois disso, um pode ver e controlar o outro.", "The two computers get to know each other once, by checking the same 6-digit code on both screens. After that, one can see and control the other.";
-    HomeAddressHint => "Se o outro computador não aparece em Na rede, digite o IPv4 dele.", "If the other computer does not show up under On the network, type its IPv4 address.";
+    HomeAddressHint => "Se o outro computador não aparece em Na rede, digite o IPv4 dele.", "If the other computer does not show up under “On the network”, type its IPv4 address.";
     HomeAddressAdd => "Adicionar", "Add";
     HomeRecentTitle => "Atividade recente", "Recent activity";
     HomeRecentEmpty => "Ainda não aconteceu nada por aqui.", "Nothing has happened here yet.";
@@ -83,7 +83,7 @@ strings! {
     SectionWhoControls => "Quem controla quem", "Who controls whom";
     YouControl => "Você controla", "You control";
     SwapNote => "Durante a sessão, qualquer um dos dois pode pedir para inverter.", "During a session either of you can ask to swap.";
-    PermsPanelTitle => "O {0} pode, aqui", "{0} can, here";
+    PermsPanelTitle => "O {0} pode, aqui", "What {0} can do here";
     PermsPanelEdit => "Editar", "Edit";
     PermsNone => "Nada liberado aqui.", "Nothing is allowed here.";
     ListAnd => " e ", " and ";
@@ -113,14 +113,14 @@ strings! {
     WhereLogin => "na tela de login deste computador", "on this computer's sign-in screen";
 
     // Permissions tab
-    PermsHereTitle => "O {0} pode, neste computador", "{0} can, on this computer";
-    PermsThereTitle => "Este computador pode, no {0}", "This computer can, on {0}";
+    PermsHereTitle => "O {0} pode, neste computador", "What {0} can do on this computer";
+    PermsThereTitle => "Este computador pode, no {0}", "What this computer can do on {0}";
     PermView => "Ver a tela", "See the screen";
     PermControl => "Controlar mouse e teclado", "Control mouse and keyboard";
     PermAudio => "Ouvir o áudio", "Hear the audio";
     PermTerminal => "Terminal", "Terminal";
     PermAdminTerminal => "Terminal de administrador", "Administrator terminal";
-    PermAdminTerminalHint => "Comandos como sistema", "Commands as the system";
+    PermAdminTerminalHint => "Comandos como sistema", "Runs commands as the system";
     PermFiles => "Arquivos", "Files";
     PermClipboard => "Área de transferência", "Clipboard";
     PermUnattended => "Entrar sem perguntar", "Enter without asking";
@@ -137,7 +137,7 @@ strings! {
     RenameTooLong => "Esse nome é longo demais.", "That name is too long.";
     RenameControlChars => "O nome não pode ter caracteres de controle.", "The name cannot contain control characters.";
     HistoryTitle => "Histórico de {0}", "History of {0}";
-    HistoryPlaceholder => "O histórico por dispositivo chega numa próxima versão. Por enquanto, veja tudo em Atividade.", "History per device arrives in a later version. For now, see everything under Activity.";
+    HistoryPlaceholder => "O histórico por dispositivo chega numa próxima versão. Por enquanto, veja tudo em Atividade.", "Per-device history is coming in a later version. For now, see everything under Activity.";
 
     // Pairing
     PairingBarPrefix => "Swapdesk no", "Swapdesk on";
@@ -146,7 +146,7 @@ strings! {
     PairTitleWith => "Parear com {0}", "Pair with {0}";
     PairCompare => "Confira se o código abaixo é igual ao que aparece agora no {0}.", "Check that the code below matches the one now showing on {0}.";
     PairCodeLabel => "Código {0}", "Code {0}";
-    PairWarn => "Se forem diferentes, cancele: outro aparelho pode estar tentando se passar pelo {0}.", "If they differ, cancel: another device may be trying to pose as {0}.";
+    PairWarn => "Se forem diferentes, cancele: outro dispositivo pode estar tentando se passar pelo {0}.", "If they differ, cancel: another device may be trying to pose as {0}.";
     PairSame => "Os códigos são iguais", "The codes match";
     PairDifferent => "São diferentes", "They differ";
     PairOpenBody => "Abra “Parear este computador” também no outro computador antes que o tempo abaixo acabe. Pedidos de pareamento sem isso são ignorados.", "Open “Pair this computer” on the other computer too, before the time below runs out. Pairing requests without it are ignored.";
@@ -168,7 +168,7 @@ strings! {
     IncomingTitleView => "{0} quer ver este computador", "{0} wants to see this computer";
     IncomingTitleControl => "{0} quer controlar este computador", "{0} wants to control this computer";
     IncomingSub => "Recusa automática em {0} s.", "Declined automatically in {0} s.";
-    AllowThisSession => "Permitir nesta sessão", "Allow in this session";
+    AllowThisSession => "Permitir nesta sessão", "Allow for this session";
     AllowControl => "Controlar", "Control";
     AllowAudio => "Ouvir o áudio", "Hear the audio";
     AllowFiles => "Arquivos", "Files";
@@ -176,14 +176,14 @@ strings! {
     AllowTerminal => "Terminal", "Terminal";
     RememberUnattended => "Deixar entrar sem perguntar da próxima vez", "Let it in without asking next time";
     Decline => "Recusar", "Decline";
-    ViewOnlyAccept => "Só deixar ver", "Allow view only";
+    ViewOnlyAccept => "Só deixar ver", "Allow watching only";
     Accept => "Aceitar", "Accept";
     RequestDialogLabel => "Pedido de conexão", "Connection request";
 
     // Consent card (D13)
-    ConsentTitleTerminal => "{0} quer abrir o terminal desta conta", "{0} wants to open the terminal of this account";
-    ConsentTitleFiles => "{0} quer abrir os arquivos desta conta", "{0} wants to open the files of this account";
-    ConsentBody => "O acesso sem perguntar foi liberado por outro usuário. Terminal e arquivos desta conta só abrem se você disser sim. Tela e controle seguem sem perguntar.", "Access without asking was granted by another user. The terminal and files of this account open only if you say yes. Screen and control still go ahead without asking.";
+    ConsentTitleTerminal => "{0} quer abrir o terminal desta conta", "{0} wants to open this account’s terminal";
+    ConsentTitleFiles => "{0} quer abrir os arquivos desta conta", "{0} wants to open this account’s files";
+    ConsentBody => "O acesso sem perguntar foi liberado por outro usuário. Terminal e arquivos desta conta só abrem se você disser sim. Tela e controle seguem sem perguntar.", "Another user granted “Enter without asking”. This account’s terminal and files open only if you say yes. Screen and control still go ahead without asking.";
     ConsentCountdown => "Recusa automática em {0} s", "Declined automatically in {0} s";
     ConsentAllow => "Permitir", "Allow";
     ConsentDeny => "Recusar", "Decline";
@@ -207,9 +207,9 @@ strings! {
 
     // Activity
     ActivityTitle => "Atividade", "Activity";
-    ActivitySub => "Cada conexão com este computador. O registro fica só aqui.", "Every connection to this computer. The log stays here only.";
+    ActivitySub => "Cada conexão com este computador. O registro fica só aqui.", "Every connection to this computer. The log stays on this computer only.";
     ExportLog => "Exportar registro", "Export log";
-    AlertUnknownPair => "Um aparelho desconhecido tentou parear {0}.", "An unknown device tried to pair {0}.";
+    AlertUnknownPair => "Um dispositivo desconhecido tentou parear {0}.", "An unknown device tried to pair with {0}.";
     AlertUnknownRest => "Os códigos não foram confirmados e nada foi liberado.", "The codes were not confirmed and nothing was allowed.";
     BlockAddress => "Bloquear {0}", "Block {0}";
     LogLabel => "Registro", "Log";
@@ -222,7 +222,7 @@ strings! {
     DurNone => "–", "–";
     UnknownDevice => "Desconhecido", "Unknown";
     AuditSwap => "Inverteu o controle: este computador passou a controlar o {0}", "Swapped control: this computer began to control {0}";
-    AuditControlFiles => "Controlou este computador e enviou {0} arquivos", "Controlled this computer and sent {0} files";
+    AuditControlFiles => "Controlou este computador e enviou {0} {0|arquivo|arquivos}", "Controlled this computer and sent {0} {0|file|files}";
     AuditUnknownPair => "Pareamento cancelado: códigos não confirmados", "Pairing cancelled: codes not confirmed";
     AuditUnattendedLogin => "Entrou sem perguntar, na tela de login", "Entered without asking, on the sign-in screen";
     AuditViewOnly => "Só viu a tela", "Only watched the screen";
@@ -239,19 +239,19 @@ strings! {
     ThemeLight => "Claro", "Light";
     ThemeDark => "Escuro", "Dark";
     OpenAtLogin => "Abrir ao ligar o computador", "Open when the computer starts";
-    GroupUnattended => "Sem ninguém na frente", "With no one in front";
+    GroupUnattended => "Sem ninguém na frente", "When no one is at the computer";
     ServiceName => "Receber conexões", "Receive connections";
     ServiceHint => "Outros computadores podem se conectar a esta conta", "Other computers can connect to this account";
     ServiceActive => "Ativo", "On";
     ServiceInactive => "Desligado", "Off";
     LockOnEnd => "Bloquear ao terminar a sessão", "Lock when the session ends";
-    KeepAwake => "Não suspender durante a sessão", "Do not sleep during a session";
+    KeepAwake => "Não suspender durante a sessão", "Keep awake during a session";
     GroupImage => "Imagem", "Image";
     Quality => "Qualidade", "Quality";
     QualityAuto => "Automática", "Automatic";
     QualityText => "Texto nítido", "Sharp text";
     QualityMotion => "Movimento fluido", "Smooth motion";
-    ShowStats => "Mostrar latência e quadros", "Show latency and frames";
+    ShowStats => "Mostrar latência e quadros", "Show latency and frame rate";
     GroupKeyboard => "Teclado", "Keyboard";
     SendKeys => "Enviar teclas", "Send keys";
     SendKeysHint => "Automático troca para texto quando os teclados são diferentes", "Automatic switches to text when the keyboards differ";
@@ -261,14 +261,14 @@ strings! {
     SwapCtrlCmd => "Trocar Ctrl e Cmd no Mac", "Swap Ctrl and Cmd on the Mac";
     GroupShortcuts => "Atalhos do visualizador", "Viewer shortcuts";
     ReleaseKeyLabel => "Tecla que libera o teclado", "Key that releases the keyboard";
-    ReleaseKeyHint => "Aperte e solte, sem outra tecla no meio. Um clique na tela volta a capturar.", "Press and let go, with no other key between. A click on the screen captures again.";
+    ReleaseKeyHint => "Aperte e solte, sem outra tecla no meio. Um clique na tela volta a capturar.", "Press and release it without pressing any other key. Clicking the screen captures the keyboard again.";
     ReleaseCtrlAlt => "Ctrl+Alt", "Ctrl+Alt";
     ReleaseRightCtrl => "Ctrl direito", "Right Ctrl";
     ReleaseCtrlAltShift => "Ctrl+Alt+Shift", "Ctrl+Alt+Shift";
     ReleaseControlOption => "Control+Option", "Control+Option";
     ReleaseRightControl => "Control direito", "Right Control";
     ReleaseControlOptionShift => "Control+Option+Shift", "Control+Option+Shift";
-    FullscreenMonitorLabel => "Monitor da tela cheia", "Full screen monitor";
+    FullscreenMonitorLabel => "Monitor da tela cheia", "Full-screen monitor";
     FullscreenMonitorAuto => "Onde a janela está", "Where the window is";
     FullscreenMonitorN => "Monitor {0}", "Monitor {0}";
     ShortcutsTitle => "Atalhos", "Shortcuts";
@@ -296,14 +296,14 @@ strings! {
     NoticeCrashBody => "O registro do que aconteceu ficou na pasta de logs. Para relatar o problema, anexe esse arquivo.", "A record of what happened is in the logs folder. To report the problem, attach that file.";
     NoticeCrashButton => "Abrir a pasta de logs", "Open logs folder";
     NoComputerTitle => "Nenhum computador encontrado", "No computer found";
-    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e na mesma rede Wi-Fi ou cabo que este. Se continuar sem aparecer, o roteador pode estar isolando os aparelhos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the other computer, check that Swapdesk is open and on the same Wi-Fi or cable as this one. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
+    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e na mesma rede Wi-Fi ou cabo que este. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the other computer, check that Swapdesk is open and on the same Wi-Fi or cable as this one. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
     NoComputerButton => "Adicionar por endereço", "Add by address";
     NoticeServiceButton => "Abrir Ajustes do Sistema", "Open System Settings";
     NoticeMacPermsOne => "Falta 1 permissão no Mac", "1 permission is missing on the Mac";
     NoticeMacPermsMany => "Faltam {0} permissões no Mac", "{0} permissions are missing on the Mac";
     NoticeMacPermsButton => "Conceder permissões", "Grant permissions";
     OsPermScreen => "Gravação de Tela, para ver a tela.", "Screen Recording, to see the screen.";
-    OsPermAccessibility => "Acessibilidade, para mexer o mouse e o teclado.", "Accessibility, to move the mouse and the keyboard.";
+    OsPermAccessibility => "Acessibilidade, para mexer o mouse e o teclado.", "Accessibility, to control the mouse and keyboard.";
     OsPermInput => "Monitoramento de Entrada, para enviar atalhos como Cmd+Tab.", "Input Monitoring, to send shortcuts such as Cmd+Tab.";
     ReconnectingTitle => "Reconectando ao {0}", "Reconnecting to {0}";
     ReconnectingBody => "O Wi-Fi caiu. A tela volta sozinha quando a rede voltar. Tentativa {0}.", "The Wi-Fi dropped. The screen returns by itself when the network is back. Attempt {0}.";
@@ -332,11 +332,11 @@ strings! {
     ViewerViewing => "você está vendo há {0}", "you have been watching for {0}";
     ViewerConnecting => "conectando…", "connecting…";
     ViewerStats => "{0} ms, {1} qps, {2}", "{0} ms, {1} fps, {2}";
-    ViewerScreenOf => "Tela do {0}", "Screen of {0}";
-    VideoPlaceholder => "A tela remota aparece aqui.", "The remote screen shows here.";
+    ViewerScreenOf => "Tela do {0}", "{0}’s screen";
+    VideoPlaceholder => "A tela remota aparece aqui.", "The remote screen appears here.";
     ToolbarLabel => "Sessão", "Session";
     TbScreen => "Escolher tela", "Choose screen";
-    TbScreenN => "Tela {0}", "Screen {0}";
+    TbScreenN => "Tela {0}", "Display {0}";
     TbFit => "Ajustar à janela", "Fit to window";
     TbAudio => "Áudio", "Audio";
     TbGrab => "Capturar atalhos do sistema", "Capture system shortcuts";
@@ -386,7 +386,7 @@ strings! {
     ChangeFolder => "Trocar pasta", "Change folder";
     FilesDownload => "Baixar", "Download";
     FilesOpen => "Abrir", "Open";
-    FilesItems => "{0} itens", "{0} items";
+    FilesItems => "{0} {0|item|itens}", "{0} {0|item|items}";
     FilesDrop => "Envie arquivos deste computador para a pasta que está aberta em {0}.", "Send files from this computer to the folder that is open on {0}.";
     ChooseFiles => "Escolher arquivos", "Choose files";
     Transfers => "Transferências", "Transfers";
@@ -411,8 +411,8 @@ strings! {
     ChatSendButton => "Enviar", "Send";
     ChatReadAt => "Lida às {0}", "Read at {0}";
     ChatSwapped => "Controle invertido às {0}", "Control swapped at {0}";
-    ClipTitle => "Copiar e colar entre os dois", "Copy and paste between the two";
-    ClipBody => "Texto e imagens. Senhas copiadas de gerenciadores ficam de fora.", "Text and images. Passwords copied from managers are left out.";
+    ClipTitle => "Copiar e colar entre os dois", "Copy and paste between the computers";
+    ClipBody => "Texto e imagens. Senhas copiadas de gerenciadores ficam de fora.", "Text and images. Passwords copied from password managers are left out.";
 
     // Host banner and swap
     BannerControls => "{0} controla este computador", "{0} controls this computer";
@@ -421,10 +421,10 @@ strings! {
     BannerOpenChat => "Abrir chat", "Open chat";
     BannerLabel => "Sessão ativa", "Active session";
     SwapConfirmTitle => "Inverter o controle?", "Swap control?";
-    SwapConfirmBody => "O {0} passa a controlar este computador e você deixa de controlar o {0}. Quem está no {0} precisa aceitar.", "{0} will control this computer and you stop controlling {0}. Whoever is at {0} has to accept.";
+    SwapConfirmBody => "O {0} passa a controlar este computador e você deixa de controlar o {0}. Quem está no {0} precisa aceitar.", "{0} will control this computer and you will stop controlling {0}. Whoever is at {0} has to accept.";
     SwapAskButton => "Pedir inversão", "Ask to swap";
     SwapAskTitle => "O {0} pediu para inverter", "{0} asked to swap";
-    SwapAskBody => "Se aceitar, você passa a controlar o {0} e ele deixa de controlar este computador.", "If you accept, you will control {0} and it stops controlling this computer.";
+    SwapAskBody => "Se aceitar, você passa a controlar o {0} e ele deixa de controlar este computador.", "If you accept, you will control {0} and it will stop controlling this computer.";
     SwapAskCountdown => "Recusa automática em {0} s", "Declined automatically in {0} s";
     SwapAccept => "Aceitar e controlar", "Accept and control";
     SwapDecline => "Recusar", "Decline";
@@ -454,7 +454,7 @@ strings! {
     MenuCut => "Recortar", "Cut";
     MenuCopy => "Copiar", "Copy";
     MenuPaste => "Colar", "Paste";
-    MenuSelectAll => "Selecionar tudo", "Select All";
+    MenuSelectAll => "Selecionar tudo", "Select all";
 
     // The macOS menu bar status item (D32: the app keeps hosting with its window closed)
     StatusOpen => "Abrir o Swapdesk", "Open Swapdesk";
@@ -491,7 +491,7 @@ strings! {
 
     // Waits, appended last as above. `EndedTitle` stays unused further up: a key travels as its index.
     ConnectingBody => "Abrindo a conexão pela rede local.", "Opening the connection over the local network.";
-    PromptedBody => "O {0} está mostrando o seu pedido. Quem estiver nele precisa aceitar e escolher o que você pode fazer.", "{0} is showing your request. Whoever is at it has to accept and choose what you may do.";
+    PromptedBody => "O {0} está mostrando o seu pedido. Quem estiver nele precisa aceitar e escolher o que você pode fazer.", "{0} is showing your request. Someone there has to accept it and choose what you may do.";
     ConnectExpiresIn => "O pedido expira em {0} s", "The request expires in {0} s";
     ConnectEndedTitle => "Não deu para conectar ao {0}", "Could not connect to {0}";
     ConnectWhyTimedOut => "O {0} não respondeu em 20 segundos.", "{0} did not answer within 20 seconds.";
@@ -505,7 +505,7 @@ strings! {
     SwapWaitingTitle => "Esperando o {0} aceitar a inversão", "Waiting for {0} to accept the swap";
     SwapWaitingBody => "Se ninguém responder em 20 segundos, você continua controlando o {0}.", "If nobody answers within 20 seconds, you keep controlling {0}.";
     TermConsentWaiting => "Esperando quem usa o {0} permitir o terminal.", "Waiting for the person using {0} to allow the terminal.";
-    FilesConsentWaiting => "Esperando quem usa o {0} permitir os arquivos.", "Waiting for the person using {0} to allow the files.";
+    FilesConsentWaiting => "Esperando quem usa o {0} permitir os arquivos.", "Waiting for the person using {0} to allow file access.";
     ActionWaiting => "Esperando o {0} executar a ação…", "Waiting for {0} to run the action…";
     PermAdminTerminalMacOff => "Indisponível no macOS nesta versão", "Not available on macOS in this version";
     SidebarLegacyNote => "Os pareamentos de antes da versão 1.1 não passam para as contas. Pareie de novo com os computadores que você usa.", "Pairings made before version 1.1 do not carry over to accounts. Pair again with the computers you use.";
@@ -521,12 +521,12 @@ strings! {
     // Updates (UPDATES.md 10.4, approved by the owner 2026-11-11, D58). New keys go at the end: the wire carries a
     // key's index.
     UpdTitle => "Nova versão: {0}", "New version: {0}";
-    UpdBody => "Você usa a {0}. A atualização vem do GitHub, é conferida pela assinatura do Swapdesk e instalada; o Swapdesk fecha e abre de novo.", "You have {0}. The update comes from GitHub, is checked against the Swapdesk signature and installed; Swapdesk closes and opens again.";
+    UpdBody => "Você usa a {0}. A atualização vem do GitHub, é conferida pela assinatura do Swapdesk e instalada; o Swapdesk fecha e abre de novo.", "You have {0}. The update is downloaded from GitHub, verified against the Swapdesk signature and installed. Swapdesk closes and reopens.";
     UpdInstall => "Atualizar agora", "Update now";
     UpdLater => "Agora não", "Not now";
     UpdNotes => "O que mudou", "What changed";
     UpdLiveBody => "Há uma sessão ativa com {0}. Atualizar agora encerra a sessão.", "A session with {0} is active. Updating now ends it.";
-    UpdLiveRemote => "Se você controla este computador de longe, conecte-se de novo em um minuto. Sem \"Entrar sem perguntar\", alguém aqui terá de aceitar.", "If you control this computer from elsewhere, connect again in a minute. Without \"Enter without asking\", someone here has to accept.";
+    UpdLiveRemote => "Se você controla este computador de longe, conecte-se de novo em um minuto. Sem “Entrar sem perguntar”, alguém aqui terá de aceitar.", "If you control this computer from elsewhere, reconnect in a minute. Without “Enter without asking”, someone here has to accept.";
     UpdLiveConfirm => "Encerrar e atualizar", "End and update";
     UpdDownloading => "Baixando {0} de {1}", "Downloading {0} of {1}";
     UpdVerifying => "Conferindo a assinatura", "Checking the signature";
@@ -540,7 +540,7 @@ strings! {
     UpdErrRolledBack => "A versão {0} não iniciou. A {1} foi restaurada e continua funcionando.", "Version {0} did not start. {1} was restored and keeps working.";
     UpdErrMacAdmin => "Só um administrador deste Mac pode substituir o Swapdesk em Aplicativos.", "Only an administrator of this Mac can replace Swapdesk in Applications.";
     UpdErrMacLocation => "Mova o Swapdesk para a pasta Aplicativos para que ele possa se atualizar.", "Move Swapdesk to the Applications folder so it can update itself.";
-    UpdManual => "Esta versão precisa ser instalada à mão.", "This version must be installed by hand.";
+    UpdManual => "Esta versão precisa ser instalada à mão.", "This version must be installed manually.";
     UpdSection => "Atualizações", "Updates";
     UpdVersion => "Versão {0}", "Version {0}";
     UpdSwitch => "Procurar novas versões no GitHub", "Check GitHub for new versions";
@@ -549,9 +549,9 @@ strings! {
     UpdLast => "Última procura: {0}", "Last check: {0}";
     UpdLatest => "Você tem a versão mais recente.", "You have the latest version.";
     UpdRetry => "Tentar de novo", "Try again";
-    UpdTryLater => "Tentar mais tarde", "Try later";
+    UpdTryLater => "Tentar mais tarde", "Try again later";
     UpdOpenRelease => "Abrir a página da versão", "Open the release page";
-    UpdDownloadByHand => "Baixar à mão", "Download by hand";
+    UpdDownloadByHand => "Baixar à mão", "Download manually";
     UpdClose => "Fechar", "Close";
     UpdCancel => "Cancelar", "Cancel";
     // The files explorer (docs/FILES-UI.md section 9; texts for the owner's approval in R1)
@@ -560,7 +560,7 @@ strings! {
     DisplayOption => "{0}, {1}", "{0}, {1}";
     DisplayOptionPrimary => "{0} (principal), {1}", "{0} (main), {1}";
     GuideTitle => "Bem-vindo ao Swapdesk", "Welcome to Swapdesk";
-    GuideBody => "1. Instale o Swapdesk no outro computador, na mesma rede.\n2. Escolha-o em Na rede e clique em Parear; confira se o código é o mesmo nos dois.\n3. Em Permissões, diga o que ele pode fazer aqui. Depois é só clicar em Controlar.", "1. Install Swapdesk on the other computer, on the same network.\n2. Pick it under On the network and click Pair; check that the code is the same on both.\n3. Under Permissions, say what it may do here. Then click Control.";
+    GuideBody => "1. Instale o Swapdesk no outro computador, na mesma rede.\n2. Escolha-o em Na rede e clique em Parear; confira se o código é o mesmo nos dois.\n3. Em Permissões, diga o que ele pode fazer aqui. Depois é só clicar em Controlar.", "1. Install Swapdesk on the other computer, on the same network.\n2. Select it under “On the network” and click Pair. Check that both computers show the same code.\n3. In Permissions, choose what it may do here. Then click Control.";
     GuideSkip => "Pular", "Skip";
     GuideDone => "Entendi", "Got it";
     ExplorerTitle => "Arquivos", "Files";
@@ -577,9 +577,9 @@ strings! {
     ExplorerColSize => "Tamanho", "Size";
     ExplorerColType => "Tipo", "Type";
     ExplorerColModified => "Modificado", "Modified";
-    ExplorerItems => "{0} itens", "{0} items";
+    ExplorerItems => "{0} {0|item|itens}", "{0} {0|item|items}";
     ExplorerOneItem => "1 item", "1 item";
-    ExplorerSelected => "{0} selecionados, {1}", "{0} selected, {1}";
+    ExplorerSelected => "{0} {0|selecionado|selecionados}, {1}", "{0} selected, {1}";
     ExplorerShowingFirst => "Mostrando os primeiros {0}", "Showing the first {0}";
     ExplorerEmpty => "Esta pasta está vazia.", "This folder is empty.";
     ExplorerPlaceHome => "Início", "Home";
@@ -604,7 +604,7 @@ strings! {
     ExplorerErrDenied => "O {0} não deixou ler esta pasta.", "{0} did not allow reading this folder.";
     ExplorerErrDeniedHere => "Este computador não deixou ler esta pasta.", "This computer did not allow reading this folder.";
     ExplorerErrTimeout => "O {0} não respondeu a tempo.", "{0} did not answer in time.";
-    ExplorerErrNoGrant => "O {0} não deu a este computador permissão para arquivos.", "{0} has not given this computer permission for files.";
+    ExplorerErrNoGrant => "O {0} não deu a este computador permissão para arquivos.", "{0} has not given this computer permission to access files.";
     ExplorerRetry => "Tentar de novo", "Try again";
     ExplorerGoBack => "Voltar", "Go back";
     ExplorerOpenThere => "Para abrir no {0}, use a tela.", "To open it on {0}, use the screen.";
@@ -614,11 +614,30 @@ strings! {
     ExplorerTransfersRunning => "{0} em andamento", "{0} in progress";
     ExplorerShow => "Mostrar", "Show";
     ExplorerHide => "Ocultar", "Hide";
+    // A chat message as a screen reader reads it (B17, F-UI-01).
+    ChatLineMine => "Você: {0}", "You: {0}";
+    ChatLinePeer => "{0}: {1}", "{0}: {1}";
 }
 
-/// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty).
+/// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
+/// `{n|one|other}` by the form the count in argument `n` takes in `lang` ([`is_one`]).
 pub fn text(lang: Language, msg: &Msg) -> String {
-    fill(msg.key.template(lang), &msg.args)
+    fill(lang, msg.key.template(lang), &msg.args)
+}
+
+/// Whether a count takes the singular form, by the CLDR cardinal rules (unicode.org/cldr/charts/latest/supplemental/
+/// language_plural_rules.html, read 12/11/2026): Portuguese `one` is the integers 0 and 1, English `one` is 1. A
+/// count that is not a whole number (an empty or missing argument) takes the plural.
+pub fn is_one(lang: Language, count: &str) -> bool {
+    let digits: String = count.chars().filter(char::is_ascii_digit).collect();
+    if digits.is_empty() || digits.len() != count.trim().chars().filter(|c| !matches!(c, '.' | ',')).count() {
+        return false;
+    }
+    match digits.trim_start_matches('0') {
+        "" => lang == Language::PtBr,
+        "1" => true,
+        _ => false,
+    }
 }
 
 /// Shorthand for a key without arguments.
@@ -626,18 +645,25 @@ pub fn plain(lang: Language, key: MsgKey) -> String {
     key.template(lang).to_owned()
 }
 
-fn fill(template: &str, args: &[String]) -> String {
+fn fill(lang: Language, template: &str, args: &[String]) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut rest = template;
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let tail = &rest[open + 1..];
-        if let Some(close) = tail.find('}')
-            && let Ok(n) = tail[..close].parse::<usize>()
-        {
-            out.push_str(args.get(n).map_or("", String::as_str));
-            rest = &tail[close + 1..];
-            continue;
+        if let Some(close) = tail.find('}') {
+            let inner = &tail[..close];
+            let mut parts = inner.split('|');
+            let index = parts.next().and_then(|n| n.parse::<usize>().ok());
+            if let Some(n) = index {
+                let arg = args.get(n).map_or("", String::as_str);
+                match (parts.next(), parts.next()) {
+                    (Some(one), Some(other)) => out.push_str(if is_one(lang, arg) { one } else { other }),
+                    _ => out.push_str(arg),
+                }
+                rest = &tail[close + 1..];
+                continue;
+            }
         }
         out.push('{');
         rest = tail;
@@ -653,7 +679,7 @@ pub fn placeholders(template: &str) -> usize {
     while let Some(open) = rest.find('{') {
         let tail = &rest[open + 1..];
         if let Some(close) = tail.find('}')
-            && let Ok(n) = tail[..close].parse::<usize>()
+            && let Ok(n) = tail[..close].split('|').next().unwrap_or_default().parse::<usize>()
         {
             max = max.max(n + 1);
             rest = &tail[close + 1..];
@@ -686,6 +712,65 @@ mod tests {
                 placeholders(key.template(Language::En)),
                 "{key:?} has different arguments per language"
             );
+        }
+    }
+
+    /// F-UI-01: a count chooses its noun by the language's rule; Portuguese says "0 item" and "1 item", English
+    /// "0 items" and "1 item" (CLDR).
+    #[test]
+    fn a_count_picks_the_singular_or_the_plural_of_its_language() {
+        let items = |lang, n: &str| text(lang, &Msg::new(MsgKey::ExplorerItems).with(n));
+        assert_eq!(
+            ["0", "1", "2", "1.000"].map(|n| items(Language::PtBr, n)),
+            ["0 item", "1 item", "2 itens", "1.000 itens"]
+        );
+        assert_eq!(
+            ["0", "1", "2", "1,000"].map(|n| items(Language::En, n)),
+            ["0 items", "1 item", "2 items", "1,000 items"]
+        );
+        let sent = text(Language::PtBr, &Msg::new(MsgKey::AuditControlFiles).with("1"));
+        assert_eq!(sent, "Controlou este computador e enviou 1 arquivo");
+        // Not a whole number: the plural, never a panic.
+        assert_eq!(items(Language::En, ""), " items");
+        assert!(!is_one(Language::PtBr, "1,5") && !is_one(Language::En, "abc"));
+    }
+
+    /// docs/GLOSSARY.md: one word per idea; the variants it lists under "Not" never appear in a text.
+    #[test]
+    fn the_texts_keep_to_the_glossary() {
+        let not_pt = [
+            "aparelho",
+            "máquina",
+            " pc ",
+            "visualizar",
+            "acessar remotamente",
+            "trocar papéis",
+            "emparelh",
+            "preferências",
+            "acesso não assistido",
+            "wake-on-lan",
+        ];
+        let not_en = [
+            "machine",
+            " pc ",
+            "remote into",
+            "view only",
+            "switch roles",
+            "preferences",
+            "pasteboard",
+            "unattended",
+            "wake-on-lan",
+        ];
+        for key in MsgKey::ALL {
+            // Padded, so a word at either end matches " pc " too.
+            let pt = format!(" {} ", key.template(Language::PtBr).to_lowercase());
+            let en = format!(" {} ", key.template(Language::En).to_lowercase());
+            for w in not_pt {
+                assert!(!pt.contains(w), "{key:?} (pt-BR) says {w:?}: {pt}");
+            }
+            for w in not_en {
+                assert!(!en.contains(w), "{key:?} (en) says {w:?}: {en}");
+            }
         }
     }
 

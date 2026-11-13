@@ -135,6 +135,8 @@ fn run_shell(
     });
     let gfx = Gfx::new()?;
     let mut state = state;
+    // A contrast theme on at start: the first paint is in its colours.
+    let _ = state.set_contrast(crate::system::system_contrast());
     // The full-screen monitor setting offers one entry for each monitor.
     state.set_local_monitors(u8::try_from(crate::fullscreen::monitor_rects().len()).unwrap_or(1));
     // Files are received into this user's Downloads folder until the user picks another (the file panel).
@@ -454,9 +456,13 @@ impl Shared {
         self.refresh(c);
     }
 
+    /// The system's appearance changed: light or dark, or a contrast theme turned on, off or edited.
     pub fn system_theme_changed(self: &Rc<Self>) {
         let dark = system_dark();
-        let c = self.state.borrow_mut().set_dark(dark);
+        let c = {
+            let mut st = self.state.borrow_mut();
+            st.set_dark(dark).union(st.set_contrast(crate::system::system_contrast()))
+        };
         self.refresh(c);
     }
 

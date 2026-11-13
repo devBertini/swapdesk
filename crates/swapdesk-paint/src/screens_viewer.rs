@@ -2,7 +2,7 @@
 //! (its visual is stage 15), the terminal panel's grid is drawn by the window (stage 43). Toolbar, drawer, cards and the banner follow the design.
 
 use swapdesk_ui::format;
-use swapdesk_ui::tokens::{Color, fixed, layout, text};
+use swapdesk_ui::tokens::{Color, layout, text};
 use swapdesk_ui::{
     ActionKind, ControlId, DialogKind, DrawerTab, EditId, Msg, MsgKey, SessionState, SwapPhase, SwapWait, TermPhase,
     WindowKind,
@@ -83,10 +83,10 @@ pub fn paint_viewer(f: &mut Frame) {
         }
     } else {
         p.fill_rect(video_col, pal.remote);
-        p.fill_rrect(video, 4.0, fixed::REMOTE_SCREEN);
+        p.fill_rrect(video, 4.0, f.fx.remote_screen);
         let ph = p.label_in(&f.t(MsgKey::VideoPlaceholder), text::BODY, video.w - 40.0, Align::Center);
         let (_, vy) = video.center();
-        p.draw(&ph, video.x + 20.0, vy - ph.h / 2.0, fixed::CARD_DARK_SOFT);
+        p.draw(&ph, video.x + 20.0, vy - ph.h / 2.0, f.fx.card_dark_soft);
     }
     f.out.video = Some(video);
 
@@ -150,7 +150,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
     let (p, _pal) = (f.p, f.pal);
     let _ = device_id;
     let display = f.st.tm(&Msg::new(MsgKey::TbScreenN).with("1"));
-    let white = fixed::TOOLBAR_INK;
+    let white = f.fx.toolbar_ink;
     let tool = |id, icon: &str| Tool {
         id,
         icon: Some(icon.to_owned()),
@@ -221,7 +221,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
         icon: None,
         label: Some(f.t(MsgKey::Disconnect)),
         pressed: false,
-        color: fixed::TOOLBAR_DANGER,
+        color: f.fx.toolbar_danger,
         weight_bold: true,
         chevron: false,
         sep_before: !swap_offered,
@@ -250,7 +250,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
     let total = 12.0 + widths.iter().sum::<f32>() + 2.0 * (tools.len() as f32 - 1.0) + seps * (1.0 + 12.0);
     let bar = Rect::new(p.snap(col.x + (col.w - total) / 2.0), col.y + 14.0, total, 52.0);
     p.shadow(bar, 12.0, 10.0, 30.0, Color::rgba(0, 0, 0, 35));
-    p.fill_rrect(bar, 12.0, fixed::TOOLBAR);
+    p.fill_rrect(bar, 12.0, f.fx.toolbar);
     let mut x = bar.x + 6.0;
     let mut pointed = None;
     for (n, (t, w)) in tools.iter().zip(&widths).enumerate() {
@@ -258,12 +258,12 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
             x += 2.0;
         }
         if t.sep_before {
-            p.fill_rect(Rect::new(x + 6.0, bar.y + 14.0, 1.0, 24.0), fixed::TOOLBAR_SEP);
+            p.fill_rect(Rect::new(x + 6.0, bar.y + 14.0, 1.0, 24.0), f.fx.toolbar_sep);
             x += 13.0;
         }
         let r = Rect::new(x, bar.y + 6.0, *w, 40.0);
         if t.pressed {
-            p.fill_rrect(r, 8.0, fixed::TOOLBAR_PRESSED);
+            p.fill_rrect(r, 8.0, f.fx.toolbar_pressed);
         }
         f.tint(t.id, r, 8.0, Color::rgb(0xFFFFFF), 0.10, 0.18);
         let color = if t.pressed { Color::rgb(0xFFFFFF) } else { t.color };
@@ -285,7 +285,7 @@ fn toolbar(f: &mut Frame, col: Rect, device_id: &str) {
         parts += 8.0 * (count as f32 - 1.0).max(0.0);
         let mut cx = r.x + (r.w - parts) / 2.0;
         if let Some(icon) = &t.icon {
-            let ic = if t.id == ControlId::TbSwap { fixed::TOOLBAR_LINK } else { color };
+            let ic = if t.id == ControlId::TbSwap { f.fx.toolbar_link } else { color };
             p.svg(icon, cx, r.y + 11.0, 18.0, 1.8, ic);
             cx += 18.0 + 8.0;
         }
@@ -323,8 +323,8 @@ fn button_hint(f: &mut Frame, col: Rect, bar: Rect, id: ControlId, button: Rect)
     let x = (cx - w / 2.0).min(col.right() - 8.0 - w).max(col.x + 8.0);
     let r = Rect::new(p.snap(x), bar.bottom() + 6.0, w, h);
     p.shadow(r, 8.0, 6.0, 18.0, Color::rgba(0, 0, 0, 35));
-    p.fill_rrect(r, 8.0, fixed::TOOLBAR);
-    p.draw(&label, r.x + 10.0, r.y + 6.0, fixed::TOOLBAR_INK);
+    p.fill_rrect(r, 8.0, f.fx.toolbar);
+    p.draw(&label, r.x + 10.0, r.y + 6.0, f.fx.toolbar_ink);
     f.out.hint = Some((id, r));
 }
 
@@ -424,8 +424,8 @@ fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
         layout::DIALOG_W.min(f.w - 48.0),
         h,
     );
-    p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), fixed::TOOLBAR.with_alpha(0.55));
-    p.shadow(r, layout::DIALOG_RADIUS, 30.0, 80.0, fixed::SHADOW_DIALOG);
+    p.fill_rect(Rect::new(0.0, 0.0, f.w, f.h), f.fx.toolbar.with_alpha(0.55));
+    p.shadow(r, layout::DIALOG_RADIUS, 30.0, 80.0, f.fx.shadow_dialog);
     p.fill_rrect(r, layout::DIALOG_RADIUS, pal.surface);
     let (x, mut y) = (r.x + 32.0, r.y + 32.0);
     p.draw(&title, x, y, pal.ink);
@@ -516,12 +516,12 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
     let actions_h = 21.75 + 14.0 + 2.0 * 40.0 + 8.0;
     let box_h = (b.bottom() - 18.0 - actions_h - 14.0 - buttons_h - hint_h - y).max(80.0);
     let grid = Rect::new(x, y, w, box_h);
-    p.fill_rrect(grid, 10.0, fixed::TERMINAL_BG);
+    p.fill_rrect(grid, 10.0, f.fx.terminal_bg);
     // The grid is drawn by the window after the frame (the terminal renderer), a few DIPs inside the rounded box.
     f.out.terminal = Some(grid.inset(3.0));
     let say = |f: &Frame, msg: String| {
         let l = f.p.label_in(&msg, text::CAPTION, w - 32.0, Align::Start);
-        f.p.draw(&l, x + 16.0, y + 14.0, fixed::TERMINAL_INK);
+        f.p.draw(&l, x + 16.0, y + 14.0, f.fx.terminal_ink);
     };
     match &phase {
         TermPhase::Open { .. } => f.register(ControlId::TermGrid, grid, 10.0),
@@ -530,8 +530,8 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
             Some(bar) => {
                 let msg = f.st.tm(&Msg::new(MsgKey::TermConsentWaiting).with(peer));
                 let l = f.p.label_in(&msg, text::CAPTION, w - 32.0, Align::Start);
-                f.p.draw(&l, x + 16.0, y + 14.0, fixed::TERMINAL_INK);
-                let colors = [fixed::CARD_DARK_BORDER, fixed::SPINNER, fixed::CARD_DARK_SOFT];
+                f.p.draw(&l, x + 16.0, y + 14.0, f.fx.terminal_ink);
+                let colors = [f.fx.card_dark_border, f.fx.spinner, f.fx.card_dark_soft];
                 f.countdown_row((x + 16.0, y + 14.0 + l.h + 10.0), (w - 32.0).min(320.0), &bar, colors);
             }
             None => say(f, f.t(MsgKey::TermOpening)),

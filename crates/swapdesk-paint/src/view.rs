@@ -2,7 +2,7 @@
 //! registration and the output the window needs afterwards (where each control landed, where the native text inputs
 //! and the video area are).
 
-use swapdesk_ui::tokens::{Color, Palette, TextStyle, layout, palette, text};
+use swapdesk_ui::tokens::{Color, Palette, TextStyle, layout, text};
 use swapdesk_ui::{ControlId, EditId, UiState, WaitBar};
 
 use crate::painter::{Align, Painter, Rect, rrect_path};
@@ -77,7 +77,9 @@ pub enum Kind {
 
 pub struct Frame<'a> {
     pub p: &'a dyn Painter,
-    pub pal: &'static Palette,
+    pub pal: Palette,
+    /// The colours that do not follow light and dark (`UiState::fixed_colors`).
+    pub fx: swapdesk_ui::tokens::FixedColors,
     pub st: &'a UiState,
     pub ix: &'a Interaction,
     pub out: Output,
@@ -100,7 +102,8 @@ impl<'a> Frame<'a> {
     ) -> Frame<'a> {
         Frame {
             p,
-            pal: palette(st.dark()),
+            pal: st.palette(),
+            fx: st.fixed_colors(),
             st,
             ix,
             out: Output::default(),
@@ -300,7 +303,7 @@ impl<'a> Frame<'a> {
         }
         let Some(w) = self.out.widgets.iter().find(|w| Some(w.id) == self.ix.focus) else { return };
         let radius = if w.radius > 0.0 { w.radius + 3.0 } else { 0.0 };
-        let color = if on_dark { swapdesk_ui::tokens::fixed::TOOLBAR_LINK } else { self.pal.link };
+        let color = if on_dark { self.fx.toolbar_link } else { self.pal.link };
         self.p.stroke_rrect(
             Rect::new(w.rect.x - 3.0, w.rect.y - 3.0, w.rect.w + 6.0, w.rect.h + 6.0),
             radius,
