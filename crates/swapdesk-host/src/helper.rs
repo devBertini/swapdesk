@@ -1484,17 +1484,13 @@ where
 }
 
 #[cfg(test)]
-#[path = "helper_refine_tests.rs"]
 mod refine_tests;
 
 #[cfg(test)]
-#[path = "helper_stall_tests.rs"]
 mod stall_tests;
 
 #[cfg(test)]
-#[path = "helper_rate_tests.rs"]
 mod rate_tests;
 
 #[cfg(test)]
-#[path = "helper_codec_tests.rs"]
 mod codec_tests;

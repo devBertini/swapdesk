@@ -872,5 +872,4 @@ impl UiState {
 }
 
 #[cfg(test)]
-#[path = "explorer_tests.rs"]
 mod tests;

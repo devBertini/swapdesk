@@ -519,5 +519,4 @@ impl UiState {
 }
 
 #[cfg(test)]
-#[path = "explorer_drag_out_tests.rs"]
 mod tests;

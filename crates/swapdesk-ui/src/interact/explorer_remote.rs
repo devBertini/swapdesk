@@ -1281,5 +1281,4 @@ enum Answer {
 }
 
 #[cfg(test)]
-#[path = "explorer_remote_tests.rs"]
 mod tests;

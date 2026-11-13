@@ -285,5 +285,4 @@ impl UiState {
 }
 
 #[cfg(test)]
-#[path = "explorer_drop_tests.rs"]
 mod tests;

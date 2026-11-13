@@ -304,5 +304,4 @@ impl HttpGet for MacHttp {
 }
 
 #[cfg(test)]
-#[path = "http_tests.rs"]
 mod tests;

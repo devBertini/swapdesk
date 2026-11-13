@@ -321,5 +321,4 @@ impl Watcher for MacWatcher {
 }
 
 #[cfg(test)]
-#[path = "update_mac_tests.rs"]
 mod tests;

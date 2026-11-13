@@ -396,9 +396,7 @@ impl UiState {
     }
 }
 
-#[path = "explorer_drag_out.rs"]
 pub mod out;
 
 #[cfg(test)]
-#[path = "explorer_drag_tests.rs"]
 mod tests;

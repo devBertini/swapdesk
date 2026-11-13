@@ -1010,5 +1010,4 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
 }
 
 #[cfg(test)]
-#[path = "first_start_tests.rs"]
 mod first_start_tests;

@@ -623,5 +623,4 @@ pub fn key_action(key: Option<Key>, mods: Mods, rows: usize, alt_screen: bool, a
 }
 
 #[cfg(test)]
-#[path = "term_tests.rs"]
 mod tests;
