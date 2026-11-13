@@ -14,6 +14,8 @@
 pub mod actions;
 pub mod admin;
 #[cfg(target_os = "macos")]
+pub mod disk;
+#[cfg(target_os = "macos")]
 pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod http;

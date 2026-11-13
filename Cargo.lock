@@ -1043,6 +1043,7 @@ dependencies = [
  "swapdesk-input-win",
  "swapdesk-ipc",
  "swapdesk-platform",
+ "swapdesk-proto",
  "swapdesk-sys-win",
 ]
 

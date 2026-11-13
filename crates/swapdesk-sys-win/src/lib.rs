@@ -8,6 +8,7 @@ mod acl;
 pub mod actions;
 pub mod desktop;
 pub mod dirwatch;
+pub mod disk;
 pub mod elevate;
 mod env;
 pub mod fs;

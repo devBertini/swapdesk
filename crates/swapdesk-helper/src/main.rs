@@ -16,6 +16,10 @@ fn main() {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
+mod system_disk;
+
+#[cfg(windows)]
 mod win {
     use std::sync::Arc;
     use std::time::Duration;

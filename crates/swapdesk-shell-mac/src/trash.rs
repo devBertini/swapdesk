@@ -1,53 +1,31 @@
 //! This computer's Trash and free space for the explorer (`docs/FILES-UI.md` 3.2, slice 2a), given to
 //! `swapdesk_ui::local_disk` at start; both run on the interface backend's worker thread.
 //!
-//! The Trash: `-[NSFileManager trashItemAtURL:resultingItemURL:error:]`, which "returns YES if the item at url was
-//! successfully moved to the trash, or NO if the item was not moved to the trash" (Foundation `NSFileManager.h`, macOS
-//! 10.8, read in the SDK 12/11/2026): an item it cannot move stays where it is, so nothing is ever destroyed. Free
-//! space: `attributesOfFileSystemForPath:error:` and `NSFileSystemFreeSize`.
+//! A thin adaptor: the Trash (`trashItemAtURL`) and the free space live in `swapdesk_sys_mac::disk`; this maps its
+//! `TrashError` to the window's `ApiCode`.
 
 use std::path::{Path, PathBuf};
 
-use objc2_foundation::{NSFileManager, NSFileSystemFreeSize, NSNumber, NSString, NSURL};
+use swapdesk_sys_mac::disk::{self, TrashError};
 use swapdesk_ui::ApiCode;
 use swapdesk_ui::local_disk::LocalOs;
-
-/// `NSFeatureUnsupportedError`: the volume has no Trash (Foundation `FoundationErrors.h`).
-const FEATURE_UNSUPPORTED: isize = 3328;
-/// `NSFileNoSuchFileError` and `NSFileReadNoSuchFileError`.
-const NO_SUCH_FILE: [isize; 2] = [4, 260];
-/// `NSFileWriteNoPermissionError`.
-const NO_PERMISSION: isize = 513;
 
 pub fn local_os() -> LocalOs {
     LocalOs { trash, free_bytes }
 }
 
 fn free_bytes(path: &Path) -> Option<u64> {
-    let manager = NSFileManager::defaultManager();
-    let attrs = manager.attributesOfFileSystemForPath_error(&NSString::from_str(path.to_str()?)).ok()?;
-    // SAFETY: the key is Foundation's constant.
-    let value = attrs.objectForKey(unsafe { NSFileSystemFreeSize })?;
-    let number = value.downcast::<NSNumber>().ok()?;
-    Some(number.unsignedLongLongValue())
+    disk::free_bytes(path)
 }
 
 /// Moves `paths` to the Trash. `Refused` when a volume has no Trash; an item that could not be moved stays.
 fn trash(paths: &[PathBuf]) -> Result<(), ApiCode> {
-    let manager = NSFileManager::defaultManager();
-    for p in paths {
-        let text = p.to_str().ok_or(ApiCode::Invalid)?;
-        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
-        if let Err(e) = manager.trashItemAtURL_resultingItemURL_error(&url, None) {
-            return Err(match e.code() {
-                FEATURE_UNSUPPORTED => ApiCode::Refused,
-                c if NO_SUCH_FILE.contains(&c) => ApiCode::NotFound,
-                NO_PERMISSION => ApiCode::NotPermitted,
-                _ => ApiCode::Internal,
-            });
-        }
-    }
-    Ok(())
+    disk::trash(paths).map_err(|e| match e {
+        TrashError::NoBin => ApiCode::Refused,
+        TrashError::NotFound => ApiCode::NotFound,
+        TrashError::NotPermitted => ApiCode::NotPermitted,
+        TrashError::Failed => ApiCode::Internal,
+    })
 }
 
 #[cfg(test)]

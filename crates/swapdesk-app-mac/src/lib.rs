@@ -49,6 +49,8 @@ pub mod session_notices;
 #[cfg(target_os = "macos")]
 pub mod slot;
 #[cfg(target_os = "macos")]
+pub mod system_disk;
+#[cfg(target_os = "macos")]
 pub mod update;
 
 #[cfg(all(test, target_os = "macos"))]
