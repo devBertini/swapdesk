@@ -420,7 +420,7 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
         let l = p.label_in(msg, text::CAPTION, w, Align::Start);
         let x = rows.x + 16.0;
         p.draw(&l, x, rows.y + 14.0, pal.soft);
-        let colors = [pal.line, pal.link, pal.sunken];
+        let colors = [pal.line, pal.link, pal.soft];
         f.countdown_row((x, rows.y + 14.0 + l.h + 10.0), w, bar, colors);
     } else if v.loading && v.rows.is_empty() {
         for i in 0..8 {

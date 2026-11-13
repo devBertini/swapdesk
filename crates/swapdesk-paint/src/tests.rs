@@ -27,6 +27,8 @@ pub(crate) struct Fixed {
     pub(crate) centred: RefCell<Vec<(String, f32, f32)>>,
     /// Every text laid out, with its style.
     pub(crate) styled: RefCell<Vec<(String, TextStyle)>>,
+    /// The ink of every text drawn, in the order of `drawn`.
+    pub(crate) inks: RefCell<Vec<Color>>,
 }
 
 impl Fixed {
@@ -96,9 +98,10 @@ impl Painter for Fixed {
         let lines = if ellipsis || one_line <= max_w { 1.0 } else { (one_line / max_w).ceil() };
         Label::new(one_line.min(max_w), lines * st.size * st.line, st.size, text.to_owned())
     }
-    fn draw(&self, l: &Label, x: f32, y: f32, _: Color) {
+    fn draw(&self, l: &Label, x: f32, y: f32, ink: Color) {
         let text = l.handle::<String>().expect("a label is drawn by the painter that made it");
         self.drawn.borrow_mut().push(text.clone());
+        self.inks.borrow_mut().push(ink);
         self.placed.borrow_mut().push((x, y, l.h));
         if let Some((_, box_w, size)) = self.centred_made.borrow().iter().find(|(t, ..)| t == text) {
             self.centred.borrow_mut().push((text.clone(), x + box_w / 2.0, *size));
@@ -752,7 +755,9 @@ fn the_explorer_draws_the_files_question_and_its_countdown_in_the_right_pane_onl
     let drawn = p.drawn.borrow().clone();
     let placed = p.placed.borrow().clone();
     let at = drawn.iter().position(|t| *t == text).expect("the sentence with the other computer's name is drawn");
-    assert!(drawn.contains(&"0:14".to_string()), "the countdown row's time is drawn: {drawn:?}");
+    let time = drawn.iter().position(|t| t == "0:14").expect("the countdown row's time is drawn");
+    let pal = state.palette();
+    assert_eq!(p.inks.borrow()[time], pal.soft, "the time is read in soft ink, not in a background colour");
     let pane = out.widgets.iter().find(|w| w.id == ControlId::ExpPane(true)).expect("the right pane").rect;
     let (x, y, _) = placed[at];
     assert!(x >= pane.x && x < pane.right() && y > pane.y && y < pane.bottom(), "inside the right pane: {x},{y}");
