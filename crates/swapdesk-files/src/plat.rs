@@ -90,7 +90,7 @@ pub(crate) fn mark_downloaded(path: &Path) -> io::Result<()> {
 }
 
 /// Whether `path` carries the mark of [`mark_downloaded`] (the test side of it).
-#[cfg(test)]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 pub(crate) fn is_marked_downloaded(path: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -101,10 +101,5 @@ pub(crate) fn is_marked_downloaded(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         swapdesk_sys_mac::fs::quarantine_of(path).is_some_and(|v| v.starts_with("0081;"))
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = path;
-        true
     }
 }

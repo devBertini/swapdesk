@@ -122,6 +122,8 @@ fn a_file_is_received_through_the_pipe_and_never_overwrites() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+// Only Windows and the Mac have a mark of the web (plat.rs).
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn a_file_the_viewer_saves_carries_the_mark_of_the_web() {
     // The viewer's disk (the UI's token roots) is where a download lands: the finished file is marked as coming from

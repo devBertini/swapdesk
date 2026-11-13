@@ -54,7 +54,7 @@ impl Stallers {
         Self { runtime, released: Arc::new((Mutex::new(false), Condvar::new())), endpoints: Vec::new() }
     }
 
-    /// One more handshake that stalls, from 127.0.0.`last` towards `host`.
+    /// One more handshake that stalls, from 127.0.0.`last` towards `host` (macOS has only 127.0.0.1 on loopback).
     fn stall(&mut self, last: u8, host: SocketAddr, expected: swapdesk_trust::Spki) {
         let _enter = self.runtime.enter();
         let socket = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, last), 0)).expect("a loopback source address");
@@ -100,6 +100,10 @@ fn rig() -> (Machine, Machine, super::super::MachineShared) {
 /// Four neighbours with four stalled handshakes each (16: the machine's whole cap, and 4 per address: each one's
 /// whole share) shut every other peer out for as long as the handshake stage lasted.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS loopback holds only 127.0.0.1, and this case needs a source address per neighbour (Windows and Linux run it)"
+)]
 fn four_addresses_with_four_stalled_handshakes_each_do_not_shut_a_fifth_peer_out() {
     let (host, viewer, shared) = rig();
     let mut stallers = Stallers::new();
@@ -126,6 +130,10 @@ fn four_addresses_with_four_stalled_handshakes_each_do_not_shut_a_fifth_peer_out
 /// Sixteen neighbours, one stalled handshake each, fill the machine's cap: the peer that follows is let in, and the
 /// oldest stalled handshake is the one that gives way.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS loopback holds only 127.0.0.1, and this case needs a source address per neighbour (Windows and Linux run it)"
+)]
 fn a_full_cap_of_stalled_handshakes_gives_way_to_the_next_peer() {
     let (host, viewer, shared) = rig();
     let mut stallers = Stallers::new();
@@ -147,7 +155,7 @@ fn a_full_cap_of_stalled_handshakes_gives_way_to_the_next_peer() {
 fn a_stalled_handshake_gives_up_its_place_within_the_short_limit() {
     let (host, _viewer, shared) = rig();
     let mut stallers = Stallers::new();
-    stallers.stall(2, host.addr(), *host.identity.spki());
+    stallers.stall(1, host.addr(), *host.identity.spki());
     wait_for("the stalled handshake to reach the host", || (shared.handshakes_in_flight() == 1).then_some(()));
     let started = Instant::now();
     wait_for("the place to be given back", || (shared.handshakes_in_flight() == 0).then_some(()));

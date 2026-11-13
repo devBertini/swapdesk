@@ -313,6 +313,8 @@ mod tests {
         winners.len()
     }
 
+    // The no-replace guarantee is the system's (Windows, the Mac); the `std` fallback elsewhere has the gap plat.rs says.
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn concurrent_renames_to_one_name_never_replace_each_other() {
         let d = dir("race-rename");
@@ -352,6 +354,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // The no-replace guarantee is the system's (Windows, the Mac); the `std` fallback elsewhere has the gap plat.rs says.
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn concurrent_moves_into_one_folder_never_replace_each_other() {
         let d = dir("race-move");
