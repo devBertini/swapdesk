@@ -5,18 +5,44 @@
 # PyNaCl, removed at exit; only the ciphertext is printed, as the JSON call list for `github-repo-config <repo> <file>`.
 #
 #   bash packaging/macos/seal-release-secrets.sh <key_id> <base64 public key> > secrets.json
+#   bash packaging/macos/seal-release-secrets.sh --rehearse      only the rehearsal below
+#
+# Before sealing it rehearses the runner's import and signature with the same files, and seals nothing if they fail.
 #
 # key_id and key come from GET /repos/<owner>/<repo>/actions/secrets/public-key. The identity folder defaults to
 # ~/.swapdesk-release-signing (SWAPDESK_RELEASE_DIR overrides it).
 set -euo pipefail
 
-key_id="${1:?usage: seal-release-secrets.sh <key_id> <public key base64>}"
-key="${2:?usage: seal-release-secrets.sh <key_id> <public key base64>}"
 dir="${SWAPDESK_RELEASE_DIR:-$HOME/.swapdesk-release-signing}"
 [ -f "$dir/release.p12" ] && [ -f "$dir/p12-password" ] || { echo "no release identity in $dir" >&2; exit 1; }
 
 venv="$(mktemp -d "${TMPDIR:-/tmp}/swapdesk-seal.XXXXXX")"
-trap 'rm -rf "$venv"' EXIT
+trap 'security delete-keychain "$venv/rehearsal.keychain-db" 2>/dev/null; rm -rf "$venv"' EXIT
+
+# The rehearsal: what build-release.sh does with the secrets on the runner (a throwaway keychain, the PKCS#12 imported,
+# codesign by the certificate's hash), on a copy of /usr/bin/true. Nothing is sealed unless it signs.
+rehearse() {
+  local kc="$venv/rehearsal.keychain-db" kpw hash
+  kpw="$(/usr/bin/openssl rand -hex 24)"
+  security create-keychain -p "$kpw" "$kc"
+  security set-keychain-settings "$kc"
+  security unlock-keychain -p "$kpw" "$kc"
+  security import "$dir/release.p12" -f pkcs12 -k "$kc" -P "$(cat "$dir/p12-password")" -T /usr/bin/codesign >&2
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$kpw" "$kc" >/dev/null
+  hash="$(security find-certificate -c "Swapdesk Release" -Z "$kc" | sed -n 's/^SHA-1 hash: *//p' | head -1)"
+  echo "rehearsal: certificate $hash; identities:" >&2
+  security find-identity "$kc" >&2
+  cp /usr/bin/true "$venv/probe"
+  codesign --force --keychain "$kc" --sign "$hash" --timestamp=none "$venv/probe" >&2
+  echo "rehearsal: signed" >&2
+}
+if [ "${1:-}" = --rehearse ]; then
+  rehearse
+  exit 0
+fi
+key_id="${1:?usage: seal-release-secrets.sh <key_id> <public key base64> | --rehearse}"
+key="${2:?usage: seal-release-secrets.sh <key_id> <public key base64> | --rehearse}"
+rehearse
 /usr/bin/python3 -m venv "$venv" >&2
 "$venv/bin/pip" install -q pynacl >&2
 
