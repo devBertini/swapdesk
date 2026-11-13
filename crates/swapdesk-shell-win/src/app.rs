@@ -130,6 +130,10 @@ fn run_shell(
         let ole = OleInitialize(None).is_ok();
         OLE_STARTED.with(|o| o.set(ole));
     }
+    if host.is_some() {
+        // Leftovers of a crashed drag out to the system's file manager (slice 5), removed on a worker.
+        swapdesk_ui::clean_stale_staging(swapdesk_ui::staging_root());
+    }
     // A real run shows the remote picture in the viewer window: it gets the window's whole area, with no margin.
     state.set_live_picture(host.is_some());
     register_gdi_font();
@@ -423,7 +427,7 @@ impl Shared {
         self.dispatch(act, from);
     }
 
-    fn dispatch(self: &Rc<Self>, act: Activation, from: &Window) {
+    pub(crate) fn dispatch(self: &Rc<Self>, act: Activation, from: &Window) {
         match act.effect {
             Some(Effect::FocusEdit(e)) => from.focus_control(ControlId::Edit(e), true),
             Some(Effect::Focus(id)) => from.focus_control(id, true),
@@ -463,7 +467,8 @@ impl Shared {
                 | Effect::ContextMenu
                 | Effect::SaveLog
                 | Effect::PickFiles
-                | Effect::PickReceiveFolder),
+                | Effect::PickReceiveFolder
+                | Effect::SystemDrag),
             ) => {
                 debug_assert_eq!(handling(&effect), Handling::Modal);
                 from.set_pending_effect(effect)
@@ -525,6 +530,7 @@ impl Shared {
                     self.refresh(act.changed);
                 }
             }
+            Effect::SystemDrag => self.run_system_drag(from),
             _ => {}
         }
     }
@@ -809,9 +815,12 @@ pub(crate) enum Handling {
 /// `dispatch` and `run_modal` handle each side.
 pub(crate) fn handling(effect: &Effect) -> Handling {
     match effect {
-        Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::PickFiles | Effect::PickReceiveFolder => {
-            Handling::Modal
-        }
+        Effect::Menu(_)
+        | Effect::ContextMenu
+        | Effect::SaveLog
+        | Effect::PickFiles
+        | Effect::PickReceiveFolder
+        | Effect::SystemDrag => Handling::Modal,
         Effect::FocusEdit(_)
         | Effect::Focus(_)
         | Effect::SubmitEdit(_)
@@ -842,6 +851,7 @@ mod effect_tests {
             Effect::OpenLocal,
             Effect::ContextMenu,
             Effect::RevealLocal,
+            Effect::SystemDrag,
         ];
         for e in &all {
             match e {
@@ -856,7 +866,8 @@ mod effect_tests {
                 | Effect::OpenWebPage
                 | Effect::OpenLocal
                 | Effect::ContextMenu
-                | Effect::RevealLocal => {}
+                | Effect::RevealLocal
+                | Effect::SystemDrag => {}
             }
         }
         all
@@ -865,7 +876,7 @@ mod effect_tests {
     #[test]
     fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
         let all = every_effect();
-        assert_eq!(all.len(), 12);
+        assert_eq!(all.len(), 13);
         for e in &all {
             // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
             let _ = handling(e);

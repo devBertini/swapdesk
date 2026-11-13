@@ -9,6 +9,7 @@
 mod app;
 mod cursor;
 mod dialogs;
+mod drag_out;
 mod drop_target;
 mod files_dialogs;
 mod fullscreen;

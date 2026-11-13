@@ -56,6 +56,8 @@ struct Active {
     under: Option<ControlId>,
     /// The folder row under the pointer and since when (ms).
     hover: Option<(ControlId, u64)>,
+    /// Size and time of each item (slice 5, `out_capture_meta`).
+    meta: Vec<(u64, u64)>,
 }
 
 /// What the explorer remembers of a drag between events.
@@ -69,6 +71,8 @@ pub(crate) struct DragState {
     active: Option<Active>,
     /// A drag was cancelled with the button still down: its release is not a click.
     swallow: bool,
+    /// Slice 5: the drag out to the system's file manager.
+    out: out::OutState,
 }
 
 /// A drag as the painter draws it: the pill under the pointer, its caption and the target to highlight.
@@ -211,7 +215,9 @@ impl UiState {
         self.explorer.focus_there = there;
         self.explorer.pointer = Default::default();
         self.explorer.drag.press = None;
-        self.explorer.drag.active = Some(Active { there, folder, items, at, copy: false, under: None, hover: None });
+        self.explorer.drag.active =
+            Some(Active { there, folder, items, at, copy: false, under: None, hover: None, meta: Vec::new() });
+        self.out_capture_meta();
     }
 
     /// The control under the pointer is, or stands for, a folder this drag could land in.
@@ -389,6 +395,9 @@ impl UiState {
         if was { Changed::VIEWER } else { Changed::NONE }
     }
 }
+
+#[path = "explorer_drag_out.rs"]
+pub mod out;
 
 #[cfg(test)]
 #[path = "explorer_drag_tests.rs"]

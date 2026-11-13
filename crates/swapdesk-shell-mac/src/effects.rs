@@ -32,6 +32,8 @@ pub enum Handling {
     ContextMenu,
     /// The explorer's local item, shown in the Finder (`/usr/bin/open -R`).
     RevealInFinder,
+    /// The system drag of `UiState::take_system_drag` starts on the canvas (slice 5; a promise per file).
+    SystemDrag,
 }
 
 impl Handling {
@@ -50,7 +52,8 @@ impl Handling {
             | Handling::OpenLogsFolder
             | Handling::OpenWebPage
             | Handling::OpenLocalFile
-            | Handling::RevealInFinder => false,
+            | Handling::RevealInFinder
+            | Handling::SystemDrag => false,
         }
     }
 }
@@ -70,5 +73,6 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::OpenLocal => Handling::OpenLocalFile,
         Effect::ContextMenu => Handling::ContextMenu,
         Effect::RevealLocal => Handling::RevealInFinder,
+        Effect::SystemDrag => Handling::SystemDrag,
     }
 }

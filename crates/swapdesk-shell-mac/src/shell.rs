@@ -330,6 +330,24 @@ pub(crate) fn drag_move(hit: Option<ControlId>, at: (f32, f32), copy: bool) {
     });
 }
 
+/// The pointer left the session window with the left button held (slice 5): a drag of the right pane becomes a
+/// system drag of promised files.
+pub(crate) fn drag_left_window() {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().drag_left_window();
+        s.dispatch_from(WindowKind::Viewer, act);
+        s.sync_drag_timer();
+    });
+}
+
+/// A drag out's waker fired (main thread): the downloads the system asked for start, a released drag's cancel.
+pub(crate) fn system_drag_pump() {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().system_drag_pump();
+        s.send_commands(act.commands);
+    });
+}
+
 /// The left button went up over the explorer: true when a drag ended (the canvas must not click).
 pub(crate) fn drag_release(hit: Option<ControlId>, at: (f32, f32), copy: bool) -> bool {
     with_shell(|s| {
@@ -837,6 +855,12 @@ impl Shell {
                 // Only something that exists: `open -R` shows it selected in its folder.
                 if let Some(path) = target.filter(|p| p.exists()) {
                     let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+                }
+            }
+            Handling::SystemDrag => {
+                let out = self.state.borrow_mut().take_system_drag();
+                if let Some(out) = out {
+                    crate::drag_out::begin(&canvas, out, self.mtm);
                 }
             }
             Handling::SaveLogPanel => self.save_log(),

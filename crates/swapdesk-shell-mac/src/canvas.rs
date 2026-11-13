@@ -224,6 +224,9 @@ define_class!(
                 // A press on a row, moved, is the explorer's drag; Option is the copy key.
                 let copy = event.modifierFlags().contains(NSEventModifierFlags::Option);
                 crate::shell::drag_move(hit, self.point(event), copy);
+                if self.outside(event) {
+                    crate::shell::drag_left_window(); // slice 5
+                }
             }
             self.hover(hit, hit.is_none() && self.over_video(event));
         }
@@ -612,6 +615,13 @@ impl CanvasView {
     fn point(&self, event: &NSEvent) -> (f32, f32) {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         (p.x as f32, p.y as f32)
+    }
+
+    /// The pointer is outside the canvas (the drag left the window).
+    fn outside(&self, event: &NSEvent) -> bool {
+        let (x, y) = self.point(event);
+        let size = self.bounds().size;
+        x < 0.0 || y < 0.0 || f64::from(x) >= size.width || f64::from(y) >= size.height
     }
 
     /// A right click or Control+click on the explorer: the state decides what the menu holds.

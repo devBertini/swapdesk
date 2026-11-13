@@ -1330,6 +1330,9 @@ impl Window {
                     // MK_LBUTTON: a press on a row, moved, is the explorer drag.
                     self.shared.drag_move(hit, self.dips(x, y), Self::ctrl_down(), self);
                     self.sync_drag_timer();
+                    if crate::drag_out::outside_client(hwnd, x, y) {
+                        self.shared.drag_left_window(self); // slice 5: a drag of the right pane leaves
+                    }
                 }
                 self.forward_mouse(MouseKind::Move, x, y, hit);
                 Some(LRESULT(0))
@@ -1644,6 +1647,10 @@ impl Window {
             }
             WM_ACCESS => {
                 self.handle_access_actions();
+                Some(LRESULT(0))
+            }
+            crate::drag_out::WM_SYSDRAG => {
+                self.shared.system_drag_pump();
                 Some(LRESULT(0))
             }
             WM_WAKE => {

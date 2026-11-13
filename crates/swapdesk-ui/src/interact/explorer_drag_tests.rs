@@ -13,7 +13,7 @@ use crate::interact::explorer_manage::ExplorerKey;
 use crate::mock::Scenario;
 use crate::state::Effect;
 
-fn entry(name: &str, is_dir: bool) -> DirEntryView {
+pub(super) fn entry(name: &str, is_dir: bool) -> DirEntryView {
     DirEntryView { name: name.into(), is_dir, size: 10, mtime_ms: 0 }
 }
 
@@ -63,7 +63,7 @@ fn local_listing(s: &mut UiState) {
 }
 
 /// A 1.1 peer, FILES and CONTROL granted: the home folder shows "Contratos" (row 0), "foto.jpg", "notas.txt".
-fn opened_11() -> UiState {
+pub(super) fn opened_11() -> UiState {
     let mut s = Scenario::Visualizador.prepared_state();
     let a = s.activate(ControlId::TbFiles);
     local_listing(&mut s);
@@ -115,12 +115,12 @@ fn grant(s: &mut UiState, granted: Permissions) {
 const FAR: (f32, f32) = (200.0, 200.0);
 
 /// Press on `from`, move far enough to start, and hover `over`.
-fn drag(s: &mut UiState, from: ControlId, over: Option<ControlId>, copy: bool) {
+pub(super) fn drag(s: &mut UiState, from: ControlId, over: Option<ControlId>, copy: bool) {
     s.drag_press(Some(from), (100.0, 100.0));
     s.drag_move(over, FAR, copy, 1_000);
 }
 
-fn row(there: bool, n: u16) -> ControlId {
+pub(super) fn row(there: bool, n: u16) -> ControlId {
     ControlId::ExpRow(there, n)
 }
 
@@ -358,7 +358,8 @@ fn the_context_menu_lists_the_same_items_in_the_same_order_with_disabled_ones_ke
         "Excluir",
         "Propriedades",
         "Atualizar",
-        "Mostrar no Explorador de Arquivos",
+        // The system's own file manager, named per system.
+        if cfg!(target_os = "macos") { "Mostrar no Finder" } else { "Mostrar no Explorador de Arquivos" },
     ];
 
     // On a row.
@@ -382,7 +383,7 @@ fn the_context_menu_lists_the_same_items_in_the_same_order_with_disabled_ones_ke
     assert_eq!(there.len(), want_here.len());
     assert_eq!(there[1], "Copiar para este computador");
     assert_eq!(there[2..], want_here[2..]);
-    assert!(!enabled(&s, "Mostrar no Explorador de Arquivos") && !enabled(&s, "Propriedades"));
+    assert!(!enabled(&s, want_here[9]) && !enabled(&s, "Propriedades"));
     assert!(enabled(&s, "Renomear"), "a 1.1 peer with control takes a rename");
     assert!(!enabled(&s, "Abrir"), "a file there is not opened");
 

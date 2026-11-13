@@ -573,6 +573,8 @@ pub enum Effect {
     /// Show the local item of [`UiState::take_local_target`] in the system's file manager (Explorador de Arquivos,
     /// Finder).
     RevealLocal,
+    /// Slice 5: start the system's drag of [`UiState::take_system_drag`] (the pointer left the window mid-drag).
+    SystemDrag,
 }
 
 /// What to restore when an optimistic change is refused.
@@ -2066,6 +2068,7 @@ impl UiState {
                 Changed::VIEWER
             }
             UiEvent::Transfer { transfer_id, session_id, name, outgoing, state } => {
+                self.system_drag_transfer(transfer_id, session_id, &name, outgoing, &state);
                 // A transfer that moves or ends was answered (a refusal fails it).
                 if !matches!(state, TransferState::Queued) {
                     self.consent_answered(Feature::Files);
@@ -2085,6 +2088,7 @@ impl UiState {
                 Changed::VIEWER
             }
             UiEvent::TransferSavedAs { transfer_id, name, .. } => {
+                self.system_drag_saved_as(transfer_id, &name);
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
                     t.saved_as = Some(name);
                 }
