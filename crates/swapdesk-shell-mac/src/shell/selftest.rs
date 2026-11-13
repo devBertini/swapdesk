@@ -109,6 +109,9 @@ fn scenarios_build_their_windows(mtm: MainThreadMarker) -> Result<(), String> {
         if let Some(canvas) = banner {
             ensure!(canvas.paint_now(), "{}: the banner's canvas did not paint", sc.name());
             painted_all(&shell, &canvas, WindowKind::Banner, sc.name())?;
+            // The banner's line moves on by itself: a timer is armed for its next minute or the end of a files note.
+            shell.sync_timers();
+            ensure!(shell.banner_timer.borrow().is_some(), "{}: no timer moves the banner's line on", sc.name());
         }
         close(&shell);
     }

@@ -7,7 +7,7 @@
 //! (`NSControlTextDidChangeNotification`), `NSDistributedNotificationCenter` with `AppleInterfaceThemeChangedNotification`
 //! (the notification the system posts when the appearance changes), `NSSavePanel`, `NSWindowDelegate`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -131,6 +131,12 @@ define_class!(
             with_shell(|s| s.tick());
         }
 
+        // The banner's line changes: the next minute of "há 12 min", or the end of a files note.
+        #[unsafe(method(bannerTick:))]
+        fn banner_tick(&self, _t: &AnyObject) {
+            with_shell(|s| s.banner_tick());
+        }
+
         // Development (`dev_panel`): looks at the panel that is open and cancels it.
         #[unsafe(method(devPanelCheck:))]
         fn dev_panel_check(&self, _t: &AnyObject) {
@@ -217,6 +223,9 @@ pub struct Shell {
     /// The host banner, while another computer watches or controls this Mac.
     banner: RefCell<Option<BannerWindow>>,
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// The banner's one-shot timer, and the moment (ms of the local clock) it is due.
+    banner_timer: RefCell<Option<Retained<NSTimer>>>,
+    banner_due_ms: Cell<u64>,
     placeholder_timer: RefCell<Option<Retained<NSTimer>>>,
     debounce_timer: RefCell<Option<Retained<NSTimer>>>,
     /// Runs while an explorer drag does.
@@ -500,6 +509,8 @@ fn start_with(
         viewer: RefCell::new(None),
         banner: RefCell::new(None),
         tick_timer: RefCell::new(None),
+        banner_timer: RefCell::new(None),
+        banner_due_ms: Cell::new(0),
         placeholder_timer: RefCell::new(None),
         debounce_timer: RefCell::new(None),
         drag_timer: RefCell::new(None),
@@ -1128,6 +1139,14 @@ impl Shell {
         self.apply_focus_request();
     }
 
+    fn banner_tick(&self) {
+        *self.banner_timer.borrow_mut() = None;
+        if SHOT.get().is_none() {
+            self.state.borrow_mut().set_clock(local_clock());
+        }
+        self.refresh(Changed::BANNER);
+    }
+
     fn arm_placeholders(&self) {
         *self.placeholder_timer.borrow_mut() = None;
         let c = self.state.borrow_mut().arm_placeholders();
@@ -1401,10 +1420,28 @@ impl Shell {
 
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
-        let (tick, placeholder) = {
+        let (now_ms, tick, placeholder, banner) = {
             let st = self.state.borrow();
-            (st.needs_tick(), st.has_pending_fetch())
+            let now = local_clock().now_ms;
+            // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
+            (now, st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
+        match banner {
+            // Armed again when the due moment moved earlier: a files note that ends in 10 s comes before the minute
+            // the timer was armed for.
+            Some(ms) => {
+                let due = now_ms.saturating_add(ms);
+                if self.banner_timer.borrow().is_none() || due + 50 < self.banner_due_ms.get() {
+                    self.set_timer(&self.banner_timer, ms as f64 / 1000.0, false, sel!(bannerTick:));
+                    self.banner_due_ms.set(due);
+                }
+            }
+            None => {
+                if let Some(t) = self.banner_timer.borrow_mut().take() {
+                    t.invalidate();
+                }
+            }
+        }
         let ticking = self.tick_timer.borrow().is_some();
         if tick && !ticking {
             self.set_timer(&self.tick_timer, 1.0, true, sel!(tick:));
