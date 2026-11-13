@@ -46,16 +46,30 @@ struct FakeScm {
     journal: PathBuf,
     install: PathBuf,
     commits: Arc<Mutex<bool>>,
+    /// What the service control was asked, in order (`start 1.1.0` carries the installed service's version).
+    log: Log,
+    /// Runs inside every start, as a local program would at that moment.
+    on_start: Option<OnStart>,
 }
+
+type Log = Arc<Mutex<Vec<String>>>;
+
+/// What a local program does at the moment a service starts (given the installed service's version).
+type OnStart = Box<dyn FnMut(&str) + Send>;
 
 impl ServiceControl for FakeScm {
     fn stop(&mut self) -> Result<(), String> {
+        self.log.lock().unwrap().push("stop".into());
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), String> {
         let text = read(&self.install, "swapdesk-service.exe");
         let version = text.rsplit(' ').next().unwrap().to_string();
+        self.log.lock().unwrap().push(format!("start {version}"));
+        if let Some(on_start) = &mut self.on_start {
+            on_start(&version);
+        }
         if *self.commits.lock().unwrap() && version == "1.1.1" {
             append_journal(&self.journal, &Journal::Committed { new: v(&version) }).unwrap();
         }
@@ -68,17 +82,27 @@ impl ServiceControl for FakeScm {
 }
 
 fn machine(layout: &Layout, root: &Path, commits: bool) -> WinMachine {
-    WinMachine {
+    machine_with(layout, root, commits, None).0
+}
+
+fn machine_with(layout: &Layout, root: &Path, commits: bool, on_start: Option<OnStart>) -> (WinMachine, Log) {
+    let log = Log::default();
+    let m = WinMachine {
         control: Box::new(FakeScm {
             journal: layout.journal(),
             install: layout.install.clone(),
             commits: Arc::new(Mutex::new(commits)),
+            log: Arc::clone(&log),
+            on_start,
         }),
         layout: layout.clone(),
         policy: InstallPolicy { root: root.to_path_buf(), trusted_sids: trusted() },
         grace: Duration::ZERO,
         poll: Duration::from_millis(20),
-    }
+        retry: Duration::from_millis(300),
+        held: None,
+    };
+    (m, log)
 }
 
 #[test]
@@ -267,4 +291,145 @@ fn the_sweep_ends_only_processes_inside_the_install_folder() {
         let _ = c.kill();
         let _ = c.wait();
     }
+}
+
+/// Opens `path` as a hostile local program would: for read, sharing only read.
+fn hold_for_read(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new().read(true).share_mode(1).open(path)
+}
+
+fn journal_of(layout: &Layout) -> Option<Journal> {
+    read_journal(&layout.journal())
+}
+
+/// The review's defect: one read handle (share READ) on an installed program broke every update. Now the apply stops
+/// before it changes anything, names the holder, starts the service again and leaves the version on offer; once the
+/// holder lets go the same staged files apply.
+#[test]
+fn a_target_held_open_with_share_read_fails_the_apply_before_any_file_changes() {
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let hold = hold_for_read(&layout.install.join("Swapdesk.exe")).unwrap();
+
+    let (mut m, log) = machine_with(&layout, &temp.0, true, None);
+    let out = apply(&mut m, &v("1.1.0"), &v("1.1.1"));
+    let Outcome::Refused(why) = &out else { panic!("{out:?}") };
+    assert!(why.contains("Swapdesk.exe") && why.contains("nothing was changed"), "{why}");
+    for name in INSTALLED {
+        assert_eq!(read(&layout.install, name), format!("{name} 1.1.0"), "{name} untouched");
+    }
+    assert!(!layout.rollback(&v("1.1.0")).exists(), "not even a backup was made");
+    assert!(layout.staging().join("Swapdesk.exe").exists(), "the staged files wait for a second try");
+    // The service was stopped for the swap and is started again: a clean stop is not restarted by the SCM.
+    assert_eq!(log.lock().unwrap().last().map(String::as_str), Some("start 1.1.0"), "{:?}", log.lock().unwrap());
+    // Not recorded as a version that did not start: the next start of the old service finds `refused`.
+    let last = journal_of(&layout).unwrap();
+    assert!(matches!(last, Journal::Refused { .. }), "{last:?}");
+    let at = swapdesk_update::apply::at_start(Some(&last), &v("1.1.0"), false, true);
+    assert!(matches!(at, swapdesk_update::apply::AtStart::Refused { .. }), "{at:?}");
+
+    // The holder lets go: the same staged files apply.
+    drop(hold);
+    let (mut m, _) = machine_with(&layout, &temp.0, true, None);
+    assert_eq!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::Committed);
+    assert_eq!(read(&layout.install, "Swapdesk.exe"), "Swapdesk.exe 1.1.1");
+}
+
+/// The other half of the incident: the restore fails (here: its rollback folder lost a file), and the service was left
+/// stopped. The install folder holds a complete set, so the service is started anyway and the journal says `broken`.
+#[test]
+fn a_failed_restore_still_starts_the_service_when_the_set_is_complete() {
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let rollback = layout.rollback(&v("1.1.0"));
+    let on_start: OnStart = Box::new(move |version| {
+        if version == "1.1.1" {
+            // The new service starts and the old files' copy is damaged before anyone can restore them.
+            let _ = fs::remove_file(rollback.join("swapdesk-helper.exe"));
+        }
+    });
+    let (mut m, log) = machine_with(&layout, &temp.0, false, Some(on_start));
+    let out = apply_with_wait(&mut m);
+    assert!(matches!(out, Outcome::Broken(_)), "{out:?}");
+    assert_eq!(read_journal(&layout.journal()), Some(Journal::Broken { old: v("1.1.0"), new: v("1.1.1") }));
+    assert!(complete(&layout.install));
+    let starts: Vec<String> = log.lock().unwrap().iter().filter(|l| l.starts_with("start")).cloned().collect();
+    assert_eq!(starts.len(), 2, "the service is started again after the failed restore: {starts:?}");
+}
+
+/// The race: between the check and the move nothing can grab a target. Once the files are claimed a program that
+/// opens one for read sharing only read is refused by the system, through the move, and until the hold is let go.
+#[test]
+fn no_program_can_grab_a_target_between_the_claim_and_the_move() {
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let (mut m, _) = machine_with(&layout, &temp.0, true, None);
+    let target = layout.install.join("swapdesk-service.exe");
+    hold_for_read(&target).expect("before the claim a reader gets in");
+
+    m.claim_targets().unwrap();
+    let refused = hold_for_read(&target).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(32), "after the claim the open is refused: {refused}");
+    m.back_up(&v("1.1.0")).unwrap();
+    m.put_new().unwrap();
+    for name in INSTALLED {
+        assert_eq!(read(&layout.install, name), format!("{name} 1.1.1"));
+    }
+    // The new file is held through the rename: there was no moment in which it could be grabbed.
+    let refused = hold_for_read(&target).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(32), "the new file is held too: {refused}");
+    m.clean_staging();
+    hold_for_read(&target).expect("after the commit the hold is let go");
+}
+
+/// A held file the claim cannot take is named by the Restart Manager, and the claim waits `retry` for a scanner.
+#[test]
+fn a_claim_that_fails_names_the_holder_and_waits_only_the_retry() {
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let hold = hold_for_read(&layout.install.join("swapdesk-helper.exe")).unwrap();
+    let started = Instant::now();
+    let Err(why) = lock::Held::claim(&layout.install, &layout.staging(), Duration::from_millis(300)) else {
+        panic!("the claim must fail")
+    };
+    assert!(started.elapsed() >= Duration::from_millis(300) && started.elapsed() < Duration::from_secs(5));
+    assert!(why.contains("swapdesk-helper.exe"), "{why}");
+    // This very process holds it: the Restart Manager names it.
+    assert!(why.contains(&format!("pid {}", std::process::id())), "{why}");
+    drop(hold);
+    lock::Held::claim(&layout.install, &layout.staging(), Duration::ZERO).expect("claims once the holder is gone");
+}
+
+/// The hold must not stop the service from starting from the files it holds: a program is started from a claimed file.
+#[test]
+fn a_program_starts_from_a_claimed_file() {
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let exe = layout.install.join("swapdesk-helper.exe");
+    let mut m = machine(&layout, &temp.0, true);
+    fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    fs::copy(&exe, layout.staging().join("swapdesk-helper.exe")).unwrap();
+    m.claim_targets().unwrap();
+    let mut child = Command::new(&exe)
+        .args(["--exact", "update_apply::tests::sweep_target_sleeps", "--ignored", "--nocapture"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a program starts from a file whose hold is ours");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none(), "it runs");
+    let _ = child.kill();
+    let _ = child.wait();
 }

@@ -523,13 +523,20 @@ fn spawn_applier(update: &std::path::Path, args: &[&str]) -> Result<std::process
         .map_err(|e| format!("starting the applier: {e}"))
 }
 
+/// How the last update ended, told once by the first start after it.
+enum UpdateEnded {
+    /// This version came by it.
+    Updated,
+    /// The version that started, did not commit and was rolled back to this one (not offered again by itself).
+    RolledBack(swapdesk_update::Version),
+    /// The version the applier never got to start (a file held open, a step that failed): this one runs, and that one
+    /// stays on offer.
+    Refused(swapdesk_update::Version),
+}
+
 /// What a starting service does with the update journal (UPDATES.md 6.2 step 6, 6.4; the decision is
-/// `swapdesk_update::apply::at_start`). Returns how the last update ended, once: `Ok` this version came by it, `Err`
-/// the version that was rolled back to this one (not offered again by itself). The journal goes with the cleaning.
-fn update_journal_at_start(
-    update: &std::path::Path,
-    trace: &dyn TraceSink,
-) -> Option<Result<(), swapdesk_update::Version>> {
+/// `swapdesk_update::apply::at_start`). Returns how the last update ended, once. The journal goes with the cleaning.
+fn update_journal_at_start(update: &std::path::Path, trace: &dyn TraceSink) -> Option<UpdateEnded> {
     use swapdesk_sys_win::update_apply::{
         APPLIER, Layout, ROLLBACK, append_journal, complete, programs_inside, read_journal,
     };
@@ -543,7 +550,7 @@ fn update_journal_at_start(
         AtStart::Commit => match append_journal(&layout.journal(), &Journal::Committed { new: me.clone() }) {
             Ok(()) => {
                 trace.log(Level::Info, "update", format_args!("updated to {me}: committed"));
-                Some(Ok(()))
+                Some(UpdateEnded::Updated)
             }
             Err(e) => {
                 trace.log(Level::Error, "update", format_args!("the commit of {me} was not written: {e}"));
@@ -571,8 +578,21 @@ fn update_journal_at_start(
             // After a commit the "updated" card was told at the commit's own start; a rollback is told here, once.
             rolled_back.map(|new| {
                 trace.log(Level::Warn, "update", format_args!("{new} did not start; {me} was restored"));
-                Err(new)
+                UpdateEnded::RolledBack(new)
             })
+        }
+        AtStart::Refused { new, why } => {
+            let _ = std::fs::remove_dir_all(update.join(ROLLBACK));
+            let _ = std::fs::remove_dir_all(update.join(APPLIER));
+            let _ = std::fs::remove_dir_all(layout.staging());
+            let _ = std::fs::remove_dir_all(layout.swap());
+            let _ = std::fs::remove_file(layout.journal());
+            trace.log(
+                Level::Warn,
+                "update",
+                format_args!("{new} was not installed: {why}; {me} keeps running and {new} stays on offer"),
+            );
+            Some(UpdateEnded::Refused(new))
         }
         AtStart::Broken { old, new } => {
             // The rollback folder stays: the way out is install.cmd from the release zip (UPDATES.md 6.4).
@@ -594,7 +614,7 @@ fn update_journal_at_start(
 /// by the service (or puts `old` back); the outcome goes to `update\applier.log` and the journal. Exit codes: 0
 /// committed, 1 rolled back, 3 broken, 2 refused.
 pub fn apply_update(old: &str, new: &str, roll_back: bool) -> u8 {
-    use swapdesk_sys_win::update_apply::{Layout, SWEEP_GRACE, Scm, WinMachine};
+    use swapdesk_sys_win::update_apply::{Layout, Scm, WinMachine};
     use swapdesk_update::apply::{Outcome, apply, roll_back_only};
     let Some(program_data) = std::env::var_os("ProgramData") else { return 2 };
     let update = PathBuf::from(program_data).join("Swapdesk").join("update");
@@ -623,19 +643,17 @@ pub fn apply_update(old: &str, new: &str, roll_back: bool) -> u8 {
         log("refused: the install policy could not be read");
         return 2;
     };
-    let mut machine = WinMachine {
-        layout: Layout { install: program_files.join("Swapdesk"), update: update.clone() },
-        control: Box::new(Scm { name: SERVICE_NAME.into() }),
+    let mut machine = WinMachine::new(
+        Layout { install: program_files.join("Swapdesk"), update: update.clone() },
+        Box::new(Scm { name: SERVICE_NAME.into() }),
         policy,
-        grace: SWEEP_GRACE,
-        poll: Duration::from_millis(250),
-    };
+    );
     log(&format!("{} {old} -> {new}", if roll_back { "rolling back" } else { "applying" }));
     let outcome = if roll_back { roll_back_only(&mut machine, &old, &new) } else { apply(&mut machine, &old, &new) };
     log(&format!("{outcome:?}"));
     match outcome {
         Outcome::Committed => 0,
-        Outcome::RolledBack(_) => 1,
+        Outcome::RolledBack(_) | Outcome::Refused(_) => 1,
         Outcome::Broken(_) => 3,
     }
 }
@@ -671,6 +689,11 @@ impl swapdesk_update::manager::UpdateFolder for UpdateDir {
 
     fn path(&self, name: &str) -> PathBuf {
         self.0.join(name)
+    }
+
+    fn free_bytes(&self) -> Option<u64> {
+        // The folder is made by the first `create`: ask about the nearest folder that exists.
+        self.0.ancestors().find(|p| p.is_dir()).and_then(swapdesk_sys_win::free_bytes)
     }
 }
 
@@ -926,13 +949,14 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     // The pipes and endpoints are up: an update that started this version is committed (UPDATES.md 6.2 step 6).
     if !(opts.console || opts.instance.is_some()) {
         let ended = update_journal_at_start(&store.dir().join("update"), &*trace);
-        if matches!(ended, Some(Ok(()))) {
+        if matches!(ended, Some(UpdateEnded::Updated)) {
             reopen_interfaces(&store.dir().join("update"), &*trace);
         }
         if let Some(u) = &updater {
             match ended {
-                Some(Ok(())) => u.updated(),
-                Some(Err(v)) => u.rolled_back(&v),
+                Some(UpdateEnded::Updated) => u.updated(),
+                Some(UpdateEnded::RolledBack(v)) => u.rolled_back(&v),
+                Some(UpdateEnded::Refused(v)) => u.refused(&v),
                 None => {}
             }
         }

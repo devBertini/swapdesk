@@ -81,6 +81,7 @@ pub fn failure_tag(f: InstallFailure) -> u8 {
         InstallFailure::Cancelled => 7,
         InstallFailure::Unwritable => 8,
         InstallFailure::Translocated => 9,
+        InstallFailure::NotApplied => 10,
     }
 }
 
@@ -97,6 +98,12 @@ impl Updater {
     /// again by itself.
     pub fn rolled_back(&self, version: &Version) {
         self.manager.rolled_back(version);
+        self.changed();
+    }
+
+    /// The applier stopped before `version` ran (UPDATES.md 6.4): it stays on offer, the reason shows.
+    pub fn refused(&self, version: &Version) {
+        self.manager.refused(version);
         self.changed();
     }
 
@@ -187,10 +194,13 @@ impl Hub {
                 Ok(ReplyBody::Done)
             }
             O::UpdateCancel => {
+                self.require_console(conn, "an update cancel from a UI that is not the console's")?;
                 updater.cancel.store(true, Ordering::Release);
                 Ok(ReplyBody::Done)
             }
             O::UpdateDismiss { version } => {
+                // `dismissed` is saved for the whole machine: only the console's person writes it.
+                self.require_console(conn, "an update dismissal from a UI that is not the console's")?;
                 updater.manager.dismiss(&Version::parse(version).map_err(|_| ApiCode::Invalid)?);
                 updater.changed();
                 Ok(ReplyBody::Done)

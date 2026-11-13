@@ -18,8 +18,11 @@ pub enum Journal {
     Applying { old: Version, new: Version },
     /// The new service is up.
     Committed { new: Version },
-    /// `new` did not start; `old` was restored.
+    /// `new` started and did not commit; `old` was restored.
     Failed { old: Version, new: Version },
+    /// `new` never started: the apply stopped for `why` (a file held open, a step that failed) and the install folder
+    /// holds `old` again. Unlike [`Journal::Failed`], `new` stays on offer: it never ran, so nothing says it is bad.
+    Refused { old: Version, new: Version, why: String },
     /// `new` did not start and the restore of `old` failed too: the rollback folder is kept for `install.cmd`.
     Broken { old: Version, new: Version },
 }
@@ -30,6 +33,9 @@ impl Journal {
             Self::Applying { old, new } => format!("applying {old} {new}"),
             Self::Committed { new } => format!("committed {new}"),
             Self::Failed { old, new } => format!("failed {old} {new}"),
+            Self::Refused { old, new, why } => {
+                format!("refused {old} {new} {}", why.split_whitespace().collect::<Vec<_>>().join(" "))
+            }
             Self::Broken { old, new } => format!("broken {old} {new}"),
         }
     }
@@ -37,13 +43,14 @@ impl Journal {
     /// The last line that reads; `None` for an empty or unreadable journal.
     pub fn last_of(text: &str) -> Option<Journal> {
         text.lines().rev().find_map(|line| {
-            let mut w = line.split_whitespace();
-            let (kind, a, b) = (w.next()?, w.next(), w.next());
+            let mut w = line.trim().splitn(4, ' ');
+            let (kind, a, b, rest) = (w.next()?, w.next(), w.next(), w.next());
             let v = |s: Option<&str>| s.and_then(|s| Version::parse(s).ok());
             match kind {
                 "applying" => Some(Journal::Applying { old: v(a)?, new: v(b)? }),
                 "committed" => Some(Journal::Committed { new: v(a)? }),
                 "failed" => Some(Journal::Failed { old: v(a)?, new: v(b)? }),
+                "refused" => Some(Journal::Refused { old: v(a)?, new: v(b)?, why: rest.unwrap_or_default().into() }),
                 "broken" => Some(Journal::Broken { old: v(a)?, new: v(b)? }),
                 _ => None,
             }
@@ -59,6 +66,13 @@ pub trait Machine {
     fn stop_service(&mut self) -> Result<(), String>;
     /// Ends every Swapdesk process whose image is inside the install folder.
     fn sweep(&mut self) -> Result<(), String>;
+    /// Takes hold of every installed file the staged set will replace, so that no other process can keep one open in a
+    /// way that stops its replacement, and keeps the hold until [`Machine::start_service`]. An `Err` (a file is held
+    /// by another program) comes while nothing in the install folder has changed.
+    fn claim_targets(&mut self) -> Result<(), String>;
+    /// Whether the install folder holds a complete set of programs (of whichever version): a service started over it
+    /// runs, so a failed restore still starts one.
+    fn install_complete(&mut self) -> bool;
     /// Copies the installed files into the rollback folder of `old`, unless a complete copy is there already (an apply
     /// resumed after a power cut must keep the copy of the first try, made before any file was replaced).
     fn back_up(&mut self, old: &Version) -> Result<(), String>;
@@ -82,28 +96,39 @@ pub trait Machine {
 pub enum Outcome {
     /// The new version runs and committed.
     Committed,
-    /// The new version did not start; the old one was restored and started.
+    /// The new version started, did not commit, and the old one was restored and started.
     RolledBack(String),
+    /// The new version never started (the apply stopped for the reason given); the install folder holds the old one
+    /// again, its service runs, and the new version stays on offer.
+    Refused(String),
     /// The restore failed too: the old files wait in the rollback folder (Event Log 1004; `install.cmd` is the way
     /// out).
     Broken(String),
 }
 
-/// Replaces `old` with `new` (UPDATES.md 6.2 step 5 to 7): journal, stop, sweep, back up, move the new files in,
-/// start, wait for the commit; any failure after the stop rolls back.
+/// Replaces `old` with `new` (UPDATES.md 6.2 step 5 to 7): journal, stop, sweep, claim every file to replace, back up,
+/// move the new files in, start, wait for the commit; any failure after the stop puts the old version back and starts
+/// its service. Whether the new version is then held against is decided by whether it ever started: a failure before
+/// that is [`Outcome::Refused`] (the version stays on offer), a start that failed or a commit that never came is
+/// [`Outcome::RolledBack`].
 pub fn apply(m: &mut dyn Machine, old: &Version, new: &Version) -> Outcome {
     if let Err(e) = m.journal(&Journal::Applying { old: old.clone(), new: new.clone() }) {
         // Nothing was touched: the old service is still the installed one.
-        return Outcome::RolledBack(format!("journal: {e}"));
+        return Outcome::Refused(format!("journal: {e}"));
     }
-    // Whether the install folder may hold new files: from the first move on (a move that failed half-way too).
-    let mut touched = false;
+    // How far the sequence went: whether the install folder may hold new files (from the first move on, a move that
+    // failed half-way too) and whether the new service was asked to start.
+    let (mut touched, mut started) = (false, false);
     let steps = (|| {
         m.stop_service()?;
         m.sweep()?;
+        // Every file to replace is held before the first byte changes: a program that keeps one open stops the
+        // apply here, with nothing touched.
+        m.claim_targets()?;
         m.back_up(old)?;
         touched = true;
         m.put_new()?;
+        started = true;
         m.start_service()
     })();
     match steps {
@@ -111,38 +136,53 @@ pub fn apply(m: &mut dyn Machine, old: &Version, new: &Version) -> Outcome {
             m.clean_staging();
             Outcome::Committed
         }
-        Ok(()) => roll_back(m, old, new, true, "the new service did not commit in time".into()),
-        Err(e) => roll_back(m, old, new, touched, e),
+        Ok(()) => roll_back(m, old, new, (true, true), "the new service did not commit in time".into()),
+        Err(e) => roll_back(m, old, new, (touched, started), e),
     }
 }
 
 /// Restores `old` after an apply that was cut short and cannot be finished (its staged files are gone): the start
-/// of a service that finds `applying` with no applier alive and nothing staged ([`at_start`]).
+/// of a service that finds `applying` with no applier alive and nothing staged ([`at_start`]). Whether the new version
+/// ran is unknown: it is held against, the safe side.
 pub fn roll_back_only(m: &mut dyn Machine, old: &Version, new: &Version) -> Outcome {
-    roll_back(m, old, new, true, "the update was cut short and its files are gone".into())
+    roll_back(m, old, new, (true, true), "the update was cut short and its files are gone".into())
 }
 
-/// Back to `old`: its files are put back only when the folder may hold new ones (before that they never left). The
-/// journal says `failed` before the old service starts, so that service does not read `applying` and resume the apply;
-/// a restore that fails says `broken`, which keeps the rollback folder.
-fn roll_back(m: &mut dyn Machine, old: &Version, new: &Version, touched: bool, why: String) -> Outcome {
-    let mut restored_files = !touched;
-    let restored = (|| {
-        let _ = m.stop_service();
-        let _ = m.sweep();
-        if touched {
-            m.restore(old)?;
-            restored_files = true;
-        }
-        let _ = m.journal(&Journal::Failed { old: old.clone(), new: new.clone() });
+/// Back to `old`: its files are put back only when the folder may hold new ones (before that they never left;
+/// `touched`). The journal says `failed` (the new version started: `started`) or `refused` (it never did) before the
+/// old service starts, so that service does not read `applying` and resume the apply; a restore that fails says
+/// `broken`, which keeps the rollback folder. A service is started whenever the restore worked or the install folder
+/// holds a complete set anyway: nothing restarts a service that was stopped cleanly, so a failed restore must not leave
+/// the machine without one.
+fn roll_back(
+    m: &mut dyn Machine,
+    old: &Version,
+    new: &Version,
+    (touched, started): (bool, bool),
+    why: String,
+) -> Outcome {
+    let _ = m.stop_service();
+    let _ = m.sweep();
+    let restored = if touched { m.restore(old) } else { Ok(()) };
+    let verdict = match (&restored, started) {
+        (Err(_), _) => Journal::Broken { old: old.clone(), new: new.clone() },
+        (Ok(()), true) => Journal::Failed { old: old.clone(), new: new.clone() },
+        (Ok(()), false) => Journal::Refused { old: old.clone(), new: new.clone(), why: why.clone() },
+    };
+    let _ = m.journal(&verdict);
+    let start = if restored.is_ok() || m.install_complete() {
         m.start_service()
-    })();
-    if !restored_files {
-        let _ = m.journal(&Journal::Broken { old: old.clone(), new: new.clone() });
-    }
-    match restored {
-        Ok(()) => Outcome::RolledBack(why),
-        Err(e) => Outcome::Broken(format!("{why}; the restore failed too: {e}")),
+    } else {
+        Err("the install folder holds no complete set of programs to start".to_string())
+    };
+    match (restored, start) {
+        (Ok(()), Ok(())) if started => Outcome::RolledBack(why),
+        (Ok(()), Ok(())) => Outcome::Refused(why),
+        (Err(e), Ok(())) => {
+            Outcome::Broken(format!("{why}; the restore failed too: {e}; the service runs over what is there"))
+        }
+        (Err(e), Err(s)) => Outcome::Broken(format!("{why}; the restore failed too: {e}; {s}")),
+        (Ok(()), Err(s)) => Outcome::Broken(format!("{why}; the old service did not start: {s}")),
     }
 }
 
@@ -172,6 +212,12 @@ pub enum AtStart {
         old: Version,
         new: Version,
     },
+    /// The last apply stopped before the new version ran, and this is the old one: remove what it left and tell the
+    /// reason; `new` stays on offer.
+    Refused {
+        new: Version,
+        why: String,
+    },
 }
 
 /// The decision of [`AtStart`]: `me` is the starting service's version, `applier_alive` whether an applier process
@@ -192,6 +238,10 @@ pub fn at_start(last: Option<&Journal>, me: &Version, applier_alive: bool, stage
         Some(Journal::Committed { .. }) => AtStart::Clean { rolled_back: None },
         Some(Journal::Failed { old, new }) => AtStart::Clean { rolled_back: (old == me).then(|| new.clone()) },
         Some(Journal::Broken { old, new }) => AtStart::Broken { old: old.clone(), new: new.clone() },
+        Some(Journal::Refused { old, new, why }) if old == me => {
+            AtStart::Refused { new: new.clone(), why: why.clone() }
+        }
+        Some(Journal::Refused { .. }) => AtStart::Clean { rolled_back: None },
     }
 }
 

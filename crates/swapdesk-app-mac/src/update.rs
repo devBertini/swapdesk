@@ -198,7 +198,7 @@ pub fn watch(pid: &str, old: &str, new: &str, running: &str) -> i32 {
     log(&format!("{outcome:?}"));
     match outcome {
         Outcome::Committed => 0,
-        Outcome::RolledBack(_) => 1,
+        Outcome::RolledBack(_) | Outcome::Refused(_) => 1,
         Outcome::Broken(_) => 3,
     }
 }
@@ -288,5 +288,9 @@ impl swapdesk_update::manager::UpdateFolder for UpdateDir {
 
     fn path(&self, name: &str) -> PathBuf {
         self.0.join(name)
+    }
+
+    fn free_bytes(&self) -> Option<u64> {
+        self.0.ancestors().find(|p| p.is_dir()).and_then(swapdesk_sys_mac::free_bytes)
     }
 }

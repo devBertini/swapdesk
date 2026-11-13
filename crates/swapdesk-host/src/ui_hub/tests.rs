@@ -1503,6 +1503,10 @@ impl swapdesk_update::manager::UpdateFolder for NoFolder {
     fn path(&self, name: &str) -> std::path::PathBuf {
         name.into()
     }
+
+    fn free_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// UPDATES.md 10 and 13 (U4): the updater through the hub: the view, the install refused from a UI that is not the
@@ -1541,6 +1545,12 @@ fn the_updater_answers_through_the_hub_with_its_refusals() {
     let mut other = m.client(ConnInfo { session_id: 2, ..info(false) });
     assert_eq!(other.call(install()).unwrap_err(), ApiCode::NotPermitted);
     assert_eq!(other.call(UiOp::UpdateSetCheck { on: false }).unwrap_err(), ApiCode::NotPermitted);
+    // So are the cancel and the dismissal: another account's interface neither ends the console user's download nor
+    // writes `dismissed` for the whole machine.
+    assert_eq!(other.call(UiOp::UpdateCancel).unwrap_err(), ApiCode::NotPermitted);
+    assert_eq!(other.call(UiOp::UpdateDismiss { version: "1.1.1".into() }).unwrap_err(), ApiCode::NotPermitted);
+    let ReplyBody::Update(after) = ui.call(UiOp::UpdateGet).unwrap() else { panic!() };
+    assert_eq!(after.dismissed, None, "the refused dismissal wrote nothing");
     // The console's, with a live session and no confirmation: refused until "Encerrar e atualizar".
     live.store(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(ui.call(install()).unwrap_err(), ApiCode::Busy);

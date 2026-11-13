@@ -18,11 +18,20 @@ struct Fake {
     fail_at: Option<&'static str>,
     new_commits: bool,
     steps: Vec<&'static str>,
+    /// Whether the install folder holds a complete set whatever its versions (a failed restore starts it).
+    complete: bool,
 }
 
 impl Fake {
     fn new(old: &str, new: &str) -> Self {
-        Self { installed: old.into(), staged_version: new.into(), running: true, new_commits: true, ..Self::default() }
+        Self {
+            installed: old.into(),
+            staged_version: new.into(),
+            running: true,
+            new_commits: true,
+            complete: true,
+            ..Self::default()
+        }
     }
 
     fn step(&mut self, name: &'static str) -> Result<(), String> {
@@ -33,8 +42,11 @@ impl Fake {
 
 impl Machine for Fake {
     fn journal(&mut self, entry: &Journal) -> Result<(), String> {
-        if matches!(entry, Journal::Failed { .. }) {
-            self.steps.push("failed");
+        match entry {
+            Journal::Failed { .. } => self.steps.push("failed"),
+            Journal::Refused { .. } => self.steps.push("refused"),
+            Journal::Broken { .. } => self.steps.push("broken"),
+            _ => {}
         }
         self.journal.push(entry.to_line());
         Ok(())
@@ -48,6 +60,14 @@ impl Machine for Fake {
 
     fn sweep(&mut self) -> Result<(), String> {
         self.step("sweep")
+    }
+
+    fn claim_targets(&mut self) -> Result<(), String> {
+        self.step("claim_targets")
+    }
+
+    fn install_complete(&mut self) -> bool {
+        self.complete
     }
 
     fn back_up(&mut self, old: &Version) -> Result<(), String> {
@@ -97,7 +117,7 @@ fn apply_replaces_every_file_and_starts_the_service() {
     let mut m = Fake::new("1.1.0", "1.1.1");
     assert_eq!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::Committed);
     assert_eq!((m.installed.as_str(), m.running), ("1.1.1", true));
-    assert_eq!(m.steps, ["stop", "sweep", "back_up", "put_new", "start"]);
+    assert_eq!(m.steps, ["stop", "sweep", "claim_targets", "back_up", "put_new", "start"]);
     assert_eq!(m.journal, ["applying 1.1.0 1.1.1", "committed 1.1.1"]);
     assert!(m.staged_version.is_empty(), "the staging copy goes after the commit");
 }
@@ -111,19 +131,72 @@ fn a_service_that_does_not_commit_in_time_is_rolled_back() {
     assert_eq!(m.journal.last().map(String::as_str), Some("failed 1.1.0 1.1.1"));
     // `failed` is written before the old service starts, so that service does not resume the apply.
     assert!(m.steps.ends_with(&["restore", "failed", "start"]), "{:?}", m.steps);
-    // A step that fails after the stop rolls back the same way.
-    for step in ["sweep", "put_new", "start"] {
+    // A new service that cannot start is a bad version: the restore starts the old one, and a start that fails again
+    // is broken.
+    let mut m = Fake::new("1.1.0", "1.1.1");
+    m.fail_at = Some("start");
+    let out = apply(&mut m, &v("1.1.0"), &v("1.1.1"));
+    assert!(matches!(out, Outcome::Broken(_)), "{out:?}");
+}
+
+/// A step that fails before the new service started leaves the old version in place and on offer: the journal says
+/// `refused` (the next start does not record the version as rolled back), the old service runs, and a step that never
+/// ran is not undone.
+#[test]
+fn a_failure_before_the_new_service_started_is_refused_and_the_old_service_runs() {
+    for step in ["stop", "sweep", "claim_targets", "back_up", "put_new"] {
         let mut m = Fake::new("1.1.0", "1.1.1");
         m.fail_at = Some(step);
         let out = apply(&mut m, &v("1.1.0"), &v("1.1.1"));
-        if step == "start" {
-            // The restore starts the service again, and that fails too.
-            assert!(matches!(out, Outcome::Broken(_)), "{step}: {out:?}");
-        } else {
-            assert!(matches!(out, Outcome::RolledBack(_)), "{step}: {out:?}");
-            assert_eq!(m.installed, "1.1.0", "{step}");
-        }
+        assert!(matches!(out, Outcome::Refused(ref why) if why.contains(step)), "{step}: {out:?}");
+        assert_eq!((m.installed.as_str(), m.running), ("1.1.0", true), "{step}: the old service runs");
+        let last = Journal::last_of(m.journal.last().unwrap()).unwrap();
+        assert!(matches!(last, Journal::Refused { ref why, .. } if why.contains(step)), "{step}: {last:?}");
+        assert!(!m.steps.contains(&"failed"), "{step}: never recorded as a version that did not start");
+        let touched = ["put_new"].contains(&step);
+        assert_eq!(m.steps.contains(&"restore"), touched, "{step}: files are put back only once they may have changed");
+        assert!(m.steps.ends_with(&["start"]), "{step}: {:?}", m.steps);
+        // The next start of the old service: the version is not rolled back, the reason is told.
+        let at = at_start(Some(&last), &v("1.1.0"), false, false);
+        assert!(matches!(at, AtStart::Refused { ref new, .. } if *new == v("1.1.1")), "{step}: {at:?}");
     }
+    // Another version starting over a refused journal only cleans.
+    let refused = Journal::Refused { old: v("1.1.0"), new: v("1.1.1"), why: "a held".into() };
+    assert_eq!(at_start(Some(&refused), &v("1.1.1"), false, false), AtStart::Clean { rolled_back: None });
+    // Round trip with a reason of several words, and a newline in it stays on one line.
+    let j = Journal::Refused {
+        old: v("1.1.0"),
+        new: v("1.1.1"),
+        why: "swapdesk.exe is held
+by Foo (pid 4)"
+            .into(),
+    };
+    assert_eq!(
+        Journal::last_of(&j.to_line()),
+        Some(Journal::Refused { old: v("1.1.0"), new: v("1.1.1"), why: "swapdesk.exe is held by Foo (pid 4)".into() })
+    );
+}
+
+/// The incident of 13/11: a restore that fails (a file held) returned before the service was started, and the SCM does
+/// not restart a clean stop. A complete set of programs in the install folder starts a service whatever happened.
+#[test]
+fn a_failed_restore_still_starts_the_service_over_a_complete_set() {
+    let mut m = Fake::new("1.1.0", "1.1.1");
+    m.new_commits = false;
+    m.fail_at = Some("restore");
+    let out = apply(&mut m, &v("1.1.0"), &v("1.1.1"));
+    assert!(matches!(out, Outcome::Broken(_)), "{out:?}");
+    assert!(m.running, "the service runs again");
+    assert_eq!(m.journal.last().map(String::as_str), Some("broken 1.1.0 1.1.1"));
+    assert!(m.steps.ends_with(&["restore", "broken", "start"]), "{:?}", m.steps);
+
+    // An incomplete set cannot run: the service stays stopped and the way out is install.cmd.
+    let mut m = Fake::new("1.1.0", "1.1.1");
+    m.new_commits = false;
+    m.fail_at = Some("restore");
+    m.complete = false;
+    assert!(matches!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::Broken(_)));
+    assert!(!m.running);
 }
 
 #[test]

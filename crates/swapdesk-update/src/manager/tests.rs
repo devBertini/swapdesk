@@ -70,8 +70,9 @@ impl SavedStore for FakeStore {
 /// One file's bytes, shared between the folder and the writer that fills it.
 type Bytes = Arc<Mutex<Vec<u8>>>;
 
+/// The files of the folder, and the free space its volume reports (`None`: the system cannot say).
 #[derive(Default, Clone)]
-struct FakeFolder(Arc<Mutex<HashMap<String, Bytes>>>);
+struct FakeFolder(Arc<Mutex<HashMap<String, Bytes>>>, Arc<Mutex<Option<u64>>>);
 
 struct FileOf(Bytes);
 
@@ -99,6 +100,10 @@ impl UpdateFolder for FakeFolder {
 
     fn path(&self, name: &str) -> std::path::PathBuf {
         std::path::PathBuf::from("update").join(name)
+    }
+
+    fn free_bytes(&self) -> Option<u64> {
+        *self.1.lock().unwrap()
     }
 }
 
@@ -281,6 +286,44 @@ fn the_download_lands_only_in_the_update_folder_and_is_deleted_on_any_failure() 
     assert_eq!(r.m.view().phase, Phase::Offered { version: v("1.2.0"), manual: true });
     assert_eq!(r.m.install(&v("1.2.0"), CONSOLE, &AtomicBool::new(false)), Err(InstallFailure::NotOffered));
     assert_eq!(r.m.install(&v("9.9.9"), CONSOLE, &AtomicBool::new(false)), Err(InstallFailure::NotOffered));
+}
+
+/// UPDATES.md 4.3 step 5: twice the package plus 32 MiB must be free before anything is written.
+#[test]
+fn the_download_needs_twice_the_package_plus_32_mib_of_free_space_before_it_writes() {
+    let need = 2 * PACKAGE.len() as u64 + 32 * 1024 * 1024;
+    let r = rig();
+    r.publish("1.1.1", Apply::Auto);
+    r.m.check(START, 0).unwrap();
+    *r.folder.1.lock().unwrap() = Some(need - 1);
+    assert_eq!(r.m.install(&v("1.1.1"), CONSOLE, &AtomicBool::new(false)), Err(InstallFailure::Disk));
+    assert!(r.folder.names().is_empty(), "no file was created");
+    assert!(!r.http.asked().iter().any(|u| u.contains("/download/v1.1.1/")), "nothing was downloaded");
+    assert_eq!(r.m.view().phase, Phase::Failed(InstallFailure::Disk));
+
+    // Exactly enough, and an unknown answer, go on.
+    for free in [Some(need), None] {
+        let r = rig();
+        r.publish("1.1.1", Apply::Auto);
+        r.m.check(START, 0).unwrap();
+        *r.folder.1.lock().unwrap() = free;
+        assert!(r.m.install(&v("1.1.1"), CONSOLE, &AtomicBool::new(false)).is_ok(), "{free:?}");
+    }
+}
+
+/// The applier stopped before the new version ran (a file held open, say): the old version runs, the reason shows,
+/// and the version is NOT remembered as rolled back: the next check offers it again.
+#[test]
+fn a_refused_apply_leaves_the_version_on_offer() {
+    let r = rig();
+    r.publish("1.1.1", Apply::Auto);
+    r.m.check(START, 0).unwrap();
+    r.m.refused(&v("1.1.1"));
+    assert_eq!(r.m.view().phase, Phase::Failed(InstallFailure::NotApplied));
+    assert_eq!(r.m.view().rolled_back, None, "no \"did not start\" card: it never started");
+    assert!(r.store.load().rolled_back.is_empty(), "nothing saved against the version");
+    r.m.check(START + PERIOD_MS, 0).unwrap();
+    assert_eq!(r.m.view().phase, Phase::Offered { version: v("1.1.1"), manual: false }, "offered again");
 }
 
 #[test]

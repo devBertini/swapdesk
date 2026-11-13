@@ -4,18 +4,18 @@
 //! * The service is stopped and started through the SCM ([`ServiceControl`]; tests use a fake).
 //! * The sweep ends every Swapdesk program whose image is inside the install folder (the rule of `install.ps1` item
 //!   1), after a grace for the interfaces told `UpdateRestarting` to exit by themselves; nothing else is touched.
-//! * Each new file is moved into place with `MoveFileExW` (replace, write-through, a copy across volumes), retried for
-//!   [`MOVE_RETRY`] while a scanner holds a handle; it is then reset to inherit the install folder's ACL and each
-//!   program is checked with the install policy. The install folder holds a complete set at every moment.
+//! * Before the first file changes, every installed file the update replaces is held (opened with `DELETE` access, see
+//!   [`lock`]): a program that keeps one open makes the apply stop with nothing touched, and none can grab one after.
+//!   Each new file is then put in place through its own handle (`SetFileInformationByHandle`, `FileRenameInfo` with
+//!   `ReplaceIfExists`, flushed to the disk), so the hold carries over to it; it is reset to inherit the install
+//!   folder's ACL and each program is checked with the install policy. The install folder holds a complete set at every
+//!   moment.
 //! * The old programs are copied into `<update>\rollback\<old>\` first; the journal is `<update>\journal`, each line
 //!   written through.
 //!
-//! Sources read on 2026-11-11: `MoveFileExW`
-//! <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw> (MOVEFILE_REPLACE_EXISTING,
-//! MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH: "the function does not return until the file is actually moved on
-//! the disk"); `SetNamedSecurityInfoW` with `UNPROTECTED_DACL_SECURITY_INFORMATION`
+//! Sources read on 2026-11-11 and 2026-11-13: `SetNamedSecurityInfoW` with `UNPROTECTED_DACL_SECURITY_INFORMATION`
 //! <https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow> (the object inherits
-//! the inheritable entries of its parent; an empty DACL so leaves only those).
+//! the inheritable entries of its parent; an empty DACL so leaves only those); the rest in [`lock`].
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,13 +24,10 @@ use std::time::{Duration, Instant};
 use swapdesk_update::Version;
 use swapdesk_update::apply::{Journal, Machine};
 use swapdesk_update::package::Package;
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
 use windows_sys::Win32::Security::{
     ACL, ACL_REVISION, DACL_SECURITY_INFORMATION, InitializeAcl, UNPROTECTED_DACL_SECURITY_INFORMATION,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    MOVEFILE_COPY_ALLOWED, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows_sys::Win32::System::ProcessStatus::K32EnumProcesses;
 use windows_sys::Win32::System::Threading::{
@@ -46,7 +43,7 @@ pub const PROGRAMS: [&str; 3] = ["Swapdesk.exe", "swapdesk-service.exe", "swapde
 /// Every name the install folder may hold (`$Required` and `$Optional`): a package carries nothing else.
 pub const INSTALLED: [&str; 5] =
     ["Swapdesk.exe", "swapdesk-service.exe", "swapdesk-helper.exe", "LICENSE-MIT", "LICENSE-APACHE"];
-/// How long a move is retried while another process (a scanner) holds the file (UPDATES.md 6.2 step 5).
+/// How long a claim or a move is retried while another process (a scanner) holds the file (UPDATES.md 6.2 step 5).
 pub const MOVE_RETRY: Duration = Duration::from_secs(10);
 /// How long the interfaces told `UpdateRestarting` have to exit before the sweep ends them.
 pub const SWEEP_GRACE: Duration = Duration::from_secs(10);
@@ -172,14 +169,43 @@ pub struct WinMachine {
     pub grace: Duration,
     /// How often [`Machine::wait_commit`] reads the journal.
     pub poll: Duration,
+    /// How long a file held by a scanner is retried before the apply is refused ([`MOVE_RETRY`]).
+    pub retry: Duration,
+    /// The files held (installed first, then the new ones) from [`Machine::claim_targets`] until the commit.
+    pub held: Option<lock::Held>,
 }
 
 impl WinMachine {
+    /// The machine of an apply with the production timings: the sweep's grace, the commit poll and the retry for a file
+    /// a scanner holds.
+    pub fn new(layout: Layout, control: Box<dyn ServiceControl>, policy: InstallPolicy) -> Self {
+        Self {
+            layout,
+            control,
+            policy,
+            grace: SWEEP_GRACE,
+            poll: Duration::from_millis(250),
+            retry: MOVE_RETRY,
+            held: None,
+        }
+    }
+
+    /// Holds the installed files `from` will replace (see [`lock`]); the new hold is taken before the old one is let
+    /// go, so the files are never free in between.
+    fn claim(&mut self, from: &Path) -> Result<(), String> {
+        let held = lock::Held::claim(&self.layout.install, from, self.retry)?;
+        self.held = Some(held);
+        Ok(())
+    }
+
     /// Puts every installed name found in `from` into the install folder: a copy in the swap folder is moved over the
     /// installed file (so `from` stays whole for a second try), reset to the folder's ACL and, for a program, checked
     /// with the install policy. Before each program the service is stopped again and the folder swept: the SCM's
     /// recovery actions may have restarted a service that ended badly, and its image would hold the file.
     fn put_from(&mut self, from: &Path) -> Result<(), String> {
+        if self.held.is_none() {
+            self.claim(from)?;
+        }
         let swap = self.layout.swap();
         std::fs::create_dir_all(&swap).map_err(|e| format!("the swap folder: {e}"))?;
         for name in INSTALLED {
@@ -196,7 +222,8 @@ impl WinMachine {
             let copy = swap.join(name);
             copy_through(&src, &copy).map_err(|e| format!("copying {name}: {e}"))?;
             let dst = self.layout.install.join(name);
-            move_replacing(&copy, &dst, MOVE_RETRY)?;
+            let held = self.held.get_or_insert_with(Default::default);
+            held.replace_through(name, &copy, &dst)?;
             inherit_parent_acl(&dst)?;
             if PROGRAMS.contains(&name) {
                 self.policy.verify(&dst).map_err(|e| format!("{name}: {e}"))?;
@@ -224,6 +251,14 @@ impl Machine for WinMachine {
 
     fn sweep(&mut self) -> Result<(), String> {
         sweep(&self.layout.install, self.grace)
+    }
+
+    fn claim_targets(&mut self) -> Result<(), String> {
+        self.claim(&self.layout.staging())
+    }
+
+    fn install_complete(&mut self) -> bool {
+        complete(&self.layout.install)
     }
 
     fn back_up(&mut self, old: &Version) -> Result<(), String> {
@@ -258,6 +293,8 @@ impl Machine for WinMachine {
         if !complete(&dir) {
             return Err(format!("the rollback folder {} is incomplete", dir.display()));
         }
+        // The files the old set carries are held (the new files' hold is let go once these are), then put back.
+        self.claim(&dir)?;
         self.put_from(&dir)
     }
 
@@ -285,34 +322,11 @@ impl Machine for WinMachine {
     }
 
     fn clean_staging(&mut self) {
+        if let Some(held) = &mut self.held {
+            held.release();
+        }
         let _ = std::fs::remove_dir_all(self.layout.staging());
         let _ = std::fs::remove_dir_all(self.layout.swap());
-    }
-}
-
-/// `MoveFileExW` with replace, write-through and a copy across volumes, retried for `retry` while the file is held.
-pub fn move_replacing(src: &Path, dst: &Path, retry: Duration) -> Result<(), String> {
-    let (s, d) = (wide(src.as_os_str()).map_err(|e| e.to_string())?, wide(dst.as_os_str()).map_err(|e| e.to_string())?);
-    let start = Instant::now();
-    loop {
-        // SAFETY: both are null-terminated wide strings alive for the call.
-        let ok = unsafe {
-            MoveFileExW(
-                s.as_ptr(),
-                d.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED,
-            )
-        };
-        if ok != 0 {
-            return Ok(());
-        }
-        // SAFETY: no preconditions.
-        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        let held = matches!(code, ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED | ERROR_LOCK_VIOLATION);
-        if !held || start.elapsed() >= retry {
-            return Err(format!("moving {} to {}: os error {code}", src.display(), dst.display()));
-        }
-        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -450,5 +464,6 @@ fn end_programs_inside(install: &Path) {
     }
 }
 
+pub mod lock;
 #[cfg(test)]
 mod tests;

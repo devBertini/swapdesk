@@ -25,6 +25,8 @@ pub const FIRST_DELAY_MS: (u64, u64) = (2 * 60_000, 10 * 60_000);
 /// Then every 24 hours, plus or minus one (the caller picks the jitter).
 pub const PERIOD_MS: u64 = 24 * 3_600_000;
 pub const PERIOD_JITTER_MS: u64 = 3_600_000;
+/// Free space kept beyond twice the package before a download starts (UPDATES.md 4.3 step 5).
+pub const FREE_MARGIN: u64 = 32 * 1024 * 1024;
 
 /// What persists across restarts (the service keeps it in its folder; the Mac app in its own).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +96,9 @@ pub trait UpdateFolder: Send + Sync {
     fn remove(&self, name: &str);
     /// The full path of `name`, as the applier is given it.
     fn path(&self, name: &str) -> std::path::PathBuf;
+    /// Free bytes on the volume that holds the folder (the folder itself may not exist yet), `None` when the system
+    /// cannot say (the download then goes on: the write fails by itself on a full disk).
+    fn free_bytes(&self) -> Option<u64>;
 }
 
 /// How the manager is set up.
@@ -146,6 +151,9 @@ pub enum InstallFailure {
     Unwritable,
     /// Mac: the app runs from a translocated copy (move it to Applications).
     Translocated,
+    /// Windows: the applier stopped before the new version ran (a file of the install folder held open by another
+    /// program, a step that failed); the old version runs and the new one stays on offer.
+    NotApplied,
 }
 
 /// Where the manager is.
@@ -415,6 +423,13 @@ impl UpdateManager {
         self.store.save(&i.saved);
     }
 
+    /// The applier stopped before `version` ran and put the old files back (UPDATES.md 6.4): unlike
+    /// [`UpdateManager::rolled_back`] nothing is held against the version, so the next check offers it again; the
+    /// reason shows until then.
+    pub fn refused(&self, _version: &Version) {
+        lock(&self.inner).phase = Phase::Failed(InstallFailure::NotApplied);
+    }
+
     /// "Atualizar agora" (UPDATES.md 10.2, 10.3): refused from an interface outside the console session, and with a
     /// live session unless "Encerrar e atualizar" was pressed; then downloads the package into the update folder and
     /// checks its size and hash against the signed manifest. On any failure the partial file is deleted. `Ok`: the
@@ -472,6 +487,11 @@ impl UpdateManager {
         entry: &FileEntry,
         cancel: &AtomicBool,
     ) -> Result<std::path::PathBuf, InstallFailure> {
+        // UPDATES.md 4.3 step 5, before the folder or a byte exists: the package, its unpacked copy and a margin.
+        let needed = entry.size.saturating_mul(2).saturating_add(FREE_MARGIN);
+        if self.folder.free_bytes().is_some_and(|free| free < needed) {
+            return Err(InstallFailure::Disk);
+        }
         let url = format!("{}/download/v{version}/{}", self.setup.base, entry.name);
         let mut file = self.folder.create(&entry.name).map_err(|_| InstallFailure::Disk)?;
         let mut hashing = Hashing { out: &mut *file, digest: ring::digest::Context::new(&ring::digest::SHA256) };
