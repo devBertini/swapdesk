@@ -976,4 +976,36 @@ mod tests {
             Route::Op(w::UiOp::RunAction { session_id: 4, action: p::Action::Restart })
         );
     }
+
+    /// F-SEC-02: the activity alert's `BlockAddress` becomes the service's `BlockDevice` (the MAC is learned there),
+    /// and the service's `Blocked` reply (the list as it now is) comes back as the list's items; Desbloquear and the
+    /// list request map too.
+    #[test]
+    fn block_address_becomes_block_device_and_the_blocked_reply_comes_back_as_the_list() {
+        assert_eq!(
+            route(&a::Command::BlockAddress { ipv4: "192.168.0.57".into() }),
+            Route::Op(w::UiOp::BlockDevice { ipv4: "192.168.0.57".into(), name: String::new() })
+        );
+        assert_eq!(
+            route(&a::Command::UnblockDevice { mac: "02:5a:d0:00:00:39".into() }),
+            Route::Op(w::UiOp::UnblockDevice { mac: "02:5a:d0:00:00:39".into() })
+        );
+        assert_eq!(route(&a::Command::ListBlocked), Route::Op(w::UiOp::ListBlocked));
+        let reply = reply_from_wire(w::ReplyBody::Blocked(vec![swapdesk_ipc::BlockedView {
+            mac: "02:5a:d0:00:00:39".into(),
+            last_ipv4: "192.168.0.57".into(),
+            name: "Sala".into(),
+            blocked_at_ms: 7,
+        }]))
+        .expect("a reply");
+        assert_eq!(
+            reply,
+            a::Reply::Blocked(vec![a::BlockedItem {
+                mac: "02:5a:d0:00:00:39".into(),
+                last_ipv4: "192.168.0.57".into(),
+                name: "Sala".into(),
+                blocked_at_ms: 7,
+            }])
+        );
+    }
 }

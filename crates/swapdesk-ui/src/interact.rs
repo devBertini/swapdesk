@@ -1200,7 +1200,7 @@ impl UiState {
         }
         s.region(Region::Toolbar);
         // The session line rides on the toolbar (owner, 12/11): read with it, after the peer's heading.
-        s.text(UiRole::Text, self.viewer_status_text(session));
+        s.text(UiRole::Text, self.viewer_session_line(session));
         let screen_label = self.name_of(MsgKey::TbScreen);
         s.button(ControlId::TbScreen, screen_label);
         if self.viewer_extras {
@@ -1459,6 +1459,22 @@ impl UiState {
                 self.tm(&Msg::new(key).with(format::short_minutes(self.lang, secs)))
             }
             _ => self.name_of(MsgKey::ViewerConnecting),
+        }
+    }
+
+    /// The toolbar's session line: how long this has gone on, and, when Ajustes shows the numbers, the latency, the
+    /// frame rate and the codec in use ("HEVC" or "H.264", F-VIEW-07). Drawn on the toolbar and read with it.
+    pub fn viewer_session_line(&self, s: &SessionView) -> String {
+        let status = self.viewer_status_text(s);
+        match (self.settings(), s.stats) {
+            (Some(set), Some(stats)) if set.show_stats => {
+                let numbers = self.tm(&Msg::new(MsgKey::ViewerStats)
+                    .with(stats.latency_ms.to_string())
+                    .with(stats.fps.to_string())
+                    .with(if stats.hevc { "HEVC" } else { "H.264" }));
+                format!("{status} · {numbers}")
+            }
+            _ => status,
         }
     }
 

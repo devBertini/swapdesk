@@ -145,19 +145,9 @@ struct Tool {
 }
 
 /// The second line of the toolbar's session segment: how long this has gone on ("você controla há 68 min"), and the
-/// latency, frame rate and codec when Ajustes shows them.
+/// latency, frame rate and codec when Ajustes shows them (the state composes it, so it is read with the toolbar).
 fn session_line(f: &Frame, session: &swapdesk_ui::state::SessionView) -> String {
-    let status = f.st.viewer_status_text(session);
-    match (f.st.settings(), session.stats) {
-        (Some(set), Some(stats)) if set.show_stats => {
-            let s = f.st.tm(&Msg::new(MsgKey::ViewerStats)
-                .with(stats.latency_ms.to_string())
-                .with(stats.fps.to_string())
-                .with(if stats.hevc { "HEVC" } else { "H.264" }));
-            format!("{status} · {s}")
-        }
-        _ => status,
-    }
+    f.st.viewer_session_line(session)
 }
 
 /// The toolbar's text styles of its session segment: the peer's name, then the session line, small and soft.

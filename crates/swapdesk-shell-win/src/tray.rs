@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, HICON, ICONINFO,
-    MF_STRING, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+    MF_STRING, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
 };
 use windows::core::HSTRING;
 
@@ -30,6 +30,21 @@ const SIZE: i32 = 32;
 pub enum TrayAction {
     Open,
     Quit,
+}
+
+/// The `WM_COMMAND` ids of the menu's two entries (far above the edit controls' small codes).
+pub const CMD_OPEN: usize = 0x7101;
+pub const CMD_QUIT: usize = 0x7102;
+
+impl TrayAction {
+    /// The action a `WM_COMMAND` id of the tray menu stands for.
+    pub fn from_command(id: usize) -> Option<TrayAction> {
+        match id {
+            CMD_OPEN => Some(TrayAction::Open),
+            CMD_QUIT => Some(TrayAction::Quit),
+            _ => None,
+        }
+    }
 }
 
 /// The icon's pixels, BGRA top-down: a rounded blue square with two arrows that turn into each other (the swap).
@@ -131,25 +146,20 @@ pub fn remove(hwnd: HWND) {
     }
 }
 
-/// Shows the menu at the pointer and returns the entry chosen (`None` when it was dismissed).
-pub fn menu(hwnd: HWND, open: &str, quit: &str) -> Option<TrayAction> {
+/// Shows the menu at the pointer. The entry chosen reaches the window as a `WM_COMMAND` with [`CMD_OPEN`] or
+/// [`CMD_QUIT`] (nothing arrives when it is dismissed), so a test can post the same ids.
+pub fn menu(hwnd: HWND, open: &str, quit: &str) {
     // SAFETY: a popup menu owned here, shown for our own window (made foreground first, as the shell requires for the
-    // menu to close when it loses focus), destroyed before returning.
+    // menu to close when it loses focus), destroyed before returning; the system posts the command to the window.
     unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(open));
-        let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(quit));
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, &HSTRING::from(open));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, &HSTRING::from(quit));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
         let _ = SetForegroundWindow(hwnd);
-        let picked =
-            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, Some(0), hwnd, None);
+        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, Some(0), hwnd, None);
         let _ = DestroyMenu(menu);
-        match picked.0 {
-            1 => Some(TrayAction::Open),
-            2 => Some(TrayAction::Quit),
-            _ => None,
-        }
     }
 }
 

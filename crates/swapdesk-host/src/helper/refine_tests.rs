@@ -126,13 +126,17 @@ impl VideoEncoder for CountingEncoder {
     }
 }
 
-/// Runs the capture loop for `run_for` over `schedule`; returns the video frames sent as (keyframe, bytes) and the faults.
-fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, usize)>, Vec<String>, Counts) {
-    let (outbox, rx) = Outbox::new(256);
-    let counts = Counts::default();
+/// The capture environment over a scripted screen and the counting encoder, on the given clock.
+fn env_on(
+    clock: Arc<dyn Clock>,
+    outbox: Outbox,
+    counts: &Counts,
+    schedule: Vec<Duration>,
+    refuse: bool,
+) -> CaptureEnv<ScriptedScreen, CountingEncoder> {
     let encoder_counts = counts.clone();
     let sched = Mutex::new(Some(schedule));
-    let env = CaptureEnv {
+    CaptureEnv {
         screen: Arc::new(move |_| {
             Ok(ScriptedScreen {
                 schedule: sched.lock().unwrap().take().unwrap_or_default(),
@@ -141,7 +145,7 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
             })
         }),
         encoder: Arc::new(move |_f, _c, _b| Ok(CountingEncoder { counts: encoder_counts.clone(), refuse })),
-        clock: Arc::new(RealClock(Instant::now())),
+        clock,
         outbox,
         displays: std::sync::Mutex::new(Vec::new()),
         input_tx: std::sync::Mutex::new(None),
@@ -149,7 +153,14 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
         fence: Arc::default(),
         desktop_probe: None,
         desktop_sent: Mutex::default(),
-    };
+    }
+}
+
+/// Runs the capture loop for `run_for` over `schedule`; returns the video frames sent as (keyframe, bytes) and the faults.
+fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, usize)>, Vec<String>, Counts) {
+    let (outbox, rx) = Outbox::new(256);
+    let counts = Counts::default();
+    let env = env_on(Arc::new(RealClock(Instant::now())), outbox, &counts, schedule, refuse);
     let p = StartParams {
         display: 0,
         fps: 60,
@@ -212,4 +223,69 @@ fn a_refusing_encoder_is_logged_once_and_the_stream_goes_on() {
     assert_eq!(counts.refines.load(Ordering::SeqCst), 2);
     assert_eq!(faults.len(), 1, "logged once: {faults:?}");
     assert!(faults[0].contains("refinement"), "{faults:?}");
+}
+
+/// A clock the test sets.
+struct ManualClock(std::sync::atomic::AtomicU64);
+
+impl Clock for ManualClock {
+    fn now(&self) -> MonoMicros {
+        MonoMicros(self.0.load(Ordering::SeqCst))
+    }
+}
+
+fn a_frame() -> Frame {
+    Frame {
+        display: DisplayId(0),
+        captured_at: MonoMicros(0),
+        width: 64,
+        height: 48,
+        pixels: Pixels::Cpu { stride: 256, data: vec![0; 256 * 48] },
+        dirty: Vec::new(),
+        content_changed: true,
+    }
+}
+
+/// F-VIEW-05: the threshold is exactly `STILL_AFTER_US` (400 ms): a picture still for 399.999 ms is not refined, at
+/// 400 ms exactly one refinement goes out, and nothing more while the screen stays still.
+#[test]
+fn a_still_of_399_ms_sends_no_refinement_and_at_400_ms_exactly_one() {
+    use super::{Still, refine_still};
+    assert_eq!(super::STILL_AFTER_US, 400_000, "the flow text says 400 ms");
+    let (outbox, rx) = Outbox::new(16);
+    let counts = Counts::default();
+    let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000_000)));
+    let env = env_on(clock.clone(), outbox, &counts, Vec::new(), false);
+    let p = StartParams {
+        display: 0,
+        fps: 60,
+        kbps: 5000,
+        preset: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_platform::Codec::H264,
+    };
+    let ids = AtomicU32::new(0);
+    let (mut discontinuity, mut force) = (false, false);
+    let mut enc = CountingEncoder { counts: counts.clone(), refuse: false };
+    // The picture was encoded at 1.000 s on the clock.
+    let mut still = Still { frame: Some(a_frame()), since: 1_000_000, ..Default::default() };
+    let mut look = |at_us: u64, still: &mut Still| {
+        clock.0.store(at_us, Ordering::SeqCst);
+        refine_still(&env, p, &ids, &mut enc, still, &mut discontinuity, &mut force);
+    };
+
+    look(1_000_000, &mut still);
+    look(1_399_999, &mut still);
+    assert_eq!(counts.refines.load(Ordering::SeqCst), 0, "399.999 ms of stillness sends nothing");
+    assert!(rx.try_iter().next().is_none());
+
+    look(1_400_000, &mut still);
+    assert_eq!(counts.refines.load(Ordering::SeqCst), 1, "400 ms sends the refinement");
+    let sent: Vec<_> = rx.try_iter().collect();
+    assert_eq!(sent.len(), 1, "one frame");
+    assert!(matches!(&sent[0], Message::VideoFrame { header, payload } if header.keyframe && payload.0.len() == 5000));
+
+    look(2_400_000, &mut still);
+    assert_eq!(counts.refines.load(Ordering::SeqCst), 1, "never again while the screen stays still");
+    assert!(rx.try_iter().next().is_none());
 }

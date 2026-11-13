@@ -167,6 +167,47 @@ fn the_pairing_endpoint_ignores_a_blocked_address_before_any_handshake() {
     b.finish();
 }
 
+/// F-SEC-02, the MAC path: B blocks a device by its MAC (listed under an old address); the neighbour table says A's
+/// pairing attempt comes from that MAC, so B ignores it before any handshake and shows no card.
+#[test]
+fn the_pairing_endpoint_ignores_a_blocked_mac_under_another_address_before_any_handshake() {
+    struct OneMac([u8; 6]);
+    impl swapdesk_platform::NeighborTable for OneMac {
+        fn cached_mac(&self, _peer: std::net::IpAddr) -> Option<[u8; 6]> {
+            Some(self.0)
+        }
+    }
+    let mac = [0x02, 0x5a, 0xd0, 0, 0, 0x39];
+    let a = Machine::new("alfa");
+    let b = Machine::new("beta");
+    let mut ua = a.client(info(false));
+    let mut ub = b.client(info(false));
+    b.hub.set_neighbors(Arc::new(OneMac(mac)));
+    b.trust
+        .block_mac(swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: [192, 168, 0, 57],
+            name: String::new(),
+            blocked_at_ms: 0,
+        })
+        .expect("store");
+    assert!(b.trust.read(|s| s.blocked.is_empty()), "no address is blocked, only the MAC");
+
+    let ReplyBody::PairingId(_id_b) = ub.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    let ReplyBody::PairingId(id_a) = ua.call(UiOp::PairOpen { device_id: Some(b.hex()) }).unwrap() else { panic!() };
+    a.sees(&b, true);
+    assert!(ua.call(UiOp::PairStart { pairing_id: id_a, device_id: b.hex() }).is_ok());
+    let shows_code = |m: &Ipc| matches!(m, Ipc::UiNotify(Notify::Pairing { state: PairingState::ShowCode { .. }, .. }));
+    assert!(ub.nothing_within(Duration::from_millis(1500), shows_code), "B talked to a blocked MAC");
+    assert!(ua.nothing_within(Duration::from_millis(100), shows_code));
+    assert!(b.trust.read(|s| s.devices.is_empty()));
+
+    assert!(ua.call(UiOp::PairCancel { pairing_id: id_a }).is_ok());
+    drop((ua, ub));
+    a.finish();
+    b.finish();
+}
+
 /// ACCOUNTS.md 5.6: what only narrows the account's own reach is open to any session of the account's own user, a
 /// session switched away from the console included; widening stays the console's, and another user gets nothing.
 #[test]

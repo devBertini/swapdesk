@@ -352,6 +352,50 @@ fn closing_the_main_window_of_a_real_run_hides_it_and_an_update_still_ends_the_r
     join.join().expect("the shell thread");
 }
 
+/// F-UI-04: the notification area menu's two entries reach the window as commands: "Abrir" shows the hidden main
+/// window and "Sair" ends the run.
+#[test]
+fn the_tray_menu_open_shows_the_main_window_and_quit_ends_the_run() {
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, WM_COMMAND};
+    let backend = Arc::new(Scripted::default());
+    let b = Arc::clone(&backend);
+    let mut live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    let hwnd = live.hwnd();
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "the close hid the window");
+
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(crate::tray::CMD_OPEN), LPARAM(0));
+    }
+    let started = Instant::now();
+    while !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        assert!(started.elapsed() < Duration::from_secs(5), "Open did not show the main window");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!live.join.as_ref().expect("running").is_finished(), "Open keeps the run going");
+
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(crate::tray::CMD_QUIT), LPARAM(0));
+    }
+    let join = live.join.take().expect("running");
+    let started = Instant::now();
+    while !join.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(5), "Quit did not end the run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    join.join().expect("the shell thread");
+}
+
 #[test]
 fn the_main_window_minimizes_when_a_session_starts_and_not_in_a_mock_run() {
     use swapdesk_ui::{Role, SessionState, UiWaker};

@@ -916,6 +916,41 @@ fn a_peer_at_a_blocked_address_is_dropped_before_the_handshake_and_costs_no_prom
     });
 }
 
+/// A neighbour table that gives one MAC to every address (every peer here dials from loopback).
+struct OneMac([u8; 6]);
+
+impl swapdesk_platform::NeighborTable for OneMac {
+    fn cached_mac(&self, _peer: std::net::IpAddr) -> Option<[u8; 6]> {
+        Some(self.0)
+    }
+}
+
+/// F-SEC-02, the MAC path: the blocked device is listed by its MAC and an old address (not the one it dials from now),
+/// the neighbour table says the connection comes from that MAC, and the host drops it before the handshake.
+#[test]
+fn a_peer_with_a_blocked_mac_under_another_address_is_dropped_before_the_handshake_and_costs_no_prompt() {
+    let mac = [0x02, 0x5a, 0xd0, 0, 0, 0x39];
+    let a = Machine::build("a", true, false, ALL, |cfg| cfg.with_neighbors(Arc::new(OneMac(mac))));
+    let b = Machine::new("b", true, false);
+    Machine::pair(&a, &b, ALL);
+    a.trust
+        .block_mac(swapdesk_trust::BlockedDevice {
+            mac,
+            last_ipv4: [192, 168, 0, 57],
+            name: String::new(),
+            blocked_at_ms: 0,
+        })
+        .expect("host store");
+    assert!(a.trust.read(|s| s.blocked.is_empty()), "no address is blocked, only the MAC");
+    let r = b.core.connect(a.addr(), a.device(), Intent::Control);
+    assert!(r.is_err(), "the blocked MAC got a session");
+    assert!(a.core.host().sessions().is_empty());
+    assert_eq!(a.ui.prompts.load(Ordering::SeqCst), 0, "no prompt for a blocked MAC");
+    wait_for("the ignored connection in A's trace", || {
+        a.trace.lines().iter().any(|l| l.text.contains("blocked address")).then_some(())
+    });
+}
+
 #[test]
 fn a_core_refuses_to_dial_its_own_endpoint() {
     let a = Machine::new("a", true, false);

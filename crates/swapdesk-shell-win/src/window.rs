@@ -1722,28 +1722,27 @@ impl Window {
             crate::tray::WM_TRAY if self.kind == WindowKind::Main => {
                 use windows::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_RBUTTONUP};
                 let event = (lparam.0 & 0xFFFF) as u32;
-                let action = match event {
-                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(crate::tray::TrayAction::Open),
+                match event {
+                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.run_tray_action(hwnd, crate::tray::TrayAction::Open),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
                         let (open, quit) = {
                             let st = self.shared.state.borrow();
                             (st.t(swapdesk_ui::MsgKey::StatusOpen), st.t(swapdesk_ui::MsgKey::StatusQuit))
                         };
-                        crate::tray::menu(hwnd, &open, &quit)
+                        crate::tray::menu(hwnd, &open, &quit);
                     }
-                    _ => None,
-                };
-                match action {
-                    // SAFETY: shows and raises our own window.
-                    Some(crate::tray::TrayAction::Open) => unsafe {
-                        let _ = ShowWindow(hwnd, SW_SHOW);
-                        let _ = SetForegroundWindow(hwnd);
-                    },
-                    // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
-                    Some(crate::tray::TrayAction::Quit) => unsafe {
-                        let _ = DestroyWindow(hwnd);
-                    },
-                    None => {}
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
+            // The tray menu's entries arrive as commands (menu items carry no notification code).
+            WM_COMMAND
+                if self.kind == WindowKind::Main
+                    && hiword(wparam.0 as isize) == 0
+                    && crate::tray::TrayAction::from_command(loword(wparam.0 as isize) as usize).is_some() =>
+            {
+                if let Some(action) = crate::tray::TrayAction::from_command(loword(wparam.0 as isize) as usize) {
+                    self.run_tray_action(hwnd, action);
                 }
                 Some(LRESULT(0))
             }
@@ -1771,6 +1770,21 @@ impl Window {
                 Some(LRESULT(0))
             }
             _ => None,
+        }
+    }
+
+    /// What the notification area icon asks of the main window: show and raise it, or end the run.
+    fn run_tray_action(&self, hwnd: HWND, action: crate::tray::TrayAction) {
+        match action {
+            // SAFETY: shows and raises our own window.
+            crate::tray::TrayAction::Open => unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+            },
+            // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
+            crate::tray::TrayAction::Quit => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
         }
     }
 

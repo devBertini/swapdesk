@@ -2957,3 +2957,66 @@ fn no_viewer_session_reports_no_area() {
     let mut s = UiState::default();
     assert_eq!(s.set_view_area(1280, 720, 60), vec![]);
 }
+
+// ---------- the first-run guide card (F-UI-04) ----------
+
+#[test]
+fn an_empty_prefs_store_shows_the_first_run_guide_card() {
+    let mut s = UiState::new(Language::PtBr, false);
+    assert!(s.guide_card().is_none(), "before the store is read nothing shows");
+    s.load_prefs(Box::new(MemPrefs::default()));
+    let (title, body) = s.guide_card().expect("an empty store is a first start");
+    assert_eq!(title, "Bem-vindo ao Swapdesk");
+    assert!(!body.is_empty());
+}
+
+#[test]
+fn guide_skip_and_guide_done_each_close_the_card_and_write_the_record_and_it_never_comes_back() {
+    for id in [ControlId::GuideSkip, ControlId::GuideDone] {
+        let mem = MemPrefs::default();
+        let mut s = UiState::new(Language::PtBr, false);
+        s.load_prefs(Box::new(mem.clone()));
+        assert!(s.guide_card().is_some());
+        assert_eq!(mem.read().unwrap(), None, "showing the card writes nothing");
+        s.activate(id);
+        assert!(s.guide_card().is_none(), "{id:?} closes the guide");
+        let bytes = mem.read().unwrap().expect("closing writes the record");
+        assert!(UserPrefs::decode(&bytes).is_ok(), "a valid record");
+        // A second start over the same store: no card.
+        let mut next = UiState::new(Language::PtBr, false);
+        next.load_prefs(Box::new(mem.clone()));
+        assert!(next.guide_card().is_none(), "{id:?}: the guide is dismissed for good");
+    }
+}
+
+// ---------- the stats line names the codec (F-VIEW-07) ----------
+
+/// The overlay shall name the codec in use: the toolbar's session line (also read with the toolbar) ends with the
+/// numbers and "HEVC" when the session's pictures come in HEVC, "H.264" otherwise, and shows no codec when Ajustes
+/// hides the numbers.
+#[test]
+fn the_toolbar_session_line_names_the_codec_hevc_or_h264() {
+    let line = |s: &UiState| s.viewer_session_line(&s.viewer_session().unwrap().clone());
+    let stats = |hevc| UiEvent::Stats { session_id: 1, stats: Stats { latency_ms: 18, fps: 60, kbps: 9000, hevc } };
+
+    let mut s = viewer();
+    assert!(s.settings().unwrap().show_stats);
+    s.apply(stats(true));
+    let l = line(&s);
+    assert!(l.ends_with("18 ms, 60 qps, HEVC"), "{l}");
+    s.apply(stats(false));
+    let l = line(&s);
+    assert!(l.ends_with("18 ms, 60 qps, H.264") && !l.contains("HEVC"), "{l}");
+
+    // Read with the toolbar: the same text is in the accessible list.
+    s.apply(stats(true));
+    let in_bar = s.controls(WindowKind::Viewer).into_iter().any(|c| c.label.ends_with("HEVC"));
+    assert!(in_bar, "the toolbar's text names the codec");
+
+    // Ajustes hides the numbers: no codec either.
+    let mut hidden = viewer();
+    hidden.activate(ControlId::ShowStats);
+    hidden.apply(stats(true));
+    assert!(!hidden.settings().unwrap().show_stats);
+    assert!(!line(&hidden).contains("HEVC") && !line(&hidden).contains("H.264"), "{}", line(&hidden));
+}

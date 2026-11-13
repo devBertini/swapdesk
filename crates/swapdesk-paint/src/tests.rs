@@ -814,3 +814,78 @@ fn the_picture_shows_the_line_of_a_folders_only_drop_over_its_bottom_and_nothing
     let (_, drawn, _) = paint_texts(&state);
     assert!(!drawn.contains(&note), "gone with its time");
 }
+
+/// F-UI-04: the first-run guide card on Início puts "Pular" left of "Entendi": the confirming action trails.
+#[test]
+fn the_first_run_guide_has_skip_left_of_done() {
+    struct Empty;
+    impl swapdesk_ui::prefs::PrefsStore for Empty {
+        fn read(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn write(&self, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut state = Scenario::Inicio.prepared_state();
+    state.load_prefs(Box::new(Empty));
+    let (kind, size) = (WindowKind::Main, design_size(WindowKind::Main));
+    let painter = Fixed::default();
+    let out = paint(Frame::new(&painter, &state, &Interaction::default(), size, true), kind);
+    let skip = out.widgets.iter().find(|w| w.id == ControlId::GuideSkip).expect("Pular").rect;
+    let done = out.widgets.iter().find(|w| w.id == ControlId::GuideDone).expect("Entendi").rect;
+    assert!(skip.right() <= done.x, "Pular {skip:?} is left of Entendi {done:?}");
+    assert!((skip.y - done.y).abs() < 1.0, "same row");
+    let drawn = painter.drawn.borrow();
+    assert!(drawn.iter().any(|t| t == "Bem-vindo ao Swapdesk"), "{drawn:?}");
+}
+
+/// F-SEC-02: Ajustes draws the blocked list with its note about private or rotating Wi-Fi addresses, with the list
+/// empty and with a device in it.
+#[test]
+fn ajustes_draws_the_blocked_note_with_the_blocked_list() {
+    use swapdesk_ui::{Reply, UiEvent};
+    let note_drawn = |state: &swapdesk_ui::UiState| {
+        let (kind, size) = (WindowKind::Main, design_size(WindowKind::Main));
+        let painter = Fixed::default();
+        let _ = paint(Frame::new(&painter, state, &Interaction::default(), size, true), kind);
+        let drawn = painter.drawn.borrow().join("\n");
+        (drawn.contains("endereço Wi-Fi privado ou rotativo"), drawn.contains("Nenhum dispositivo bloqueado."), drawn)
+    };
+    let mut state = Scenario::Ajustes.prepared_state();
+    let (note, none, drawn) = note_drawn(&state);
+    assert!(none && note, "empty list: {drawn:?}");
+
+    state.apply(UiEvent::Reply {
+        ticket: swapdesk_ui::Ticket(0),
+        result: Ok(Reply::Blocked(vec![swapdesk_ui::BlockedItem {
+            mac: "02:00:00:00:00:01".into(),
+            last_ipv4: "192.168.0.57".into(),
+            name: String::new(),
+            blocked_at_ms: 0,
+        }])),
+    });
+    let (note, none, drawn) = note_drawn(&state);
+    assert!(note && !none, "one blocked device: {drawn:?}");
+    assert!(drawn.contains("Dispositivo sem nome"));
+}
+
+/// F-VIEW-07: the toolbar draws the codec in its session line, HEVC or H.264.
+#[test]
+fn the_toolbar_draws_the_codec_in_its_session_line() {
+    let drawn_for = |hevc: bool| {
+        let mut state = Scenario::Visualizador.prepared_state();
+        state.apply(swapdesk_ui::UiEvent::Stats {
+            session_id: 1,
+            stats: swapdesk_ui::Stats { latency_ms: 18, fps: 60, kbps: 9000, hevc },
+        });
+        let (kind, size) = (WindowKind::Viewer, design_size(WindowKind::Viewer));
+        let painter = Fixed::default();
+        let _ = paint(Frame::new(&painter, &state, &Interaction::default(), size, true), kind);
+        painter.drawn.borrow().clone()
+    };
+    let on = drawn_for(true);
+    assert!(on.iter().any(|t| t.ends_with("18 ms, 60 qps, HEVC")), "{on:?}");
+    let off = drawn_for(false);
+    assert!(off.iter().any(|t| t.ends_with("18 ms, 60 qps, H.264")), "{off:?}");
+}

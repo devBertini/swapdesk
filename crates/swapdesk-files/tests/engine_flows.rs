@@ -340,6 +340,34 @@ fn an_offer_over_the_size_limit_is_too_large() {
     let _ = std::fs::remove_dir_all(&dst);
 }
 
+/// F-FILE-03: an offer larger than the free space is declined with `NoSpace` before anything is written, and the
+/// sender's transfer event carries that reason.
+#[test]
+fn an_offer_larger_than_the_free_space_is_declined_no_space_and_the_sender_is_told() {
+    let (src, dst) = (temp("nospace-src"), temp("nospace-dst"));
+    std::fs::write(src.join("big.bin"), data(5_000_000, 3)).unwrap();
+    let mut w = World::new(Some(&dst), &dst);
+    let mut cfg = FilesConfig::new(Side::Host, dst.clone());
+    cfg.default_dir = Some(dst.clone());
+    // The receiving volume has 1000 bytes free.
+    w.host = Engine::with_fs(cfg, std::sync::Arc::new(swapdesk_files::LocalFs::with_free_space(|_| Some(1000))));
+    let outs = w.viewer.send_file(9, &src.join("big.bin"), None);
+    w.pump(true, outs, None);
+    assert!(
+        w.to_viewer.iter().any(|m| matches!(m, Message::FileDecline(FileDecline { code: ErrorCode::NoSpace, .. }))),
+        "the receiver declines with NoSpace: {:?}",
+        w.to_viewer
+    );
+    assert!(
+        w.viewer_events.contains(&Event::Failed { id: 9, code: ErrorCode::NoSpace }),
+        "the sender's transfer event carries the reason: {:?}",
+        w.viewer_events
+    );
+    assert!(leftovers(&dst).is_empty(), "nothing was written: {:?}", leftovers(&dst));
+    assert_eq!(w.host.active() + w.viewer.active(), 0);
+    let _ = (std::fs::remove_dir_all(&src), std::fs::remove_dir_all(&dst));
+}
+
 #[test]
 fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
     let save = temp("unsolicited");

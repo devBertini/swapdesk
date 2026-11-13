@@ -242,3 +242,51 @@ fn the_full_screen_monitor_is_a_choice_among_the_monitors_the_shell_found() {
     s.set_local_monitors(2);
     assert_eq!(s.fullscreen_monitor(), None, "a monitor that went away is forgotten");
 }
+
+/// F-UI-05: "the choice holds until the session ends": a collapsed bar is open again in the next session.
+#[test]
+fn a_collapsed_bar_is_open_again_in_the_next_session() {
+    let mut s = viewer();
+    let first = s.viewer_session().expect("a session").clone();
+    s.activate(ControlId::TbCollapse);
+    assert!(!s.session_bar_visible() && s.bar_handle_visible());
+
+    s.apply(UiEvent::Session {
+        session_id: first.id,
+        device_id: first.device_id.clone(),
+        state: SessionState::Ended { reason: None },
+    });
+    assert!(s.viewer_session().is_none(), "the session ended");
+
+    s.apply(UiEvent::Session {
+        session_id: first.id + 1,
+        device_id: first.device_id.clone(),
+        state: first.state.clone(),
+    });
+    assert!(s.viewer_session().is_some(), "another session started");
+    assert!(s.session_bar_visible() && !s.bar_handle_visible(), "the new session starts with the bar open");
+    assert!(toolbar_controls(&s) > 0);
+}
+
+/// F-UI-05: the collapsed handle is a button for the keyboard and screen readers, and the session line is read
+/// with the toolbar.
+#[test]
+fn the_handle_is_a_button_and_the_session_line_is_in_the_toolbars_accessible_text() {
+    let mut s = viewer();
+    let session = s.viewer_session().expect("a session").clone();
+    let line = s.viewer_session_line(&session);
+    assert!(!line.is_empty());
+    let specs = s.controls(WindowKind::Viewer);
+    let in_bar = specs
+        .iter()
+        .find(|c| c.region == Region::Toolbar && c.role == crate::interact::UiRole::Text && c.label == line)
+        .expect("the session line is a text of the toolbar");
+    let first_button = specs.iter().position(|c| c.region == Region::Toolbar && c.id == ControlId::TbScreen).unwrap();
+    let line_at = specs.iter().position(|c| std::ptr::eq(c, in_bar)).unwrap();
+    assert!(line_at < first_button, "read with the toolbar, before its buttons");
+
+    s.activate(ControlId::TbCollapse);
+    let handle = s.controls(WindowKind::Viewer).into_iter().find(|c| c.id == ControlId::TbExpand).expect("the handle");
+    assert_eq!(handle.role, crate::interact::UiRole::Button);
+    assert!(!handle.disabled && !handle.label.is_empty());
+}
