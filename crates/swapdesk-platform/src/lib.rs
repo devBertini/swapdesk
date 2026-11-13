@@ -482,6 +482,14 @@ pub struct NetInterface {
 
 pub trait NetInterfaces: Send + Sync {
     fn list(&self) -> Result<Vec<NetInterface>>;
+
+    /// A copy of the list that can be handed over without reading the system, for a path where a person waits (the
+    /// dial of a swap, the accept of a session): `None` when there is none, and the caller reads with [`list`](Self::list).
+    /// The copy may be a little older than a plain `list` allows; an implementation that keeps one refreshes it in
+    /// the background. The default keeps none.
+    fn warm_copy(&self) -> Option<Vec<NetInterface>> {
+        None
+    }
 }
 
 /// The link-layer (MAC) address of a peer on this network, from the system's neighbour table (ARP for IPv4, Neighbour

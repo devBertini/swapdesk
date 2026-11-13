@@ -197,9 +197,14 @@ impl Connector {
             }
             Ipv4Addr::LOCALHOST
         } else {
-            let list = crate::netcache::list_async(&d.interfaces)
+            let read = std::time::Instant::now();
+            let list = crate::netcache::list_warm_async(&d.interfaces)
                 .await
                 .map_err(|_| ConnectError::Refused(Refusal::UnknownLocalAddress))?;
+            self.shared.log(
+                Level::Debug,
+                format_args!("dial {addr}: interface list read in {} ms", read.elapsed().as_millis()),
+            );
             find_on_link(&list, *v4.ip()).map_err(ConnectError::Refused)?.local
         };
         let (spki, stored) = d
@@ -259,7 +264,12 @@ impl Connector {
         waiting: Option<WaitHook>,
     ) -> Result<(ViewerHandle, ViewerMessages), ConnectError> {
         let d = &self.dialer;
+        let started = std::time::Instant::now();
         let (endpoint, spki, stored) = self.endpoint_for(addr, device).await?;
+        self.shared.log(
+            Level::Debug,
+            format_args!("dial {addr}: local endpoint ready after {} ms", started.elapsed().as_millis()),
+        );
         let mut cfg = ViewerConfig::new(
             &d.cfg_name,
             d.os,
@@ -293,6 +303,13 @@ impl Connector {
             cfg,
         )
         .await?;
+        self.shared.log(
+            Level::Debug,
+            format_args!(
+                "dial {addr}: session open after {} ms (handshake and the host's answer)",
+                started.elapsed().as_millis()
+            ),
+        );
         lock(&self.viewers).insert(opened.handle.session_id(), Arc::downgrade(&opened.handle.inner));
         Ok((opened.handle, opened.messages))
     }
@@ -473,6 +490,8 @@ impl Gate {
         if self.allow_loopback && remote.is_loopback() && local.is_some_and(|l| l.is_loopback()) {
             return Ok(());
         }
+        // The guard reads the interfaces of now, never a warm copy: an incoming session is judged on-link against the
+        // machine as it is (the dial alone takes the warm copy, for the swap's time).
         let list = crate::netcache::list_async(&self.interfaces).await.map_err(|_| Refusal::UnknownLocalAddress)?;
         let local = local.ok_or(Refusal::UnknownLocalAddress)?;
         let link = check_incoming(&list, local, remote)?;

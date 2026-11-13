@@ -138,13 +138,24 @@ impl SwapEnv for CoreEnv {
                 .log(Level::Warn, format_args!("a swap cannot open its new connection: no interface is attached"));
             return;
         };
+        let shared = Arc::clone(&self.shared);
         self.shared.rt.spawn(async move {
+            let started = std::time::Instant::now();
             let opened = match hooks.address_of(&host) {
                 Some(addr) => {
+                    shared.log(Level::Debug, format_args!("swap: dialing {addr}"));
                     connector.connect(addr, host, Intent::Control, false, PermissionSet::EMPTY, Some(token), None).await
                 }
                 None => Err(ConnectError::UnknownDevice),
             };
+            shared.log(
+                Level::Debug,
+                format_args!(
+                    "swap: the new connection {} after {} ms",
+                    if opened.is_ok() { "opened" } else { "failed" },
+                    started.elapsed().as_millis()
+                ),
+            );
             hooks.swap_viewing(host, opened);
         });
     }

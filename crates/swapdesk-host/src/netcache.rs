@@ -15,12 +15,17 @@ use swapdesk_platform::{NetInterface, NetInterfaces, PlatformError, Result};
 /// How long a copy of the list is good.
 pub const TTL: Duration = Duration::from_secs(1);
 
+/// How old an expired copy may be and still answer [`NetInterfaces::warm_copy`] (a dial or an accept a person waits for):
+/// the network-change news empties the copy at once, so this only bounds a copy whose news never came.
+pub const WARM_LIMIT: Duration = Duration::from_secs(30);
+
 /// A [`NetInterfaces`] that reads the real one at most once per [`TTL`]. A failed read is not kept: the next call tries
 /// again.
 pub struct CachedInterfaces {
     inner: Arc<dyn NetInterfaces>,
     ttl: Duration,
-    slot: Mutex<Slot>,
+    warm_limit: Duration,
+    slot: Arc<Mutex<Slot>>,
 }
 
 #[derive(Default)]
@@ -38,7 +43,11 @@ impl CachedInterfaces {
     }
 
     pub fn with_ttl(inner: Arc<dyn NetInterfaces>, ttl: Duration) -> Self {
-        Self { inner, ttl, slot: Mutex::new(Slot::default()) }
+        Self::with_limits(inner, ttl, WARM_LIMIT)
+    }
+
+    pub fn with_limits(inner: Arc<dyn NetInterfaces>, ttl: Duration, warm_limit: Duration) -> Self {
+        Self { inner, ttl, warm_limit, slot: Arc::new(Mutex::new(Slot::default())) }
     }
 
     /// The network changed (or may have): the next `list` reads the real one.
@@ -63,17 +72,56 @@ impl NetInterfaces for CachedInterfaces {
             slot.refreshing = true;
             slot.generation
         };
-        // The OS is asked with the lock released: nobody waits on this enumeration but its caller.
-        let read = self.inner.list();
-        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-        slot.refreshing = false;
-        let list = read?;
-        // A network change during the read makes this answer old: it is returned, not kept.
-        if slot.generation == generation {
-            slot.kept = Some((Instant::now(), list.clone()));
-        }
-        Ok(list)
+        read_and_keep(&*self.inner, &self.slot, generation)
     }
+
+    /// The copy, when there is one that is fresh or expired for less than the warm limit; an expired one starts the
+    /// refresh on a thread of its own (one at a time), so the caller never waits for the OS. Nothing after a network
+    /// change ([`CachedInterfaces::invalidate`]): the news empties the copy, and the caller reads.
+    fn warm_copy(&self) -> Option<Vec<NetInterface>> {
+        let (list, generation) = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let (at, list) = slot.kept.as_ref()?;
+            let age = at.elapsed();
+            if age < self.ttl {
+                return Some(list.clone());
+            }
+            if age >= self.warm_limit {
+                return None;
+            }
+            let list = list.clone();
+            if slot.refreshing {
+                return Some(list);
+            }
+            slot.refreshing = true;
+            (list, slot.generation)
+        };
+        let (inner, slot) = (Arc::clone(&self.inner), Arc::clone(&self.slot));
+        let started = std::thread::Builder::new().name("net-refresh".into()).spawn({
+            let slot = Arc::clone(&slot);
+            move || {
+                let _ = read_and_keep(&*inner, &slot, generation);
+            }
+        });
+        if started.is_err() {
+            slot.lock().unwrap_or_else(PoisonError::into_inner).refreshing = false;
+        }
+        Some(list)
+    }
+}
+
+/// Reads the OS (the caller took `refreshing` and holds no lock) and keeps the answer unless a network change overtook
+/// the read. A failed read is not kept.
+fn read_and_keep(inner: &dyn NetInterfaces, slot: &Mutex<Slot>, generation: u64) -> Result<Vec<NetInterface>> {
+    let read = inner.list();
+    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    slot.refreshing = false;
+    let list = read?;
+    // A network change during the read makes this answer old: it is returned, not kept.
+    if slot.generation == generation {
+        slot.kept = Some((Instant::now(), list.clone()));
+    }
+    Ok(list)
 }
 
 /// Reads `nets` on a blocking thread: the enumeration never runs on one of the runtime's workers.
@@ -87,6 +135,15 @@ pub async fn list_async(nets: &Arc<dyn NetInterfaces>) -> Result<Vec<NetInterfac
             detail: format!("the read ended early: {e}"),
         })
     })
+}
+
+/// As [`list_async`], but a copy the cache can hand over at once ([`NetInterfaces::warm_copy`]) is taken without a
+/// trip to a blocking thread. For the paths a person waits on.
+pub async fn list_warm_async(nets: &Arc<dyn NetInterfaces>) -> Result<Vec<NetInterface>> {
+    match nets.warm_copy() {
+        Some(list) => Ok(list),
+        None => list_async(nets).await,
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +335,90 @@ mod tests {
             release_tx.send(()).unwrap();
             assert!(read.await.unwrap().is_ok());
         });
+    }
+
+    /// A list whose real read takes `delay_ms` (settable), as the Windows enumeration does under load or while the
+    /// firewall's COM service is busy.
+    struct Slowed {
+        delay_ms: std::sync::atomic::AtomicU64,
+        reads: AtomicUsize,
+    }
+
+    impl NetInterfaces for Slowed {
+        fn list(&self) -> Result<Vec<NetInterface>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
+            Ok(Vec::new())
+        }
+    }
+
+    fn slowed(ttl_ms: u64, warm_ms: u64) -> (Arc<Slowed>, Arc<CachedInterfaces>, Arc<dyn NetInterfaces>) {
+        let inner = Arc::new(Slowed { delay_ms: 0.into(), reads: AtomicUsize::new(0) });
+        let cache = Arc::new(CachedInterfaces::with_limits(
+            inner.clone(),
+            Duration::from_millis(ttl_ms),
+            Duration::from_millis(warm_ms),
+        ));
+        let nets: Arc<dyn NetInterfaces> = cache.clone();
+        (inner, cache, nets)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_time().build().unwrap()
+    }
+
+    /// B4: the reverse dial of a swap (and the accept of one) must not wait for the OS to enumerate the adapters
+    /// when the copy has only just expired: the harness saw 1.4 s once, the enumeration being the slow step.
+    #[test]
+    fn a_dial_after_the_copy_expired_does_not_wait_for_a_slow_enumeration() {
+        let (inner, _cache, nets) = slowed(30, 60_000);
+        let rt = runtime();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+        inner.delay_ms.store(500, Ordering::SeqCst);
+        let started = Instant::now();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_millis(100), "the dial waited {waited:?} for the enumeration");
+        // The copy is refreshed behind the dial's back.
+        let until = Instant::now() + Duration::from_secs(5);
+        while inner.reads.load(Ordering::SeqCst) < 2 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 2, "the refresh ran in the background");
+    }
+
+    #[test]
+    fn a_network_change_or_a_copy_past_the_warm_limit_is_read_before_the_dial_goes_on() {
+        let (inner, cache, nets) = slowed(30, 200);
+        let rt = runtime();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        inner.delay_ms.store(150, Ordering::SeqCst);
+        // After the news there is no copy: the dial waits for a real read.
+        cache.invalidate();
+        let started = Instant::now();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(150), "no copy was left after a network change");
+        // Past the warm limit the copy is too old to hand over.
+        std::thread::sleep(Duration::from_millis(250));
+        let before = inner.reads.load(Ordering::SeqCst);
+        let started = Instant::now();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(150), "a copy older than the warm limit was handed over");
+        assert_eq!(inner.reads.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn only_one_background_refresh_runs_at_a_time() {
+        let (inner, _cache, nets) = slowed(20, 60_000);
+        let rt = runtime();
+        rt.block_on(list_warm_async(&nets)).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        inner.delay_ms.store(300, Ordering::SeqCst);
+        for _ in 0..20 {
+            rt.block_on(list_warm_async(&nets)).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 2, "one first read and one refresh");
     }
 }
