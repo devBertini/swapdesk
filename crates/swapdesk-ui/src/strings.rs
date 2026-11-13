@@ -712,6 +712,7 @@ strings! {
     RecvFolderDeniedTitle => "O Swapdesk não pode salvar na pasta de recebimento", "Swapdesk cannot save to the receiving folder";
     RecvFolderDeniedBody => "O macOS ainda não deixou o Swapdesk usar {0}. Abra Arquivos e Pastas e ligue essa pasta.", "macOS has not let Swapdesk use {0} yet. Open Files and Folders and switch that folder on.";
     RecvFolderDeniedOpen => "Abrir Arquivos e Pastas", "Open Files and Folders";
+    MacPermsWaiting => "Esperando você permitir nos Ajustes do Sistema…", "Waiting for you to allow it in System Settings…";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
