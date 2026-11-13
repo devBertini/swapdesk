@@ -685,6 +685,17 @@ strings! {
     BannerFilesOtherDisks => "Abrindo arquivos de outros discos", "Opening files on other disks";
     AuditFilesChanged => "Mudou {0} {0|arquivo|arquivos} neste computador", "Changed {0} {0|file|files} on this computer";
     AuditFilesReach => "Abriu arquivos fora da pasta pessoal", "Opened files outside the home folder";
+    // Slice 3: drag and drop inside the explorer, and the context menu (FILES-UI.md 9)
+    ExplorerDragMove => "Mover para {0}", "Move to {0}";
+    ExplorerDragCopy => "Copiar para {0}", "Copy to {0}";
+    ExplorerDragCopyThere => "Copiar para {0}, no {1}", "Copy to {0}, on {1}";
+    ExplorerDragItems => "{0} itens", "{0} items";
+    ExplorerDragNoCopyHere => "Para copiar, solte no outro painel.", "To copy, drop on the other pane.";
+    ExplorerCopy => "Copiar", "Copy";
+    ExplorerCut => "Recortar", "Cut";
+    ExplorerPaste => "Colar", "Paste";
+    ExplorerRevealWindows => "Mostrar no Explorador de Arquivos", "Show in File Explorer";
+    ExplorerRevealMac => "Mostrar no Finder", "Show in Finder";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
