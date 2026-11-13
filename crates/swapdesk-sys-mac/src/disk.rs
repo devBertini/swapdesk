@@ -164,7 +164,8 @@ pub fn places() -> Vec<(PlaceKind, PathBuf)> {
 
 /// The shell startup files of a home folder that nothing may create or replace: the login and interactive shells of the
 /// system read them, so a file put there runs at the user's next shell.
-const SHELL_STARTUP_FILES: [&str; 6] = [".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"];
+const SHELL_STARTUP_FILES: [&str; 9] =
+    [".zshenv", ".zshrc", ".zprofile", ".zlogin", ".zlogout", ".bash_profile", ".bash_login", ".bashrc", ".profile"];
 
 /// The folders `launchd` starts programs from, for the user whose home folder is `home` and for every user: a program
 /// put there runs at the next login or boot.
@@ -260,7 +261,17 @@ mod tests {
             assert!(launch.contains(&PathBuf::from(want)), "{want}");
         }
         let entries = protected_entries_in(Some(home));
-        for want in [".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"] {
+        for want in [
+            ".zshenv",
+            ".zshrc",
+            ".zprofile",
+            ".zlogin",
+            ".zlogout",
+            ".bash_profile",
+            ".bash_login",
+            ".bashrc",
+            ".profile",
+        ] {
             assert!(entries.contains(&home.join(want)), "{want}");
         }
         assert!(protected_entries_in(None).is_empty());

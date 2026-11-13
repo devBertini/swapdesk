@@ -177,8 +177,10 @@ pub fn places() -> Vec<(PlaceKind, PathBuf)> {
     .collect()
 }
 
-/// Where every change is refused: the Windows folder, the program folders, ProgramData, the system drive's root and the
-/// two Startup folders (the user's and the common one), where a program is run at the next logon.
+/// Where every change is refused: the Windows folder, the program folders, ProgramData, the system drive's root, the
+/// two Startup folders (the user's and the common one), where a program is run at the next logon, and the folders of
+/// the user's PowerShell profiles and modules (Windows PowerShell and PowerShell 7), whose code runs when a shell
+/// starts (D66). The PowerShell folders are listed even when absent, so they cannot be made.
 pub fn protected() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = [
         &FOLDERID_Windows,
@@ -194,8 +196,14 @@ pub fn protected() -> Vec<PathBuf> {
     if let Some(root) = out.first().and_then(|w| w.ancestors().last().map(Path::to_path_buf)) {
         out.push(root);
     }
+    if let Some(documents) = known_folder(&FOLDERID_Documents) {
+        out.extend(POWERSHELL_FOLDERS.iter().map(|f| documents.join(f)));
+    }
     out
 }
+
+/// The user's PowerShell folders under Documents: profiles and modules load from them when a shell starts.
+const POWERSHELL_FOLDERS: [&str; 2] = ["WindowsPowerShell", "PowerShell"];
 
 /// Whether the volume of `path` is a fixed disk, the kind that has a Recycle Bin.
 fn on_fixed_disk(path: &Path) -> bool {
@@ -600,6 +608,11 @@ mod tests {
             assert!(prot.contains(&dir), "{dir:?} is protected");
         }
         assert_ne!(known_folder(&FOLDERID_Startup), known_folder(&FOLDERID_CommonStartup));
+        // The PowerShell profiles and modules of the user, listed even before they exist (D66).
+        let documents = known_folder(&FOLDERID_Documents).expect("the shell knows Documents");
+        for f in ["WindowsPowerShell", "PowerShell"] {
+            assert!(prot.contains(&documents.join(f)), "{f} is protected");
+        }
     }
 
     #[test]
