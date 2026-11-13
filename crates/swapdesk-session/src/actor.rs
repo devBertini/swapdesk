@@ -934,17 +934,25 @@ impl Actor {
         }
     }
 
+    /// What this viewer holds of the set the host granted: the host's set intersected with what the viewer asked for.
+    /// Everything that leaves the viewer (clipboard, input, file data) is gated on it.
+    fn viewer_holds(&self, host_granted: PermissionSet) -> PermissionSet {
+        host_granted & self.ctx.requested()
+    }
+
     fn viewer_granted(&mut self, g: SessionGrant) -> Option<Finish> {
+        // What the host's user grants beyond the request (D8) is theirs to give, never a flow out of this viewer.
+        let granted = self.viewer_holds(g.granted);
         let Side::Viewer { opened, peer, .. } = &mut self.side else { return None };
         let Some(peer) = peer.clone() else { return Some(Finish::violation(ErrorCode::Internal)) };
         self.ctx.inner.session_id.store(g.session_id, std::sync::atomic::Ordering::SeqCst);
-        self.ctx.set_granted(g.granted);
+        self.ctx.set_granted(granted);
         self.ctx.inner.active.send_replace(true);
         self.phase = Phase::Active;
         self.liveness = Liveness::new(self.live_cfg, now());
         let info = GrantInfo {
             session_id: g.session_id,
-            granted: g.granted,
+            granted,
             mode: g.mode,
             resume: swapdesk_proto::Resume { session_id: g.session_id, token: g.resume_token },
             host: peer,
@@ -971,10 +979,11 @@ impl Actor {
         match msg {
             Message::PermissionsChanged(p) => {
                 let old = self.ctx.granted();
-                self.ctx.set_granted(p.granted);
-                let _ = events.try_send(ViewerEvent::PermissionsChanged(p.granted));
+                let granted = self.viewer_holds(p.granted);
+                self.ctx.set_granted(granted);
+                let _ = events.try_send(ViewerEvent::PermissionsChanged(granted));
                 for h in self.registry.handlers() {
-                    h.on_permissions(&self.ctx, old, p.granted);
+                    h.on_permissions(&self.ctx, old, granted);
                 }
                 None
             }

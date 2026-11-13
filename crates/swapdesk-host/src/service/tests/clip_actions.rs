@@ -329,3 +329,90 @@ fn turning_the_sync_on_in_a_session_offers_the_current_clipboard_once() {
     host.core.shutdown();
     viewer.core.shutdown();
 }
+
+/// Security review of 13/11 (F2): a viewer that asked only to see holds only that, whatever the host's user granted
+/// beyond the request (D8): what it had copied is not sent, what the host copies is not written, no input goes out.
+#[test]
+fn a_view_request_sends_no_clipboard_and_no_input_when_the_host_grants_more() {
+    let host = Machine::build("host-pc", true, false, WITH_CLIPBOARD, |c| c);
+    let viewer = Machine::build("viewer-pc", true, false, WITH_CLIPBOARD, |c| c);
+    Machine::pair(&host, &viewer, WITH_CLIPBOARD);
+    let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
+    host_clip.copy_externally(text("host copy"), false);
+    viewer_clip.copy_externally(text("viewer secret"), false);
+    host.core.set_clip_actions(Scripted::new(None));
+    viewer.core.set_clip_actions(Scripted::new(Some(fake_ui(viewer_clip.clone()))));
+    let _helper = user_helper(&host.core, &host_clip, &FakeActions::new());
+
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::View).expect("the session opens");
+    drain(msgs);
+    pause(1500);
+    viewer_clip.copy_externally(text("viewer secret 2"), false);
+    pause(1000);
+    assert!(host_clip.writes().is_empty(), "nothing of the viewer's clipboard reached the host");
+    assert!(viewer_clip.writes().is_empty(), "nothing of the host's clipboard was written at the viewer");
+    assert_eq!(
+        handle.send_input(vec![swapdesk_proto::InputEvent::Text("x".into())]),
+        Err(ApplyError::NotPermitted),
+        "no input leaves a View viewer"
+    );
+    assert!(
+        !handle.granted().contains(PermissionSet::CLIPBOARD) && !handle.granted().contains(PermissionSet::CONTROL),
+        "the viewer holds what it asked for, not the extra the host's user granted"
+    );
+
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+}
+
+/// Security review of 13/11 (F1): one clipboard item is in flight per session, the newest wins. A peer that declares
+/// 16 MiB and goes quiet holds the slot only until the next item, which stops the older stream and is applied.
+#[test]
+fn a_second_clipboard_item_supersedes_a_stalled_first_one() {
+    let host = Machine::build("host-pc", true, false, WITH_CLIPBOARD, |c| c);
+    let viewer = Machine::build("viewer-pc", true, false, WITH_CLIPBOARD, |c| c);
+    Machine::pair(&host, &viewer, WITH_CLIPBOARD);
+    let (host_clip, viewer_clip) = (FakeClipboard::new(), FakeClipboard::new());
+    host.core.set_clip_actions(Scripted::new(None));
+    viewer.core.set_clip_actions(Scripted::new(Some(fake_ui(viewer_clip.clone()))));
+    let _helper = user_helper(&host.core, &host_clip, &FakeActions::new());
+
+    let (handle, msgs) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
+    drain(msgs);
+    let ctx = handle.ctx();
+    let rt = viewer.core.runtime();
+    let open = |item_bytes: Vec<u8>, finish: bool| {
+        rt.block_on(async {
+            let mut send = ctx.open_uni(swapdesk_proto::StreamKind::Clipboard).await.expect("a clipboard stream");
+            send.write_all(&item_bytes).await.expect("written");
+            if finish {
+                send.finish().expect("finished");
+            }
+            send
+        })
+    };
+    // The first item declares 16 MiB and sends its header and a little more.
+    let mut stalled = swapdesk_proto::ClipboardItem {
+        seq: 1,
+        payload: swapdesk_proto::ClipboardPayload::Png(vec![7; swapdesk_proto::MAX_CLIPBOARD_PNG as usize]),
+    }
+    .encode()
+    .unwrap();
+    stalled.truncate(swapdesk_proto::CLIPBOARD_HEADER_LEN + 100);
+    let first = open(stalled, false);
+    pause(300);
+    assert!(host_clip.writes().is_empty());
+    // The second one is whole: it is applied, and the first is stopped by the receiver.
+    let second =
+        swapdesk_proto::ClipboardItem { seq: 2, payload: swapdesk_proto::ClipboardPayload::Text("newest".into()) };
+    let _second = open(second.encode().unwrap(), true);
+    wait_for("the newest item at the host", || host_clip.writes().contains(&text("newest")).then_some(()));
+    let stopped = rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), first.stopped()).await });
+    assert!(matches!(stopped, Ok(Ok(Some(_)))), "the older stream was stopped by the receiver: {stopped:?}");
+    assert_eq!(host_clip.writes(), vec![text("newest")], "only the newest item was written");
+
+    drop(handle);
+    host.core.shutdown();
+    viewer.core.shutdown();
+}

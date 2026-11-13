@@ -214,6 +214,51 @@ fn a_prompted_session_presets_the_stored_grants_and_applies_what_the_host_picked
     });
 }
 
+/// Security review of 13/11 (F2): what the host's user grants beyond the request (D8) is the host's to give, never a
+/// flow out of the viewer. The viewer holds the host's set intersected with what it asked for.
+#[test]
+fn a_viewer_holds_only_what_the_host_granted_and_it_asked_for() {
+    run_paused(async {
+        let host_says = PermissionSet::VIEW | PermissionSet::CLIPBOARD | PermissionSet::CONTROL;
+        let ui = TestUi::accepting(host_says);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, host_says);
+        let (mut s, _task) = prompted(&mem, &who, PermissionSet::VIEW).await;
+        assert_eq!(s.grant().granted, PermissionSet::VIEW, "the grant the viewer reports is what it can use");
+        assert_eq!(s.granted(), PermissionSet::VIEW);
+        assert!(!s.ctx().can_inject(), "a View request sends no input, whatever the host says");
+        assert!(!s.ctx().spawn_gated(PermissionSet::CLIPBOARD, async {}), "no clipboard task starts");
+
+        // The host's user widens the running session later: still nothing opens at the viewer.
+        let id = s.grant().session_id;
+        assert!(mem.host.set_session_grants(id, host_says | PermissionSet::FILES));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(s.granted(), PermissionSet::VIEW);
+        assert!(!s.ctx().spawn_gated(PermissionSet::FILES, async {}));
+        while let Some(e) = s.try_event() {
+            if let ViewerEvent::PermissionsChanged(p) = e {
+                assert_eq!(p, PermissionSet::VIEW, "the viewer's interface is told the set it holds");
+            }
+        }
+    });
+}
+
+#[test]
+fn a_control_request_holds_what_the_host_granted_within_it() {
+    run_paused(async {
+        let asked = PermissionSet::CONTROL | PermissionSet::CLIPBOARD | PermissionSet::FILES;
+        let ui = TestUi::accepting(asked);
+        let mem = Mem::new(ui, Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, asked);
+        let (s, _task) = prompted(&mem, &who, asked).await;
+        assert_eq!(s.granted(), asked);
+        assert!(s.ctx().can_inject());
+        assert!(s.ctx().spawn_gated(PermissionSet::CLIPBOARD, async {}));
+    });
+}
+
 #[test]
 fn only_let_see_grants_view_and_nothing_else() {
     run_paused(async {

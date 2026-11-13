@@ -222,7 +222,8 @@ impl SessionCtx {
         tokio::time::timeout(limit, wait).await.unwrap_or(false) && self.inner.ended.borrow().is_none()
     }
 
-    /// What the viewer's `Hello` asked for (host side): an administrator terminal needs it as well as the grant (D10).
+    /// What the viewer's `Hello` asked for: on the host an administrator terminal needs it as well as the grant (D10);
+    /// on the viewer it caps what the viewer holds of the host's grant.
     pub fn requested(&self) -> PermissionSet {
         PermissionSet::closure(self.inner.requested.load(Ordering::SeqCst))
     }

@@ -274,6 +274,8 @@ impl ViewerSession {
         if let Some(grants) = stored_grants {
             ctx.set_own_stored(grants);
         }
+        // What this viewer asked for caps what it holds of the host's grant (F2 of the review of 13/11).
+        ctx.set_requested(cfg.requested);
         let side = Side::Viewer {
             events: events_tx,
             opened: Some(opened_tx),
