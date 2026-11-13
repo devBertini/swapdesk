@@ -699,6 +699,9 @@ strings! {
     // Slices 4 and 5: drags with the system's file manager (FILES-UI.md 4.2, 4.3)
     ExplorerDiskOnly => "Só dá para enviar arquivos que estão no disco.", "Only files that are on a disk can be sent.";
     ExplorerDropOnScreen => "Solte para enviar ao {0}", "Drop to send to {0}";
+    // T1: limits of one copy (FILES-UI.md 5) and folders dragged out of the window (1.1)
+    ExplorerJobTooBig => "Esta cópia passa do limite de {0} arquivos ou {1} níveis de pastas. Nada foi copiado.", "This copy is over the limit of {0} files or {1} folder levels. Nothing was copied.";
+    ExplorerFoldersStayIn => "Pastas ainda não podem ser arrastadas para fora do app.", "Folders cannot be dragged out of the app yet.";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
