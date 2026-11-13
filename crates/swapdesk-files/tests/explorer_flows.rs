@@ -303,6 +303,35 @@ fn changes_run_one_result_per_name_and_are_audited_by_count() {
 }
 
 #[test]
+fn a_move_is_audited_with_the_wider_area_of_its_two_ends() {
+    // Tag 19's area says where the change reached: 0 the home folder, 1 elsewhere on the system volume, 2 another
+    // volume. A file taken out of the home folder onto a removable volume is a change of that volume, whichever end the
+    // message names first.
+    let mut r = rig("area");
+    let (sys_vol, stick) = (r.root.join("sysvol"), r.root.join("stick"));
+    for n in ["to-stick.txt", "to-sys.txt", "within.txt"] {
+        std::fs::write(r.home.join(n), n).unwrap();
+    }
+    std::fs::write(stick.join("back.txt"), b"b").unwrap();
+    std::fs::create_dir(r.home.join("dir")).unwrap();
+    let mut op = |id: u32, from: &str, file: &str, to: &str| {
+        let kind = FsOpKind::Move { from_dir: from.into(), names: vec![name(file)], to_dir: to.into() };
+        let outs = r.viewer.request_op(id, kind);
+        r.run(outs).1
+    };
+    let events = op(1, "", "to-stick.txt", ":2");
+    assert!(events.contains(&Event::Changed { op: 2, count: 1, area: 2 }), "home to a stick: {events:?}");
+    let events = op(2, "", "to-sys.txt", ":1");
+    assert!(events.contains(&Event::Changed { op: 2, count: 1, area: 1 }), "home to the system volume: {events:?}");
+    let events = op(3, ":2", "back.txt", "");
+    assert!(events.contains(&Event::Changed { op: 2, count: 1, area: 2 }), "a stick to home: {events:?}");
+    let events = op(4, "", "within.txt", "dir");
+    assert!(events.contains(&Event::Changed { op: 2, count: 1, area: 0 }), "inside home: {events:?}");
+    assert!(stick.join("to-stick.txt").exists() && sys_vol.join("to-sys.txt").exists());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+#[test]
 fn a_viewer_engine_does_not_serve_changes_and_a_busy_answer_names_every_name() {
     let mut r = rig("busy");
     let op = FsOp { op_id: 4, op: FsOpKind::Trash { dir: String::new(), names: vec![name("x"), name("y")] } };

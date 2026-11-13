@@ -389,7 +389,7 @@ fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
 
     // An offer with another id than the request is refused as well; the right one is accepted and `dest` ignored.
     let other = temp("unsolicited-dest");
-    w.viewer.request_get(5, "irrelevant".into(), save.clone());
+    w.viewer.request_get(5, "irrelevant/ok.bin".into(), save.clone());
     let wrong = FileOffer { transfer_id: 6, ..offer.clone() };
     assert!(matches!(w.viewer.on_message(Message::FileOffer(wrong)).as_slice(), [Out::Msg(Message::FileDecline(_))]));
     let right =
@@ -399,6 +399,33 @@ fn a_viewer_takes_a_file_only_as_the_answer_to_its_own_request() {
     assert!(leftovers(&other).is_empty(), "dest is ignored by a viewer");
     assert!(leftovers(&save).contains(&"ok.bin.swapdesk-part".to_string()));
     let _ = (std::fs::remove_dir_all(&save), std::fs::remove_dir_all(&other));
+}
+
+#[test]
+fn a_viewer_takes_only_the_file_it_asked_for_by_name() {
+    let (save, host_files) = (temp("get-name-save"), temp("get-name-host"));
+    let mut w = World::new(None, &host_files);
+    // The viewer asked for `docs/report.pdf`; the host offers another name (a script, a double extension...).
+    w.viewer.request_get(5, "docs/report.pdf".into(), save.clone());
+    let evil = FileOffer { transfer_id: 5, name: "report.pdf.exe".into(), size: 3, mtime_ms: 1, dest: None };
+    let outs = w.viewer.on_message(Message::FileOffer(evil));
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, Out::Msg(Message::FileDecline(FileDecline { code: ErrorCode::InvalidName, .. })))),
+        "{outs:?}"
+    );
+    assert!(leftovers(&save).is_empty(), "nothing was created: {:?}", leftovers(&save));
+    assert!(!w.viewer.has(5), "the request is spent");
+
+    // The same name, in the 1.0 spelling of a host path too (both separators), is taken.
+    for (id, path) in [(6, "docs/report.pdf"), (7, r"C:\Users\me\report.pdf"), (8, ":2/a/report.pdf")] {
+        w.viewer.request_get(id, path.into(), save.clone());
+        let ok = FileOffer { transfer_id: id, name: "report.pdf".into(), size: 3, mtime_ms: 1, dest: None };
+        let outs = w.viewer.on_message(Message::FileOffer(ok));
+        assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileAccept(_)))), "{path}: {outs:?}");
+        w.viewer.cancel(id);
+    }
+    let _ = (std::fs::remove_dir_all(&save), std::fs::remove_dir_all(&host_files));
 }
 
 #[test]

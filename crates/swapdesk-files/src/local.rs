@@ -251,12 +251,10 @@ impl Fs for LocalFs {
         let from = file_path(dir, name, Kind::Part)?;
         validate_name(target_name)?;
         let to = dir.join(target_name);
-        // Never over a file. Windows refuses an existing target by itself (no replace flag); elsewhere `rename`
-        // replaces, so the check comes first.
-        if std::fs::symlink_metadata(&to).is_ok() {
-            return Err(ErrorCode::IoFailed);
-        }
-        std::fs::rename(from, to).map_err(io_failed)
+        // Never over a file: the system's no-replace rename, which makes the check and the move one step (the
+        // standard `rename` replaces an existing file on Windows and anything on Unix, so a look first would leave a
+        // gap in which two receivers finishing under one name both succeed and the second replaces the first).
+        crate::plat::rename_noreplace(&from, &to).map_err(io_failed)
     }
 
     fn remove_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<(), ErrorCode> {
@@ -353,6 +351,39 @@ mod tests {
         assert_eq!(fs.part_read(&d, "a.bin", 1, 10), Ok(b"bc".to_vec()));
         fs.part_rename(&d, "a.bin", "b.bin").unwrap();
         assert_eq!(std::fs::read(d.join("b.bin")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn concurrent_part_renames_to_one_name_never_replace_each_other() {
+        // Several received files finish under one name at the same moment (the upload's last step): one gets the name,
+        // the others fail and keep their partial file; nothing already there is replaced.
+        let d = dir("part-race");
+        let fs = LocalFs::new();
+        let n = 8;
+        for round in 0..150 {
+            for i in 0..n {
+                fs.part_create(&d, &format!("p{round}-{i}")).unwrap();
+                fs.part_append(&d, &format!("p{round}-{i}"), 0, format!("from {i}").as_bytes()).unwrap();
+            }
+            let barrier = std::sync::Barrier::new(n);
+            let target = format!("final-{round}");
+            let oks: Vec<(usize, bool)> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|i| {
+                        let (fs, barrier, d, target) = (&fs, &barrier, &d, &target);
+                        s.spawn(move || {
+                            barrier.wait();
+                            (i, fs.part_rename(d, &format!("p{round}-{i}"), target).is_ok())
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let winners: Vec<usize> = oks.iter().filter(|(_, ok)| *ok).map(|(i, _)| *i).collect();
+            assert_eq!(winners.len(), 1, "round {round}: a rename replaced the file another one had just made");
+            assert_eq!(std::fs::read_to_string(d.join(&target)).unwrap(), format!("from {}", winners[0]));
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

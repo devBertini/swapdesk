@@ -46,15 +46,22 @@ pub fn is_reserved_device(name: &str) -> bool {
     RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r))
 }
 
+/// The invisible bidirectional controls that reorder what a person reads ("photo" + U+202E + "gpj.exe" shows as
+/// "photoexe.jpg"): embeddings and overrides U+202A-202E, isolates U+2066-2069, the marks U+200E and U+200F and the
+/// Arabic letter mark U+061C. They are not in the `Cc` class, so `char::is_control` does not see them.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
+}
+
 /// One path component the receiver may create: not empty, not `.` or `..`, no `/`, `\`, `:` (which also closes the
-/// alternate data stream `name:stream`) or control character, not a reserved device name, no leading space or
+/// alternate data stream `name:stream`), control or bidi control character, not a reserved device name, no leading space or
 /// trailing dot or space (Windows drops them, so "con." would be the device), and not one of this crate's own
 /// partial-file names.
 pub fn validate_name(name: &str) -> Result<(), ErrorCode> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(ErrorCode::InvalidName);
     }
-    if name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control()) {
+    if name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control() || is_bidi_control(c)) {
         return Err(ErrorCode::InvalidName);
     }
     if name.ends_with('.') || name.ends_with(' ') || name.starts_with(' ') {
@@ -117,5 +124,22 @@ mod tests {
         for n in bad {
             assert_eq!(validate_name(n), Err(ErrorCode::InvalidName), "{n:?}");
         }
+    }
+
+    #[test]
+    fn bidi_and_format_controls_are_refused() {
+        // The usual spoofing set: embeddings and overrides (U+202A-202E), isolates (U+2066-2069), the marks U+200E and
+        // U+200F and the Arabic letter mark U+061C. They are not `Cc`, so `is_control` alone lets them through.
+        for c in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+            '\u{200e}', '\u{200f}', '\u{61c}',
+        ] {
+            for n in [format!("photo{c}gpj.exe"), format!("{c}x"), format!("x{c}")] {
+                assert_eq!(validate_name(&n), Err(ErrorCode::InvalidName), "{n:?}");
+            }
+        }
+        // Ordinary right-to-left names stay valid: only the invisible controls are refused.
+        assert_eq!(validate_name("\u{5e9}\u{5dc}\u{5d5}\u{5dd}.txt"), Ok(()));
+        assert_eq!(validate_name("\u{645}\u{631}\u{62d}\u{628}\u{627}.txt"), Ok(()));
     }
 }

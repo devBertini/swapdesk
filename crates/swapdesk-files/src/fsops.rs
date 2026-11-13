@@ -11,7 +11,9 @@ use swapdesk_ipc::{FsEntry2View, FsPage, Text};
 use swapdesk_proto::{EntryKind, ErrorCode};
 
 use crate::disk::Moved;
+use crate::fsutil::long_form;
 use crate::name::validate_name;
+use crate::plat;
 
 /// Deepest folder tree a cross-volume move copies (a guard against a runaway walk; links are never followed).
 const MAX_COPY_DEPTH: u32 = 64;
@@ -124,15 +126,18 @@ pub(crate) fn rename(dir: &Path, name: &str, new_name: &str) -> Result<(), Error
     if name == new_name {
         return Err(ErrorCode::Exists);
     }
-    // Windows `rename` replaces a file and Unix `rename` replaces anything: look first. A change of letter case alone
-    // finds "the target" in the entry itself, which is allowed unless a different entry holds that name.
-    if there(&to) {
-        let only_case = name.to_lowercase() == new_name.to_lowercase();
-        if !only_case || case_twin(dir, new_name, name) {
+    // A change of letter case alone finds "the target" in the entry itself, which is allowed unless a different entry
+    // holds that name (the one look that cannot be one step with the rename: the twin would have to appear in the
+    // instant between the look and the rename).
+    if name.to_lowercase() == new_name.to_lowercase() {
+        if case_twin(dir, new_name, name) {
             return Err(ErrorCode::Exists);
         }
+        return std::fs::rename(from, to).map_err(|e| map_err(&e));
     }
-    std::fs::rename(from, to).map_err(|e| map_err(&e))
+    // `std::fs::rename` replaces what is at the target (a file on Windows, anything on Unix). The system's no-replace
+    // rename makes the check and the move one step, so a name someone made a moment ago is never replaced.
+    plat::rename_noreplace(&from, &to).map_err(|e| map_err(&e))
 }
 
 /// `a` is `b` or inside it, comparing names without letter case (the usual volumes are case-insensitive; refusing a
@@ -154,7 +159,9 @@ pub(crate) fn move_into(from_dir: &Path, name: &str, to_dir: &Path) -> Result<Mo
     let dest = to_dir.join(name);
     let Ok(src_meta) = std::fs::symlink_metadata(&src) else { return Err(ErrorCode::NotFound) };
     // A folder never goes into itself, nor into anything inside it.
-    if within(to_dir, &src) {
+    // (also by long names: `LONGFO~1/sub` is inside `Long Folder`; the source's own name is not resolved, so a link is
+    // looked at as itself and not as its target).
+    if within(to_dir, &src) || within(&long_form(to_dir), &long_form(from_dir).join(name)) {
         return Err(ErrorCode::InvalidName);
     }
     match std::fs::metadata(to_dir) {
@@ -165,17 +172,26 @@ pub(crate) fn move_into(from_dir: &Path, name: &str, to_dir: &Path) -> Result<Mo
     if there(&dest) {
         return Err(ErrorCode::Exists);
     }
-    match std::fs::rename(&src, &dest) {
+    match plat::rename_noreplace(&src, &dest) {
         Ok(()) => Ok(Moved::Renamed),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            if let Err(code) = copy_tree(&src, &src_meta, &dest, 0) {
-                // What this call made is a fresh tree nobody else knows: take it away again; the source is untouched.
-                let _ = remove_tree(&dest);
-                return Err(code);
-            }
-            Ok(Moved::Copied)
+            copy_across(&src, &src_meta, &dest).map(|()| Moved::Copied)
         }
         Err(e) => Err(map_err(&e)),
+    }
+}
+
+/// Copies `src` to `dest` for a move across volumes. `dest` is never replaced: when something is there already (it
+/// appeared since the caller looked) the copy fails with `Exists` and that entry is left alone. A copy that fails
+/// otherwise takes away the tree it made; the source is untouched either way.
+fn copy_across(src: &Path, src_meta: &Metadata, dest: &Path) -> Result<(), ErrorCode> {
+    match copy_tree(src, src_meta, dest, 0) {
+        Ok(()) => Ok(()),
+        Err(Failed { code, dest_was_there: true }) => Err(code),
+        Err(Failed { code, dest_was_there: false }) => {
+            let _ = remove_tree(dest);
+            Err(code)
+        }
     }
 }
 
@@ -187,42 +203,183 @@ pub(crate) fn remove_tree(p: &Path) -> io::Result<()> {
     }
 }
 
-/// Copies `src` to the absent `dest`, entry by entry without following a link, and checks every file's size.
-fn copy_tree(src: &Path, meta: &Metadata, dest: &Path, depth: u32) -> Result<(), ErrorCode> {
-    if depth > MAX_COPY_DEPTH {
-        return Err(ErrorCode::TooLarge);
+/// Why a [`copy_tree`] stopped.
+struct Failed {
+    code: ErrorCode,
+    /// The entry at `dest` was there before the copy made anything (`AlreadyExists` at the very first step), so it is
+    /// not the copy's to take away.
+    dest_was_there: bool,
+}
+
+impl Failed {
+    /// A failure of the first step at the top.
+    fn at_top(e: &io::Error) -> Self {
+        Self { code: map_err(e), dest_was_there: e.kind() == io::ErrorKind::AlreadyExists }
     }
+
+    /// A failure anywhere else: what is at `dest` is the copy's own tree.
+    fn inside(code: ErrorCode) -> Self {
+        Self { code, dest_was_there: false }
+    }
+}
+
+/// Copies `src` to `dest`, which must be absent, entry by entry without following a link, and checks every file's
+/// size. Nothing is ever replaced: a folder is made with `create_dir` and a file with a copy that fails when its
+/// target exists.
+fn copy_tree(src: &Path, meta: &Metadata, dest: &Path, depth: u32) -> Result<(), Failed> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(Failed::inside(ErrorCode::TooLarge));
+    }
+    let top = depth == 0;
+    let step = |e: io::Error| if top { Failed::at_top(&e) } else { Failed::inside(map_err(&e)) };
+    let inside = |e: io::Error| Failed::inside(map_err(&e));
     if meta.file_type().is_symlink() {
-        return copy_link(src, dest);
+        return copy_link(src, dest).map_err(|e| if top { e } else { Failed::inside(e.code) });
     }
     if meta.is_dir() {
-        std::fs::create_dir(dest).map_err(|e| map_err(&e))?;
-        for item in std::fs::read_dir(src).map_err(|e| map_err(&e))? {
-            let item = item.map_err(|e| map_err(&e))?;
-            let m = item.metadata().map_err(|e| map_err(&e))?;
-            copy_tree(&item.path(), &m, &dest.join(item.file_name()), depth + 1)?;
+        std::fs::create_dir(dest).map_err(step)?;
+        for item in std::fs::read_dir(src).map_err(inside)? {
+            let item = item.map_err(inside)?;
+            let m = item.metadata().map_err(inside)?;
+            copy_tree(&item.path(), &m, &dest.join(item.file_name()), depth + 1).map_err(|e| Failed::inside(e.code))?;
         }
         return Ok(());
     }
     if !meta.is_file() {
-        return Err(ErrorCode::IoFailed);
+        return Err(Failed::inside(ErrorCode::IoFailed));
     }
-    let copied = std::fs::copy(src, dest).map_err(|e| map_err(&e))?;
-    let now = std::fs::metadata(dest).map_err(|e| map_err(&e))?;
-    if copied != meta.len() || now.len() != meta.len() {
-        return Err(ErrorCode::IoFailed);
+    plat::copy_file_noreplace(src, dest).map_err(step)?;
+    let now = std::fs::metadata(dest).map_err(inside)?;
+    if now.len() != meta.len() {
+        return Err(Failed::inside(ErrorCode::IoFailed));
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn copy_link(src: &Path, dest: &Path) -> Result<(), ErrorCode> {
-    let target = std::fs::read_link(src).map_err(|e| map_err(&e))?;
-    std::os::unix::fs::symlink(target, dest).map_err(|e| map_err(&e))
+fn copy_link(src: &Path, dest: &Path) -> Result<(), Failed> {
+    let target = std::fs::read_link(src).map_err(|e| Failed::inside(map_err(&e)))?;
+    std::os::unix::fs::symlink(target, dest).map_err(|e| Failed::at_top(&e))
 }
 
 #[cfg(not(unix))]
-fn copy_link(_src: &Path, _dest: &Path) -> Result<(), ErrorCode> {
+fn copy_link(_src: &Path, _dest: &Path) -> Result<(), Failed> {
     // Making a link on Windows needs a privilege the user helper does not hold.
-    Err(ErrorCode::IoFailed)
+    Err(Failed::inside(ErrorCode::IoFailed))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Barrier;
+
+    use super::*;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("swapdesk-fsops-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `n` threads each rename their own file to the one name `target`, released together: whatever the order, exactly
+    /// one wins and the others are told `Exists`, and the winner's bytes are what is there at the end. A check followed
+    /// by a rename that replaces would let a second one through.
+    fn race(
+        d: &Path,
+        round: usize,
+        n: usize,
+        rename_to_target: impl Fn(&str) -> Result<(), ErrorCode> + Sync,
+    ) -> usize {
+        let barrier = Barrier::new(n);
+        let target = format!("target-{round}");
+        let wins: Vec<(usize, bool)> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..n)
+                .map(|i| {
+                    let (barrier, rename_to_target) = (&barrier, &rename_to_target);
+                    s.spawn(move || {
+                        let mine = format!("src-{round}-{i}");
+                        std::fs::write(d.join(&mine), format!("from {i}")).unwrap();
+                        barrier.wait();
+                        (i, rename_to_target(&mine).is_ok())
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let winners: Vec<usize> = wins.iter().filter(|(_, ok)| *ok).map(|(i, _)| *i).collect();
+        if winners.len() == 1 {
+            assert_eq!(std::fs::read_to_string(d.join(&target)).unwrap(), format!("from {}", winners[0]));
+        }
+        winners.len()
+    }
+
+    #[test]
+    fn concurrent_renames_to_one_name_never_replace_each_other() {
+        let d = dir("race-rename");
+        let n = 8;
+        for round in 0..150 {
+            let target = format!("target-{round}");
+            let winners = race(&d, round, n, |mine| rename(&d, mine, &target));
+            assert_eq!(winners, 1, "round {round}: every one of the renames that returned Ok replaced the one before");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_copy_across_volumes_never_replaces_or_removes_what_is_at_the_destination() {
+        // The destination appears after the move looked: the copy fails with `Exists`, and what is there (a file, or a
+        // folder with files in it) is still there, untouched, since the copy made none of it.
+        let d = dir("copy-across");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src").join("f.txt"), b"source").unwrap();
+        std::fs::write(d.join("taken.txt"), b"theirs").unwrap();
+        let meta = std::fs::symlink_metadata(d.join("src").join("f.txt")).unwrap();
+        assert_eq!(copy_across(&d.join("src").join("f.txt"), &meta, &d.join("taken.txt")), Err(ErrorCode::Exists));
+        assert_eq!(std::fs::read(d.join("taken.txt")).unwrap(), b"theirs");
+
+        std::fs::create_dir_all(d.join("tree").join("deep")).unwrap();
+        std::fs::write(d.join("tree").join("deep").join("a.txt"), b"a").unwrap();
+        std::fs::create_dir_all(d.join("occupied")).unwrap();
+        std::fs::write(d.join("occupied").join("theirs.txt"), b"theirs").unwrap();
+        let tree = std::fs::symlink_metadata(d.join("tree")).unwrap();
+        assert_eq!(copy_across(&d.join("tree"), &tree, &d.join("occupied")), Err(ErrorCode::Exists));
+        assert_eq!(std::fs::read(d.join("occupied").join("theirs.txt")).unwrap(), b"theirs");
+        assert!(d.join("tree").join("deep").join("a.txt").exists(), "the source is untouched");
+
+        // A free destination gets the whole tree; a failure half way takes away what the copy made.
+        copy_across(&d.join("tree"), &tree, &d.join("fresh")).unwrap();
+        assert_eq!(std::fs::read(d.join("fresh").join("deep").join("a.txt")).unwrap(), b"a");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn concurrent_moves_into_one_folder_never_replace_each_other() {
+        let d = dir("race-move");
+        let (from, to) = (d.join("from"), d.join("to"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        for round in 0..60 {
+            // The same name arrives from `n` folders at once.
+            let n = 8;
+            let barrier = Barrier::new(n);
+            let ok: Vec<(usize, bool)> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..n)
+                    .map(|i| {
+                        let (barrier, d, to) = (&barrier, &d, &to);
+                        s.spawn(move || {
+                            let src = d.join(format!("src-{round}-{i}"));
+                            std::fs::create_dir_all(&src).unwrap();
+                            std::fs::write(src.join(format!("f-{round}")), format!("from {i}")).unwrap();
+                            barrier.wait();
+                            (i, move_into(&src, &format!("f-{round}"), to).is_ok())
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let winners: Vec<_> = ok.iter().filter(|(_, ok)| *ok).collect();
+            assert_eq!(winners.len(), 1, "round {round}: a move replaced the file another move had just put there");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -34,6 +34,8 @@ struct Fake {
     vols: Mutex<Vec<SysVolume>>,
     places: Vec<(PlaceKind, PathBuf)>,
     protected: Vec<PathBuf>,
+    /// What nothing may create or replace (`SystemDisk::protected_entries`).
+    entries: Vec<PathBuf>,
     bin: PathBuf,
     trashed: Mutex<Vec<PathBuf>>,
 }
@@ -45,6 +47,20 @@ impl Fake {
             vols: Mutex::new(vols),
             places: Vec::new(),
             protected: Vec::new(),
+            entries: Vec::new(),
+            bin: bin.to_path_buf(),
+            trashed: Mutex::default(),
+        })
+    }
+
+    /// Like `with`, with protected entries too.
+    fn guarded(vols: Vec<SysVolume>, bin: &Path, protected: Vec<PathBuf>, entries: Vec<PathBuf>) -> Arc<Self> {
+        std::fs::create_dir_all(bin).unwrap();
+        Arc::new(Self {
+            vols: Mutex::new(vols),
+            places: Vec::new(),
+            protected,
+            entries,
             bin: bin.to_path_buf(),
             trashed: Mutex::default(),
         })
@@ -52,7 +68,14 @@ impl Fake {
 
     fn with(vols: Vec<SysVolume>, bin: &Path, places: Vec<(PlaceKind, PathBuf)>, protected: Vec<PathBuf>) -> Arc<Self> {
         std::fs::create_dir_all(bin).unwrap();
-        Arc::new(Self { vols: Mutex::new(vols), places, protected, bin: bin.to_path_buf(), trashed: Mutex::default() })
+        Arc::new(Self {
+            vols: Mutex::new(vols),
+            places,
+            protected,
+            entries: Vec::new(),
+            bin: bin.to_path_buf(),
+            trashed: Mutex::default(),
+        })
     }
 
     fn set(&self, vols: Vec<SysVolume>) {
@@ -77,6 +100,10 @@ impl SystemDisk for Fake {
 
     fn protected(&self) -> Vec<PathBuf> {
         self.protected.clone()
+    }
+
+    fn protected_entries(&self) -> Vec<PathBuf> {
+        self.entries.clone()
     }
 }
 
@@ -559,5 +586,180 @@ fn a_page_carries_flags_kinds_and_where_the_next_one_starts() {
     assert!(page(100, 3).entries.is_empty());
     #[cfg(unix)]
     assert_eq!(first.entries[1].flags & swapdesk_proto::ENTRY_HIDDEN, swapdesk_proto::ENTRY_HIDDEN);
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// The 8.3 short name Windows gave the folder `long` of `dir` (`PROTEC~1`), read from `dir /x`; `None` when the volume
+/// makes none (8.3 generation off), in which case the short-name tests have nothing to prove.
+#[cfg(windows)]
+fn short_name_of(dir: &Path, long: &str) -> Option<String> {
+    let out = std::process::Command::new("cmd").args(["/C", "dir", "/x", "/ad"]).arg(dir).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.lines().find_map(|line| {
+        let before = line.trim_end().strip_suffix(long)?.trim_end();
+        let short = before.rsplit(' ').next()?;
+        short.contains('~').then(|| short.to_string())
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn a_short_name_does_not_get_around_the_protected_folders() {
+    let r = rig("short-guard");
+    let guarded = r.home.join("Protected Folder Long Name");
+    std::fs::create_dir_all(guarded.join("inner")).unwrap();
+    std::fs::write(guarded.join("f.txt"), b"s").unwrap();
+    let Some(short) = short_name_of(&r.home, "Protected Folder Long Name") else {
+        eprintln!("this volume makes no 8.3 names: the short-name guard has nothing to prove here");
+        let _ = std::fs::remove_dir_all(&r.root);
+        return;
+    };
+    let sys = Fake::with(vec![volume("A", &r.v1, true)], &r.root.join("bin"), Vec::new(), vec![guarded.clone()]);
+    let s = server(&r.home, Arc::clone(&sys));
+    let refused = Err(ErrorCode::NotPermitted);
+    let inner = format!("{short}/inner");
+    assert_eq!(make(&s, &short, "new"), refused, "a change in the folder through its short name");
+    assert_eq!(make(&s, &inner, "new"), refused, "and deeper");
+    assert_eq!(call(&s, FsCall::Rename { dir: t(""), name: t(&short), new_name: t("moved") }), refused);
+    assert_eq!(call(&s, FsCall::Trash { dir: t(""), name: t(&short) }), refused);
+    assert_eq!(call(&s, FsCall::Trash { dir: t(&short), name: t("f.txt") }), refused);
+    assert_eq!(call(&s, FsCall::Move { from_dir: t(""), name: t("mine.txt"), to_dir: t(&short) }), refused);
+    assert_eq!(call(&s, FsCall::Move { from_dir: t(&short), name: t("f.txt"), to_dir: t("") }), refused);
+    assert_eq!(call(&s, FsCall::PartCreate { dir: t(&short), name: t("up") }), refused);
+    assert!(guarded.join("f.txt").exists() && !guarded.join("new").exists() && !r.home.join("moved").exists());
+    assert!(lock(&sys.trashed).is_empty());
+    // The guarded folder named the long way stays refused, and what is not guarded is still free.
+    assert_eq!(make(&s, "Protected Folder Long Name", "new"), refused);
+    assert!(make(&s, "", "free").is_ok());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_short_name_of_a_system_folder_is_the_same_folder_for_the_guard() {
+    // `C:\PROGRA~3` is ProgramData (Users may write there). The real protected set names it the long way.
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let short = PathBuf::from(format!("{drive}/PROGRA~3"));
+    if !short.is_dir() {
+        eprintln!("no 8.3 name for ProgramData on this volume");
+        return;
+    }
+    let program_data = PathBuf::from(std::env::var("ProgramData").expect("ProgramData"));
+    let sys = Fake::with(Vec::new(), &temp("short-sys-bin"), Vec::new(), vec![program_data.clone()]);
+    let v = Volumes::new(sys);
+    assert!(v.protected_hit(&program_data.join("Microsoft")), "the long way: refused");
+    assert!(v.protected_hit(&short.join("Microsoft")), "the short way is the same place");
+    assert!(v.protected_hit(&short.join("swapdesk-not-there").join("x")), "a place that does not exist yet");
+    assert!(!v.protected_hit(&std::env::temp_dir().join("x")));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_link_is_found_through_its_short_name_too() {
+    let r = rig("short-link");
+    let outside = r.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("file.txt"), b"f").unwrap();
+    if !make_link(&outside, &r.home.join("Junction With A Long Name")) {
+        eprintln!("no link could be made here: the test cannot run");
+        return;
+    }
+    let Some(short) = short_name_of(&r.home, "Junction With A Long Name") else {
+        eprintln!("this volume makes no 8.3 names");
+        return;
+    };
+    let sys = Fake::new(vec![volume("A", &r.v1, true)], &r.root.join("bin"));
+    let s = server(&r.home, sys);
+    assert_eq!(make(&s, &short, "new"), Err(ErrorCode::InvalidName), "the junction by its short name");
+    assert_eq!(make(&s, "Junction With A Long Name", "new"), Err(ErrorCode::InvalidName));
+    assert!(!outside.join("new").exists());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+#[test]
+fn the_autostart_folders_refuse_every_write_and_stay_readable() {
+    // FILES alone could otherwise put a program where the system runs it at the next logon: the Startup folders of
+    // Windows (the user's, on the home volume, and the common one, on a volume of its own) and the Launch folders of the
+    // Mac are in the protected set of the system part; here a fake table names two real temporary folders.
+    let r = rig("autostart");
+    let user_startup = r.home.join("Startup");
+    let common_startup = r.v1.join("CommonStartup");
+    for d in [&user_startup, &common_startup] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("existing.lnk"), b"x").unwrap();
+    }
+    std::fs::write(r.home.join("payload.bat"), b"calc").unwrap();
+    std::fs::write(r.v1.join("payload2.bat"), b"calc").unwrap();
+    let sys = Fake::with(
+        vec![volume("A", &r.v1, true)],
+        &r.root.join("bin"),
+        Vec::new(),
+        vec![user_startup.clone(), common_startup.clone()],
+    );
+    let s = server(&r.home, Arc::clone(&sys));
+    let refused = Err(ErrorCode::NotPermitted);
+    for dir in ["Startup", ":1/CommonStartup"] {
+        // An upload (the FileOffer `dest`): the partial file is refused before a byte is written.
+        assert_eq!(call(&s, FsCall::PartCreate { dir: t(dir), name: t("payload.bat") }), refused, "upload into {dir}");
+        assert_eq!(call(&s, FsCall::PartRename { dir: t(dir), name: t("x"), target_name: t("run.bat") }), refused);
+        assert_eq!(make(&s, dir, "folder"), refused, "new folder in {dir}");
+        assert_eq!(call(&s, FsCall::MetaWrite { dir: t(dir), name: t("p"), data: Bytes(vec![1]) }), refused);
+        assert_eq!(
+            call(&s, FsCall::Rename { dir: t(dir), name: t("existing.lnk"), new_name: t("other.lnk") }),
+            refused,
+            "rename in {dir}"
+        );
+        assert_eq!(call(&s, FsCall::Trash { dir: t(dir), name: t("existing.lnk") }), refused, "trash in {dir}");
+    }
+    assert_eq!(call(&s, FsCall::Move { from_dir: t(""), name: t("payload.bat"), to_dir: t("Startup") }), refused);
+    assert_eq!(
+        call(&s, FsCall::Move { from_dir: t(":1"), name: t("payload2.bat"), to_dir: t(":1/CommonStartup") }),
+        refused
+    );
+    assert_eq!(call(&s, FsCall::Rename { dir: t(""), name: t("payload.bat"), new_name: t("Startup") }), refused);
+    assert!(!user_startup.join("payload.bat").exists() && !common_startup.join("payload2.bat").exists());
+    assert!(!user_startup.join("folder").exists() && !common_startup.join("run.bat").exists());
+    // Reading stays allowed: the viewer can list and download what is there.
+    assert_eq!(list(&s, "Startup").unwrap(), ["existing.lnk"]);
+    assert_eq!(list(&s, ":1/CommonStartup").unwrap(), ["existing.lnk"]);
+    assert!(call(&s, FsCall::OpenRead { path: t("Startup/existing.lnk") }).is_ok());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+#[test]
+fn the_shell_startup_files_cannot_be_made_or_replaced_at_the_home_root() {
+    let r = rig("shellrc");
+    let rc = r.home.join(".zshrc");
+    let profile = r.home.join(".bash_profile");
+    std::fs::write(&rc, b"# mine").unwrap();
+    let sys = Fake::guarded(
+        vec![volume("A", &r.v1, true)],
+        &r.root.join("bin"),
+        Vec::new(),
+        vec![rc.clone(), profile.clone()],
+    );
+    let s = server(&r.home, Arc::clone(&sys));
+    let refused = Err(ErrorCode::NotPermitted);
+    // Making or replacing the names, every way a change can put something there.
+    assert_eq!(call(&s, FsCall::PartCreate { dir: t(""), name: t(".bash_profile") }), refused);
+    assert_eq!(call(&s, FsCall::PartRename { dir: t(""), name: t("x"), target_name: t(".zshrc") }), refused);
+    assert_eq!(make(&s, "", ".bash_profile"), refused);
+    assert_eq!(call(&s, FsCall::Rename { dir: t(""), name: t("mine.txt"), new_name: t(".zshrc") }), refused);
+    assert_eq!(call(&s, FsCall::Rename { dir: t(""), name: t("mine.txt"), new_name: t(".ZSHRC") }), refused, "case");
+    std::fs::create_dir_all(r.home.join("sub")).unwrap();
+    std::fs::write(r.home.join("sub").join(".bash_profile"), b"x").unwrap();
+    assert_eq!(
+        call(&s, FsCall::Move { from_dir: t("sub"), name: t(".bash_profile"), to_dir: t("") }),
+        refused,
+        "a move into the home root"
+    );
+    assert_eq!(std::fs::read(&rc).unwrap(), b"# mine", "nothing was replaced");
+    assert!(!profile.exists());
+    // Reading stays allowed, the same name below the root is free, and the file can be renamed away.
+    assert!(call(&s, FsCall::OpenRead { path: t(".zshrc") }).is_ok());
+    assert!(list(&s, "").unwrap().contains(&".zshrc".to_string()));
+    assert!(call(&s, FsCall::PartCreate { dir: t("sub"), name: t(".zshrc") }).is_ok(), "only the home root is guarded");
+    assert!(call(&s, FsCall::Rename { dir: t(""), name: t(".zshrc"), new_name: t(".zshrc.old") }).is_ok());
+    assert!(r.home.join(".zshrc.old").exists());
     let _ = std::fs::remove_dir_all(&r.root);
 }

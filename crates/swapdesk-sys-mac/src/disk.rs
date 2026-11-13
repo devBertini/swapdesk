@@ -162,12 +162,44 @@ pub fn places() -> Vec<(PlaceKind, PathBuf)> {
     .collect()
 }
 
-/// Where every change is refused: the system's own folders and the root of the system volume.
+/// The shell startup files of a home folder that nothing may create or replace: the login and interactive shells of the
+/// system read them, so a file put there runs at the user's next shell.
+const SHELL_STARTUP_FILES: [&str; 6] = [".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"];
+
+/// The folders `launchd` starts programs from, for the user whose home folder is `home` and for every user: a program
+/// put there runs at the next login or boot.
+fn launch_folders(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> =
+        ["/Library/LaunchAgents", "/Library/LaunchDaemons"].into_iter().map(PathBuf::from).collect();
+    if let Some(home) = home {
+        out.push(home.join("Library/LaunchAgents"));
+        out.push(home.join("Library/LaunchDaemons"));
+    }
+    out
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
+}
+
+/// Where every change is refused: the system's own folders, the root of the system volume and the folders `launchd`
+/// starts programs from (listed even when one is not there yet: making it would be as good).
 pub fn protected() -> Vec<PathBuf> {
-    ["/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/private", "/"]
+    let mut out: Vec<PathBuf> = ["/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/private", "/"]
         .into_iter()
         .map(PathBuf::from)
-        .collect()
+        .collect();
+    out.extend(launch_folders(home_dir().as_deref()));
+    out
+}
+
+/// The shell startup files of the home folder, which nothing may create or replace (reading them stays allowed).
+pub fn protected_entries() -> Vec<PathBuf> {
+    protected_entries_in(home_dir().as_deref())
+}
+
+fn protected_entries_in(home: Option<&Path>) -> Vec<PathBuf> {
+    home.map(|h| SHELL_STARTUP_FILES.iter().map(|f| h.join(f)).collect()).unwrap_or_default()
 }
 
 /// Moves `paths` to the Trash. `NoBin` when a volume has none; an item that could not be moved stays where it is.
@@ -213,6 +245,26 @@ mod tests {
     fn the_protected_folders_include_the_system_and_the_root() {
         let prot = protected();
         assert!(prot.contains(&PathBuf::from("/System")) && prot.contains(&PathBuf::from("/")));
+    }
+
+    #[test]
+    fn the_launch_folders_and_the_shell_startup_files_are_guarded() {
+        let home = Path::new("/Users/someone");
+        let launch = launch_folders(Some(home));
+        for want in [
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/Users/someone/Library/LaunchAgents",
+            "/Users/someone/Library/LaunchDaemons",
+        ] {
+            assert!(launch.contains(&PathBuf::from(want)), "{want}");
+        }
+        let entries = protected_entries_in(Some(home));
+        for want in [".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"] {
+            assert!(entries.contains(&home.join(want)), "{want}");
+        }
+        assert!(protected_entries_in(None).is_empty());
+        assert!(protected().contains(&PathBuf::from("/Library/LaunchAgents")));
     }
 
     #[test]

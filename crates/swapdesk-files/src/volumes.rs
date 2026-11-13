@@ -10,6 +10,7 @@ use swapdesk_ipc::{MAX_FS_PATH, MAX_PLACES, MAX_VOLUME_LABEL, MAX_VOLUMES, Place
 use swapdesk_proto::{ErrorCode, PlaceKind};
 
 use crate::fsops::within;
+use crate::fsutil::long_form;
 use crate::name::validate_name;
 use crate::system::{SysVolume, SystemDisk};
 
@@ -89,6 +90,15 @@ pub(crate) fn walk_no_link(base: &Path, rest: &[String]) -> Result<(), ErrorCode
     Ok(())
 }
 
+/// The rule of [`Volumes::protected_hit`] for one protected folder `p`, on names compared as they stand.
+fn hits(target: &Path, p: &Path) -> bool {
+    if p.parent().is_none() {
+        within(target, p) && target.parent().is_none_or(|parent| within(p, parent) && within(parent, p))
+    } else {
+        within(target, p) || within(p, target)
+    }
+}
+
 /// At most `max` bytes of `s`, cut at a character boundary.
 fn cut(s: &str, max: usize) -> String {
     let mut end = s.len().min(max);
@@ -157,14 +167,26 @@ impl Volumes {
     /// Whether a change to `target` (the entry itself, or what would be made there) is refused by the protected
     /// folders: anything inside one, the folder itself, and a folder that holds one (moving it would move that). The
     /// root of a volume protects only the entries directly in it.
+    ///
+    /// Names are compared as written and again in their long, final form ([`long_form`]): `C:\PROGRA~3` and
+    /// `C:\ProgramData` are one folder, and a text comparison alone would let the short spelling through. A target
+    /// that does not exist yet is resolved through its deepest existing ancestor.
     pub(crate) fn protected_hit(&self, target: &Path) -> bool {
+        let long_target = long_form(target);
         self.system.protected().iter().any(|p| {
-            if p.parent().is_none() {
-                within(target, p) && target.parent().is_none_or(|parent| within(p, parent) && within(parent, p))
-            } else {
-                within(target, p) || within(p, target)
+            hits(target, p) || {
+                let long = long_form(p);
+                hits(&long_target, &long)
             }
         })
+    }
+
+    /// Whether making something at `target`, or putting something there in place of what is, is refused because the
+    /// system lists that very entry among [`SystemDisk::protected_entries`] (compared as written and in long form).
+    pub(crate) fn creation_hit(&self, target: &Path) -> bool {
+        let same = |a: &Path, b: &Path| within(a, b) && within(b, a);
+        let long_target = long_form(target);
+        self.system.protected_entries().iter().any(|p| same(target, p) || same(&long_target, &long_form(p)))
     }
 
     /// The answer to `FsCall::Volumes`: the home folder (the empty path), the places as 1.1 paths and the volumes.

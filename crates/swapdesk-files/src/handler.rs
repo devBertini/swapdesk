@@ -454,9 +454,16 @@ async fn worker(
                     let e = Arc::clone(&engine);
                     match blocking(move || lock(&e).begin_op(op)).await {
                         Some(Ok(job)) => {
+                            // The change belongs to the permissions that allowed it (FILES and CONTROL, FILES-UI.md
+                            // 3.3): when either is withdrawn, or the session ends, the task is stopped and the names it
+                            // has not begun are never touched. It does not start at all when they are not held now.
+                            let refused = failed_result(job.op(), ErrorCode::NotPermitted);
                             let task = run_op(Arc::clone(&engine), work_tx.clone(), Arc::clone(&ops), job);
-                            ctx.spawn(task);
-                            continue;
+                            if ctx.spawn_gated(PermissionSet::FILES.union(PermissionSet::CONTROL), task) {
+                                continue;
+                            }
+                            ops.give();
+                            vec![Out::Msg(refused)]
                         }
                         Some(Err(outs)) => {
                             ops.give();
@@ -522,12 +529,33 @@ async fn worker(
     }
 }
 
-/// One change of the host's files, off the worker: the disk work on a blocking thread without the engine's lock, then
-/// the answer and the audit events through the worker's queue, so the viewer always hears what became of it. The
-/// session ending stops the wait, not the disk work: a move that began finishes (copied, verified, source to the bin) or
-/// takes its copy away, never half.
+/// Raises a change's cancel flag when the task that waits for the change is dropped before it ends (aborted: a
+/// permission withdrawn, the session over).
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// One change of the host's files, off the worker, run under the permissions that allow it (the caller starts this with
+/// `spawn_gated`). The disk work and its answer are a task of their own that no abort reaches, so the name being worked
+/// on always finishes (a move that began ends copied, verified, source to the bin, or takes its copy away, never half)
+/// and the viewer's audit hears what was done; this task only waits for it. When this task is aborted, its guard raises
+/// the change's cancel flag: the names not begun are not touched, and the slot is given back all the same.
 async fn run_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, job: crate::engine::OpJob) {
     let job = Arc::new(job);
+    let guard = CancelOnDrop(job.cancel_flag());
+    let task = tokio::spawn(do_op(engine, work, ops, job));
+    let _ = task.await;
+    // Finished on its own: raising the flag now touches nothing.
+    drop(guard);
+}
+
+/// The disk work of one change on a blocking thread without the engine's lock, then the answer and the audit events
+/// through the worker's queue, so the viewer always hears what became of it.
+async fn do_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, job: Arc<crate::engine::OpJob>) {
     let j = Arc::clone(&job);
     let outs = match blocking(move || j.run()).await {
         Some(results) => {

@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use swapdesk_ipc::VolumesView;
 use swapdesk_proto::{
@@ -146,6 +147,8 @@ pub fn failed_result(op: &FsOp, code: ErrorCode) -> Message {
 pub struct OpJob {
     fs: Arc<dyn Fs>,
     op: FsOp,
+    /// Raised when the permission for the change is gone or the session ended: the names not begun are left alone.
+    cancel: Arc<AtomicBool>,
 }
 
 impl OpJob {
@@ -153,7 +156,14 @@ impl OpJob {
         &self.op
     }
 
-    /// Does the change: each name its own call, in order, and its own result; what was done stays done. Blocks.
+    /// The flag [`OpJob::run`] looks at before each name. Raising it stops the change at the next name (one already
+    /// begun finishes: a move that started ends copied and verified or takes its copy away, never half).
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Does the change: each name its own call, in order, and its own result; what was done stays done. A name not
+    /// begun when the cancel flag is up is not touched and its result is `UNAVAILABLE`. Blocks.
     pub fn run(&self) -> Vec<OpItem> {
         use std::path::Path;
         let fs = &self.fs;
@@ -161,15 +171,25 @@ impl OpJob {
             name: name.to_string(),
             code: r.err().unwrap_or(ErrorCode::NoError),
         };
+        // Each name: its own result, from the call unless the change was cancelled before the name began.
+        let each = |name: &str, call: &dyn Fn() -> Result<(), ErrorCode>| {
+            if self.cancel.load(Ordering::SeqCst) {
+                item(name, Err(ErrorCode::Unavailable))
+            } else {
+                item(name, call())
+            }
+        };
         match &self.op.op {
-            FsOpKind::MakeDir { parent, name } => vec![item(name, fs.make_dir(Path::new(parent), name))],
-            FsOpKind::Rename { dir, name, new_name } => vec![item(name, fs.rename(Path::new(dir), name, new_name))],
+            FsOpKind::MakeDir { parent, name } => vec![each(name, &|| fs.make_dir(Path::new(parent), name))],
+            FsOpKind::Rename { dir, name, new_name } => {
+                vec![each(name, &|| fs.rename(Path::new(dir), name, new_name))]
+            }
             FsOpKind::Move { from_dir, names, to_dir } => names
                 .iter()
-                .map(|n| item(&n.name, fs.move_into(Path::new(from_dir), &n.name, Path::new(to_dir)).map(|_| ())))
+                .map(|n| each(&n.name, &|| fs.move_into(Path::new(from_dir), &n.name, Path::new(to_dir)).map(|_| ())))
                 .collect(),
             FsOpKind::Trash { dir, names } => {
-                names.iter().map(|n| item(&n.name, fs.trash(Path::new(dir), &n.name))).collect()
+                names.iter().map(|n| each(&n.name, &|| fs.trash(Path::new(dir), &n.name))).collect()
             }
         }
     }
@@ -206,6 +226,13 @@ struct Tx {
     state: TxState,
 }
 
+/// A `FileGet` waiting for its offer.
+struct PendingGet {
+    save_dir: PathBuf,
+    /// The last component of the path asked for: the only name the offer may carry.
+    wanted: String,
+}
+
 struct Rx {
     inc: Incoming,
     done_sha: Option<[u8; 32]>,
@@ -221,8 +248,8 @@ pub struct Engine {
     cfg: FilesConfig,
     fs: Arc<dyn Fs>,
     transfers: HashMap<u32, Transfer>,
-    /// Viewer: the folder chosen for each `FileGet` still waiting for its offer.
-    gets: HashMap<u32, PathBuf>,
+    /// Viewer: the folder chosen and the file name asked for, for each `FileGet` still waiting for its offer.
+    gets: HashMap<u32, PendingGet>,
     dir_reqs: HashSet<u32>,
     /// Viewer: the explorer's requests waiting for their answer.
     page_reqs: HashSet<u32>,
@@ -309,7 +336,8 @@ impl Engine {
         if self.cfg.side != Side::Viewer || self.transfers.contains_key(&id) || self.gets.contains_key(&id) {
             return vec![failed(id, ErrorCode::Busy)];
         }
-        self.gets.insert(id, save_dir);
+        let wanted = path.rsplit(['/', '\u{5c}']).next().unwrap_or_default().to_string();
+        self.gets.insert(id, PendingGet { save_dir, wanted });
         vec![Out::Msg(Message::FileGet(FileGet { transfer_id: id, path }))]
     }
 
@@ -627,7 +655,14 @@ impl Engine {
         // A viewer accepts a file only as the answer to its own `FileGet`; `dest` is ignored there.
         let dir = match self.cfg.side {
             Side::Viewer => match self.gets.remove(&id) {
-                Some(dir) => dir,
+                // The file saved is the file asked for: a host that answers `a.pdf` with `a.pdf.exe` is refused, so the
+                // name the viewer's user chose is the name that lands on their disk.
+                Some(get) if get.wanted != m.name => {
+                    let mut outs = decline(ErrorCode::InvalidName);
+                    outs.push(failed(id, ErrorCode::InvalidName));
+                    return outs;
+                }
+                Some(get) => get.save_dir,
                 None => return decline(ErrorCode::NotPermitted),
             },
             Side::Host => {
@@ -890,7 +925,18 @@ impl Engine {
         if self.cfg.side != Side::Host {
             return Err(vec![error_msg(ErrorCode::NotPermitted, 0x0410, m.op_id)]);
         }
-        Ok(OpJob { fs: Arc::clone(&self.fs), op: m })
+        Ok(OpJob { fs: Arc::clone(&self.fs), op: m, cancel: Arc::new(AtomicBool::new(false)) })
+    }
+
+    /// The audit's area of a 1.1 path: 0 the home folder, 1 elsewhere on the system volume, 2 another volume.
+    fn area_of(&mut self, dir: &str) -> u8 {
+        if !dir.starts_with(':') {
+            0
+        } else if self.kind_of_path(dir) == Some(VolumeKind::System) {
+            1
+        } else {
+            2
+        }
     }
 
     /// Host: the answer and the audit events of a change whose disk work is done.
@@ -907,13 +953,12 @@ impl Engine {
         if let Some(d) = other_dir {
             outs.extend(self.note_reach(d));
         }
-        let area = if !first_dir.starts_with(':') {
-            0
-        } else if self.kind_of_path(first_dir) == Some(VolumeKind::System) {
-            1
-        } else {
-            2
-        };
+        // A move touches two places: the audit says the wider of the two (a file taken from the home folder to a
+        // removable volume is a change of another volume, not of the home folder).
+        let mut area = self.area_of(first_dir);
+        if let Some(d) = other_dir {
+            area = area.max(self.area_of(d));
+        }
         outs.push(Out::Msg(Message::FsOpResult(FsOpResult { op_id: job.op.op_id, results })));
         if count > 0 {
             outs.push(Out::Event(Event::Changed { op, count, area }));

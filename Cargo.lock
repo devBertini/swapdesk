@@ -1029,6 +1029,8 @@ dependencies = [
  "swapdesk-platform",
  "swapdesk-proto",
  "swapdesk-session",
+ "swapdesk-sys-mac",
+ "swapdesk-sys-win",
  "swapdesk-trust",
  "tokio",
 ]
@@ -1358,6 +1360,7 @@ dependencies = [
  "swapdesk-proto",
  "swapdesk-update",
  "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

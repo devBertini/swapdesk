@@ -41,6 +41,14 @@ pub trait SystemDisk: Send + Sync {
     fn trash(&self, path: &Path) -> Result<(), ErrorCode>;
 
     /// The folders where the server refuses every change (FILES-UI.md 8.1 "Protected locations"): the system's own
-    /// folders and the root of the system volume. Reading stays allowed.
+    /// folders, the root of the system volume and the places that run code at the next logon (the Startup folders of
+    /// Windows, the Launch folders of the Mac). Reading stays allowed.
     fn protected(&self) -> Vec<PathBuf>;
+
+    /// Entries (usually files) that nothing may create or replace, though they can be read, renamed away or removed:
+    /// the shell startup files of the Mac home folder, which run at the user's next login shell. Same refusal as a
+    /// protected folder (`NotPermitted`); names compare without letter case. None by default.
+    fn protected_entries(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }

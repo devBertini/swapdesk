@@ -47,4 +47,8 @@ impl SystemDisk for MacSystemDisk {
     fn protected(&self) -> Vec<PathBuf> {
         disk::protected()
     }
+
+    fn protected_entries(&self) -> Vec<PathBuf> {
+        disk::protected_entries()
+    }
 }

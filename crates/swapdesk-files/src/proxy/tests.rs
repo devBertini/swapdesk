@@ -123,6 +123,39 @@ fn a_file_is_received_through_the_pipe_and_never_overwrites() {
 }
 
 #[test]
+fn a_file_the_viewer_saves_carries_the_mark_of_the_web() {
+    // The viewer's disk (the UI's token roots) is where a download lands: the finished file is marked as coming from
+    // another machine (Windows: the Zone.Identifier stream, ZoneId=3; Mac: the quarantine attribute), and it is marked
+    // before the last rename, so the finished name is never seen unmarked.
+    let base = temp("motw");
+    let recv = base.join("recv");
+    std::fs::create_dir_all(&recv).unwrap();
+    let tokens = Arc::new(Tokens::new());
+    let r = tokens.receive_into(recv.clone());
+    let link = Link::start(FsServer::new(Roots::Tokens(Arc::clone(&tokens))));
+    let fs: Arc<dyn Fs> = Arc::new(link.fs());
+    let body = data(300_000);
+    let sha: [u8; 32] = digest(&SHA256, &body).as_ref().try_into().unwrap();
+    let dir = PathBuf::from(format!("r{r}"));
+    let mut inc = Incoming::open_with(Arc::clone(&fs), &dir, "setup.exe", body.len() as u64, 7).unwrap();
+    inc.write(0, &body).unwrap();
+    let path = inc.finish(&sha).unwrap();
+    assert_eq!(path, dir.join("setup.exe"));
+    assert_eq!(std::fs::read(recv.join("setup.exe")).unwrap(), body, "the bytes are the file's own");
+    assert!(crate::plat::is_marked_downloaded(&recv.join("setup.exe")), "the received file is marked");
+    // A file the host receives from the viewer is the user's own transfer to their own machine: not marked.
+    let home = temp("motw-host");
+    let host_link = home_link(&home, None);
+    let host_fs: Arc<dyn Fs> = Arc::new(host_link.fs());
+    let mut inc = Incoming::open_with(host_fs, Path::new(""), "up.bin", body.len() as u64, 7).unwrap();
+    inc.write(0, &body).unwrap();
+    inc.finish(&sha).unwrap();
+    assert!(!crate::plat::is_marked_downloaded(&home.join("up.bin")));
+    drop((link, host_link));
+    let _ = (std::fs::remove_dir_all(&base), std::fs::remove_dir_all(&home));
+}
+
+#[test]
 fn a_file_is_read_through_the_pipe_with_the_whole_file_hashed() {
     let home = temp("send");
     std::fs::create_dir_all(home.join("docs")).unwrap();

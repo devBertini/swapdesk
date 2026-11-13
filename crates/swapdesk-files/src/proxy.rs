@@ -36,7 +36,7 @@ use swapdesk_proto::ErrorCode;
 
 use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, Moved, ReadHandle};
 use crate::local::LocalFs;
-use crate::name::validate_name;
+use crate::name::{PART_SUFFIX, validate_name};
 use crate::system::SystemDisk;
 use crate::volumes::{Volumes, volume_id, walk_no_link};
 
@@ -648,6 +648,19 @@ impl FsServer {
         Ok(real)
     }
 
+    /// `names` are about to be made in `real` (or put there in place of what is): none may be an entry the system
+    /// protects against creation or replacement (the shell startup files of the Mac home folder).
+    fn created(&self, real: &Path, names: &[&str]) -> Result<(), ErrorCode> {
+        if let Some(v) = &self.volumes {
+            for n in names {
+                if v.creation_hit(&real.join(n)) {
+                    return Err(ErrorCode::NotPermitted);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A path to read as a file: under the root on the host side, a picked file on the viewer side.
     fn readable(&self, v: &str) -> Result<PathBuf, ErrorCode> {
         match &self.roots {
@@ -704,15 +717,18 @@ impl FsServer {
             }
             FsCall::MakeDir { dir, name } => {
                 let real = self.changeable(&dir.0, &[&name.0])?;
+                self.created(&real, &[&name.0])?;
                 done(fs.make_dir(&real, &name.0))
             }
             FsCall::Rename { dir, name, new_name } => {
                 let real = self.changeable(&dir.0, &[&name.0, &new_name.0])?;
+                self.created(&real, &[&new_name.0])?;
                 done(fs.rename(&real, &name.0, &new_name.0))
             }
             FsCall::Move { from_dir, name, to_dir } => {
                 let from = self.changeable(&from_dir.0, &[&name.0])?;
                 let to = self.changeable(&to_dir.0, &[&name.0])?;
+                self.created(&to, &[&name.0])?;
                 done(self.move_entry(&from, &name.0, &to))
             }
             FsCall::Trash { dir, name } => {
@@ -804,7 +820,11 @@ impl FsServer {
             FsCall::StatFile { dir, name, kind } => {
                 Ok(FsAnswer::Stat(fs.stat_file(&self.folder(&dir.0)?, &name.0, kind_of(kind))?.as_ref().map(stat_view)))
             }
-            FsCall::PartCreate { dir, name } => done(fs.part_create(&self.changeable(&dir.0, &[&name.0])?, &name.0)),
+            FsCall::PartCreate { dir, name } => {
+                let real = self.changeable(&dir.0, &[&name.0])?;
+                self.created(&real, &[&name.0])?;
+                done(fs.part_create(&real, &name.0))
+            }
             FsCall::PartTruncate { dir, name, len } => done(fs.part_truncate(&self.writable(&dir.0)?, &name.0, len)),
             FsCall::PartAppend { dir, name, offset, data } => {
                 done(fs.part_append(&self.writable(&dir.0)?, &name.0, offset, &data.0))
@@ -817,7 +837,16 @@ impl FsServer {
                 done(fs.part_sync(&self.writable(&dir.0)?, &name.0, final_mtime_ms))
             }
             FsCall::PartRename { dir, name, target_name } => {
-                done(fs.part_rename(&self.changeable(&dir.0, &[&target_name.0])?, &name.0, &target_name.0))
+                let real = self.changeable(&dir.0, &[&target_name.0])?;
+                self.created(&real, &[&target_name.0])?;
+                if matches!(self.roots, Roots::Tokens(_)) {
+                    // The UI's disk is the viewer's own: what lands there came from the host's machine. The mark goes
+                    // on the finished partial file before the rename, so the final name is never seen without it (it
+                    // stays with the file). A volume that cannot carry it still gets the file.
+                    validate_name(&name.0)?;
+                    let _ = crate::plat::mark_downloaded(&real.join(format!("{}{}", name.0, PART_SUFFIX)));
+                }
+                done(fs.part_rename(&real, &name.0, &target_name.0))
             }
             FsCall::RemoveFile { dir, name, kind } => {
                 done(fs.remove_file(&self.writable(&dir.0)?, &name.0, kind_of(kind)))
@@ -825,7 +854,10 @@ impl FsServer {
             FsCall::MetaRead { dir, name } => {
                 Ok(FsAnswer::Meta(fs.meta_read(&self.folder(&dir.0)?, &name.0)?.map(Bytes)))
             }
-            FsCall::MetaWrite { dir, name, data } => done(fs.meta_write(&self.writable(&dir.0)?, &name.0, &data.0)),
+            FsCall::MetaWrite { dir, name, data } => {
+                // The record is a file made in the folder like any other: not in a protected one.
+                done(fs.meta_write(&self.changeable(&dir.0, &[&name.0])?, &name.0, &data.0))
+            }
             FsCall::FreeSpace { dir } => Ok(FsAnswer::Free(fs.free_space(&self.folder(&dir.0)?)?)),
             // FILES-UI.md 7.4: served on the helper's roots; the UI's token roots refuse every one of them.
             call @ (FsCall::ListPage { .. }

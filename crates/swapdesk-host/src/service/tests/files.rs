@@ -553,3 +553,54 @@ fn a_listing_is_answered_while_a_long_move_runs_and_the_move_then_reports_its_tr
     assert!(rig.home.join("to").join("big.bin").exists() && !rig.home.join("from").join("big.bin").exists());
     rig.finish(handle);
 }
+
+#[test]
+fn a_change_stops_before_its_next_name_when_control_is_withdrawn() {
+    // A change of the host's files needs FILES and CONTROL. When the host's user takes one back while a long change
+    // runs, the name being worked on finishes (a move is never half) and the ones not begun are left alone.
+    let mut rig = Rig::new("withdrawn");
+    let (release, gate) = std::sync::mpsc::channel();
+    let slow = Arc::new(SlowMove { inner: LocalFs::new(), gate: Mutex::new(gate), entered: AtomicBool::new(false) });
+    let server = Arc::new(FsServer::with_fs(slow.clone(), Roots::Home { home: rig.home.clone(), receive: None }));
+    rig.user = TestHelper::spawn_with(&rig.host.core, IpcRole::HelperUser, move |deps| deps.with_fs(server));
+    std::fs::create_dir_all(rig.home.join("from")).unwrap();
+    std::fs::create_dir_all(rig.home.join("to")).unwrap();
+    for n in ["one.bin", "two.bin", "three.bin"] {
+        std::fs::write(rig.home.join("from").join(n), n).unwrap();
+    }
+    let (handle, _seen) = rig.connect(false);
+    let name = |n: &str| swapdesk_proto::FsName { name: n.into() };
+    run(
+        &handle,
+        Command::FsOp {
+            op_id: 1,
+            op: swapdesk_proto::FsOpKind::Move {
+                from_dir: "from".into(),
+                names: vec![name("one.bin"), name("two.bin"), name("three.bin")],
+                to_dir: "to".into(),
+            },
+        },
+    );
+    wait_for("the first move to start on the disk", || {
+        slow.entered.load(std::sync::atomic::Ordering::SeqCst).then_some(())
+    });
+    // The user takes CONTROL back while the first name is on the disk.
+    let remaining = PermissionSet::VIEW | FILES;
+    assert!(rig.host.core.host().set_session_grants(handle.session_id(), remaining));
+    // Give the session core its moment to abort what needed CONTROL, then let the disk finish the first name.
+    std::thread::sleep(Duration::from_millis(300));
+    release.send(()).unwrap();
+    wait_for("the first name to be done", || rig.home.join("to").join("one.bin").exists().then_some(()));
+    // A second and third name would each wait on the gate forever if they began: release them so a run that does not
+    // stop shows itself as moved files, not as a hang.
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(rig.home.join("to").join("one.bin").exists(), "the name being worked on finished");
+    assert!(
+        rig.home.join("from").join("two.bin").exists() && rig.home.join("from").join("three.bin").exists(),
+        "the names not begun were left alone"
+    );
+    assert!(!rig.home.join("to").join("two.bin").exists() && !rig.home.join("to").join("three.bin").exists());
+    rig.finish(handle);
+}

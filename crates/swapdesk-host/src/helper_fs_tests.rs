@@ -198,3 +198,73 @@ fn a_helper_with_no_disk_fails_every_call_and_stays_silent_for_a_close() {
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
 }
+
+/// A system part whose bin never answers until the test lets it: stands for the shell's delete waiting on a dialog.
+struct StuckBin {
+    root: PathBuf,
+    entered: std::sync::atomic::AtomicBool,
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl swapdesk_files::SystemDisk for StuckBin {
+    fn volumes(&self) -> Vec<swapdesk_files::SysVolume> {
+        vec![swapdesk_files::SysVolume {
+            identity: "stuck".into(),
+            root: self.root.clone(),
+            kind: swapdesk_proto::VolumeKind::Fixed,
+            label: String::new(),
+            letter: None,
+            total_bytes: 1000,
+            free_bytes: 500,
+            has_bin: true,
+        }]
+    }
+
+    fn places(&self) -> Vec<(swapdesk_proto::PlaceKind, PathBuf)> {
+        Vec::new()
+    }
+
+    fn trash(&self, path: &std::path::Path) -> Result<(), ErrorCode> {
+        self.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.gate.lock().unwrap_or_else(|p| p.into_inner()).recv();
+        std::fs::remove_file(path).map_err(|_| ErrorCode::IoFailed)
+    }
+
+    fn protected(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn a_trash_that_waits_on_the_shell_holds_no_other_disk_call() {
+    // The shell's delete may stop on a dialog (an item it cannot recycle); the helper's disk thread must not stop with
+    // it: a listing is answered while the trash waits, and the trash then answers with its own result.
+    let home = temp("stuckbin");
+    std::fs::write(home.join("old.txt"), b"x").unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let bin = Arc::new(StuckBin {
+        root: home.clone(),
+        entered: std::sync::atomic::AtomicBool::new(false),
+        gate: std::sync::Mutex::new(gate),
+    });
+    let server = FsServer::new(Roots::Home { home: home.clone(), receive: None }).with_system(bin.clone());
+    let mut rig = rig_with(None, Some(Arc::new(server)));
+    rig.send(&Message::FsRequest { req: 1, call: FsCall::Trash { dir: t(""), name: t("old.txt") } });
+    let start = std::time::Instant::now();
+    while !bin.entered.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "the trash never reached the bin");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let listing = call(&mut rig, 2, FsCall::ListPage { path: t(""), start: 0, max: 10 });
+    assert!(matches!(listing, Ok(FsAnswer::Entries2(_))), "a listing while the trash waits: {listing:?}");
+    release.send(()).unwrap();
+    let trashed = rig.wait(|m| match m {
+        Message::FsReply { req: 1, result } => Some(result.clone()),
+        _ => None,
+    });
+    assert_eq!(trashed, Ok(FsAnswer::Done));
+    assert!(!home.join("old.txt").exists());
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+    let _ = std::fs::remove_dir_all(&home);
+}
