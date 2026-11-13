@@ -384,6 +384,8 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         session_timeout: Duration::from_secs(40),
         grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
         chat_say: Some(dir.join("chat-host-say")),
+        swap: false,
+        audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),
@@ -509,6 +511,8 @@ fn different_codes_end_the_pairing_without_a_device() {
         session_timeout: Duration::from_secs(5),
         grants: Permissions::NONE.with(Permission::Control),
         chat_say: None,
+        swap: false,
+        audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
         &format!("127.0.0.1:{session_port}"),

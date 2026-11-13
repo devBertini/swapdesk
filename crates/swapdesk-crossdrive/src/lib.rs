@@ -14,14 +14,17 @@
 //! (`peer_code`, `go`) that the orchestrator writes: this crate never talks to the other machine itself.
 //! Everything is generic over the backend and the decoder, so it is tested on one machine with two in-process hubs.
 
+pub mod actions;
 pub mod chat;
 pub mod clip;
 pub mod files;
 pub mod host;
 pub mod pump;
 pub mod reconnect;
+pub mod swap;
+pub mod term;
 pub mod viewer;
 
-pub use host::{HostConfig, host_drive, host_stay};
+pub use host::{AuditCheck, HostConfig, host_drive, host_stay};
 pub use pump::{Pump, wait_file};
 pub use viewer::{ClipStep, DecoderFactory, Media, ViewerConfig, ViewerReport, viewer_drive};

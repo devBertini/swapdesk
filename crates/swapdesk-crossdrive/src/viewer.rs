@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use swapdesk_platform::{Pixels, VideoDecoder};
 use swapdesk_proto::{CursorPosition, CursorShape, InputEvent, KeyframeRequest, VideoHeader};
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
-use swapdesk_ui::{Command, Intent, PairingState, Reply, Role, SessionState, UiEvent};
+use swapdesk_ui::{Command, Intent, Os, PairingState, Reply, Role, SessionState, UiEvent};
 
 use crate::pump::{Pump, wait_file};
 
@@ -69,6 +69,8 @@ struct Shared {
     /// Percent of sampled pixels that are not black in the last sampled picture; 101 = none yet.
     nonblack: AtomicU32,
     cursor: Mutex<Vec<CursorSample>>,
+    /// Terminal output not yet taken by the terminal proof, by terminal id.
+    term_out: Mutex<Vec<(u32, Vec<u8>)>>,
 }
 
 struct Sink {
@@ -107,6 +109,10 @@ impl ViewerSink for Sink {
     }
 
     fn cursor_shape(&self, _session_id: u64, _shape: CursorShape) {}
+
+    fn term_output(&self, term_id: u32, bytes: Vec<u8>) {
+        lock(&self.shared.term_out).push((term_id, bytes));
+    }
 }
 
 /// The viewer's media side: a sink for `ServiceBackend::start_with_sink` and the decode thread behind it.
@@ -256,6 +262,16 @@ pub struct ViewerConfig {
     /// Reconnect proof ([`crate::reconnect`]): the orchestrator drops the link for about 10 s and this side must see
     /// the session come back and a picture inside the budget; they meet in this folder. Runs last. `None`: no drop.
     pub reconnect: Option<PathBuf>,
+    /// Terminal and quick actions proof ([`crate::term`], [`crate::actions`]): a shell on the host as its logged-in
+    /// user, resized and closed, then the quick action list (and the harmless run, toward a Mac); the orchestrator
+    /// writes the host's console user into `term-expect-user` in this folder. Needs `TERMINAL` granted by the host.
+    pub term: Option<PathBuf>,
+    /// Swap proof ([`crate::swap`]): asks for a swap, expects the reverse session, ends it. Runs last, and not with
+    /// the reconnect proof (the session it would drop is gone).
+    pub swap: bool,
+    /// No picture is waited for and no pointer is moved: the proofs that need no screen (terminal, quick actions, chat,
+    /// swap) toward a host that cannot capture one. The orchestrator says why in its report.
+    pub no_media: bool,
     /// Pairing with a host started after the viewer: the file the orchestrator writes once that host is up (see
     /// `pair_with_fresh_host`). `None`: the host is found by its address.
     pub host_up: Option<PathBuf>,
@@ -285,6 +301,9 @@ impl ViewerConfig {
             files: None,
             chat: None,
             reconnect: None,
+            term: None,
+            swap: false,
+            no_media: false,
             host_up: None,
         }
     }
@@ -323,6 +342,12 @@ pub struct ViewerReport {
     pub reconnect_failed: Option<String>,
     /// What the reconnect proof measured (when it got that far).
     pub reconnect_times: Option<crate::reconnect::Times>,
+    /// The terminal proof failed: why.
+    pub term_failed: Option<String>,
+    /// The quick actions proof failed: why.
+    pub actions_failed: Option<String>,
+    /// The swap proof failed: why.
+    pub swap_failed: Option<String>,
 }
 
 impl ViewerReport {
@@ -474,7 +499,18 @@ fn script(
     report.session_active = true;
     log(&format!("VIEWER_ACTIVE session={session_id} granted={:#06x}", granted.0));
     pump.ask(Command::SetAudio { session_id, on: true }, REPLY)?;
-    script_media(pump, backend, media, cfg, log, held, report, session_id, active_at)
+    let host_os = match pump.ask(Command::ListDevices, REPLY)? {
+        Reply::Devices(list) => list.iter().find(|d| d.id == host).map(|d| d.os),
+        _ => None,
+    };
+    let host = Peer { id: host, os: host_os };
+    script_media(pump, backend, media, cfg, log, held, report, session_id, active_at, &host)
+}
+
+/// The host of the session: its device id and, when the list says, its system.
+struct Peer {
+    id: String,
+    os: Option<Os>,
 }
 
 /// Adds the host by address and runs the pairing ceremony; the device id it paired as.
@@ -592,16 +628,20 @@ fn script_media(
     report: &mut ViewerReport,
     session_id: u64,
     active_at: Instant,
+    host: &Peer,
 ) -> Result<(), String> {
     let shared = &media.shared;
     let mut last_ask = Instant::now() - Duration::from_secs(1);
-    // 3. Video: wait for the first decoded picture, asking for a keyframe when the decoder lost its place.
+    // 3. Video: wait for the first decoded picture, asking for a keyframe when the decoder lost its place. Without
+    // media (a host whose screen cannot be captured, such as a locked Mac) the picture is not waited for.
     let end = Instant::now() + cfg.media_timeout;
-    while shared.frames_decoded.load(Ordering::Relaxed) == 0 && Instant::now() < end {
+    while !cfg.no_media && shared.frames_decoded.load(Ordering::Relaxed) == 0 && Instant::now() < end {
         request_keyframe_if_needed(backend, shared, session_id, &mut last_ask);
         std::thread::sleep(Duration::from_millis(30));
     }
-    if shared.frames_decoded.load(Ordering::Relaxed) == 0 {
+    if cfg.no_media {
+        log("VIEWER_MEDIA_SKIPPED no picture is waited for and no pointer is moved (--no-media)");
+    } else if shared.frames_decoded.load(Ordering::Relaxed) == 0 {
         return Err(format!(
             "no frame was decoded within {}s (received {}, decode errors {}, last: {})",
             cfg.media_timeout.as_secs(),
@@ -610,10 +650,16 @@ fn script_media(
             lock(&shared.last_error)
         ));
     }
-    log(&format!("VIEWER_FIRST_FRAME decoded={} ", shared.frames_decoded.load(Ordering::Relaxed)));
+    if !cfg.no_media {
+        log(&format!("VIEWER_FIRST_FRAME decoded={} ", shared.frames_decoded.load(Ordering::Relaxed)));
+    }
 
     // 4. Pointer: a few small moves around where the host's pointer is now, at most one second of them.
-    let pointer = if cfg.send_input { pointer_moves(backend, shared, session_id, cfg, log, report) } else { Ok(()) };
+    let pointer = if cfg.send_input && !cfg.no_media {
+        pointer_moves(backend, shared, session_id, cfg, log, report)
+    } else {
+        Ok(())
+    };
     let pointer = pointer.and_then(|()| match &cfg.type_after {
         Some(ready) => type_word(backend, session_id, ready, cfg.anchor_timeout, cfg.save_with_ctrl, log),
         None => Ok(()),
@@ -638,6 +684,46 @@ fn script_media(
         if let Err(e) = crate::chat::chat_round(pump, session_id, dir, Duration::from_secs(30), log) {
             log(&format!("CHAT_FAIL {e}"));
             report.chat_failed = Some(e);
+        }
+    }
+    if let Some(dir) = &cfg.term {
+        let drain = |term_id: u32| -> Vec<u8> {
+            let mut out = lock(&shared.term_out);
+            let mut bytes = Vec::new();
+            out.retain(|(t, b)| {
+                if *t == term_id {
+                    bytes.extend_from_slice(b);
+                }
+                *t != term_id
+            });
+            bytes
+        };
+        match host.os {
+            None => report.term_failed = Some("the host's system is not in the device list".into()),
+            Some(os) => {
+                if let Err(e) = crate::term::term_round(pump, session_id, dir, os, &drain, Duration::from_secs(30), log)
+                {
+                    log(&format!("TERM_FAIL {e}"));
+                    report.term_failed = Some(e);
+                }
+                if let Err(e) = crate::actions::actions_round(pump, session_id, &host.id, os, log) {
+                    log(&format!("ACTIONS_FAIL {e}"));
+                    report.actions_failed = Some(e);
+                }
+            }
+        }
+    }
+    if cfg.swap {
+        log("VIEWER_NEED_SWAP");
+        match crate::swap::swap_round(pump, session_id, &host.id, log) {
+            Ok(new_session) => {
+                end_after_swap(pump, new_session, held, report, log)?;
+                return pointer;
+            }
+            Err(e) => {
+                log(&format!("SWAP_FAIL {e}"));
+                report.swap_failed = Some(e);
+            }
         }
     }
     if let Some(dir) = &cfg.reconnect {
@@ -682,6 +768,32 @@ fn script_media(
     pointer?;
     if !report.ended_clean {
         return Err(format!("the session ended with {reason:?}"));
+    }
+    Ok(())
+}
+
+/// After a swap: this machine hosts `new_session`; it stays up a moment (the other side's log says what it saw), then
+/// this side ends it.
+fn end_after_swap(
+    pump: &mut Pump<'_>,
+    new_session: u64,
+    held: &mut Held,
+    report: &mut ViewerReport,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    held.session = None;
+    std::thread::sleep(Duration::from_secs(2));
+    pump.ask(Command::Disconnect { session_id: new_session }, REPLY)?;
+    let reason = pump.wait("the reverse session to end", Duration::from_secs(10), |e| match e {
+        UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. } if *s == new_session => {
+            Some(*reason)
+        }
+        _ => None,
+    })?;
+    report.ended_clean = reason.is_none();
+    log(&format!("VIEWER_SESSION_ENDED reason={reason:?} (the reverse session, after the swap)"));
+    if !report.ended_clean {
+        return Err(format!("the reverse session ended with {reason:?}"));
     }
     Ok(())
 }

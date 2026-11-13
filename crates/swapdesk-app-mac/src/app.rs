@@ -332,7 +332,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 window: Arc::clone(&window),
                 wake: Arc::new(move || swapdesk_ui::UiWaker::wake(&*wake_ui)),
             };
-            crate::drive::start(dir, tee, Arc::clone(&trace))?;
+            crate::drive::start(dir, store.dir(), tee, Arc::clone(&trace))?;
             swapdesk_shell_mac::set_snapshot_dir(dir.to_path_buf());
             window
         }

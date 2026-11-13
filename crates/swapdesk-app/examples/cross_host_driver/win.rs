@@ -6,7 +6,7 @@
 //! CONTROL and AUDIO, answers the incoming request with Accept, waits for the session to end and forgets the device.
 //!
 //!     cross_host_driver --peer-code <file> [--pair-timeout <s>] [--session-timeout <s>] [--clip] [--files]
-//!         [--chat <file>] [--reconnect]
+//!         [--chat <file>] [--reconnect] [--term --audit-dir <folder>] [--swap]
 //!     cross_host_driver --stay
 //!
 //! `--stay` (hand testing) pairs nothing and forgets nothing: it accepts every session request of a paired device
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use swapdesk_app::cli::Options;
 use swapdesk_app::connect::open_pipe;
-use swapdesk_crossdrive::{HostConfig, host_drive, host_stay};
+use swapdesk_crossdrive::{AuditCheck, HostConfig, host_drive, host_stay};
 use swapdesk_ui::service_backend::ServiceBackend;
 use swapdesk_ui::{Permission, Permissions, UiWaker};
 
@@ -93,6 +93,13 @@ pub fn main() -> ExitCode {
     if args.iter().any(|a| a == "--reconnect") {
         log("HOST_RECONNECT_WATCH");
     }
+    // `--term`: the terminal proof needs the terminal granted. `--audit-dir <folder>`: the data folder of this host (the
+    // development instance's), whose audit file the script reads once the session is over. Toward a Windows host no
+    // quick action runs (Task Manager asks for an elevation), so none is waited for.
+    let term = args.iter().any(|a| a == "--term");
+    if term {
+        grants = grants.with(Permission::Terminal);
+    }
     if stay {
         return match host_stay(&backend, grants, &log) {
             Ok(()) => ExitCode::SUCCESS,
@@ -106,6 +113,11 @@ pub fn main() -> ExitCode {
         grants,
         // `--chat <file>`: the chat proof; once the orchestrator writes a text to <file> the host sends it.
         chat_say: value(&args, "--chat").map(PathBuf::from),
+        // `--swap`: the proof of the swap; the host accepts the question the viewer asks.
+        swap: args.iter().any(|a| a == "--swap"),
+        audit: value(&args, "--audit-dir")
+            .filter(|_| term)
+            .map(|dir| AuditCheck { dir: PathBuf::from(dir), wait_action: false }),
     };
     let (outcome, result) = host_drive(&backend, &cfg, &log);
     match result {

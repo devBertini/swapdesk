@@ -969,6 +969,7 @@ dependencies = [
  "swapdesk-host",
  "swapdesk-input-mac",
  "swapdesk-ipc",
+ "swapdesk-lan",
  "swapdesk-net-mac",
  "swapdesk-platform",
  "swapdesk-proto",

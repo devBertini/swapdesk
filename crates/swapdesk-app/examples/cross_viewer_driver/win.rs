@@ -8,7 +8,7 @@
 //! nothing is forgotten: the pairing outlives the tool.
 //!
 //!     cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--reconnect]
+//!     cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--term] [--swap] [--no-media] [--reconnect]
 //!
 //! `--pair` is the full script against a host run by `Swapdesk --drive-host` (a scratch identity on the Mac): it adds
 //! the host by address, prints `VIEWER_CODE <code>`, reads the host's code from `<folder>/peer-code.txt`, waits for
@@ -66,10 +66,13 @@ fn pick(devices: &[DeviceView], wanted: &str) -> Result<String, String> {
 }
 
 /// Whether the report meets the proof: active, decoded, not black, audio.
-fn verdict(r: &ViewerReport) -> Result<(), String> {
+fn verdict(r: &ViewerReport, no_media: bool) -> Result<(), String> {
     let mut missing = Vec::new();
     if !r.session_active {
         missing.push("the session never went active".to_string());
+    }
+    if no_media {
+        return if missing.is_empty() { Ok(()) } else { Err(missing.join("; ")) };
     }
     if r.frames_decoded == 0 {
         missing.push(format!(
@@ -93,7 +96,7 @@ pub fn main() -> ExitCode {
     if device.is_none() == pair.is_none() {
         eprintln!(
             "usage: cross_viewer_driver --device <id prefix or name part> [--seconds N] [--no-input]
-       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--reconnect]"
+       cross_viewer_driver --pair <host ipv4> --dir <folder> [--seconds N] [--no-input] [--type] [--clip] [--files] [--chat] [--term] [--swap] [--no-media] [--reconnect]"
         );
         return ExitCode::from(2);
     }
@@ -170,6 +173,16 @@ pub fn main() -> ExitCode {
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--chat"), &pair) {
         cfg.chat = Some(PathBuf::from(dir));
     }
+    // `--term`: the terminal and quick actions proof; the orchestrator writes the host's console user into
+    // `<dir>/term-expect-user`.
+    if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--term"), &pair) {
+        cfg.term = Some(PathBuf::from(dir));
+    }
+    // `--swap`: asks for a swap and expects the reverse session (runs last, not with `--reconnect`).
+    cfg.swap = pair.is_some() && args.iter().any(|a| a == "--swap");
+    // `--no-media`: no picture is waited for (a host that cannot capture one, such as a locked Mac): the session, the
+    // terminal, the quick actions, the chat and the swap are proven, the picture is not.
+    cfg.no_media = args.iter().any(|a| a == "--no-media");
     // `--reconnect`: the orchestrator drops the link for about 10 s and the session must come back (runs last).
     if let (true, Some((_, dir))) = (args.iter().any(|a| a == "--reconnect"), &pair) {
         cfg.reconnect = Some(PathBuf::from(dir));
@@ -183,7 +196,7 @@ pub fn main() -> ExitCode {
     drop(backend);
     media.finish();
     println!("{}", report.counts_line());
-    let verdict = verdict(&report)
+    let verdict = verdict(&report, cfg.no_media)
         .and_then(|()| match &report.clip_failed {
             Some(why) => Err(format!("copy and paste: {why}")),
             None => Ok(()),
@@ -194,6 +207,18 @@ pub fn main() -> ExitCode {
         })
         .and_then(|()| match &report.chat_failed {
             Some(why) => Err(format!("chat: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.term_failed {
+            Some(why) => Err(format!("terminal: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.actions_failed {
+            Some(why) => Err(format!("quick actions: {why}")),
+            None => Ok(()),
+        })
+        .and_then(|()| match &report.swap_failed {
+            Some(why) => Err(format!("swap: {why}")),
             None => Ok(()),
         })
         .and_then(|()| match &report.reconnect_failed {

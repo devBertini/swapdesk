@@ -7,12 +7,21 @@
 //! is what its interface received (the message is then marked read), `HOST_CHAT_SENT` follows the sending of the text
 //! in the file [`HostConfig::chat_say`], `HOST_CHAT_READ_BY_PEER` is the viewer's read state; and it logs the session
 //! going `HOST_SESSION_RECONNECTING` and `HOST_SESSION_ACTIVE_AGAIN` for the reconnect proof.
+//!
+//! With [`HostConfig::swap`] it accepts the swap the viewer asks for (`HOST_SWAP_ASKED`, `HOST_SWAP_ACCEPTED`), times
+//! the reverse session it then opens as the viewer (`HOST_SWAP_VIEWING ... after_accept_ms=`, from the moment its
+//! answer was sent to the new session being active here), notes any pairing or request that came up meanwhile
+//! (`HOST_SWAP_PROMPT_SEEN`) and stays until the reverse session ends (`HOST_SWAP_REVERSE_ENDED`). With
+//! [`HostConfig::audit`] it reads the host's own audit file once the session is over: `HOST_AUDIT terminal_opened=N
+//! actions=[..] swapped=N` (the terminal and the quick action of the terminal proof leave their lines there).
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use swapdesk_trust::{AuditEvent, decode_log};
 use swapdesk_ui::{
-    ApiCode, Command, Decision, PairingState, Permissions, Reply, RequestKind, Role, SessionState, UiBackend, UiEvent,
+    ApiCode, Command, Decision, DeviceStatus, PairingState, Permissions, Reply, RequestKind, Role, SessionState,
+    SwapEvent, UiBackend, UiEvent,
 };
 
 use crate::pump::{Pump, wait_file};
@@ -31,6 +40,99 @@ pub struct HostConfig {
     /// The file the orchestrator writes a chat text to; once it exists the text is sent to the viewer on the hosted
     /// session (`ChatSend`). `None`: the host sends no chat message.
     pub chat_say: Option<PathBuf>,
+    /// Swap proof: accept the swap the viewer asks for and watch the reverse session ([`crate::swap`]).
+    pub swap: bool,
+    /// Terminal and quick action proof: where to read this host's own audit file once the session is over.
+    pub audit: Option<AuditCheck>,
+}
+
+/// Where the host's audit files are, and whether a quick action is expected in them.
+pub struct AuditCheck {
+    /// The folder of the host's data (`audit-sessions.log` is looked for in it and up to four levels below).
+    pub dir: PathBuf,
+    /// A quick action ran: wait for its line (up to a few seconds) before reporting.
+    pub wait_action: bool,
+}
+
+/// What the audit files hold from a moment on.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AuditCounts {
+    pub terminal_opened: u32,
+    pub actions: Vec<String>,
+    pub swapped: u32,
+}
+
+fn audit_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth > 0 {
+                audit_files(&path, depth - 1, out);
+            }
+        } else if path.file_name().is_some_and(|n| n == "audit-sessions.log") {
+            out.push(path);
+        }
+    }
+}
+
+/// Reads the host's audit files under `dir` and counts the terminal, quick action and swap lines from `since_ms` on.
+pub fn audit_counts(dir: &Path, since_ms: u64) -> Result<AuditCounts, String> {
+    let mut files = Vec::new();
+    audit_files(dir, 4, &mut files);
+    if files.is_empty() {
+        return Err(format!("no audit-sessions.log under {}", dir.display()));
+    }
+    let mut counts = AuditCounts::default();
+    for file in files {
+        let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let read = decode_log(&bytes).map_err(|e| format!("{}: {e:?}", file.display()))?;
+        for e in read.entries.into_iter().filter(|e| e.time_ms >= since_ms) {
+            match e.event {
+                AuditEvent::TerminalOpened { .. } => counts.terminal_opened += 1,
+                AuditEvent::ActionRun(a) => counts.actions.push(format!("{a:?}")),
+                AuditEvent::Swapped => counts.swapped += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok(counts)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+}
+
+/// Logs `HOST_AUDIT` from the audit files, waiting a little for the writer when a line is still missing.
+fn report_audit(check: &AuditCheck, since_ms: u64, log: &dyn Fn(&str)) {
+    let end = Instant::now() + Duration::from_secs(4);
+    loop {
+        let late = Instant::now() >= end;
+        match audit_counts(&check.dir, since_ms) {
+            Ok(c) if late || (c.terminal_opened > 0 && (!check.wait_action || !c.actions.is_empty())) => {
+                log(&format!(
+                    "HOST_AUDIT terminal_opened={} actions=[{}] swapped={}",
+                    c.terminal_opened,
+                    c.actions.join(","),
+                    c.swapped
+                ));
+                return;
+            }
+            Err(e) if late => {
+                log(&format!("HOST_AUDIT_FAILED {e}"));
+                return;
+            }
+            _ => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+/// A swap this host accepted: when, which session is the reverse one, and whether a prompt came up meanwhile.
+struct Swap {
+    accepted_at: Instant,
+    reverse: Option<u64>,
+    prompted: bool,
+    old_ended: bool,
 }
 
 /// What `host_drive` learned, for the caller's last line.
@@ -71,6 +173,7 @@ fn forget(pump: &mut Pump<'_>, device: &str) -> Result<(), String> {
 }
 
 fn script(pump: &mut Pump<'_>, cfg: &HostConfig, log: &dyn Fn(&str), out: &mut HostOutcome) -> Result<(), String> {
+    let started_ms = now_ms();
     let Reply::PairingId(pairing_id) = pump.ask(Command::PairOpen { device_id: None }, REPLY)? else {
         return Err("PairOpen did not reply a pairing id".into());
     };
@@ -112,11 +215,14 @@ fn script(pump: &mut Pump<'_>, cfg: &HostConfig, log: &dyn Fn(&str), out: &mut H
     out.session_active = true;
     log(&format!("HOST_SESSION_ACTIVE session={session_id} granted={:#06x}", granted.0));
 
-    let end = watch_session(pump, cfg, log, session_id);
+    let end = watch_session(pump, cfg, log, session_id, &device);
     match end {
         Ok(reason) => {
             out.session_ended = true;
             log(&format!("HOST_SESSION_ENDED reason={reason:?}"));
+            if let Some(check) = &cfg.audit {
+                report_audit(check, started_ms, log);
+            }
             Ok(())
         }
         Err(e) => {
@@ -134,16 +240,76 @@ fn watch_session(
     cfg: &HostConfig,
     log: &dyn Fn(&str),
     session_id: u64,
+    device: &str,
 ) -> Result<Option<ApiCode>, String> {
     let deadline = Instant::now() + cfg.session_timeout;
     let mut cursor = 0;
     let mut sent = false;
     let mut reconnecting = false;
+    let mut swap = None::<Swap>;
     loop {
         for e in pump.fresh(&mut cursor) {
             match e {
+                // The viewer asks for a swap: the answer is a yes, and the clock for the reverse session starts.
+                UiEvent::Swap { event: SwapEvent::Asked { request_id, by, .. }, .. } if cfg.swap && swap.is_none() => {
+                    log(&format!("HOST_SWAP_ASKED request={request_id} by={by}"));
+                    // The reverse connection is dialled to the address the other side's announcement gave: give the
+                    // announcement a few seconds to reach this machine (it follows the pairing), and say what was seen.
+                    let wait_end = Instant::now() + Duration::from_secs(8);
+                    let status = loop {
+                        let status = match pump.ask(Command::ListDevices, REPLY) {
+                            Ok(Reply::Devices(list)) => list.iter().find(|d| d.id == device).map(|d| d.status.clone()),
+                            _ => None,
+                        };
+                        if matches!(status, Some(DeviceStatus::Online { .. })) || Instant::now() >= wait_end {
+                            break status;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    };
+                    log(&format!("HOST_SWAP_PEER_STATUS {status:?}"));
+                    let accepted_at = Instant::now();
+                    pump.ask(Command::AnswerSwap { request_id, accept: true }, REPLY)?;
+                    log("HOST_SWAP_ACCEPTED");
+                    swap = Some(Swap { accepted_at, reverse: None, prompted: false, old_ended: false });
+                }
+                UiEvent::Session {
+                    session_id: s,
+                    device_id,
+                    state: SessionState::Active { role: Role::Viewer, .. },
+                } if s != session_id && device_id == device => {
+                    if let Some(sw) = swap.as_mut().filter(|sw| sw.reverse.is_none()) {
+                        sw.reverse = Some(s);
+                        log(&format!(
+                            "HOST_SWAP_VIEWING new_session={s} after_accept_ms={}",
+                            sw.accepted_at.elapsed().as_millis()
+                        ));
+                    }
+                }
+                UiEvent::Pairing { .. } | UiEvent::IncomingRequest(_) if swap.is_some() => {
+                    if let Some(sw) = swap.as_mut() {
+                        sw.prompted = true;
+                    }
+                    log("HOST_SWAP_PROMPT_SEEN a pairing or a request came up during the swap");
+                }
+                UiEvent::Session { session_id: s, state: SessionState::Ended { reason }, .. }
+                    if swap.as_ref().is_some_and(|sw| sw.reverse == Some(s)) =>
+                {
+                    let (prompted, old_ended) = swap.as_ref().map_or((false, false), |sw| (sw.prompted, sw.old_ended));
+                    log(&format!(
+                        "HOST_SWAP_REVERSE_ENDED reason={reason:?} no_prompt={} old_ended={old_ended}",
+                        !prompted
+                    ));
+                    return Ok(reason);
+                }
                 UiEvent::Session { session_id: s, state, .. } if s == session_id => match state {
-                    SessionState::Ended { reason } => return Ok(reason),
+                    SessionState::Ended { reason } => match swap.as_mut() {
+                        // The swap closes the old session first: the reverse one is what is left to watch.
+                        Some(sw) => {
+                            sw.old_ended = true;
+                            log(&format!("HOST_SWAP_OLD_SESSION_ENDED reason={reason:?}"));
+                        }
+                        None => return Ok(reason),
+                    },
                     SessionState::Reconnecting { .. } if !reconnecting => {
                         reconnecting = true;
                         log("HOST_SESSION_RECONNECTING");

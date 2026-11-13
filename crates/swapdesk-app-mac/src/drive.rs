@@ -56,16 +56,16 @@ impl UiBackend for Tee {
 }
 
 #[cfg(not(feature = "dev-harness"))]
-pub fn start(_dir: &Path, _backend: Tee, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(_dir: &Path, _data_dir: &Path, _backend: Tee, _trace: Arc<dyn TraceSink>) -> Result<(), String> {
     Err("--drive-host needs a build with the dev-harness feature (scripts/mac/build-app.sh --dev-harness)".into())
 }
 
 #[cfg(feature = "dev-harness")]
-pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), String> {
+pub fn start(dir: &Path, data_dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), String> {
     use std::io::Write;
     use std::time::Duration;
 
-    use swapdesk_crossdrive::{HostConfig, host_drive};
+    use swapdesk_crossdrive::{AuditCheck, HostConfig, host_drive};
     use swapdesk_platform::Level;
     use swapdesk_ui::{Permission, Permissions};
 
@@ -76,18 +76,28 @@ pub fn start(dir: &Path, backend: Tee, trace: Arc<dyn TraceSink>) -> Result<(), 
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let term = dir.join("term").exists();
+    let mut grants = Permissions::NONE
+        .with(Permission::Control)
+        .with(Permission::Audio)
+        .with(Permission::Clipboard)
+        .with(Permission::Files);
+    if term {
+        grants = grants.with(Permission::Terminal);
+    }
     let cfg = HostConfig {
         peer_code: dir.join("peer-code.txt"),
         pair_timeout: Duration::from_secs(150),
         session_timeout: Duration::from_secs(180),
-        grants: Permissions::NONE
-            .with(Permission::Control)
-            .with(Permission::Audio)
-            .with(Permission::Clipboard)
-            .with(Permission::Files),
+        grants,
         // The chat proof: the host sends the text the orchestrator writes to `<dir>/chat-host-say`. The reconnect proof
         // needs nothing more here: the script logs the session's drop and return on its own.
         chat_say: Some(dir.join("chat-host-say")),
+        // Two switches the orchestrator sets by creating a file in the folder before it starts the app. `swap`: the
+        // host accepts the swap the viewer asks for. `term`: the host grants the terminal and reads its own audit file
+        // once the session is over (the quick action of that proof runs toward a Mac, so its line is waited for).
+        swap: dir.join("swap").exists(),
+        audit: term.then(|| AuditCheck { dir: data_dir.to_path_buf(), wait_action: true }),
     };
     std::thread::Builder::new()
         .name("swapdesk-drive-host".into())
