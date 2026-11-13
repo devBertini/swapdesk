@@ -49,6 +49,10 @@ features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    # OLE drag and drop with the system's file manager (FILES-UI.md 4.2, 4.3): RegisterDragDrop, IDropTarget,
+    # DoDragDrop, IDataObject.
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Time",

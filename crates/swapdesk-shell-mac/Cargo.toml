@@ -43,6 +43,8 @@ features = [
     "NSPanel", "NSPasteboard", "NSPopUpButton", "NSPopUpButtonCell", "NSResponder", "NSSavePanel", "NSScreen", "NSScrollView",
     "NSStackView", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSSwitch", "NSText", "NSTextField", "NSTextFieldCell", "NSTrackingArea", "NSUserInterfaceLayout",
     "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "NSBox", "NSClipView", "NSRunningApplication", "NSMenuItemCell",
+    # Drag and drop with the Finder (FILES-UI.md 4.2, 4.3).
+    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSPasteboardItem",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
