@@ -66,6 +66,59 @@ pub fn dev_click(window: &str, control: &str) -> Result<(), String> {
     })
 }
 
+/// A pointer move onto the centre of control `control` of `window`, given to the canvas as AppKit gives it a real
+/// move (the canvas owns the window's tracking area). The pointer shape it leaves shows in [`dev_state`] (`pointer=`).
+pub fn dev_hover(window: &str, control: &str) -> Result<(), String> {
+    with(|s| {
+        let (kind, canvas) = canvas_of(s, window)?;
+        let id = {
+            let state = s.state.borrow();
+            let found = state.controls(kind).into_iter().find(|c| format!("{:?}", c.id) == control);
+            match found {
+                Some(c) => c.id,
+                None => return Err(format!("no control {control}; there are: {}", control_names(&state, kind))),
+            }
+        };
+        if !canvas.paint_now() {
+            return Err(format!("the {window} window did not paint"));
+        }
+        let r = canvas.rect_of(id).ok_or_else(|| format!("{control} is not painted in the {window} window"))?;
+        let centre = NSPoint::new(f64::from(r.x + r.w / 2.0), f64::from(r.y + r.h / 2.0));
+        let at = canvas.convertPoint_toView(centre, None);
+        let number = canvas.window().ok_or("the canvas has no window")?.windowNumber();
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::MouseMoved,
+            at,
+            NSEventModifierFlags::empty(),
+            0.0,
+            number,
+            None,
+            0,
+            1,
+            1.0,
+        )
+        .ok_or("the mouse event could not be made")?;
+        canvas.mouseMoved(&event);
+        Ok(())
+    })
+}
+
+/// The app's pointer now: one of the system's (`hand`, `arrow`, `ibeam`) or another (`custom`: the host's shape).
+fn pointer_name() -> &'static str {
+    use objc2_app_kit::NSCursor;
+    let now = NSCursor::currentCursor();
+    let same = |c: Retained<NSCursor>| Retained::as_ptr(&c) == Retained::as_ptr(&now);
+    if same(NSCursor::pointingHandCursor()) {
+        "hand"
+    } else if same(NSCursor::arrowCursor()) {
+        "arrow"
+    } else if same(NSCursor::IBeamCursor()) {
+        "ibeam"
+    } else {
+        "custom"
+    }
+}
+
 /// What [`panel_check`] saw, for [`dev_panel`].
 static PANEL_SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -263,6 +316,7 @@ pub fn dev_state() -> String {
             None => out.push_str("viewer_session=none\n"),
         }
         let _ = writeln!(out, "host_session={}", state.host_session().is_some());
+        let _ = writeln!(out, "pointer={}", pointer_name());
         for (name, kind) in [("main", WindowKind::Main), ("viewer", WindowKind::Viewer), ("banner", WindowKind::Banner)]
         {
             if s.canvas(kind).is_some() {

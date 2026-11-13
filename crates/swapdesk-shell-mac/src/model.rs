@@ -3,7 +3,7 @@
 //! no AppKit, so it is tested on every platform. The screens themselves are painted from the shared frame
 //! (`swapdesk-paint`, D37) and described to assistive clients from the shared tree (`swapdesk_ui::a11y`).
 
-use swapdesk_ui::{UiState, WindowKind, a11y};
+use swapdesk_ui::{ControlId, UiState, WindowKind, a11y};
 
 /// The `NSAppearanceName` the app is forced to for a theme choice; `None` (Sistema) clears the override so the app
 /// follows the OS again.
@@ -90,5 +90,31 @@ impl LiveAnnouncer {
         }
         self.said = text.to_owned();
         (!text.is_empty()).then(|| text.to_owned())
+    }
+}
+
+/// What the pointer looks like at a point of a canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerShape {
+    /// Over a text field.
+    Text,
+    /// Over any other control: a click acts.
+    Hand,
+    /// Over nothing that acts.
+    Arrow,
+    /// Over the video of a viewer: the video view's own pointer (the host's shape while the viewer controls, else the
+    /// arrow).
+    Video,
+}
+
+/// The pointer at a point: `hit` is the control under it, `over_video` whether the point is on a viewer's picture.
+/// Every point has a shape, so a pointer that leaves a button for the picture or the chat never keeps the hand
+/// (owner, 12/11: it stayed the pointing hand over the screen and the chat).
+pub fn pointer_shape(hit: Option<ControlId>, over_video: bool) -> PointerShape {
+    match hit {
+        Some(ControlId::Edit(_)) => PointerShape::Text,
+        Some(_) => PointerShape::Hand,
+        None if over_video => PointerShape::Video,
+        None => PointerShape::Arrow,
     }
 }

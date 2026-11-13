@@ -176,3 +176,15 @@ fn a_window_without_a_card_has_no_live_text() {
     assert_eq!(live_region_text(&shell_state(Scenario::Dispositivos), WindowKind::Main), "");
     assert_eq!(live_region_text(&shell_state(Scenario::Visualizador), WindowKind::Viewer), "");
 }
+
+/// Owner, 12/11 (the Mac app controlling Windows): after the pointer passed over a link of the toolbar it stayed the
+/// pointing hand over the picture and the chat. Over the picture the shape is the video view's, never "left as it was".
+#[test]
+fn a_pointer_that_leaves_a_control_takes_the_shape_of_where_it_is_now() {
+    assert_eq!(pointer_shape(Some(ControlId::TbChat), false), PointerShape::Hand);
+    assert_eq!(pointer_shape(None, true), PointerShape::Video, "on the picture: the video view's pointer");
+    assert_eq!(pointer_shape(None, false), PointerShape::Arrow, "on the chat's text or an empty spot: the arrow");
+    assert_eq!(pointer_shape(Some(ControlId::Edit(swapdesk_ui::EditId::Address)), false), PointerShape::Text);
+    // A control drawn over the picture (the toolbar) is a control first.
+    assert_eq!(pointer_shape(Some(ControlId::TbChat), true), PointerShape::Hand);
+}

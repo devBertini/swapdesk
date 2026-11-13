@@ -475,22 +475,23 @@ impl CanvasView {
         input::hit_test(&self.ivars().out.borrow().widgets, p.x as f32, p.y as f32)
     }
 
-    /// The control under the pointer changed: its tint is repainted and the pointer shows what a click would do.
-    /// Over the video rectangle the pointer is the video view's (the host's cursor shape): it is left alone.
+    /// The control under the pointer changed: its tint is repainted and the pointer shows what a click would do. Over
+    /// the video rectangle the pointer is the video view's (the host's cursor shape), set here too: the toolbar and the
+    /// chat lie inside that rectangle, so a pointer leaving them never crosses the video view's cursor rect.
     fn hover(&self, hit: Option<ControlId>, over_video: bool) {
         let was = std::mem::replace(&mut self.ivars().ix.borrow_mut().hover, hit);
         if was != hit {
             self.setNeedsDisplay(true);
         }
-        if over_video {
-            return;
+        match crate::model::pointer_shape(hit, over_video) {
+            crate::model::PointerShape::Text => NSCursor::IBeamCursor().set(),
+            crate::model::PointerShape::Hand => NSCursor::pointingHandCursor().set(),
+            crate::model::PointerShape::Arrow => NSCursor::arrowCursor().set(),
+            crate::model::PointerShape::Video => match self.ivars().home.borrow().as_ref() {
+                Some(home) => crate::video::show_view_cursor(home),
+                None => NSCursor::arrowCursor().set(),
+            },
         }
-        let cursor = match hit {
-            Some(ControlId::Edit(_)) => NSCursor::IBeamCursor(),
-            Some(_) => NSCursor::pointingHandCursor(),
-            None => NSCursor::arrowCursor(),
-        };
-        cursor.set();
     }
 
     /// The event is over the video rectangle of a viewer (where the video view below takes the mouse).

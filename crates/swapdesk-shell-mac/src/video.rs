@@ -74,6 +74,19 @@ pub enum ViewCursor<'a> {
     Image { image: &'a CGImage, size: (f64, f64), hot: (f64, f64) },
 }
 
+/// Shows the pointer of the video view `view` now: the host's shape while the viewer controls, else the arrow. Any
+/// other view shows the arrow.
+pub fn show_view_cursor(view: &NSView) {
+    let shape = if view.isKindOfClass(VideoView::class()) {
+        // SAFETY: the object is a `VideoView` (checked above), whose layout starts with its `NSView` superclass.
+        let video = unsafe { &*(view as *const NSView).cast::<VideoView>() };
+        video.ivars().cursor.borrow().clone()
+    } else {
+        None
+    };
+    shape.unwrap_or_else(NSCursor::arrowCursor).set();
+}
+
 /// Sets the pointer of the video view behind `view` (the `VideoSurface::view`); any other view is left alone.
 pub fn set_view_cursor(view: &NSView, cursor: ViewCursor<'_>) {
     if !view.isKindOfClass(VideoView::class()) {
@@ -117,9 +130,9 @@ define_class!(
 
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
-            if let Some(c) = self.ivars().cursor.borrow().as_ref() {
-                self.addCursorRect_cursor(self.bounds(), c);
-            }
+            // The arrow when the host sends no shape, so the rect never leaves the last control's pointer in place.
+            let shape = self.ivars().cursor.borrow().clone().unwrap_or_else(NSCursor::arrowCursor);
+            self.addCursorRect_cursor(self.bounds(), &shape);
         }
 
         #[unsafe(method(acceptsFirstMouse:))]

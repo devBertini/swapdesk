@@ -35,6 +35,11 @@ pub enum Cmd {
         window: String,
         text: String,
     },
+    /// The pointer moves onto a control (its centre), as a person's would; `state` then says the pointer's shape.
+    Hover {
+        window: String,
+        control: String,
+    },
     VideoClick {
         fx: f64,
         fy: f64,
@@ -122,6 +127,11 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
             let window = words.next().filter(|w| !w.is_empty()).ok_or("click needs a window and a control")?;
             let control = rest_after(line, 2).ok_or("click needs a control")?;
             Ok(Cmd::Click { window: window.to_owned(), control: control.trim().to_owned() })
+        }
+        "hover" => {
+            let window = words.next().filter(|w| !w.is_empty()).ok_or("hover needs a window and a control")?;
+            let control = rest_after(line, 2).ok_or("hover needs a control")?;
+            Ok(Cmd::Hover { window: window.to_owned(), control: control.trim().to_owned() })
         }
         "keys" => {
             let window = words.next().filter(|w| !w.is_empty()).ok_or("keys needs a window and a text")?;
@@ -281,6 +291,7 @@ mod mac {
                 Ok(out)
             }
             Cmd::Click { window, control } => swapdesk_shell_mac::dev_click(window, control).map(|()| String::new()),
+            Cmd::Hover { window, control } => swapdesk_shell_mac::dev_hover(window, control).map(|()| String::new()),
             Cmd::Keys { window, text } => swapdesk_shell_mac::dev_keys(window, text).map(|()| String::new()),
             Cmd::VideoClick { fx, fy } => swapdesk_shell_mac::dev_video("click", *fx, *fy, "").map(|()| String::new()),
             Cmd::VideoMove { fx, fy } => swapdesk_shell_mac::dev_video("move", *fx, *fy, "").map(|()| String::new()),
@@ -324,6 +335,7 @@ mod tests {
             parse("click viewer TbDisconnect\r\n"),
             Ok(Cmd::Click { window: "viewer".into(), control: "TbDisconnect".into() })
         );
+        assert_eq!(parse("hover viewer TbChat"), Ok(Cmd::Hover { window: "viewer".into(), control: "TbChat".into() }));
         assert_eq!(
             parse("panel viewer FilesChoose"),
             Ok(Cmd::Panel { window: "viewer".into(), control: "FilesChoose".into() })
