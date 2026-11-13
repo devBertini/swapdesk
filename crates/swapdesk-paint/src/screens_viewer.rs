@@ -81,6 +81,8 @@ pub fn paint_viewer(f: &mut Frame) {
         if f.st.session_bar_visible() {
             let line = session_line(f, &session);
             toolbar(f, video_col, &peer, &line);
+        } else if f.st.bar_handle_visible() {
+            bar_handle(f, video_col);
         }
     }
     if let Some(tab) = drawer {
@@ -214,6 +216,8 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
             sep_before: true,
         });
     }
+    let mut collapse = tool(ControlId::TbCollapse, CHEVRON_UP);
+    collapse.sep_before = true;
     tools.push(Tool {
         id: ControlId::TbDisconnect,
         icon: None,
@@ -224,6 +228,7 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
         chevron: false,
         sep_before: !swap_offered,
     });
+    tools.push(collapse);
 
     // Measure: button = padding 10 + content + 10, min 40; content = icon 18 / label / chevron 14, gap 8.
     let style = |t: &Tool| if t.weight_bold { text::BTN_PRIMARY } else { text::BTN };
@@ -323,6 +328,25 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
     }
 }
 
+/// The arrow of the bar's collapse button, and the handle's (pointing down: the bar comes back from there).
+const CHEVRON_UP: &str = "M18 15l-6-6-6 6";
+
+/// A collapsed session bar (B22): a small tab at the top edge of the picture, centred, with the connection dot and a
+/// downward arrow; a click brings the bar back.
+fn bar_handle(f: &mut Frame, col: Rect) {
+    let p = f.p;
+    let (w, h) = (64.0, 22.0);
+    let r = Rect::new(p.snap(col.x + (col.w - w) / 2.0), col.y, w, h);
+    // Rounded at the bottom only: the top corners run past the picture's edge.
+    let tab = Rect::new(r.x, r.y - 10.0, r.w, r.h + 10.0);
+    p.shadow(tab, 10.0, 6.0, 16.0, f.fx.shadow_dialog);
+    p.fill_rrect(tab, 10.0, f.fx.toolbar);
+    f.tint(ControlId::TbExpand, r, 8.0, Color::rgb(0xFFFFFF), 0.10, 0.18);
+    p.fill_circle((r.x + 18.0, r.y + h / 2.0), 3.5, f.pal.ok);
+    p.svg(icons::CHEVRON, r.x + 30.0, r.y + 4.0, 14.0, 2.0, f.fx.toolbar_ink);
+    f.register(ControlId::TbExpand, r, 8.0);
+}
+
 /// What the hovered button of the session bar does: one line in a small dark card under the bar, centred on the
 /// button and kept inside the column.
 fn button_hint(f: &mut Frame, col: Rect, bar: Rect, id: ControlId, button: Rect) {
@@ -332,8 +356,10 @@ fn button_hint(f: &mut Frame, col: Rect, bar: Rect, id: ControlId, button: Rect)
     let label = p.label_in(&what, text::SMALL, room, Align::Start);
     let (w, h) = (label.w + 20.0, label.h + 12.0);
     let (cx, _) = button.center();
-    let x = (cx - w / 2.0).min(col.right() - 8.0 - w).max(col.x + 8.0);
-    let r = Rect::new(p.snap(x), bar.bottom() + 6.0, w, h);
+    // Snapped to the pixel grid inside the margins: rounding the clamped edge up would push the card past them.
+    let x = p.snap((cx - w / 2.0).min(col.right() - 8.0 - w).max(col.x + 8.0));
+    let x = if x + w > col.right() - 8.0 { (col.right() - 8.0 - w).floor() } else { x };
+    let r = Rect::new(x, bar.bottom() + 6.0, w, h);
     p.shadow(r, 8.0, 6.0, 18.0, Color::rgba(0, 0, 0, 35));
     p.fill_rrect(r, 8.0, f.fx.toolbar);
     p.draw(&label, r.x + 10.0, r.y + 6.0, f.fx.toolbar_ink);

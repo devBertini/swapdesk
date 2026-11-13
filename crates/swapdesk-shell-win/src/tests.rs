@@ -334,7 +334,7 @@ fn full_screen_hides_the_bar_and_the_picture_fills_the_window() {
 }
 
 /// The buttons of the session bar, in the order they are drawn.
-const BAR_BUTTONS: [ControlId; 10] = [
+const BAR_BUTTONS: [ControlId; 11] = [
     ControlId::TbScreen,
     ControlId::TbFit,
     ControlId::TbAudio,
@@ -345,6 +345,7 @@ const BAR_BUTTONS: [ControlId; 10] = [
     ControlId::TbChat,
     ControlId::TbSwap,
     ControlId::TbDisconnect,
+    ControlId::TbCollapse,
 ];
 
 #[test]

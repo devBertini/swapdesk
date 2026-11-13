@@ -273,7 +273,7 @@ strings! {
     FullscreenMonitorN => "Monitor {0}", "Monitor {0}";
     ShortcutsTitle => "Atalhos", "Shortcuts";
     ScReleaseKeyboard => "Liberar o teclado", "Release the keyboard";
-    ScShowBar => "Mostrar a barra da sessão", "Show the session bar";
+    ScShowBar => "Mostrar ou recolher a barra da sessão", "Show or collapse the session bar";
     ScFullScreen => "Tela cheia", "Full screen";
     ScCtrlAltDel => "Enviar Ctrl+Alt+Del", "Send Ctrl+Alt+Del";
     ScDisconnect => "Desconectar", "Disconnect";
@@ -617,6 +617,10 @@ strings! {
     // A chat message as a screen reader reads it (B17, F-UI-01).
     ChatLineMine => "Você: {0}", "You: {0}";
     ChatLinePeer => "{0}: {1}", "{0}: {1}";
+    // The session bar made small and brought back (B22, owner 12/11).
+    TbCollapse => "Recolher a barra", "Collapse the bar";
+    TipCollapse => "Recolher a barra num puxador no topo ({0} a traz de volta)", "Shrink the bar to a handle at the top ({0} brings it back)";
+    TbExpand => "Mostrar a barra da sessão ({0})", "Show the session bar ({0})";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

@@ -25,7 +25,7 @@ fn the_windows_list_is_exactly_the_five_chords_of_d30() {
         keys_of(&s),
         vec![
             ("Liberar o teclado".to_owned(), "Ctrl+Alt".to_owned()),
-            ("Mostrar a barra da sessão".to_owned(), "Ctrl+Alt+B".to_owned()),
+            ("Mostrar ou recolher a barra da sessão".to_owned(), "Ctrl+Alt+B".to_owned()),
             ("Tela cheia".to_owned(), "F11".to_owned()),
             ("Enviar Ctrl+Alt+Del".to_owned(), "Ctrl+Alt+End".to_owned()),
             ("Desconectar".to_owned(), "Ctrl+Alt+Q".to_owned()),
@@ -50,7 +50,7 @@ fn the_english_names_follow_the_language() {
     s.choose(SelectId::Language, 1);
     let rows = keys_of(&s);
     assert_eq!(rows[0], ("Release the keyboard".to_owned(), "Ctrl+Alt".to_owned()));
-    assert_eq!(rows[1].0, "Show the session bar");
+    assert_eq!(rows[1].0, "Show or collapse the session bar");
     assert_eq!(rows[2], ("Full screen".to_owned(), "F11".to_owned()));
     s.choose(SelectId::ReleaseKey, 1);
     assert_eq!(s.shortcut_keys(ViewerAction::ReleaseKeyboard), "Right Ctrl");
@@ -81,6 +81,7 @@ fn each_button_of_the_session_bar_has_a_hint_of_its_own_that_says_what_it_does()
         (ControlId::TbChat, "Conversar com quem está no outro computador"),
         (ControlId::TbSwap, "Inverter o controle: o outro computador passa a controlar este"),
         (ControlId::TbDisconnect, "Encerrar a sessão (Ctrl+Alt+Q)"),
+        (ControlId::TbCollapse, "Recolher a barra num puxador no topo (Ctrl+Alt+B a traz de volta)"),
     ];
     let specs = s.controls(WindowKind::Viewer);
     let bar: Vec<_> = specs.iter().filter(|c| c.region == Region::Toolbar && c.id.focusable()).collect();
@@ -112,7 +113,7 @@ fn settings_list_the_shortcuts_and_the_release_key_choice() {
     let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
     assert!(texts.contains(&"Tecla que libera o teclado".to_owned()), "{texts:?}");
     assert!(texts.contains(&"Tela cheia: F11".to_owned()));
-    assert!(texts.contains(&"Mostrar a barra da sessão: Ctrl+Alt+B".to_owned()));
+    assert!(texts.contains(&"Mostrar ou recolher a barra da sessão: Ctrl+Alt+B".to_owned()));
     assert_eq!(s.select_options(SelectId::ReleaseKey).len(), 3, "exactly three chords");
     assert_eq!(s.select_value(SelectId::ReleaseKey), "Ctrl+Alt");
     assert_eq!(s.activate(ControlId::Select(SelectId::ReleaseKey)).effect, Some(Effect::Menu(SelectId::ReleaseKey)));
@@ -161,13 +162,36 @@ fn full_screen_hides_the_session_bar_until_ctrl_alt_b_shows_it() {
     assert!(!s.session_bar_visible(), "the next full screen starts with the bar hidden");
 }
 
+/// B22 (owner, 12/11): the session bar can be made small and tucked away and brought back: its collapse button or
+/// Ctrl+Alt+B leave a handle at the top of the picture; the handle or the shortcut bring the bar back; a new session
+/// starts with the bar open.
 #[test]
-fn the_bar_toggle_does_nothing_in_a_window() {
+fn the_bar_collapses_to_a_handle_and_comes_back() {
+    let ids = |s: &UiState| s.controls(WindowKind::Viewer).into_iter().map(|c| c.id).collect::<Vec<_>>();
     let mut s = viewer();
+    assert!(ids(&s).contains(&ControlId::TbCollapse) && !ids(&s).contains(&ControlId::TbExpand));
+
+    s.activate(ControlId::TbCollapse);
+    assert!(!s.session_bar_visible() && s.bar_handle_visible());
+    assert_eq!(toolbar_controls(&s), 0, "the bar's buttons are gone with it");
+    let handle = s.controls(WindowKind::Viewer).into_iter().find(|c| c.id == ControlId::TbExpand).expect("the handle");
+    assert_eq!(handle.label, "Mostrar a barra da sessão (Ctrl+Alt+B)", "the handle says how to bring the bar back");
+
+    s.activate(ControlId::TbExpand);
+    assert!(s.session_bar_visible() && !s.bar_handle_visible());
+
+    // The shortcut does the same in a window.
     s.run_shortcut(ViewerAction::ToggleBar);
-    assert!(s.session_bar_visible() && !s.fullscreen());
+    assert!(s.bar_handle_visible());
+    s.run_shortcut(ViewerAction::ToggleBar);
+    assert!(s.session_bar_visible());
+
+    // In full screen the picture starts clear (D30); a collapsed bar brought up there comes back whole.
+    s.run_shortcut(ViewerAction::ToggleBar);
     s.run_shortcut(ViewerAction::FullScreen);
-    assert!(!s.session_bar_visible(), "an earlier toggle in the window did not leave the bar on");
+    assert!(!s.session_bar_visible() && !s.bar_handle_visible(), "nothing over the picture in full screen");
+    s.run_shortcut(ViewerAction::ToggleBar);
+    assert!(s.session_bar_visible(), "the shortcut brings the bar back whole");
 }
 
 #[test]

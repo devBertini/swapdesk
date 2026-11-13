@@ -658,3 +658,21 @@ fn the_viewer_has_no_top_bar_and_its_session_line_rides_on_the_toolbar() {
     let screen = out.widgets.iter().find(|w| w.id == ControlId::TbScreen).expect("the toolbar");
     assert!(screen.rect.y > 0.0 && screen.rect.y < 80.0, "the toolbar floats at the top of the picture");
 }
+
+/// B22 (owner, 12/11): a collapsed session bar is a small handle at the top edge of the picture, centred, and its
+/// buttons are not drawn; the handle is where a click brings the bar back.
+#[test]
+fn a_collapsed_bar_is_a_small_handle_at_the_top_of_the_picture() {
+    let mut state = Scenario::Visualizador.prepared_state();
+    state.activate(ControlId::TbCollapse);
+    let (kind, size) = (WindowKind::Viewer, design_size(WindowKind::Viewer));
+    let painter = Fixed::default();
+    let out = paint(Frame::new(&painter, &state, &Interaction::default(), size, true), kind);
+    assert!(!out.widgets.iter().any(|w| w.id == ControlId::TbScreen), "the bar's buttons are not drawn");
+    let handle = out.widgets.iter().find(|w| w.id == ControlId::TbExpand).expect("the handle").rect;
+    assert!(handle.w <= 80.0 && handle.h <= 30.0, "small: {handle:?}");
+    let (cx, _) = handle.center();
+    assert!((cx - size.0 / 2.0).abs() < 2.0, "centred on the picture: {handle:?}");
+    let video = out.video.expect("a video");
+    assert!((handle.y - video.y).abs() < 1.0 || handle.y <= 60.0, "at the top edge: {handle:?} over {video:?}");
+}

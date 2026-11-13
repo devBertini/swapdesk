@@ -135,6 +135,10 @@ impl UiState {
                 let keys = self.shortcut_keys(ViewerAction::Disconnect);
                 return Some(self.tm(&Msg::new(MsgKey::TipDisconnect).with(keys)));
             }
+            ControlId::TbCollapse => {
+                let keys = self.shortcut_keys(ViewerAction::ToggleBar);
+                return Some(self.tm(&Msg::new(MsgKey::TipCollapse).with(keys)));
+            }
             _ => return None,
         };
         Some(self.t(key))
@@ -149,7 +153,13 @@ impl UiState {
 
     /// The session bar (the toolbar) shows: always in a window, only when asked in full screen.
     pub fn session_bar_visible(&self) -> bool {
-        !self.fullscreen() || self.bar_shown
+        (!self.fullscreen() || self.bar_shown) && !self.bar_collapsed
+    }
+
+    /// The handle of a collapsed session bar shows where the bar would: in a window, or in full screen once the bar was
+    /// brought up (full screen starts with nothing over the picture, D30).
+    pub fn bar_handle_visible(&self) -> bool {
+        (!self.fullscreen() || self.bar_shown) && self.bar_collapsed
     }
 
     /// The monitor full screen goes to (an index of the shell's monitor list); `None` is the one the window is on.
@@ -200,9 +210,17 @@ impl UiState {
                 self.bar_shown = false;
                 Activation { changed: Changed::VIEWER, ..Activation::default() }
             }
+            // A collapsed bar comes back; in a window an open bar collapses (B22); in full screen it shows or hides.
             ViewerAction::ToggleBar => {
-                if self.fullscreen() {
+                if self.bar_collapsed {
+                    self.bar_collapsed = false;
+                    if self.fullscreen() {
+                        self.bar_shown = true;
+                    }
+                } else if self.fullscreen() {
                     self.bar_shown = !self.bar_shown;
+                } else {
+                    self.bar_collapsed = true;
                 }
                 Activation { changed: Changed::VIEWER, ..Activation::default() }
             }

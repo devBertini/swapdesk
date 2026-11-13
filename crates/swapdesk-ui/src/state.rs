@@ -664,6 +664,8 @@ pub struct UiState {
     pub(crate) release_key: crate::shortcuts::ReleaseKey,
     pub(crate) fullscreen: bool,
     pub(crate) bar_shown: bool,
+    /// The session bar was made small (a handle at the top of the picture) for this session (B22).
+    pub(crate) bar_collapsed: bool,
     pub(crate) fullscreen_monitor: Option<u8>,
     pub(crate) local_monitors: u8,
     pub(crate) connect_end: Option<ConnectEnd>,
@@ -779,6 +781,7 @@ impl UiState {
             release_key: crate::shortcuts::ReleaseKey::CtrlAlt,
             fullscreen: false,
             bar_shown: false,
+            bar_collapsed: false,
             fullscreen_monitor: None,
             local_monitors: 1,
             connect_end: None,
@@ -2204,6 +2207,7 @@ impl UiState {
                 self.view_only = false;
                 self.fullscreen = false;
                 self.bar_shown = false;
+                self.bar_collapsed = false;
                 self.quality = Quality::Auto;
                 self.drawer = None;
                 self.chat.clear();

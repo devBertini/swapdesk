@@ -125,6 +125,10 @@ pub enum ControlId {
     /// "Elevar controle" on the card over a paused picture.
     PausedElevate,
     TbDisconnect,
+    /// The last button of the session bar: shrinks it to a handle at the top of the picture.
+    TbCollapse,
+    /// The handle of a collapsed session bar: brings the bar back.
+    TbExpand,
     DrawerTab(DrawerTab),
     DrawerClose,
     Action(ActionKind),
@@ -1209,6 +1213,7 @@ impl UiState {
             s.button(ControlId::TbElevate, self.name_of(MsgKey::ElevateButton));
         }
         s.button(ControlId::TbDisconnect, self.name_of(MsgKey::Disconnect));
+        s.button(ControlId::TbCollapse, self.name_of(MsgKey::TbCollapse));
         // What each button does (the hint under it while the pointer is on it) is its description, where that says
         // more than its name.
         for c in s.v.iter_mut().filter(|c| c.region == Region::Toolbar) {
@@ -1218,6 +1223,11 @@ impl UiState {
             // Full screen with the bar hidden, or the Arquivos view (its command bar's "Tela" goes back): the bar's
             // controls are not on screen, so they are not reachable either.
             s.v.retain(|c| c.region != Region::Toolbar);
+        }
+        if self.bar_handle_visible() && !self.explorer_open() {
+            let keys = self.shortcut_keys(crate::shortcuts::ViewerAction::ToggleBar);
+            s.region(Region::Content);
+            s.button(ControlId::TbExpand, self.tm(&Msg::new(MsgKey::TbExpand).with(keys)));
         }
         if self.explorer_open() {
             s.region(Region::Drawer);
@@ -1655,6 +1665,14 @@ impl UiState {
                         a.effect = Some(Effect::Menu(SelectId::HostDisplay));
                     }
                 }
+                a.changed = Changed::VIEWER;
+            }
+            ControlId::TbCollapse => {
+                self.bar_collapsed = true;
+                a.changed = Changed::VIEWER;
+            }
+            ControlId::TbExpand => {
+                self.bar_collapsed = false;
                 a.changed = Changed::VIEWER;
             }
             ControlId::TbFit => {
