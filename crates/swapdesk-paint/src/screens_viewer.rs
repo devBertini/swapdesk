@@ -741,7 +741,8 @@ pub fn paint_banner(f: &mut Frame) {
     p.clear(pal.surface);
     // 2 px link ring inside the window (box-shadow 0 0 0 2px var(--link)).
     p.stroke_rrect(Rect::new(1.0, 1.0, f.w - 2.0, f.h - 2.0), 12.0, 2.0, pal.link);
-    let cy = f.h / 2.0;
+    // The row of who, since when and the buttons keeps its height; the files line (FILES-UI.md 6) sits under it.
+    let cy = BANNER_ROW_H / 2.0;
     p.fill_circle((18.0 + 5.0, cy), 5.0, pal.link);
     // Bold first part, soft second part, in one line.
     let (who, since) = f.st.banner_parts(&peer, &h);
@@ -791,9 +792,25 @@ pub fn paint_banner(f: &mut Frame) {
     p.svg(icons::CHAT, cr.x + 10.0, cr.y + 10.0, 16.0, 1.8, pal.ink);
     f.register(ControlId::BannerChat, cr, 8.0);
     unread_badge(f, (cr.right() - 4.0, cr.y + 4.0));
+    // One soft line under the row while files move or change here; never a file name (the state's line has none).
+    if let Some(line) = f.st.banner_files_line() {
+        let l = p.label_ellipsis(&line, text::BODY, (f.w - tx - 16.0).max(0.0));
+        p.draw(&l, tx, BANNER_ROW_H + BANNER_FILES_H / 2.0 - 2.0 - l.h / 2.0, pal.soft);
+    }
 }
 
-/// The banner window's size in DIPs: wide enough for its text and buttons.
+/// The banner's main row: who controls, since when, chat, swap and disconnect.
+const BANNER_ROW_H: f32 = 52.0;
+/// The extra height of the banner while it has a files line.
+const BANNER_FILES_H: f32 = 26.0;
+
+/// The banner window's size in DIPs when it has only its main row: wide enough for its text and buttons.
 pub fn banner_size() -> (f32, f32) {
-    (820.0, 52.0)
+    (820.0, BANNER_ROW_H)
+}
+
+/// The banner window's size for `st`: one line taller while the banner has a files line.
+pub fn banner_size_for(st: &swapdesk_ui::state::UiState) -> (f32, f32) {
+    let (w, h) = banner_size();
+    if st.banner_files_line().is_some() { (w, h + BANNER_FILES_H) } else { (w, h) }
 }

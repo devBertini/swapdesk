@@ -593,10 +593,15 @@ impl Hub {
                 reply(&w.conn, w.req, Ok(ReplyBody::OpResults(results)));
             }
             // The host side's audit (FILES-UI.md 8.3): counts and kinds, never a name.
+            // The same facts go to the console UI for the session banner (FILES-UI.md 6): counts, never a name.
             Event::Changed { op, count, area } => {
+                self.files_note(session_id, FilesNote::Changed { session_id, op, count });
                 self.file_audit(session_id, AuditEvent::FilesChanged { op, count, area })
             }
-            Event::Reach { kinds } => self.file_audit(session_id, AuditEvent::FilesReach { kinds }),
+            Event::Reach { kinds } => {
+                self.files_note(session_id, FilesNote::Reach { session_id });
+                self.file_audit(session_id, AuditEvent::FilesReach { kinds })
+            }
         }
     }
 

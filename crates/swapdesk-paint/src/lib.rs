@@ -17,7 +17,7 @@ mod view;
 
 pub use font::{INSTRUMENT_SANS, face_metrics, label_height, line_box};
 pub use painter::{Align, Label, Painter, Rect, rrect_path};
-pub use screens_viewer::banner_size;
+pub use screens_viewer::{banner_size, banner_size_for};
 pub use view::{EditSlot, Frame, Interaction, Kind, Output, Widget, button_style, finish, icons};
 
 use swapdesk_ui::WindowKind;

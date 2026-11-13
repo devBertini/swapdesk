@@ -129,6 +129,38 @@ fn every_scenario_paints_through_the_trait_and_places_every_control() {
 }
 
 #[test]
+fn the_banner_grows_by_one_line_when_it_has_a_files_line_and_draws_it_under_the_row() {
+    use swapdesk_ui::WindowKind::Banner;
+    let plain = Scenario::Banner.prepared_state();
+    assert_eq!(banner_size_for(&plain), banner_size(), "no files line, the size it always had");
+    let files = Scenario::BannerArquivos.prepared_state();
+    let (w, h) = banner_size_for(&files);
+    let (bw, bh) = banner_size();
+    assert_eq!(w, bw);
+    assert!(h > bh, "one line taller: {h} against {bh}");
+
+    let ix = Interaction::default();
+    let drawn = |st: &swapdesk_ui::UiState, size: (f32, f32)| {
+        let p = Fixed::default();
+        let out = paint(Frame::new(&p, st, &ix, size, true), Banner);
+        let drawn = p.drawn.borrow().clone();
+        let placed = p.placed.borrow().clone();
+        (out, drawn, placed)
+    };
+    let (out, texts, placed) = drawn(&files, (w, h));
+    let at = texts.iter().position(|t| t == "Copiando arquivos: 2 de 5").expect("the files line is drawn");
+    let (_, y, line_h) = placed[at];
+    assert!(y >= bh - 4.0 && y + line_h <= h, "the line sits under the row, inside the window: y {y}, h {h}");
+    for id in [ControlId::BannerDisconnect, ControlId::BannerChat] {
+        let r = out.widgets.iter().find(|x| x.id == id).expect("a banner button").rect;
+        assert!(r.bottom() <= bh, "{id:?} stays in the main row: {r:?}");
+    }
+    assert!(!texts.iter().any(|t| t.contains("relatorio")), "never a file name: {texts:?}");
+    let (_, texts, _) = drawn(&plain, banner_size());
+    assert!(!texts.iter().any(|t| t.contains("arquivos")), "no files, no line: {texts:?}");
+}
+
+#[test]
 fn a_label_hands_back_only_the_handle_type_it_was_made_with() {
     let l = Label::new(10.0, 12.0, 9.0, 7u32);
     assert_eq!(l.handle::<u32>(), Some(&7));

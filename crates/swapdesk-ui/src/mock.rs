@@ -305,6 +305,8 @@ pub enum Scenario {
     VisualizadorContaAusente,
     /// The host's banner of an elevated session: "Controle elevado" (ACCOUNTS.md 9.2, D55).
     BannerElevado,
+    /// The host's banner while the viewer takes files from this computer: "Copiando arquivos: 2 de 5" (FILES-UI.md 6).
+    BannerArquivos,
     /// Início with a new version on offer (UPDATES.md 10.2).
     AtualizacaoOferecida,
     /// The download running, with its bar and the time left.
@@ -320,7 +322,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 64] = [
+    pub const ALL: [Scenario; 65] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -379,6 +381,7 @@ impl Scenario {
         Scenario::VisualizadorPausadoElevar,
         Scenario::VisualizadorContaAusente,
         Scenario::BannerElevado,
+        Scenario::BannerArquivos,
         Scenario::AtualizacaoOferecida,
         Scenario::AtualizacaoBaixando,
         Scenario::AtualizacaoSessaoAtiva,
@@ -442,6 +445,7 @@ impl Scenario {
             Scenario::VisualizadorPausadoElevar => "visualizador-pausado-elevar",
             Scenario::VisualizadorContaAusente => "visualizador-conta-ausente",
             Scenario::BannerElevado => "banner-elevado",
+            Scenario::BannerArquivos => "banner-arquivos",
             Scenario::AtualizacaoOferecida => "update-offered",
             Scenario::AtualizacaoBaixando => "update-downloading",
             Scenario::AtualizacaoSessaoAtiva => "update-live-session",
@@ -526,6 +530,9 @@ impl Scenario {
             Scenario::VisualizadorPausadoElevar => "new: the paused picture with Elevar controle (D55)",
             Scenario::VisualizadorContaAusente => "new: the session's account left the console (D55)",
             Scenario::BannerElevado => "new: the host banner of an elevated session (D55)",
+            Scenario::BannerArquivos => {
+                "new: the host banner with its files line while files are copied out (FILES-UI.md 6)"
+            }
             Scenario::AtualizacaoOferecida => "new: the update card on Início (UPDATES.md 10, D58)",
             Scenario::AtualizacaoBaixando => "new: the update downloading, with the time left (D58)",
             Scenario::AtualizacaoSessaoAtiva => "new: updating with a live session (UPDATES.md 10.3, D58)",
@@ -1015,6 +1022,28 @@ impl Scenario {
             }
             Scenario::VisualizadorContaAusente => {
                 vec![mac(), Event(Self::unattended_session(false)), Event(Self::paused(DesktopKind::AccountAway))]
+            }
+            Scenario::BannerArquivos => {
+                let transfer = |transfer_id: u32, state: TransferState| {
+                    Event(UiEvent::Transfer {
+                        transfer_id,
+                        session_id: 2,
+                        name: "relatorio.pdf".into(),
+                        outgoing: true,
+                        state,
+                    })
+                };
+                let running = || TransferState::Running { done: 1_000_000, total: 4_000_000, bytes_per_s: 2_000_000 };
+                vec![
+                    Event(Self::host_session_to(DESKTOP)),
+                    transfer(1, running()),
+                    transfer(2, running()),
+                    transfer(3, running()),
+                    transfer(4, running()),
+                    transfer(5, running()),
+                    transfer(1, TransferState::Done),
+                    transfer(2, TransferState::Done),
+                ]
             }
             Scenario::BannerElevado => vec![Event(UiEvent::Session {
                 session_id: 2,
@@ -1679,6 +1708,7 @@ mod tests {
             (Scenario::VisualizadorPausadoElevar, Screen::Devices, &[Main, Viewer]),
             (Scenario::VisualizadorContaAusente, Screen::Devices, &[Main, Viewer]),
             (Scenario::BannerElevado, Screen::Home, &[Main, Banner]),
+            (Scenario::BannerArquivos, Screen::Home, &[Main, Banner]),
             (Scenario::AtualizacaoOferecida, Screen::Home, &[Main]),
             (Scenario::AtualizacaoBaixando, Screen::Home, &[Main]),
             (Scenario::AtualizacaoSessaoAtiva, Screen::Home, &[Main, Viewer]),

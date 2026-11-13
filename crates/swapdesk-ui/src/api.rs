@@ -1324,6 +1324,18 @@ pub enum UiEvent {
         session_id: u64,
         volumes: RemoteVolumes,
     },
+    /// This computer hosts `session_id` and the viewer changed files here, for the banner's line (FILES-UI.md 6):
+    /// `op` is the audit's (0 new folder, 1 rename, 2 move, 3 to the bin), `count` the names done. Never a name.
+    HostFilesChanged {
+        session_id: u64,
+        op: u8,
+        count: u32,
+    },
+    /// This computer hosts `session_id` and the viewer reached a volume outside the home folder (sent whenever a new
+    /// kind of volume is reached; the banner says it once per session).
+    HostFilesReach {
+        session_id: u64,
+    },
     ClipboardSkipped {
         session_id: u64,
         reason: ApiCode,

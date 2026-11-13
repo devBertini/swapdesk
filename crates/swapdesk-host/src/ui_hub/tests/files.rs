@@ -730,6 +730,17 @@ fn the_explorer_ops_page_change_and_hear_of_volume_changes_and_the_audit_counts(
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // The host's user's UI hears the same facts for the session banner, as counts (FILES-UI.md 6): the first reach of
+    // a volume outside home once, then each change with its kind and the names done.
+    let session_id_h = session_id;
+    let heard = |ui: &mut Client, what: &str, want: FilesNote| {
+        ui.notify(what, |n| matches!(n, Notify::Files(f) if *f == want).then_some(()));
+    };
+    heard(&mut p.host_ui, "the reach", FilesNote::Reach { session_id: session_id_h });
+    heard(&mut p.host_ui, "the new folder", FilesNote::Changed { session_id: session_id_h, op: 0, count: 1 });
+    heard(&mut p.host_ui, "the move", FilesNote::Changed { session_id: session_id_h, op: 2, count: 1 });
+    heard(&mut p.host_ui, "the bin", FilesNote::Changed { session_id: session_id_h, op: 3, count: 1 });
+
     // A stick is pulled: the helper notices within a couple of seconds, the host pushes the list, the viewer's UI
     // hears notification 22 with one volume left.
     lock(&disks.volumes).truncate(1);
@@ -758,5 +769,33 @@ fn the_explorer_ops_answer_invalid_at_once_toward_a_host_of_minor_1() {
     // The 1.0 drawer still works against it.
     let root = listing(p.viewer_ui.call(UiOp::Files(FilesOp::List { session_id, path: None })));
     assert_eq!(root.path.0, "");
+    p.finish();
+}
+
+#[test]
+fn the_hosted_sessions_ui_hears_each_transfer_with_its_direction() {
+    let mut p = Pair::new("banner-dir", false);
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+    std::fs::write(p.home.join("down.bin"), data(100_000)).unwrap();
+    let session = p.session;
+    let done_direction = |ui: &mut Client, id: u32| {
+        ui.notify("a finished transfer", |n| match n {
+            Notify::Files(FilesNote::Transfer {
+                session_id, transfer_id, outgoing, state: TransferWire::Done, ..
+            }) if *session_id == session && *transfer_id == id => Some(*outgoing),
+            _ => None,
+        })
+    };
+    // The viewer sends a file here: for this computer it is a file that arrives (outgoing false).
+    let pick = p.pick("up.bin", &data(100_000));
+    let up = one_id(p.send(vec![pick], Some("incoming")));
+    assert!(!done_direction(&mut p.host_ui, up), "an upload arrives at the host");
+    // The viewer takes a file from here: the host sends it (outgoing true).
+    let down = one_id(p.get("down.bin"));
+    finished(&mut p.viewer_ui, down, "the download");
+    p.host_ui.notify("the host's own sending", |n| match n {
+        Notify::Files(FilesNote::Transfer { session_id, outgoing: true, .. }) if *session_id == session => Some(()),
+        _ => None,
+    });
     p.finish();
 }

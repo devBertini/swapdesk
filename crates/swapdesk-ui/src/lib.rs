@@ -15,6 +15,7 @@ pub mod debounce;
 pub mod elevated_client;
 pub mod format;
 pub mod home;
+mod host_files;
 pub mod inflight;
 pub mod interact;
 pub mod list;
@@ -31,6 +32,8 @@ pub mod update_card;
 
 #[cfg(test)]
 mod a11y_tests;
+#[cfg(test)]
+mod host_files_tests;
 #[cfg(test)]
 mod notice_tests;
 #[cfg(test)]

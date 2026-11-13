@@ -641,6 +641,12 @@ pub fn files_note() -> BoxedStrategy<FilesNote> {
             name
         }),
         (any::<u64>(), volumes_view()).prop_map(|(session_id, volumes)| FilesNote::Volumes { session_id, volumes }),
+        (any::<u64>(), any::<u8>(), any::<u32>()).prop_map(|(session_id, op, count)| FilesNote::Changed {
+            session_id,
+            op,
+            count
+        }),
+        any::<u64>().prop_map(|session_id| FilesNote::Reach { session_id }),
     ]
     .boxed()
 }

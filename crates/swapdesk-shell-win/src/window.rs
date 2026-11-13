@@ -736,6 +736,32 @@ impl Window {
         }
     }
 
+    /// The banner is as tall as its content (one line more while it has a files line, FILES-UI.md 6): its window takes
+    /// the height the state asks for, keeping its place at the top. Other windows keep the size they have.
+    pub fn fit_banner(&self) {
+        if self.kind != WindowKind::Banner {
+            return;
+        }
+        let (dw, dh) = swapdesk_paint::banner_size_for(&self.shared.state.borrow());
+        let hwnd = self.hwnd();
+        // SAFETY: plain Win32 calls on our own window.
+        unsafe {
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            let scale = dpi as f32 / 96.0;
+            let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
+            let ex = WINDOW_EX_STYLE(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32);
+            let mut want =
+                RECT { left: 0, top: 0, right: (dw * scale).round() as i32, bottom: (dh * scale).round() as i32 };
+            let _ = AdjustWindowRectExForDpi(&mut want, style, false, ex, dpi);
+            let (w, h) = (want.right - want.left, want.bottom - want.top);
+            let mut now = RECT::default();
+            if GetWindowRect(hwnd, &mut now).is_err() || (now.right - now.left == w && now.bottom - now.top == h) {
+                return;
+            }
+            let _ = SetWindowPos(hwnd, None, now.left, now.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        }
+    }
+
     /// A hover, press or focus change touches only the controls that lost or gained the state: their rectangles (as
     /// last drawn, grown by the focus ring and shadow margin and scaled by the DPI) are invalidated instead of the
     /// whole window. A control with no drawn rectangle (the layout is stale) falls back to the whole window. Layout

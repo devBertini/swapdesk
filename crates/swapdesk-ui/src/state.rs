@@ -647,6 +647,8 @@ pub struct UiState {
     pub(crate) drawer: Option<DrawerTab>,
     pub(crate) chat: Vec<ChatView>,
     pub(crate) transfers: Vec<TransferView>,
+    /// What the host banner says about files of the hosted session (FILES-UI.md 6).
+    pub(crate) host_files: crate::host_files::HostFiles,
     pub(crate) listing: Option<Listing>,
     /// The files explorer of the session window (FILES-UI.md).
     pub(crate) explorer: crate::interact::Explorer,
@@ -778,6 +780,7 @@ impl UiState {
             drawer: None,
             chat: Vec::new(),
             transfers: Vec::new(),
+            host_files: Default::default(),
             listing: None,
             explorer: crate::interact::Explorer::default(),
             local_target: None,
@@ -1528,14 +1531,16 @@ impl UiState {
             && matches!(self.incoming.as_ref().map(|i| &i.request.kind), Some(RequestKind::Session { .. }))
     }
 
-    /// Milliseconds from `now_ms` to the next whole minute of the host banner's duration ("há 12 min"), or `None`
-    /// while no session is being hosted. The shell arms one timer for it, re-arms it after each firing and stops it
-    /// when the banner closes: the banner's text changes only on these minutes, so it needs no steadier tick.
+    /// Milliseconds from `now_ms` to the next change of the host banner's text: the next whole minute of its duration
+    /// ("há 12 min") or, sooner, the end of the files note it shows (FILES-UI.md 6, 10 s); `None` while no session is
+    /// being hosted. The shell arms one timer for it, re-arms it after each firing (and when a note makes it sooner)
+    /// and stops it when the banner closes: the banner's text changes only then, so it needs no steadier tick.
     pub fn banner_minute_delay_ms(&self, now_ms: u64) -> Option<u64> {
         let SessionState::Active { since_ms, .. } = self.host_session()?.state else { return None };
         const MINUTE_MS: u64 = 60_000;
         let elapsed = now_ms.saturating_sub(since_ms);
-        Some(MINUTE_MS - elapsed % MINUTE_MS)
+        let minute = MINUTE_MS - elapsed % MINUTE_MS;
+        Some(self.banner_files_expiry_ms(now_ms).map_or(minute, |note| note.min(minute)))
     }
 
     /// True while something counts seconds down (the shell then runs a one-second timer, otherwise none).
@@ -2060,6 +2065,14 @@ impl UiState {
                 }
                 Changed::VIEWER
             }
+            // The hosted session has no explorer: its transfers only count on the banner.
+            UiEvent::Transfer { transfer_id, session_id, outgoing, state, .. }
+                if self.is_hosted_transfer(session_id) =>
+            {
+                self.host_transfer(session_id, transfer_id, outgoing, &state)
+            }
+            UiEvent::HostFilesChanged { session_id, op, count } => self.host_files_changed(session_id, op, count),
+            UiEvent::HostFilesReach { session_id } => self.host_files_reach(session_id),
             UiEvent::Transfer { transfer_id, session_id, name, outgoing, state } => {
                 self.system_drag_transfer(transfer_id, session_id, &name, outgoing, &state);
                 // A transfer that moves or ends was answered (a refusal fails it).
@@ -2219,6 +2232,9 @@ impl UiState {
             let before = self.sessions.iter().find(|s| s.id == id).map(|s| (s.state.clone(), s.device_id.clone()));
             let entry = self.sessions.iter().find(|s| s.id == id && s.is_waiting_entry()).cloned();
             self.sessions.retain(|s| s.id != id);
+            if self.host_session().is_none() {
+                self.host_files = Default::default();
+            }
             // An entry that ends with a code (not a normal end) did not open: the card says it did not.
             if let Some(e) = &entry
                 && reason.is_some()

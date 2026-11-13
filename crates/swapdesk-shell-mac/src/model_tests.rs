@@ -77,6 +77,8 @@ fn the_host_banner_says_who_and_since_when_and_goes_with_the_session() {
     let peer = state.device_by_id(&h.device_id).unwrap().name.clone();
     assert!(m.who.contains(&peer) && m.who.contains("controla"), "{}", m.who);
     assert!(m.since.contains("12 min"), "{}", m.since);
+    assert_eq!(m.files, None);
+    assert_eq!(m.size, swapdesk_paint::banner_size());
     assert_eq!(m.label(), format!("{} {}", m.who, m.since));
     assert_eq!(m.title, swapdesk_ui::a11y::window_title(&state, WindowKind::Banner));
     // How to end it is a control of the banner's frame.

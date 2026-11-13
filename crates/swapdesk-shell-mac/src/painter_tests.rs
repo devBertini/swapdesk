@@ -31,7 +31,9 @@ fn every_scenario_paints_with_core_graphics_and_every_control_has_a_place() {
     for sc in Scenario::ALL {
         let state = sc.prepared_state();
         for kind in state.windows() {
-            let r = render(&fonts, &state, kind, design_size(kind), 1.0, &Interaction::default())
+            let size =
+                if kind == WindowKind::Banner { swapdesk_paint::banner_size_for(&state) } else { design_size(kind) };
+            let r = render(&fonts, &state, kind, size, 1.0, &Interaction::default())
                 .unwrap_or_else(|e| panic!("{} {kind:?}: {e}", sc.name()));
             assert!(r.distinct_colors() > 3, "{} {kind:?} looks blank", sc.name());
             let name = format!("{}{}", sc.name(), suffix(kind));

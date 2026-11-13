@@ -110,8 +110,10 @@ fn ops_notes_and_reply_bodies_round_trip() {
         n(false, TransferWire::Done),
         n(false, TransferWire::Failed { reason: ApiCode::NotPermitted }),
         FilesNote::SavedAs { session_id: 1, transfer_id: 2, name: t("n (2)") },
+        FilesNote::Changed { session_id: 1, op: 3, count: 4 },
+        FilesNote::Reach { session_id: 1 },
     ];
-    for (note, kind) in notes.iter().zip([20u16, 20, 20, 20, 20, 21]) {
+    for (note, kind) in notes.iter().zip([20u16, 20, 20, 20, 20, 21, 23, 24]) {
         assert_eq!(Notify::Files(note.clone()).kind(), kind);
         round(&Message::UiNotify(Notify::Files(note.clone())));
     }

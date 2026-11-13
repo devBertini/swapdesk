@@ -328,6 +328,8 @@ pub fn note_to_event(n: FilesNote) -> a::UiEvent {
         FilesNote::Volumes { session_id, volumes } => {
             a::UiEvent::RemoteVolumes { session_id, volumes: volumes_from_wire(volumes) }
         }
+        FilesNote::Changed { session_id, op, count } => a::UiEvent::HostFilesChanged { session_id, op, count },
+        FilesNote::Reach { session_id } => a::UiEvent::HostFilesReach { session_id },
     }
 }
 
@@ -347,6 +349,10 @@ pub fn event_to_note(e: &a::UiEvent) -> Option<FilesNote> {
         a::UiEvent::RemoteVolumes { session_id, volumes } => {
             FilesNote::Volumes { session_id: *session_id, volumes: volumes_to_wire(volumes) }
         }
+        a::UiEvent::HostFilesChanged { session_id, op, count } => {
+            FilesNote::Changed { session_id: *session_id, op: *op, count: *count }
+        }
+        a::UiEvent::HostFilesReach { session_id } => FilesNote::Reach { session_id: *session_id },
         _ => return None,
     })
 }

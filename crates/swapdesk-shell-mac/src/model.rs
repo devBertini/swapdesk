@@ -43,7 +43,7 @@ pub fn viewer_title(state: &UiState) -> Option<String> {
 
 // ---------- the host banner ----------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BannerModel {
     /// The panel's accessible title (it has no title bar): the name of the banner in the shared accessibility tree.
     pub title: String,
@@ -51,12 +51,19 @@ pub struct BannerModel {
     pub who: String,
     /// "há 12 min", drawn soft.
     pub since: String,
+    /// The line under them while files move or change here ("Copiando arquivos: 2 de 5"), never a file name.
+    pub files: Option<String>,
+    /// The panel's size in points: one line taller while `files` is there.
+    pub size: (f32, f32),
 }
 
 impl BannerModel {
     /// The whole line: the panel is put in front again when it changes.
     pub fn label(&self) -> String {
-        format!("{} {}", self.who, self.since)
+        match &self.files {
+            Some(files) => format!("{} {} {files}", self.who, self.since),
+            None => format!("{} {}", self.who, self.since),
+        }
     }
 }
 
@@ -65,7 +72,13 @@ pub fn banner_model(state: &UiState) -> Option<BannerModel> {
     let h = state.host_session()?;
     let peer = state.device_by_id(&h.device_id).map(|d| d.name.clone()).unwrap_or_default();
     let (who, since) = state.banner_parts(&peer, h);
-    Some(BannerModel { title: a11y::window_title(state, WindowKind::Banner), who, since })
+    Some(BannerModel {
+        title: a11y::window_title(state, WindowKind::Banner),
+        who,
+        since,
+        files: state.banner_files_line(),
+        size: swapdesk_paint::banner_size_for(state),
+    })
 }
 
 // ---------- the live region ----------

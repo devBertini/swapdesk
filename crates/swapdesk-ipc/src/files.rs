@@ -711,7 +711,7 @@ impl Wire for TransferWire {
     }
 }
 
-/// The notifications of the files feature (kinds 20 to 24; 23 and 24 are free).
+/// The notifications of the files feature (kinds 20 to 24).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesNote {
     /// 20: a transfer of the session changed (progress at most 4 times a second per transfer).
@@ -721,6 +721,12 @@ pub enum FilesNote {
     SavedAs { session_id: u64, transfer_id: u32, name: Text },
     /// 22: the host's set of volumes changed (pushed by the host, at most once a second).
     Volumes { session_id: u64, volumes: VolumesView },
+    /// 23: host side only, for the session banner (FILES-UI.md 6): the viewer made a change here. `op` is the audit's
+    /// (0 new folder, 1 rename, 2 move, 3 to the bin), `count` the names done. Counts only, never a name.
+    Changed { session_id: u64, op: u8, count: u32 },
+    /// 24: host side only, for the session banner: the viewer reached a volume outside the home folder, sent the first
+    /// time it happens in the session.
+    Reach { session_id: u64 },
 }
 
 impl FilesNote {
@@ -729,6 +735,8 @@ impl FilesNote {
             Self::Transfer { .. } => 20,
             Self::SavedAs { .. } => 21,
             Self::Volumes { .. } => 22,
+            Self::Changed { .. } => 23,
+            Self::Reach { .. } => 24,
         }
     }
 
@@ -754,6 +762,12 @@ impl FilesNote {
                 w.put_u64(*session_id);
                 volumes.put(w, 0)?;
             }
+            Self::Changed { session_id, op, count } => {
+                w.put_u64(*session_id);
+                w.put_u8(*op);
+                w.put_u32(*count);
+            }
+            Self::Reach { session_id } => w.put_u64(*session_id),
         }
         Ok(())
     }
@@ -769,6 +783,8 @@ impl FilesNote {
             },
             21 => Self::SavedAs { session_id: r.u64()?, transfer_id: r.u32()?, name: Text::get(r, MAX_FS_NAME)? },
             22 => Self::Volumes { session_id: r.u64()?, volumes: VolumesView::get(r, 0)? },
+            23 => Self::Changed { session_id: r.u64()?, op: r.u8()?, count: r.u32()? },
+            24 => Self::Reach { session_id: r.u64()? },
             other => {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));
             }

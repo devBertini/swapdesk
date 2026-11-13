@@ -80,6 +80,8 @@ pub fn render(state: &UiState, kind: WindowKind, size: (f32, f32), scale: f32, i
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    // The banner is as tall as its content: one line more while it has a files line.
+    let size = if kind == WindowKind::Banner { swapdesk_paint::banner_size_for(state) } else { size };
     render_with(&Fonts::new()?, state, kind, size, scale, ix)
 }
 

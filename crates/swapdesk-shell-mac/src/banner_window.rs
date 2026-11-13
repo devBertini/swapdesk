@@ -81,7 +81,7 @@ impl BannerWindow {
         if self.panel.isVisible() && *self.label.borrow() == label {
             return;
         }
-        let size = self.panel.frame().size;
+        let size = frame(0.0, 0.0, f64::from(model.size.0), f64::from(model.size.1)).size;
         let screen = NSScreen::mainScreen(self.panel.mtm()).map(|s| s.visibleFrame());
         let (x, y) = match screen {
             Some(v) => {

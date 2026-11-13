@@ -38,6 +38,8 @@ pub struct Shared {
     placeholder_on: Cell<bool>,
     /// The banner's minute timer is armed (one-shot in effect: re-armed after each firing).
     banner_on: Cell<bool>,
+    /// When (local clock, ms) the armed banner timer fires, to arm it again when something is due sooner.
+    banner_due_ms: Cell<u64>,
     /// The appearance the windows (their DWM title bars) were last given: the state's effective theme.
     dark_applied: Cell<bool>,
     /// The drawer's terminal: the model of the open shell and its renderer (made when the panel first shows it).
@@ -162,6 +164,7 @@ fn run_shell(
         tick_on: Cell::new(false),
         placeholder_on: Cell::new(false),
         banner_on: Cell::new(false),
+        banner_due_ms: Cell::new(0),
         dark_applied: Cell::new(dark_now),
         terminal: RefCell::new(TerminalPane::default()),
         tray: Cell::new(false),
@@ -623,6 +626,7 @@ impl Shared {
         }
         for w in &windows {
             if changed.hits(w.kind) {
+                w.fit_banner();
                 w.invalidate();
             }
         }
@@ -712,11 +716,11 @@ impl Shared {
     /// Timers exist only while something needs them: no countdown, no pending command, no waiting data, no timer.
     fn sync_timers(&self) {
         let Some(h) = self.main_hwnd() else { return };
-        let (tick, placeholder, banner) = {
+        let (now_ms, tick, placeholder, banner) = {
             let st = self.state.borrow();
             let now = crate::system::local_clock().now_ms;
             // 20 ms past the boundary, so a timer that fires a little early still finds the new minute.
-            (st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
+            (now, st.needs_tick(), st.has_pending_fetch(), st.banner_minute_delay_ms(now).map(|ms| ms + 20))
         };
         // SAFETY: our window.
         unsafe {
@@ -728,9 +732,13 @@ impl Shared {
                 self.tick_on.set(false);
             }
             if let Some(ms) = banner {
-                if !self.banner_on.get() {
+                // Armed again (the same timer id is replaced) when the due moment moved earlier: a files note that
+                // ends in 10 s comes before the minute the timer was armed for.
+                let due = now_ms.saturating_add(ms);
+                if !self.banner_on.get() || due + 50 < self.banner_due_ms.get() {
                     SetTimer(Some(h), TIMER_BANNER, u32::try_from(ms).unwrap_or(60_000), None);
                     self.banner_on.set(true);
+                    self.banner_due_ms.set(due);
                 }
             } else if self.banner_on.get() {
                 let _ = KillTimer(Some(h), TIMER_BANNER);

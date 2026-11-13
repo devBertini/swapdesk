@@ -1361,6 +1361,9 @@ impl UiState {
         let Some(h) = self.host_session() else { return s.v };
         let peer = self.device_by_id(&h.device_id).map(|d| d.name.clone()).unwrap_or_default();
         s.text(UiRole::Text, self.banner_text(&peer, h));
+        if let Some(line) = self.banner_files_line() {
+            s.text(UiRole::Text, line);
+        }
         let unread = self.chat_unread();
         let chat_label = if unread > 0 {
             self.tm(&Msg::new(MsgKey::BannerChatUnread).with(unread.to_string()))
