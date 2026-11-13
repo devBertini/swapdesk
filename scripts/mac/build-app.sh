@@ -2,13 +2,17 @@
 # Builds Swapdesk.app (development identity) on the MacBook: the release binary of crates/swapdesk-app-mac, the bundle
 # (Info.plist, localized usage strings), and a code signature that stays the same across rebuilds (D25).
 #
-#   bash scripts/mac/build-app.sh [--no-build] [--adhoc] [--compare] [--dev-harness]
+#   bash scripts/mac/build-app.sh [--no-build] [--adhoc] [--compare] [--dev-harness] [--release-identity]
 #
 #   --no-build  reuse target/release/swapdesk-app-mac instead of running cargo
 #   --adhoc     sign ad hoc (no certificate); the designated requirement is then the binary's cdhash, which changes on
 #               every build, so every rebuild would ask for the macOS permissions again
 #   --dev-harness  build with the dev-harness feature (Swapdesk --drive-host, the proof with no human at the Mac);
 #               never for a build that leaves this machine
+#   --release-identity  sign with the "Swapdesk Release" certificate (UPDATES.md 7: the same designated requirement for
+#               every release, so an update keeps the macOS permissions) found in the keychain file
+#               $SWAPDESK_RELEASE_KEYCHAIN, unlocked with $SWAPDESK_RELEASE_KEYCHAIN_PASSWORD; never made here
+#               (packaging/macos/make-release-cert.sh makes it once), and no ad hoc fallback: a failure stops the build
 #   --compare   assemble and sign the bundle twice (the second with another CFBundleVersion, so the code directory
 #               differs as after a real rebuild) and fail unless the designated requirement is identical; also prints
 #               what an ad hoc signature would give, as the control
@@ -36,16 +40,24 @@ SIGN_DIR="${SWAPDESK_SIGN_DIR:-$HOME/.swapdesk-dev-signing}"
 KEYCHAIN="$SIGN_DIR/swapdesk-dev.keychain-db"
 PASSWORD_FILE="$SIGN_DIR/keychain-password"
 
-build=1; adhoc=0; compare=0; features=()
+build=1; adhoc=0; compare=0; features=(); release_identity=0
 for a in "$@"; do
   case "$a" in
     --no-build) build=0 ;;
     --adhoc) adhoc=1 ;;
     --compare) compare=1 ;;
     --dev-harness) features=(--features dev-harness) ;;  # development only: Swapdesk --drive-host
+    --release-identity) release_identity=1 ;;
     *) echo "unknown argument: $a" >&2; exit 2 ;;
   esac
 done
+
+if [ "$release_identity" = 1 ]; then
+  [ "$adhoc" = 0 ] && [ ${#features[@]} -eq 0 ] || { echo "--release-identity goes with neither --adhoc nor --dev-harness" >&2; exit 2; }
+  CERT_NAME="Swapdesk Release"
+  KEYCHAIN="${SWAPDESK_RELEASE_KEYCHAIN:?--release-identity needs SWAPDESK_RELEASE_KEYCHAIN}"
+  : "${SWAPDESK_RELEASE_KEYCHAIN_PASSWORD:?--release-identity needs SWAPDESK_RELEASE_KEYCHAIN_PASSWORD}"
+fi
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
@@ -119,6 +131,12 @@ find_hash() {
 # Creates the keychain and the certificate on the first run, unlocks the keychain on every run, sets `identity_hash`.
 # Every step is checked by hand (the caller tests the result, which turns `set -e` off inside).
 prepare_identity() {
+  if [ "$release_identity" = 1 ]; then
+    security unlock-keychain -p "$SWAPDESK_RELEASE_KEYCHAIN_PASSWORD" "$KEYCHAIN" || return 1
+    identity_hash="$(find_hash)"
+    [ -n "$identity_hash" ] || { echo "the release certificate is not in $KEYCHAIN" >&2; return 1; }
+    return 0
+  fi
   mkdir -p "$SIGN_DIR" && chmod 700 "$SIGN_DIR" || return 1
   local pw work
   if [ ! -f "$KEYCHAIN" ]; then
@@ -177,12 +195,20 @@ if [ "$adhoc" = 0 ]; then
     cat "$bundle_dir/identity.err" >&2
   else
     adhoc_reason="the development certificate could not be prepared: $(tail -3 "$bundle_dir/identity.err" | tr '\n' ' ')"
+    if [ "$release_identity" = 1 ]; then
+      echo "the release certificate could not be prepared: $(tail -3 "$bundle_dir/identity.err" | tr '\n' ' ')" >&2
+      exit 1
+    fi
   fi
 fi
 
 sign_with_fallback() { # $1 = bundle path
   if [ "$mode" = cert ]; then
     if ! sign "$1" cert 2>"$bundle_dir/sign.err"; then
+      if [ "$release_identity" = 1 ]; then
+        echo "codesign with the release certificate failed: $(tail -3 "$bundle_dir/sign.err" | tr '\n' ' ')" >&2
+        exit 1
+      fi
       adhoc_reason="codesign with the development certificate failed: $(tail -3 "$bundle_dir/sign.err" | tr '\n' ' ')"
       mode=adhoc
     fi

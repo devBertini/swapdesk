@@ -62,6 +62,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build and pack
+        env:
+          SWAPDESK_RELEASE_P12_BASE64: ${{ secrets.MACOS_RELEASE_P12 }}
+          SWAPDESK_RELEASE_P12_PASSWORD: ${{ secrets.MACOS_RELEASE_P12_PASSWORD }}
         run: bash packaging/macos/build-release.sh
       - name: Find the zip
         id: zip
