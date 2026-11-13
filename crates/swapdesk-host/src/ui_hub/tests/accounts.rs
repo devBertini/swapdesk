@@ -89,16 +89,26 @@ thread_local! {
     static LOG: LogCapture = LogCapture::new();
 }
 
-/// Four free ports in a row on loopback (two slots).
+/// The base of a free block of `SLOT_PORTS` ports on loopback, room for every slot a test of this file uses.
+///
+/// Each test runs in its own process at the same time as others, so the block starts where this process id points and
+/// the blocks of two processes never overlap: a test may use any port of its block (a held slot moves an account to the
+/// next one), never one past it. The blocks stay below Windows' dynamic range (49152 and up), where Hyper-V and WinNAT
+/// reserve ports at each boot.
 fn free_slots() -> u16 {
-    let start = 43_000 + (std::process::id() % 1_500) as u16 * 4;
-    for p in (start..50_000).step_by(4) {
-        if (0..4).all(|i| std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, p + i)).is_ok()) {
-            return p;
-        }
-    }
-    panic!("no four free ports in a row");
+    const FIRST: u16 = 43_000;
+    // A prime count of blocks: process ids on Windows are multiples of 4, and they still spread over every block.
+    const BLOCKS: u16 = 743;
+    let free = |base: u16| (0..SLOT_PORTS).all(|i| std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, base + i)).is_ok());
+    let first = (std::process::id() % u32::from(BLOCKS)) as u16;
+    (0..BLOCKS)
+        .map(|k| FIRST + (first + k) % BLOCKS * SLOT_PORTS)
+        .find(|&base| free(base))
+        .expect("no free block of ports below the dynamic range")
 }
+
+/// Ports of one test's block: four slots of two ports each.
+const SLOT_PORTS: u16 = 8;
 
 const A: &str = "S-1-5-21-1-2-3-1001";
 const B: &str = "S-1-5-21-1-2-3-1002";
