@@ -174,6 +174,7 @@ impl UiState {
         start: (Option<Command>, Vec<Command>),
     ) -> Option<Command> {
         let session_id = self.session_id()?;
+        let peer = self.peer_name();
         let t = &mut self.explorer.there;
         let dl = t.download.get_or_insert_with(Download::default);
         let idle = dl.scan.cur.is_none();
@@ -194,7 +195,7 @@ impl UiState {
             dl.made = Some(0);
         }
         if refused {
-            t.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
+            t.notice = Some(Msg::new(MsgKey::ExplorerHostNamesLeftOut).with(peer));
         }
         match first {
             Some((path, start)) => Some(Command::FilesListPage { session_id, path, start }),
@@ -254,7 +255,7 @@ impl UiState {
             dl.scan.queue.push_back(ScanDir { remote: join(&cur.dir.remote, &name), local, depth: cur.dir.depth + 1 });
         }
         if refused {
-            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
+            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerHostNamesLeftOut).with(self.peer_name()));
         }
         self.download_next();
     }

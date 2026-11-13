@@ -1220,6 +1220,8 @@ pub enum UpdateFailure {
     Unwritable,
     /// Mac: the app runs from a translocated copy.
     Translocated,
+    /// The applier could not take the installed files (one was in use): nothing changed, the old version runs.
+    NotApplied,
 }
 
 /// Why the last "Procurar agora" failed.

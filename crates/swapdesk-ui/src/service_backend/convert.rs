@@ -431,6 +431,7 @@ pub fn update_from_wire(v: w::UpdateView) -> a::UpdateInfo {
             6 => F::Disk,
             8 => F::Unwritable,
             9 => F::Translocated,
+            10 => F::NotApplied,
             _ => F::Cancelled,
         }),
     };

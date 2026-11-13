@@ -1215,6 +1215,9 @@ fn a_downloaded_folder_that_exists_here_asks_before_it_merges() {
     assert_eq!(card.title, "“Contratos” já existe em Downloads");
     let replace = card.buttons.iter().find(|b| b.id == ControlId::ExpConflictReplace).unwrap();
     assert!(!replace.enabled, "a folder is merged or skipped, never replaced");
+    assert_eq!(replace.why.as_deref(), Some("Uma pasta é mesclada ou pulada, nunca substituída."));
+    let merge = card.buttons.iter().find(|b| b.id == ControlId::ExpConflictKeepBoth).unwrap();
+    assert_eq!(merge.label, "Mesclar", "the primary answer says what it does to a folder");
     assert!(s.activate(ControlId::ExpConflictReplace).commands.is_empty());
     assert!(s.explorer_manage().conflict.is_some(), "the card stays");
     // Cancelar: nothing happens.

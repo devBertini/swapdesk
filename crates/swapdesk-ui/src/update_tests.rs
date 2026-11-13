@@ -156,3 +156,12 @@ fn update_restarting_asks_the_shell_to_close_once() {
     assert!(s.take_quit_request());
     assert!(!s.take_quit_request(), "once");
 }
+
+/// T7: an update the applier could not take (a Swapdesk file in use) says so, and the old version keeps running.
+#[test]
+fn an_update_not_applied_says_a_file_was_in_use_and_nothing_changed() {
+    let mut s = Scenario::Inicio.prepared_state();
+    s.apply(UiEvent::UpdateChanged(update_with(UpdatePhase::Failed(UpdateFailure::NotApplied))));
+    let card = s.update_card().expect("the card says why");
+    assert!(card.title.starts_with("A atualização não foi aplicada"), "{}", card.title);
+}

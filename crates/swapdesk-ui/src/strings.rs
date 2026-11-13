@@ -713,6 +713,11 @@ strings! {
     RecvFolderDeniedBody => "O macOS ainda não deixou o Swapdesk usar {0}. Abra Arquivos e Pastas e ligue essa pasta.", "macOS has not let Swapdesk use {0} yet. Open Files and Folders and switch that folder on.";
     RecvFolderDeniedOpen => "Abrir Arquivos e Pastas", "Open Files and Folders";
     MacPermsWaiting => "Esperando você permitir nos Ajustes do Sistema…", "Waiting for you to allow it in System Settings…";
+    // T7: texts the security fixes need
+    UpdErrNotApplied => "A atualização não foi aplicada: um arquivo do Swapdesk estava em uso. Nada mudou; tente de novo.", "The update was not applied: a Swapdesk file was in use. Nothing changed; try again.";
+    ExplorerHostNamesLeftOut => "O {0} mandou nomes que o Swapdesk não aceita; eles ficaram de fora.", "{0} sent names Swapdesk does not accept; they were left out.";
+    ExplorerConflictMerge => "Mesclar", "Merge";
+    ExplorerConflictFolderNoReplace => "Uma pasta é mesclada ou pulada, nunca substituída.", "A folder is merged or skipped, never replaced.";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

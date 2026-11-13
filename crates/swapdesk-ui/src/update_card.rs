@@ -113,6 +113,7 @@ impl UiState {
                     UpdateFailure::Disk => MsgKey::UpdErrDisk,
                     UpdateFailure::Unwritable => MsgKey::UpdErrMacAdmin,
                     UpdateFailure::Translocated => MsgKey::UpdErrMacLocation,
+                    UpdateFailure::NotApplied => MsgKey::UpdErrNotApplied,
                     // Refusals and a cancel are answered where they were asked: no card.
                     _ => return self.idle_card(u),
                 };

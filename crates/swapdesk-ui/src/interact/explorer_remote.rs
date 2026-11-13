@@ -380,8 +380,7 @@ impl UiState {
 
     fn note_names_left_out(&mut self, count: usize) {
         if count > 0 {
-            // Closest existing text; a text of its own is proposed in LANE-STATUS.md.
-            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
+            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerHostNamesLeftOut).with(self.peer_name()));
         }
     }
 
@@ -1335,9 +1334,15 @@ impl UiState {
                     MsgKey::ExplorerConflictReplace,
                     CardStyle::Danger,
                     block.is_none() && !folder_named,
-                    block,
+                    block.or_else(|| folder_named.then(|| self.t(MsgKey::ExplorerConflictFolderNoReplace))),
                 ),
-                btn(ControlId::ExpConflictKeepBoth, MsgKey::ExplorerConflictKeepBoth, CardStyle::Primary, true, None),
+                btn(
+                    ControlId::ExpConflictKeepBoth,
+                    if folder_named { MsgKey::ExplorerConflictMerge } else { MsgKey::ExplorerConflictKeepBoth },
+                    CardStyle::Primary,
+                    true,
+                    None,
+                ),
             ],
         })
     }
