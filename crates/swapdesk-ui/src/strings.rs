@@ -696,6 +696,9 @@ strings! {
     ExplorerPaste => "Colar", "Paste";
     ExplorerRevealWindows => "Mostrar no Explorador de Arquivos", "Show in File Explorer";
     ExplorerRevealMac => "Mostrar no Finder", "Show in Finder";
+    // Slices 4 and 5: drags with the system's file manager (FILES-UI.md 4.2, 4.3)
+    ExplorerDiskOnly => "Só dá para enviar arquivos que estão no disco.", "Only files that are on a disk can be sent.";
+    ExplorerDropOnScreen => "Solte para enviar ao {0}", "Drop to send to {0}";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
