@@ -9,10 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, UNIX_EPOCH};
 
+use swapdesk_ipc::FsPage;
 use swapdesk_proto::ErrorCode;
 
 use crate::access::AccessState;
-use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
+use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, Moved, ReadHandle};
 use crate::fsutil::{Create, is_reparse, open_rw_nofollow};
 use crate::name::{META_SUFFIX, PART_SUFFIX, validate_name};
 
@@ -272,6 +273,25 @@ impl Fs for LocalFs {
         let mut buf = Vec::new();
         f.take(META_READ_MAX as u64).read_to_end(&mut buf).map_err(io_failed)?;
         Ok(Some(buf))
+    }
+
+    fn list_page(&self, path: &Path, start: u32, max: u16) -> Result<FsPage, ErrorCode> {
+        let mut page = crate::fsops::list_page(path, start, max)?;
+        self.access.note_ok(path);
+        page.free = self.free_space.and_then(|probe| probe(path));
+        Ok(page)
+    }
+
+    fn make_dir(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+        crate::fsops::make_dir(dir, name)
+    }
+
+    fn rename(&self, dir: &Path, name: &str, new_name: &str) -> Result<(), ErrorCode> {
+        crate::fsops::rename(dir, name, new_name)
+    }
+
+    fn move_into(&self, from_dir: &Path, name: &str, to_dir: &Path) -> Result<Moved, ErrorCode> {
+        crate::fsops::move_into(from_dir, name, to_dir)
     }
 
     fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode> {

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -48,6 +48,8 @@ const INPUT_QUEUE: usize = 256;
 const DEFAULT_OUTBOX: Limits = Limits::new(16, DEFAULT_BYTES);
 /// Disk calls queued toward the files thread before the reader waits.
 const FS_QUEUE: usize = 64;
+/// How often the file server looks at the set of mounted volumes, while it serves files (FILES-UI.md 7.4).
+const VOLUME_POLL: Duration = Duration::from_secs(1);
 /// Most cursor updates read per loop turn.
 const CURSOR_BURST: usize = 8;
 /// L4: how long the screen must stand still before one refinement frame is encoded.
@@ -1353,9 +1355,24 @@ where
             let thread = std::thread::Builder::new()
                 .name("helper-fs".into())
                 .spawn(move || {
-                    while let Ok(msg) = rx.recv() {
-                        if let Some(reply) = server.serve(msg) {
-                            outbox.send_control(reply);
+                    let mut looked = Instant::now();
+                    loop {
+                        match rx.recv_timeout(VOLUME_POLL) {
+                            Ok(msg) => {
+                                if let Some(reply) = server.serve(msg) {
+                                    outbox.send_control(reply);
+                                }
+                            }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
+                        // About once a second the volumes are looked at again; a change goes to the service, which
+                        // pushes a fresh `VolumesList` to the viewer.
+                        if server.publishes_volumes() && looked.elapsed() >= VOLUME_POLL {
+                            looked = Instant::now();
+                            if server.poll_volumes_changed() {
+                                outbox.send_control(Message::FsVolumesChanged);
+                            }
                         }
                     }
                 })

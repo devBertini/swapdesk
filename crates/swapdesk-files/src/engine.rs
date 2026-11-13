@@ -11,9 +11,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use swapdesk_ipc::VolumesView;
 use swapdesk_proto::{
-    DirListing, DirRequest, ErrorCode, ErrorMessage, FileAccept, FileCancel, FileDecline, FileDone, FileGet, FileOffer,
-    FilePause, FileResume, FileVerified, Message,
+    DirEntry2, DirListing, DirPage, DirPageListing, DirRequest, ErrorCode, ErrorMessage, FileAccept, FileCancel,
+    FileDecline, FileDone, FileGet, FileOffer, FilePause, FileResume, FileVerified, FsOp, FsOpKind, FsOpResult,
+    MAX_FRAME_PAYLOAD, Message, OpItem, Place, Volume, VolumeKind, VolumesList, VolumesRequest, Wire,
 };
 
 use crate::disk::Fs;
@@ -90,6 +92,44 @@ pub enum Event {
         entries: Vec<swapdesk_proto::DirEntry>,
         truncated: bool,
     },
+    /// Viewer: a page of the host's folder (the answer to a `DirPage`).
+    PageListing {
+        req_id: u32,
+        path: String,
+        start: u32,
+        entries: Vec<DirEntry2>,
+        next: Option<u32>,
+        free_bytes: Option<u64>,
+    },
+    /// Viewer: the host's home, places and volumes; `req_id` 0 when the host pushed it because the set changed.
+    Volumes(VolumesList),
+    /// Viewer: the outcome of a change, one item per name.
+    OpResult {
+        op_id: u32,
+        results: Vec<OpItem>,
+    },
+    /// Host, for the audit (FILES-UI.md 8.3, tag 19): one change message done. `op` 0 new folder, 1 rename, 2 move,
+    /// 3 to the bin; `count` the names done; `area` 0 the home folder, 1 elsewhere on the system volume, 2 another
+    /// volume.
+    Changed {
+        op: u8,
+        count: u32,
+        area: u8,
+    },
+    /// Host, for the audit (tag 20): the viewer reached a new kind of volume; `kinds` is every kind reached so far
+    /// (bit 0 the system volume outside home, 1 fixed, 2 removable, 3 network, 4 optical or image).
+    Reach {
+        kinds: u8,
+    },
+}
+
+/// Most `FsOp` messages of one session in flight (FILES-UI.md 8.4).
+pub const MAX_FS_OPS: usize = 4;
+
+/// The answer to an `FsOp` that is one too many: `BUSY` for every name, in order.
+pub fn busy_result(op: &FsOp) -> Message {
+    let results = op.op.names().into_iter().map(|n| OpItem { name: n.to_string(), code: ErrorCode::Busy }).collect();
+    Message::FsOpResult(FsOpResult { op_id: op.op_id, results })
 }
 
 /// What the caller must do.
@@ -141,6 +181,14 @@ pub struct Engine {
     /// Viewer: the folder chosen for each `FileGet` still waiting for its offer.
     gets: HashMap<u32, PathBuf>,
     dir_reqs: HashSet<u32>,
+    /// Viewer: the explorer's requests waiting for their answer.
+    page_reqs: HashSet<u32>,
+    vol_reqs: HashSet<u32>,
+    ops: HashSet<u32>,
+    /// Host: the volume kinds the viewer reached so far (FILES-UI.md 8.3, the bits of `Event::Reach`).
+    reach: u8,
+    /// Host: the volumes as the disk last said, to tell the kind of a volume path.
+    kinds: Vec<(u32, VolumeKind)>,
 }
 
 fn error_msg(code: ErrorCode, about_type: u16, about_id: u32) -> Out {
@@ -159,7 +207,18 @@ impl Engine {
 
     /// An engine whose every disk access goes through `fs`.
     pub fn with_fs(cfg: FilesConfig, fs: Arc<dyn Fs>) -> Self {
-        Self { cfg, fs, transfers: HashMap::new(), gets: HashMap::new(), dir_reqs: HashSet::new() }
+        Self {
+            cfg,
+            fs,
+            transfers: HashMap::new(),
+            gets: HashMap::new(),
+            dir_reqs: HashSet::new(),
+            page_reqs: HashSet::new(),
+            vol_reqs: HashSet::new(),
+            ops: HashSet::new(),
+            reach: 0,
+            kinds: Vec::new(),
+        }
     }
 
     pub fn side(&self) -> Side {
@@ -206,6 +265,44 @@ impl Engine {
     pub fn request_dir(&mut self, req_id: u32, path: Option<String>) -> Vec<Out> {
         self.dir_reqs.insert(req_id);
         vec![Out::Msg(Message::DirRequest(DirRequest { req_id, path }))]
+    }
+
+    /// Viewer: asks for a page of a folder of the host (a 1.1 path).
+    pub fn request_page(&mut self, req_id: u32, path: String, start: u32, max: u16) -> Vec<Out> {
+        if self.cfg.side != Side::Viewer {
+            return Vec::new();
+        }
+        self.page_reqs.insert(req_id);
+        vec![Out::Msg(Message::DirPage(DirPage { req_id, path, start, max }))]
+    }
+
+    /// Viewer: asks for the host's home, places and volumes.
+    pub fn request_volumes(&mut self, req_id: u32) -> Vec<Out> {
+        if self.cfg.side != Side::Viewer {
+            return Vec::new();
+        }
+        self.vol_reqs.insert(req_id);
+        vec![Out::Msg(Message::VolumesRequest(VolumesRequest { req_id }))]
+    }
+
+    /// Viewer: asks the host to change its files.
+    pub fn request_op(&mut self, op_id: u32, op: FsOpKind) -> Vec<Out> {
+        if self.cfg.side != Side::Viewer {
+            return Vec::new();
+        }
+        self.ops.insert(op_id);
+        vec![Out::Msg(Message::FsOp(FsOp { op_id, op }))]
+    }
+
+    /// Host: the volume list as it is now, to push to the viewer (`req_id` 0) when the set changed.
+    pub fn volumes_push(&mut self) -> Vec<Out> {
+        if self.cfg.side != Side::Host {
+            return Vec::new();
+        }
+        match self.volumes_list(0) {
+            Ok(list) => vec![Out::Msg(Message::VolumesList(list))],
+            Err(_) => Vec::new(),
+        }
     }
 
     pub fn pause(&mut self, id: u32) -> Vec<Out> {
@@ -271,6 +368,9 @@ impl Engine {
         }
         self.gets.clear();
         self.dir_reqs.clear();
+        self.page_reqs.clear();
+        self.vol_reqs.clear();
+        self.ops.clear();
         outs
     }
 
@@ -459,6 +559,12 @@ impl Engine {
             Message::DirRequest(m) => self.on_dir_request(m),
             Message::DirListing(m) => self.on_listing(m),
             Message::FileGet(m) => self.on_get(m),
+            Message::DirPage(m) => self.on_dir_page(m),
+            Message::DirPageListing(m) => self.on_page_listing(m),
+            Message::VolumesRequest(m) => self.on_volumes_request(m),
+            Message::VolumesList(m) => self.on_volumes_list(m),
+            Message::FsOp(m) => self.on_fs_op(m),
+            Message::FsOpResult(m) => self.on_op_result(m),
             _ => Vec::new(),
         }
     }
@@ -491,17 +597,20 @@ impl Engine {
         if self.transfers.contains_key(&id) {
             return decline(ErrorCode::ProtocolViolation);
         }
+        let mut outs: Vec<Out> = match (&m.dest, self.cfg.side) {
+            (Some(dest), Side::Host) => self.note_reach(dest).into_iter().collect(),
+            _ => Vec::new(),
+        };
         match Incoming::open_with(Arc::clone(&self.fs), &dir, &m.name, m.size, m.mtime_ms) {
             Ok(inc) => {
                 let resume_from = inc.resume_from();
                 self.transfers.insert(id, Transfer::Rx(Box::new(Rx { inc, done_sha: None, paused: false })));
-                vec![
-                    Out::Event(Event::Incoming { id, name: m.name, size: m.size, resume_from }),
-                    Out::Msg(Message::FileAccept(FileAccept { transfer_id: id, resume_from })),
-                ]
+                outs.push(Out::Event(Event::Incoming { id, name: m.name, size: m.size, resume_from }));
+                outs.push(Out::Msg(Message::FileAccept(FileAccept { transfer_id: id, resume_from })));
             }
-            Err(code) => decline(code),
+            Err(code) => outs.extend(decline(code)),
         }
+        outs
     }
 
     fn on_accept(&mut self, m: FileAccept) -> Vec<Out> {
@@ -566,13 +675,204 @@ impl Engine {
         if self.transfers.contains_key(&id) {
             return vec![error_msg(ErrorCode::Busy, 0x040B, id)];
         }
+        let mut outs: Vec<Out> = self.note_reach(&m.path).into_iter().collect();
         match Outgoing::open_with(Arc::clone(&self.fs), std::path::Path::new(&m.path)) {
             Ok(out) => {
                 let offer = out.offer(id, None);
                 self.transfers.insert(id, Transfer::Tx(Tx { out, state: TxState::Offered }));
-                vec![Out::Msg(Message::FileOffer(offer))]
+                outs.push(Out::Msg(Message::FileOffer(offer)));
             }
-            Err(code) => vec![error_msg(code, 0x040B, id)],
+            Err(code) => outs.push(error_msg(code, 0x040B, id)),
+        }
+        outs
+    }
+
+    // ---------- the explorer's messages (minor 2, FILES-UI.md 7.3) ----------
+
+    /// The kind of the volume a 1.1 path starts on (`None` for a home path or a volume the disk does not publish).
+    fn kind_of_path(&mut self, path: &str) -> Option<VolumeKind> {
+        let id: u32 = path.strip_prefix(':')?.split('/').next()?.parse().ok()?;
+        if !self.kinds.iter().any(|(i, _)| *i == id) {
+            let _ = self.volumes_list(0);
+        }
+        self.kinds.iter().find(|(i, _)| *i == id).map(|(_, k)| *k)
+    }
+
+    /// Host: the viewer reaches `path`; the first time it reaches a kind of volume, the audit hears of it.
+    fn note_reach(&mut self, path: &str) -> Option<Out> {
+        if self.cfg.side != Side::Host || !path.starts_with(':') {
+            return None;
+        }
+        let bit = match self.kind_of_path(path)? {
+            VolumeKind::System => 1,
+            VolumeKind::Fixed => 1 << 1,
+            VolumeKind::Removable => 1 << 2,
+            VolumeKind::Network => 1 << 3,
+            VolumeKind::Optical | VolumeKind::Image => 1 << 4,
+        };
+        if self.reach & bit != 0 {
+            return None;
+        }
+        self.reach |= bit;
+        Some(Out::Event(Event::Reach { kinds: self.reach }))
+    }
+
+    /// Host: the disk's home, places and volumes as the wire's `VolumesList`.
+    fn volumes_list(&mut self, req_id: u32) -> Result<VolumesList, ErrorCode> {
+        let VolumesView { home, places, volumes } = self.fs.volumes()?;
+        self.kinds = volumes.iter().map(|v| (v.id, v.kind)).collect();
+        Ok(VolumesList {
+            req_id,
+            home: home.0,
+            places: places.into_iter().map(|p| Place { kind: p.kind, path: p.path.0 }).collect(),
+            volumes: volumes
+                .into_iter()
+                .map(|v| Volume {
+                    id: v.id,
+                    kind: v.kind,
+                    label: v.label.0,
+                    letter: v.letter,
+                    total_bytes: v.total_bytes,
+                    free_bytes: v.free_bytes,
+                    has_bin: v.has_bin,
+                })
+                .collect(),
+        })
+    }
+
+    fn on_dir_page(&mut self, m: DirPage) -> Vec<Out> {
+        if self.cfg.side != Side::Host {
+            return vec![error_msg(ErrorCode::NotPermitted, 0x040C, m.req_id)];
+        }
+        let mut outs: Vec<Out> = self.note_reach(&m.path).into_iter().collect();
+        let max = m.max.clamp(1, 2000);
+        let page = match self.fs.list_page(std::path::Path::new(&m.path), m.start, max) {
+            Ok(p) => p,
+            Err(code) => {
+                outs.push(error_msg(code, 0x040C, m.req_id));
+                return outs;
+            }
+        };
+        // The frame holds: req_id 4, the path (length prefix up to 2 bytes + bytes), start 4, the entry count (up to
+        // 4), `next` (1 + 4) and `free_bytes` (1 + 8).
+        let mut budget = MAX_FRAME_PAYLOAD.saturating_sub(4 + 2 + m.path.len() + 4 + 4 + 5 + 9);
+        let mut next = page.next;
+        let mut entries = Vec::new();
+        for (i, e) in page.entries.into_iter().enumerate() {
+            let entry = DirEntry2 { name: e.name.0, kind: e.kind, size: e.size, mtime_ms: e.mtime_ms, flags: e.flags };
+            let Ok(bytes) = entry.encode() else { continue };
+            if bytes.len() > budget {
+                // The page ends before the frame would pass its limit; the next one starts at this entry.
+                next = Some(m.start.saturating_add(u32::try_from(i).unwrap_or(u32::MAX)));
+                break;
+            }
+            budget -= bytes.len();
+            entries.push(entry);
+        }
+        outs.push(Out::Msg(Message::DirPageListing(DirPageListing {
+            req_id: m.req_id,
+            path: m.path,
+            start: m.start,
+            entries,
+            next,
+            free_bytes: page.free,
+        })));
+        outs
+    }
+
+    fn on_page_listing(&mut self, m: DirPageListing) -> Vec<Out> {
+        if self.cfg.side == Side::Viewer && self.page_reqs.remove(&m.req_id) {
+            vec![Out::Event(Event::PageListing {
+                req_id: m.req_id,
+                path: m.path,
+                start: m.start,
+                entries: m.entries,
+                next: m.next,
+                free_bytes: m.free_bytes,
+            })]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn on_volumes_request(&mut self, m: VolumesRequest) -> Vec<Out> {
+        if self.cfg.side != Side::Host {
+            return vec![error_msg(ErrorCode::NotPermitted, 0x040E, m.req_id)];
+        }
+        match self.volumes_list(m.req_id) {
+            Ok(list) => vec![Out::Msg(Message::VolumesList(list))],
+            Err(code) => vec![error_msg(code, 0x040E, m.req_id)],
+        }
+    }
+
+    fn on_volumes_list(&mut self, m: VolumesList) -> Vec<Out> {
+        // A push (`req_id` 0) is never asked for; anything else must answer a request of ours.
+        if self.cfg.side == Side::Viewer && (m.req_id == 0 || self.vol_reqs.remove(&m.req_id)) {
+            vec![Out::Event(Event::Volumes(m))]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Host: one change message. Each name gets its own call, in order, and its own result; what was done stays done.
+    fn on_fs_op(&mut self, m: FsOp) -> Vec<Out> {
+        if self.cfg.side != Side::Host {
+            return vec![error_msg(ErrorCode::NotPermitted, 0x0410, m.op_id)];
+        }
+        use std::path::Path;
+        let fs = Arc::clone(&self.fs);
+        let item = |name: &str, r: Result<(), ErrorCode>| OpItem {
+            name: name.to_string(),
+            code: r.err().unwrap_or(ErrorCode::NoError),
+        };
+        let (op, first_dir, other_dir, results) = match &m.op {
+            FsOpKind::MakeDir { parent, name } => {
+                (0u8, parent.as_str(), None, vec![item(name, fs.make_dir(Path::new(parent), name))])
+            }
+            FsOpKind::Rename { dir, name, new_name } => {
+                (1, dir.as_str(), None, vec![item(name, fs.rename(Path::new(dir), name, new_name))])
+            }
+            FsOpKind::Move { from_dir, names, to_dir } => (
+                2,
+                from_dir.as_str(),
+                Some(to_dir.as_str()),
+                names
+                    .iter()
+                    .map(|n| item(&n.name, fs.move_into(Path::new(from_dir), &n.name, Path::new(to_dir)).map(|_| ())))
+                    .collect(),
+            ),
+            FsOpKind::Trash { dir, names } => (
+                3,
+                dir.as_str(),
+                None,
+                names.iter().map(|n| item(&n.name, fs.trash(Path::new(dir), &n.name))).collect(),
+            ),
+        };
+        let count = u32::try_from(results.iter().filter(|r| r.code == ErrorCode::NoError).count()).unwrap_or(u32::MAX);
+        let mut outs: Vec<Out> = Vec::new();
+        outs.extend(self.note_reach(first_dir));
+        if let Some(d) = other_dir {
+            outs.extend(self.note_reach(d));
+        }
+        let area = if !first_dir.starts_with(':') {
+            0
+        } else if self.kind_of_path(first_dir) == Some(VolumeKind::System) {
+            1
+        } else {
+            2
+        };
+        outs.push(Out::Msg(Message::FsOpResult(FsOpResult { op_id: m.op_id, results })));
+        if count > 0 {
+            outs.push(Out::Event(Event::Changed { op, count, area }));
+        }
+        outs
+    }
+
+    fn on_op_result(&mut self, m: FsOpResult) -> Vec<Out> {
+        if self.cfg.side == Side::Viewer && self.ops.remove(&m.op_id) {
+            vec![Out::Event(Event::OpResult { op_id: m.op_id, results: m.results })]
+        } else {
+            Vec::new()
         }
     }
 }

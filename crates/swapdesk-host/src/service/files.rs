@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use swapdesk_files::{Command, DEFAULT_RECEIVE, Event, FilesHandler, FilesSink, Fs, FsCaller, PipeFs};
-use swapdesk_proto::{ErrorCode, ErrorMessage, Feature, FileDecline, Message, PermissionSet, StreamKind};
+use swapdesk_proto::{
+    ErrorCode, ErrorMessage, Feature, FileDecline, FsOpResult, Message, OpItem, PermissionSet, StreamKind,
+};
 use swapdesk_session::{ChannelHandler, IncomingStream, SessionCtx, SessionEnd};
 use swapdesk_term::{ConsentFacts, ConsentNeed, consent_need};
 use swapdesk_trust::{DeviceId, TrustHandle};
@@ -67,6 +69,14 @@ impl FilesService {
             Arc::clone(&me) as Arc<dyn ConsentEnv>,
             Arc::clone(&me.host_session),
         );
+        // The user helper's word that its volumes changed goes to the viewer of a session that has files open (and only
+        // such: the gate checks the D13 answer).
+        let weak = Arc::downgrade(&gate);
+        let _ = me.shared.volumes_sink.set(Box::new(move || {
+            if let Some(gate) = weak.upgrade() {
+                gate.push_volumes();
+            }
+        }));
         let _ = me.gate.set(gate);
         me
     }
@@ -177,16 +187,36 @@ impl FilesGate {
             session,
         })))
     }
+
+    /// The volumes of the host changed: tells the viewer of the session, when that session has files open, that is,
+    /// when its user's answer (D13) let the files through. Nothing is said to a session that was never allowed to
+    /// see the disk.
+    pub(crate) fn push_volumes(&self) -> bool {
+        matches!(lock(&self.0.state).verdict, Verdict::Allowed) && self.0.handler.push_volumes()
+    }
 }
 
-/// What the viewer is told for a message that is refused: an offer is declined, a request fails.
-fn refuse(ctx: &SessionCtx, msg: &Message, code: ErrorCode) {
-    let out: Message = match msg {
+/// What the viewer is told for a message that is refused: an offer is declined, a request fails, a change is
+/// answered with the code for every name.
+fn refusal(msg: &Message, code: ErrorCode) -> Option<Message> {
+    let error = |about_type, about_id| ErrorMessage { code, fatal: false, about_type, about_id }.into();
+    Some(match msg {
         Message::FileOffer(m) => FileDecline { transfer_id: m.transfer_id, code }.into(),
-        Message::FileGet(m) => ErrorMessage { code, fatal: false, about_type: 0x040B, about_id: m.transfer_id }.into(),
-        Message::DirRequest(m) => ErrorMessage { code, fatal: false, about_type: 0x0409, about_id: m.req_id }.into(),
-        _ => return,
-    };
+        Message::FileGet(m) => error(0x040B, m.transfer_id),
+        Message::DirRequest(m) => error(0x0409, m.req_id),
+        Message::DirPage(m) => error(0x040C, m.req_id),
+        Message::VolumesRequest(m) => error(0x040E, m.req_id),
+        Message::FsOp(m) => FsOpResult {
+            op_id: m.op_id,
+            results: m.op.names().into_iter().map(|n| OpItem { name: n.to_string(), code }).collect(),
+        }
+        .into(),
+        _ => return None,
+    })
+}
+
+fn refuse(ctx: &SessionCtx, msg: &Message, code: ErrorCode) {
+    let Some(out) = refusal(msg, code) else { return };
     let sender = ctx.clone();
     ctx.spawn(async move {
         let _ = sender.send(out).await;
@@ -366,5 +396,64 @@ impl ViewerFiles {
     /// Transfers the live connection's engine holds.
     pub fn active(&self) -> usize {
         self.handler.active()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use swapdesk_proto::{DirPage, FsName, FsOp, FsOpKind, VolumesRequest};
+    use swapdesk_session::policy;
+
+    use super::*;
+
+    fn fs_op() -> Message {
+        Message::FsOp(FsOp {
+            op_id: 7,
+            op: FsOpKind::Trash {
+                dir: String::new(),
+                names: ["a", "b"].map(|n| FsName { name: n.to_string() }).to_vec(),
+            },
+        })
+    }
+
+    /// FILES-UI.md 3.3: a change needs `FILES` and `CONTROL` together; browsing needs `FILES` alone. The session
+    /// core applies this before the gate sees a message, so the gate only ever holds what passed it.
+    #[test]
+    fn changes_need_files_and_control() {
+        let files = PermissionSet::FILES;
+        let control = PermissionSet::CONTROL;
+        let none = PermissionSet::EMPTY;
+        assert!(!policy::permitted(files, none, &fs_op()), "FILES alone browses and copies");
+        assert!(!policy::permitted(control, none, &fs_op()), "CONTROL alone reaches no files");
+        assert!(policy::permitted(files.union(control), none, &fs_op()));
+        let page = Message::DirPage(DirPage { req_id: 1, path: String::new(), start: 0, max: 10 });
+        let vols = Message::VolumesRequest(VolumesRequest { req_id: 2 });
+        for m in [&page, &vols] {
+            assert!(policy::permitted(files, none, m));
+            assert!(!policy::permitted(control, none, m));
+        }
+    }
+
+    /// D13 applies to the new requests like to `DirRequest`: a refusal answers each with its own kind of message, and
+    /// a change with the code for every name.
+    #[test]
+    fn a_refusal_answers_the_explorers_requests_in_their_own_terms() {
+        let code = ErrorCode::Declined;
+        let page = Message::DirPage(DirPage { req_id: 4, path: String::new(), start: 0, max: 10 });
+        let Some(Message::Error(e)) = refusal(&page, code) else { panic!("an error for a page") };
+        assert_eq!((e.code, e.about_type, e.about_id, e.fatal), (code, 0x040C, 4, false));
+        let vols = Message::VolumesRequest(VolumesRequest { req_id: 5 });
+        let Some(Message::Error(e)) = refusal(&vols, code) else { panic!("an error for the volume list") };
+        assert_eq!((e.code, e.about_type, e.about_id), (code, 0x040E, 5));
+        let Some(Message::FsOpResult(r)) = refusal(&fs_op(), code) else { panic!("results for a change") };
+        assert_eq!(r.op_id, 7);
+        assert_eq!(
+            r.results.iter().map(|i| (i.name.as_str(), i.code)).collect::<Vec<_>>(),
+            [("a", code), ("b", code)],
+            "the code for every name, in order"
+        );
+        // The 1.0 ones are as they were.
+        let old = Message::DirRequest(swapdesk_proto::DirRequest { req_id: 1, path: None });
+        assert!(matches!(refusal(&old, code), Some(Message::Error(e)) if e.about_type == 0x0409));
     }
 }

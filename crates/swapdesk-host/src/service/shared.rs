@@ -140,6 +140,8 @@ pub(crate) struct Shared {
     /// Where the media helper's report of the input desktop goes (the account's hub, which keeps the console's
     /// desktop and tells the sessions the effective one); unset: the sessions are told the helper's value as it is.
     pub desktop_sink: OnceLock<super::DesktopSink>,
+    /// Called when the user helper says its volumes changed (the files service pushes the list to its viewer).
+    pub volumes_sink: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// Sends the secure attention sequence (the service process only); unset: a `SendSpecial` is answered
     /// `UNAVAILABLE`.
     pub sas_sender: OnceLock<super::SasSender>,
@@ -183,6 +185,7 @@ impl Shared {
             account: OnceLock::new(),
             console_probe: OnceLock::new(),
             desktop_sink: OnceLock::new(),
+            volumes_sink: OnceLock::new(),
             sas_sender: OnceLock::new(),
             ptys: PtyRoutes::default(),
             links: Mutex::default(),
@@ -486,6 +489,15 @@ pub(crate) async fn pump(
             HelperEvent::PtyExited { id, code } if kind == HelperKind::User => shared.ptys.exited(link.id, id, code),
             HelperEvent::PtyOpenReply { .. } | HelperEvent::PtyOutput { .. } | HelperEvent::PtyExited { .. } => {
                 shared.log(Level::Warn, format_args!("{kind:?} helper sent a terminal message: ignored"));
+            }
+            // Only the user helper serves files: a set of volumes from the other one is nothing.
+            HelperEvent::VolumesChanged if kind == HelperKind::User => {
+                if let Some(sink) = shared.volumes_sink.get() {
+                    sink();
+                }
+            }
+            HelperEvent::VolumesChanged => {
+                shared.log(Level::Warn, format_args!("{kind:?} helper reported its volumes: ignored"));
             }
             HelperEvent::Note { what } => shared.log(Level::Info, format_args!("{kind:?} helper: {what}")),
             HelperEvent::Fault { code, what } => {

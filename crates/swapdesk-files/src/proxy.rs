@@ -29,14 +29,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use swapdesk_ipc::{
-    Bytes, FsAnswer, FsCall, FsEntryView, FsHandleView, FsKind, FsStatView, MAX_FS_LIST, MAX_FS_META, MAX_FS_NAME,
-    MAX_FS_PATH, Message, Text,
+    Bytes, FsAnswer, FsCall, FsEntryView, FsHandleView, FsKind, FsPage, FsStatView, MAX_FS_LIST, MAX_FS_META,
+    MAX_FS_NAME, MAX_FS_PATH, Message, Text, VolumesView,
 };
 use swapdesk_proto::ErrorCode;
 
-use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
+use crate::disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, Moved, ReadHandle};
 use crate::local::LocalFs;
 use crate::name::validate_name;
+use crate::system::SystemDisk;
+use crate::volumes::{Volumes, volume_id, walk_no_link};
 
 /// Where a file that arrives with no folder named is saved on the host: this virtual path under the helper's root. The
 /// helper makes the folder on first use.
@@ -261,6 +263,40 @@ impl Fs for PipeFs {
         }
         self.done(FsCall::MetaWrite { dir: virt(dir)?, name: nm(name)?, data: Bytes(data.to_vec()) })
     }
+
+    fn list_page(&self, path: &Path, start: u32, max: u16) -> Result<FsPage, ErrorCode> {
+        let max = max.min(MAX_FS_LIST as u16);
+        match self.ask(FsCall::ListPage { path: virt(path)?, start, max })? {
+            FsAnswer::Entries2(page) if page.entries.len() <= usize::from(max) => Ok(page),
+            _ => Err(bad()),
+        }
+    }
+
+    fn make_dir(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+        self.done(FsCall::MakeDir { dir: virt(dir)?, name: nm(name)? })
+    }
+
+    fn rename(&self, dir: &Path, name: &str, new_name: &str) -> Result<(), ErrorCode> {
+        self.done(FsCall::Rename { dir: virt(dir)?, name: nm(name)?, new_name: nm(new_name)? })
+    }
+
+    /// Through a pipe the serving process has finished the whole move (a copy's source is already in the bin), so the
+    /// answer is always `Renamed`.
+    fn move_into(&self, from_dir: &Path, name: &str, to_dir: &Path) -> Result<Moved, ErrorCode> {
+        self.done(FsCall::Move { from_dir: virt(from_dir)?, name: nm(name)?, to_dir: virt(to_dir)? })?;
+        Ok(Moved::Renamed)
+    }
+
+    fn trash(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+        self.done(FsCall::Trash { dir: virt(dir)?, name: nm(name)? })
+    }
+
+    fn volumes(&self) -> Result<VolumesView, ErrorCode> {
+        match self.ask(FsCall::Volumes)? {
+            FsAnswer::Volumes(v) => Ok(v),
+            _ => Err(bad()),
+        }
+    }
 }
 
 impl PipeFs {
@@ -431,8 +467,10 @@ impl Tokens {
 
 /// What a serving process lets the service reach.
 pub enum Roots {
-    /// Everything under `home`; `receive` is the virtual path of the folder created on first use for files that
-    /// arrive with no folder named.
+    /// The user helper's roots (FILES-UI.md 8.1). The empty first component is the home folder (the 1.0 meaning of
+    /// every path); with a [`SystemDisk`] (see [`FsServer::with_system`]) a first component `:<id>` is a published
+    /// volume. `receive` is the virtual path of the folder created on first use for files that arrive with no folder
+    /// named.
     Home { home: PathBuf, receive: Option<String> },
     /// Only what the UI put in `Tokens`.
     Tokens(Arc<Tokens>),
@@ -442,9 +480,10 @@ pub enum Roots {
 pub struct FsServer {
     fs: Arc<dyn Fs>,
     roots: Roots,
+    volumes: Option<Volumes>,
 }
 
-/// A virtual path split into checked components.
+/// A virtual path split into checked components (the UI's token roots, and the part of a 1.1 path after its root).
 fn components(v: &str) -> Result<Vec<&str>, ErrorCode> {
     if v.is_empty() {
         return Ok(Vec::new());
@@ -468,24 +507,80 @@ fn token_of(first: &str, prefix: char) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// A 1.1 path on the helper's roots: where it starts and what follows, so a change can walk the components.
+struct Resolved {
+    base: PathBuf,
+    rest: Vec<String>,
+}
+
+impl Resolved {
+    fn real(&self) -> PathBuf {
+        let mut p = self.base.clone();
+        p.extend(&self.rest);
+        p
+    }
+}
+
 impl FsServer {
     /// A server on this machine's disk (`LocalFs`).
     pub fn new(roots: Roots) -> Self {
-        Self { fs: Arc::new(LocalFs::new()), roots }
+        Self { fs: Arc::new(LocalFs::new()), roots, volumes: None }
     }
 
-    /// A server over another `Fs` (tests).
+    /// A server over another `Fs` (tests, the helper's `LocalFs` with its free-space probe).
     pub fn with_fs(fs: Arc<dyn Fs>, roots: Roots) -> Self {
-        Self { fs, roots }
+        Self { fs, roots, volumes: None }
+    }
+
+    /// Lets the server publish the volumes `system` reports and serve the explorer's calls on them (FILES-UI.md 8.1):
+    /// volume paths, `Volumes`, the bin and the protected folders. Without it a server speaks the 1.0 paths only.
+    #[must_use]
+    pub fn with_system(mut self, system: Arc<dyn SystemDisk>) -> Self {
+        self.volumes = Some(Volumes::new(system));
+        self
+    }
+
+    /// True when the set of published volumes changed since the last call (the first compares with the set at the time
+    /// of [`Self::with_system`]). The helper
+    /// asks about once a second while it serves files and tells the service with `FsVolumesChanged`.
+    pub fn poll_volumes_changed(&self) -> bool {
+        self.volumes.as_ref().is_some_and(Volumes::changed)
+    }
+
+    /// Does this server publish volumes (so a poll means something)?
+    pub fn publishes_volumes(&self) -> bool {
+        self.volumes.is_some()
+    }
+
+    /// A 1.1 path of the helper's roots: where it starts and the checked names after it. Only for [`Roots::Home`].
+    fn resolve(&self, v: &str) -> Result<Resolved, ErrorCode> {
+        let Roots::Home { home, .. } = &self.roots else { return Err(ErrorCode::InvalidName) };
+        if v.len() > MAX_FS_PATH {
+            return Err(ErrorCode::TooLarge);
+        }
+        if let Some(rest) = v.strip_prefix(':') {
+            // The volume's own component is `:<id>`; `validate_name` refuses `:` for every other one.
+            let (first, tail) = rest.split_once('/').map_or((rest, None), |(f, t)| (f, Some(t)));
+            let id = volume_id(&format!(":{first}"))?;
+            let volumes = self.volumes.as_ref().ok_or(ErrorCode::VolumeGone)?;
+            let base = volumes.find(id)?.root;
+            // `:3/` has an empty component: refused, like any other.
+            let rest = match tail {
+                None => Vec::new(),
+                Some("") => return Err(ErrorCode::InvalidName),
+                Some(t) => components(t)?.into_iter().map(str::to_string).collect(),
+            };
+            return Ok(Resolved { base, rest });
+        }
+        let rest = components(v)?.into_iter().map(str::to_string).collect();
+        Ok(Resolved { base: home.clone(), rest })
     }
 
     /// A path that names a folder (or, for `stat`, anything under the root).
     fn folder(&self, v: &str) -> Result<PathBuf, ErrorCode> {
-        let parts = components(v)?;
         match &self.roots {
-            Roots::Home { home, receive } => {
-                let mut p = home.clone();
-                p.extend(&parts);
+            Roots::Home { receive, .. } => {
+                let p = self.resolve(v)?.real();
                 if receive.as_deref() == Some(v) && !v.is_empty() && !p.exists() {
                     // The default receive folder is made when first needed; failing leaves the usual NotFound.
                     let _ = std::fs::create_dir_all(&p);
@@ -493,6 +588,7 @@ impl FsServer {
                 Ok(p)
             }
             Roots::Tokens(t) => {
+                let parts = components(v)?;
                 let (first, rest) = parts.split_first().ok_or(ErrorCode::InvalidName)?;
                 let token = token_of(first, 'r').ok_or(ErrorCode::InvalidName)?;
                 let mut p = lock(&t.recvs).get(&token).cloned().ok_or(ErrorCode::InvalidName)?;
@@ -502,16 +598,37 @@ impl FsServer {
         }
     }
 
+    /// A folder something is written into or changed in: the path of [`Self::folder`], with the rules of a change
+    /// (FILES-UI.md 8.1): no link or junction at any component below the root, and not inside a protected folder.
+    fn writable(&self, v: &str) -> Result<PathBuf, ErrorCode> {
+        if matches!(self.roots, Roots::Tokens(_)) {
+            return self.folder(v);
+        }
+        let r = self.resolve(v)?;
+        walk_no_link(&r.base, &r.rest)?;
+        self.folder(v)
+    }
+
+    /// The folder `dir` for a change that touches `names` in it: `writable`, and none of the entries protected.
+    fn changeable(&self, dir: &str, names: &[&str]) -> Result<PathBuf, ErrorCode> {
+        let real = self.writable(dir)?;
+        if let Some(v) = &self.volumes {
+            for n in names {
+                validate_name(n)?;
+                if v.protected_hit(&real.join(n)) {
+                    return Err(ErrorCode::NotPermitted);
+                }
+            }
+        }
+        Ok(real)
+    }
+
     /// A path to read as a file: under the root on the host side, a picked file on the viewer side.
     fn readable(&self, v: &str) -> Result<PathBuf, ErrorCode> {
-        let parts = components(v)?;
         match &self.roots {
-            Roots::Home { home, .. } => {
-                let mut p = home.clone();
-                p.extend(&parts);
-                Ok(p)
-            }
+            Roots::Home { .. } => Ok(self.resolve(v)?.real()),
             Roots::Tokens(t) => {
+                let parts = components(v)?;
                 let [first, name] = parts.as_slice() else { return Err(ErrorCode::InvalidName) };
                 let token = token_of(first, 'p').ok_or(ErrorCode::InvalidName)?;
                 let path = lock(&t.picks).get(&token).cloned().ok_or(ErrorCode::InvalidName)?;
@@ -541,6 +658,85 @@ impl FsServer {
             return None;
         }
         Some(self.answer(call))
+    }
+
+    /// The explorer's calls (FILES-UI.md 7.4): the home roots only; the UI's token roots refuse every one.
+    fn explorer(&self, call: FsCall) -> Result<FsAnswer, ErrorCode> {
+        let Roots::Home { home, receive } = &self.roots else { return Err(ErrorCode::InvalidName) };
+        let fs = &self.fs;
+        let done = |r: Result<(), ErrorCode>| r.map(|()| FsAnswer::Done);
+        match call {
+            FsCall::ListPage { path, start, max } => {
+                let real = self.listable(&path.0)?;
+                let mut page = fs.list_page(&real, start, max.min(MAX_FS_LIST as u16))?;
+                if page.free.is_none()
+                    && let Some(v) = &self.volumes
+                {
+                    let snap = v.snapshot();
+                    page.free = Volumes::containing(&snap, &real).map(|(_, vol)| vol.free_bytes);
+                }
+                Ok(FsAnswer::Entries2(page))
+            }
+            FsCall::MakeDir { dir, name } => {
+                let real = self.changeable(&dir.0, &[&name.0])?;
+                done(fs.make_dir(&real, &name.0))
+            }
+            FsCall::Rename { dir, name, new_name } => {
+                let real = self.changeable(&dir.0, &[&name.0, &new_name.0])?;
+                done(fs.rename(&real, &name.0, &new_name.0))
+            }
+            FsCall::Move { from_dir, name, to_dir } => {
+                let from = self.changeable(&from_dir.0, &[&name.0])?;
+                let to = self.changeable(&to_dir.0, &[&name.0])?;
+                done(self.move_entry(&from, &name.0, &to))
+            }
+            FsCall::Trash { dir, name } => {
+                let real = self.changeable(&dir.0, &[&name.0])?;
+                done(self.trash_entry(&real.join(&name.0)))
+            }
+            FsCall::Volumes => {
+                let view = match &self.volumes {
+                    Some(v) => v.view(home, receive.as_deref()),
+                    None => VolumesView { home: Text(String::new()), places: Vec::new(), volumes: Vec::new() },
+                };
+                Ok(FsAnswer::Volumes(view))
+            }
+            _ => Err(ErrorCode::InvalidName),
+        }
+    }
+
+    /// Sends `target` to its volume's bin: `NoBin` before anything where the volume has none.
+    fn trash_entry(&self, target: &Path) -> Result<(), ErrorCode> {
+        let Some(v) = &self.volumes else { return Err(ErrorCode::NotPermitted) };
+        if std::fs::symlink_metadata(target).is_err() {
+            return Err(ErrorCode::NotFound);
+        }
+        let snap = v.snapshot();
+        if Volumes::containing(&snap, target).is_some_and(|(_, vol)| !vol.has_bin) {
+            return Err(ErrorCode::NoBin);
+        }
+        v.system().trash(target)
+    }
+
+    /// `Move`: in place when it can be; across volumes the disk copies and verifies, and the source then goes to the
+    /// bin (so a volume without one refuses before anything is copied). A source that cannot go to the bin takes its
+    /// copy away again.
+    fn move_entry(&self, from: &Path, name: &str, to: &Path) -> Result<(), ErrorCode> {
+        let src = from.join(name);
+        if let Some(v) = &self.volumes {
+            let snap = v.snapshot();
+            let src_vol = Volumes::containing(&snap, &src);
+            let dest_vol = Volumes::containing(&snap, to);
+            if src_vol.map(|(id, _)| id) != dest_vol.map(|(id, _)| id) && src_vol.is_some_and(|(_, vol)| !vol.has_bin) {
+                return Err(ErrorCode::NoBin);
+            }
+        }
+        match self.fs.move_into(from, name, to)? {
+            Moved::Renamed => Ok(()),
+            Moved::Copied => self.trash_entry(&src).inspect_err(|_| {
+                let _ = crate::fsops::remove_tree(&to.join(name));
+            }),
+        }
     }
 
     fn answer(&self, call: FsCall) -> Result<FsAnswer, ErrorCode> {
@@ -583,37 +779,36 @@ impl FsServer {
             FsCall::StatFile { dir, name, kind } => {
                 Ok(FsAnswer::Stat(fs.stat_file(&self.folder(&dir.0)?, &name.0, kind_of(kind))?.as_ref().map(stat_view)))
             }
-            FsCall::PartCreate { dir, name } => done(fs.part_create(&self.folder(&dir.0)?, &name.0)),
-            FsCall::PartTruncate { dir, name, len } => done(fs.part_truncate(&self.folder(&dir.0)?, &name.0, len)),
+            FsCall::PartCreate { dir, name } => done(fs.part_create(&self.changeable(&dir.0, &[&name.0])?, &name.0)),
+            FsCall::PartTruncate { dir, name, len } => done(fs.part_truncate(&self.writable(&dir.0)?, &name.0, len)),
             FsCall::PartAppend { dir, name, offset, data } => {
-                done(fs.part_append(&self.folder(&dir.0)?, &name.0, offset, &data.0))
+                done(fs.part_append(&self.writable(&dir.0)?, &name.0, offset, &data.0))
             }
             FsCall::PartLen { dir, name } => Ok(FsAnswer::Len(fs.part_len(&self.folder(&dir.0)?, &name.0)?)),
             FsCall::PartRead { dir, name, offset, len } => {
                 Ok(FsAnswer::Data(Bytes(fs.part_read(&self.folder(&dir.0)?, &name.0, offset, len)?)))
             }
             FsCall::PartSync { dir, name, final_mtime_ms } => {
-                done(fs.part_sync(&self.folder(&dir.0)?, &name.0, final_mtime_ms))
+                done(fs.part_sync(&self.writable(&dir.0)?, &name.0, final_mtime_ms))
             }
             FsCall::PartRename { dir, name, target_name } => {
-                done(fs.part_rename(&self.folder(&dir.0)?, &name.0, &target_name.0))
+                done(fs.part_rename(&self.changeable(&dir.0, &[&target_name.0])?, &name.0, &target_name.0))
             }
             FsCall::RemoveFile { dir, name, kind } => {
-                done(fs.remove_file(&self.folder(&dir.0)?, &name.0, kind_of(kind)))
+                done(fs.remove_file(&self.writable(&dir.0)?, &name.0, kind_of(kind)))
             }
             FsCall::MetaRead { dir, name } => {
                 Ok(FsAnswer::Meta(fs.meta_read(&self.folder(&dir.0)?, &name.0)?.map(Bytes)))
             }
-            FsCall::MetaWrite { dir, name, data } => done(fs.meta_write(&self.folder(&dir.0)?, &name.0, &data.0)),
+            FsCall::MetaWrite { dir, name, data } => done(fs.meta_write(&self.writable(&dir.0)?, &name.0, &data.0)),
             FsCall::FreeSpace { dir } => Ok(FsAnswer::Free(fs.free_space(&self.folder(&dir.0)?)?)),
-            // FILES-UI.md 7.4: served on the helper's volume roots (B2 slice 2b, in progress); the UI's token roots
-            // refuse every one of them.
-            FsCall::ListPage { .. }
+            // FILES-UI.md 7.4: served on the helper's roots; the UI's token roots refuse every one of them.
+            call @ (FsCall::ListPage { .. }
             | FsCall::MakeDir { .. }
             | FsCall::Rename { .. }
             | FsCall::Move { .. }
             | FsCall::Trash { .. }
-            | FsCall::Volumes => Err(ErrorCode::InvalidName),
+            | FsCall::Volumes) => self.explorer(call),
         }
     }
 
@@ -629,3 +824,5 @@ impl FsServer {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vol_tests;

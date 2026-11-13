@@ -14,6 +14,7 @@
 
 use std::path::Path;
 
+use swapdesk_ipc::{FsPage, VolumesView};
 use swapdesk_proto::ErrorCode;
 
 /// Most bytes one call reads or writes (the pipe's message limit).
@@ -55,6 +56,16 @@ pub struct DirRead {
     pub entries: Vec<FsEntry>,
     /// More entries existed than `max_entries`.
     pub truncated: bool,
+}
+
+/// What a [`Fs::move_into`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    /// The entry changed folder in place: nothing is left behind.
+    Renamed,
+    /// The folder or file lives on another volume: it was copied and its sizes verified, and the source is still
+    /// there. The caller sends the source to the bin (never deleted for good).
+    Copied,
 }
 
 /// A file opened for reading.
@@ -114,4 +125,34 @@ pub trait Fs: Send + Sync {
     fn meta_read(&self, dir: &Path, name: &str) -> Result<Option<Vec<u8>>, ErrorCode>;
     /// Writes the meta file (created when missing, otherwise cut to `data`'s length) and syncs it.
     fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode>;
+
+    // ---------- the explorer's calls (FILES-UI.md 7.4): a disk that cannot serve them says `IoFailed` ----------
+
+    /// A page of `path`: entries `start..` (folders first, then files, each group by name, case-insensitive), at most
+    /// `max`, with kind, flags and the free space; `next` is the `start` of the following page when more exist.
+    fn list_page(&self, _path: &Path, _start: u32, _max: u16) -> Result<FsPage, ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
+    /// Makes the folder `dir/name`; `Exists` when anything is there.
+    fn make_dir(&self, _dir: &Path, _name: &str) -> Result<(), ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
+    /// Renames `dir/name` to `dir/new_name`, never replacing (`Exists`); a link is renamed itself.
+    fn rename(&self, _dir: &Path, _name: &str, _new_name: &str) -> Result<(), ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
+    /// Moves `from_dir/name` into `to_dir`, never replacing (`Exists`); a folder never goes into itself
+    /// (`InvalidName`).
+    fn move_into(&self, _from_dir: &Path, _name: &str, _to_dir: &Path) -> Result<Moved, ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
+    /// Sends `dir/name` to the bin (`NoBin` before touching anything where there is none). Only the process that has
+    /// the system's bin does it; `LocalFs` has none.
+    fn trash(&self, _dir: &Path, _name: &str) -> Result<(), ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
+    /// The home folder, the places and the published volumes of the machine behind this disk.
+    fn volumes(&self) -> Result<VolumesView, ErrorCode> {
+        Err(ErrorCode::IoFailed)
+    }
 }

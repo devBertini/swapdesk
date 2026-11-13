@@ -156,6 +156,10 @@ fn activity_line(entry: &AuditEntry, device_name: &str) -> Option<(Msg, bool)> {
         AuditEvent::Swapped => (msg(MsgKey::AuditSwap, &[device_name.to_string()]), false),
         AuditEvent::FilesSent { count, .. } => (msg(MsgKey::AuditControlFiles, &[count.to_string()]), false),
         AuditEvent::Elevated => (msg(MsgKey::AuditElevated, &[]), false),
+        // FILES-UI.md 8.3: counts and kinds only; the Activity line says how many files were changed, or that files
+        // outside the home folder were opened.
+        AuditEvent::FilesChanged { count, .. } => (msg(MsgKey::AuditFilesChanged, &[count.to_string()]), false),
+        AuditEvent::FilesReach { .. } => (msg(MsgKey::AuditFilesReach, &[]), false),
         _ => return None,
     })
 }
@@ -565,5 +569,26 @@ impl AuditSink for HubAudit {
                 alert: true,
             }));
         }
+    }
+}
+
+#[cfg(test)]
+mod explorer_audit_tests {
+    use super::*;
+
+    fn line(event: AuditEvent) -> Option<(MsgKey, Vec<String>, bool)> {
+        let entry = AuditEntry { time_ms: 1, device: DeviceRef::Known([1; 16]), event, duration_s: None };
+        activity_line(&entry, "pc")
+            .map(|(m, alert)| (MsgKey::ALL[usize::from(m.key)], m.args.into_iter().map(|a| a.0).collect(), alert))
+    }
+
+    /// FILES-UI.md 8.3: the Activity lines of the explorer carry a count or nothing, never a name.
+    #[test]
+    fn the_explorers_audit_has_activity_lines_with_counts_only() {
+        assert_eq!(
+            line(AuditEvent::FilesChanged { op: 3, count: 12, area: 2 }),
+            Some((MsgKey::AuditFilesChanged, vec!["12".to_string()], false))
+        );
+        assert_eq!(line(AuditEvent::FilesReach { kinds: 0b100 }), Some((MsgKey::AuditFilesReach, vec![], false)));
     }
 }

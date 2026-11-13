@@ -45,6 +45,8 @@ pub enum HelperEvent {
         code: ErrorCode,
         what: String,
     },
+    /// The user helper's set of volumes changed (FILES-UI.md 7.4): the files service tells the viewers.
+    VolumesChanged,
     /// `HelperNote`: logged at INFO.
     Note {
         what: String,
@@ -84,6 +86,7 @@ impl core::fmt::Debug for HelperEvent {
             Self::AudioMode(m) => f.debug_tuple("AudioMode").field(m).finish(),
             Self::Desktop(d) => f.debug_tuple("Desktop").field(d).finish(),
             Self::SasRequest => f.write_str("SasRequest"),
+            Self::VolumesChanged => f.write_str("VolumesChanged"),
             Self::Fault { code, what } => {
                 f.debug_struct("Fault").field("code", code).field("what", &RedactedLen(what.len())).finish()
             }
@@ -295,6 +298,7 @@ fn read_loop<R: Read>(
             Message::AudioPacket(d) => HelperEvent::Audio(d.0),
             Message::AudioMode { mode } => HelperEvent::AudioMode(mode),
             Message::DesktopChanged(d) => HelperEvent::Desktop(d),
+            Message::FsVolumesChanged => HelperEvent::VolumesChanged,
             Message::CaptureHeld { generation } => HelperEvent::CaptureHeld(generation),
             Message::SasRequest => HelperEvent::SasRequest,
             Message::HelperFault { code, what } => HelperEvent::Fault { code, what: what.0 },

@@ -62,10 +62,14 @@ pub fn host_helper(clock: Arc<dyn Clock>) -> HostHelper {
                     let disk = Arc::clone(
                         USER_DISK.get_or_init(|| Arc::new(LocalFs::with_free_space(swapdesk_sys_mac::free_bytes))),
                     );
-                    deps.with_fs(Arc::new(FsServer::with_fs(
-                        disk as Arc<dyn Fs>,
-                        Roots::Home { home, receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()) },
-                    )))
+                    // Its roots are the home folder and the published volumes (FILES-UI.md 8.1).
+                    deps.with_fs(Arc::new(
+                        FsServer::with_fs(
+                            disk as Arc<dyn Fs>,
+                            Roots::Home { home, receive: Some(swapdesk_files::DEFAULT_RECEIVE.to_string()) },
+                        )
+                        .with_system(crate::system_disk::system_disk()),
+                    ))
                 }
                 None => deps,
             };

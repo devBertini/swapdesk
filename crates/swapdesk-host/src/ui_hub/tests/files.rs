@@ -71,9 +71,24 @@ impl Pair {
     /// `unattended_by`: the host lets the viewer's device in without a prompt, granted by the account with this
     /// id; the viewer then enters that way (an administrator account, a host record of minor 1, through the relay).
     fn build(tag: &str, cut_able: bool, unattended_by: Option<&str>) -> Self {
+        Self::build_with(tag, cut_able, unattended_by, None, None)
+    }
+
+    /// The host announces protocol minor `host_minor` (default: this build's), and its helper's server publishes the
+    /// volumes of `system` when there is one.
+    fn build_with(
+        tag: &str,
+        cut_able: bool,
+        unattended_by: Option<&str>,
+        host_minor: Option<u16>,
+        system: Option<Arc<dyn swapdesk_files::SystemDisk>>,
+    ) -> Self {
         let (home, src, recv) =
             (temp(&format!("{tag}-home")), temp(&format!("{tag}-src")), temp(&format!("{tag}-recv")));
-        let mut host = Machine::new("host-pc");
+        let mut host = match host_minor {
+            Some(m) => Machine::with_minor("host-pc", m),
+            None => Machine::new("host-pc"),
+        };
         let viewer = Machine::new("viewer-pc");
         let stored = if unattended_by.is_some() { ALL | FILES | PermissionSet::UNATTENDED } else { ALL | FILES };
         host.pin(&viewer, stored);
@@ -86,10 +101,11 @@ impl Pair {
         viewer.pin(&host, CV);
         host.attach_helper(IpcRole::HelperSystem);
         host.attach_helper_with(IpcRole::HelperUser, |deps| {
-            deps.with_fs(Arc::new(FsServer::new(Roots::Home {
-                home: home.clone(),
-                receive: Some(DEFAULT_RECEIVE.into()),
-            })))
+            let server = FsServer::new(Roots::Home { home: home.clone(), receive: Some(DEFAULT_RECEIVE.into()) });
+            deps.with_fs(Arc::new(match system {
+                Some(system) => server.with_system(system),
+                None => server,
+            }))
         });
         let relay = cut_able.then(|| Relay::start(host.session_addr()));
         match &relay {
@@ -580,5 +596,167 @@ fn the_viewer_is_told_that_the_host_asks_its_user_and_for_how_long() {
         _ => None,
     });
     assert!(p.host_ui.call(UiOp::AnswerIncoming { request_id: asked, decision: Decision::Decline, grants: 0 }).is_ok());
+    p.finish();
+}
+
+// ---------- the explorer (slice 2b, minor 2) ----------
+
+use swapdesk_files::{SysVolume, SystemDisk};
+use swapdesk_ipc::{FsChange, FsNameView};
+use swapdesk_proto::{ErrorCode, PlaceKind, VolumeKind};
+
+/// Publishes the folders the test puts in `volumes`; its bin is a folder.
+struct Disks {
+    volumes: Mutex<Vec<SysVolume>>,
+    bin: PathBuf,
+}
+
+impl SystemDisk for Disks {
+    fn volumes(&self) -> Vec<SysVolume> {
+        lock(&self.volumes).clone()
+    }
+
+    fn places(&self) -> Vec<(PlaceKind, PathBuf)> {
+        Vec::new()
+    }
+
+    fn trash(&self, path: &std::path::Path) -> Result<(), ErrorCode> {
+        std::fs::rename(path, self.bin.join(path.file_name().unwrap())).map_err(|_| ErrorCode::IoFailed)
+    }
+
+    fn protected(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+fn disk(identity: &str, root: &std::path::Path, kind: VolumeKind) -> SysVolume {
+    SysVolume {
+        identity: identity.into(),
+        root: root.to_path_buf(),
+        kind,
+        label: identity.into(),
+        letter: None,
+        total_bytes: 100,
+        free_bytes: 50,
+        has_bin: true,
+    }
+}
+
+fn text(s: &str) -> Text {
+    Text(s.to_string())
+}
+
+fn results(r: Result<ReplyBody, ApiCode>) -> Vec<(String, ErrorCode)> {
+    match r.expect("the results of a change") {
+        ReplyBody::OpResults(v) => v.into_iter().map(|i| (i.name.0, i.code)).collect(),
+        other => panic!("not results: {other:?}"),
+    }
+}
+
+#[test]
+fn the_explorer_ops_page_change_and_hear_of_volume_changes_and_the_audit_counts() {
+    let root = temp("explorer-vols");
+    let (v1, v2, bin) = (root.join("sysvol"), root.join("stick"), root.join("bin"));
+    for d in [&v1, &v2, &bin] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(v2.join("on-stick.txt"), b"s").unwrap();
+    let disks = Arc::new(Disks {
+        volumes: Mutex::new(vec![disk("sys", &v1, VolumeKind::System), disk("stick", &v2, VolumeKind::Removable)]),
+        bin: bin.clone(),
+    });
+    let mut p = Pair::build_with("explorer", false, None, None, Some(Arc::clone(&disks) as Arc<dyn SystemDisk>));
+    let session_id = p.session;
+    std::fs::write(p.home.join("a.txt"), b"a").unwrap();
+    std::fs::write(p.home.join("b.txt"), b"b").unwrap();
+
+    // 48: the home folder and the volumes.
+    let ReplyBody::Volumes(v) = p.viewer_ui.call(UiOp::Files(FilesOp::Volumes { session_id })).unwrap() else {
+        panic!("volumes")
+    };
+    assert_eq!(v.home.0, "");
+    let volumes: Vec<_> = v.volumes.iter().map(|x| (x.id, x.kind)).collect();
+    assert_eq!(volumes, [(1, VolumeKind::System), (2, VolumeKind::Removable)]);
+    // 46: a page of a volume, and of the home folder.
+    let ReplyBody::Listing2(l) =
+        p.viewer_ui.call(UiOp::Files(FilesOp::ListPage { session_id, path: text(":2"), start: 0 })).unwrap()
+    else {
+        panic!("a page")
+    };
+    assert_eq!(l.path.0, ":2");
+    assert_eq!((l.page.entries[0].name.0.as_str(), l.page.next, l.page.free), ("on-stick.txt", None, Some(50)));
+    let ReplyBody::Listing2(l) =
+        p.viewer_ui.call(UiOp::Files(FilesOp::ListPage { session_id, path: text(""), start: 0 })).unwrap()
+    else {
+        panic!("a page")
+    };
+    assert!(l.page.entries.iter().any(|e| e.name.0 == "a.txt"));
+    // 47: new folder, a rename onto an existing name, a move of two names, to the bin.
+    let change = |c| UiOp::Files(FilesOp::Change { session_id, change: c });
+    assert_eq!(
+        results(p.viewer_ui.call(change(FsChange::MakeDir { parent: text(""), name: text("new") }))),
+        [("new".to_string(), ErrorCode::NoError)]
+    );
+    assert!(p.home.join("new").is_dir());
+    let rename = FsChange::Rename { dir: text(""), name: text("a.txt"), new_name: text("b.txt") };
+    assert_eq!(results(p.viewer_ui.call(change(rename))), [("a.txt".to_string(), ErrorCode::Exists)]);
+    let names = |n: &[&str]| n.iter().map(|x| FsNameView { name: text(x) }).collect::<Vec<_>>();
+    let mv = FsChange::Move { from_dir: text(""), names: names(&["a.txt", "nope"]), to_dir: text("new") };
+    assert_eq!(
+        results(p.viewer_ui.call(change(mv))),
+        [("a.txt".to_string(), ErrorCode::NoError), ("nope".to_string(), ErrorCode::NotFound)]
+    );
+    assert!(p.home.join("new").join("a.txt").exists() && !p.home.join("a.txt").exists());
+    let trash = FsChange::Trash { dir: text(":2"), names: names(&["on-stick.txt"]) };
+    assert_eq!(results(p.viewer_ui.call(change(trash))), [("on-stick.txt".to_string(), ErrorCode::NoError)]);
+    assert!(bin.join("on-stick.txt").exists());
+
+    // The audit has counts and kinds, never a name (FILES-UI.md 8.3).
+    let wanted = [
+        AuditEvent::FilesChanged { op: 0, count: 1, area: 0 },
+        AuditEvent::FilesChanged { op: 2, count: 1, area: 0 },
+        AuditEvent::FilesChanged { op: 3, count: 1, area: 2 },
+        AuditEvent::FilesReach { kinds: 1 << 2 },
+    ];
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let have: Vec<AuditEvent> = p.host.audit.entries().into_iter().map(|e| e.event).collect();
+        if wanted.iter().all(|w| have.contains(w)) {
+            let reaches = have.iter().filter(|e| matches!(e, AuditEvent::FilesReach { .. })).count();
+            assert_eq!(reaches, 1, "once per kind: {have:?}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the audit never got {wanted:?}: {have:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // A stick is pulled: the helper notices within a couple of seconds, the host pushes the list, the viewer's UI
+    // hears notification 22 with one volume left.
+    lock(&disks.volumes).truncate(1);
+    let pushed = notify_long(&mut p.viewer_ui, "the pushed volume list", |n| match n {
+        Notify::Files(FilesNote::Volumes { session_id: s, volumes }) if *s == session_id => Some(volumes.clone()),
+        _ => None,
+    });
+    assert_eq!(pushed.volumes.len(), 1);
+    assert_eq!(pushed.volumes[0].id, 1);
+    p.finish();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_explorer_ops_answer_invalid_at_once_toward_a_host_of_minor_1() {
+    let mut p = Pair::build_with("explorer-old", false, None, Some(1), None);
+    let session_id = p.session;
+    let started = Instant::now();
+    let page = UiOp::Files(FilesOp::ListPage { session_id, path: text(""), start: 0 });
+    assert_eq!(p.viewer_ui.call(page).unwrap_err(), ApiCode::Invalid);
+    let change = FsChange::MakeDir { parent: text(""), name: text("x") };
+    assert_eq!(p.viewer_ui.call(UiOp::Files(FilesOp::Change { session_id, change })).unwrap_err(), ApiCode::Invalid);
+    assert_eq!(p.viewer_ui.call(UiOp::Files(FilesOp::Volumes { session_id })).unwrap_err(), ApiCode::Invalid);
+    assert!(started.elapsed() < Duration::from_secs(5), "answered at once, not by a timeout");
+    assert!(!p.home.join("x").exists());
+    // The 1.0 drawer still works against it.
+    let root = listing(p.viewer_ui.call(UiOp::Files(FilesOp::List { session_id, path: None })));
+    assert_eq!(root.path.0, "");
     p.finish();
 }

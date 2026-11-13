@@ -338,6 +338,8 @@ Which volumes are published: on Windows, the drive letters whose drive type is f
 
 **Protected locations (default, section 12 asks).** The OS refuses most changes to the system's own folders for a standard user, but an administrator's session on the Mac can change `/Applications`, and some folders on Windows are writable by every user. As a second guard the helper refuses every change (not reading) inside: on Windows the Windows folder, `Program Files`, `Program Files (x86)`, `ProgramData` and the root of the system drive; on the Mac `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/private` and the root of the startup volume. The refusal is `NOT_PERMITTED` with "O Swapdesk não muda arquivos do sistema do {0}." (GUESS on the exact list, settled in slice 2b.)
 
+**As built (slice 2b).** The link and protection rules also cover the writes of a received file (`PartCreate` to `PartRename`, `RemoveFile`, `MetaWrite`), on the home folder too: a home path through a link or junction no longer receives. A link is what `FileType::is_symlink` says (symlinks and junctions); cloud placeholders pass. A protected folder protects itself, what it holds and the folders that hold it. The reach bit of tag 20 is set by listings, `FileGet` paths, `FileOffer.dest` and `FsOp` folders; tag 19 is written only when at least one name was done.
+
 **A volume that goes away.** During a listing: the listing fails with `VOLUME_GONE` (or the page already sent stands and the next page fails); the pane shows its error state. During a transfer: section 5. During an operation: each name not yet done answers `VOLUME_GONE`; what was done stays done. The helper never retries on another volume.
 
 ### 8.2 What the wider reach and the changes add to the threat model
