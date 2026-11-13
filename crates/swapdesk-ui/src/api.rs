@@ -484,12 +484,28 @@ pub struct Listing {
 }
 
 /// A folder of this computer, as the explorer's left pane lists it (`Command::LocalList`): hidden entries left out,
+/// What a properties count found inside a path of this computer (slice 2a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalProps {
+    pub path: PathBuf,
+    pub files: u64,
+    pub folders: u64,
+    pub bytes: u64,
+    /// The count stopped at `local_disk::MAX_PROPS_ENTRIES`.
+    pub truncated: bool,
+    /// The free space of the volume it is on, when the system says.
+    pub free_bytes: Option<u64>,
+}
+
 /// not sorted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalListing {
     pub path: PathBuf,
     pub entries: Vec<DirEntryView>,
     pub truncated: bool,
+    /// The hidden entries (dot files, the system's hidden flag), apart: the pane shows them when asked (FILES-UI.md
+    /// 2.5). The transfer engine's own side files are never listed.
+    pub hidden: Vec<DirEntryView>,
 }
 
 /// What a place of the explorer's navigation pane is.
@@ -809,6 +825,33 @@ pub enum Command {
     },
     /// This computer's places and drives or volumes for the navigation pane. Answered `LocalPlaces`.
     LocalPlaces,
+    /// Creates the folder `path` on this computer (slice 2a). `Refused`: something has that name already.
+    LocalMakeDir {
+        path: PathBuf,
+    },
+    /// Renames `path` to `name` in its folder. `Invalid`: a name the systems refuse; `Refused`: the name is taken.
+    LocalRename {
+        path: PathBuf,
+        name: String,
+    },
+    /// Moves `paths` into the folder `into` (cut and paste, also across volumes). `Invalid`: a folder into itself;
+    /// `Refused`: a name is taken there (nothing is replaced).
+    LocalMove {
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+    },
+    /// Deletes `paths` for good, after the person confirmed (Shift+Delete).
+    LocalDeleteForever {
+        paths: Vec<PathBuf>,
+    },
+    /// Sends `paths` to the system's bin (Delete). `Refused`: the volume has no bin and nothing was deleted.
+    LocalTrash {
+        paths: Vec<PathBuf>,
+    },
+    /// Counts what is inside `path` (`Reply::LocalProps`); a newer properties request makes the older reply moot.
+    LocalProps {
+        path: PathBuf,
+    },
     /// Writes the activity log to `path` as CSV, in this interface's language and local time (`UiState::activity_export`
     /// fills both). The UI process writes the file; the service only lists the entries.
     ActivityExport {
@@ -917,6 +960,12 @@ impl core::fmt::Debug for Command {
             Self::Wake { device_id } => dbg_fields!("Wake", device_id),
             Self::ActivityList { before_ms, limit } => dbg_fields!("ActivityList", before_ms, limit),
             Self::LocalList { path } => dbg_fields!("LocalList", path),
+            Self::LocalMakeDir { path } => dbg_fields!("LocalMakeDir", path),
+            Self::LocalRename { path, name } => dbg_fields!("LocalRename", path, name),
+            Self::LocalMove { paths, into } => dbg_fields!("LocalMove", paths, into),
+            Self::LocalDeleteForever { paths } => dbg_fields!("LocalDeleteForever", paths),
+            Self::LocalTrash { paths } => dbg_fields!("LocalTrash", paths),
+            Self::LocalProps { path } => dbg_fields!("LocalProps", path),
             Self::LocalPlaces => f.write_str("LocalPlaces"),
             Self::ActivityExport { path, language, utc_offset_min } => {
                 dbg_fields!("ActivityExport", path, language, utc_offset_min)
@@ -970,6 +1019,8 @@ pub enum Reply {
     MissingPermissions(Vec<OsPermission>),
     Update(UpdateInfo),
     LocalListing(LocalListing),
+    /// What `LocalProps` counted.
+    LocalProps(LocalProps),
     LocalPlaces(Vec<LocalPlace>),
     Blocked(Vec<BlockedItem>),
 }
@@ -1162,6 +1213,7 @@ impl Command {
                 | Command::ListDisplays { .. }
                 | Command::FilesList { .. }
                 | Command::LocalList { .. }
+                | Command::LocalProps { .. }
                 | Command::LocalPlaces
                 | Command::SetGrants { .. }
                 | Command::SetSettings { .. }
@@ -1194,7 +1246,14 @@ impl Command {
             Command::TermOpen { .. } | Command::FilesList { .. } => 25,
             Command::ActivityList { .. } | Command::ActivityExport { .. } => 10,
             // A slow volume (a network share, a sleeping disk) fails visibly instead of freezing the pane (R-UI-7).
-            Command::LocalList { .. } | Command::LocalPlaces => 8,
+            Command::LocalList { .. }
+            | Command::LocalPlaces
+            | Command::LocalMakeDir { .. }
+            | Command::LocalRename { .. }
+            | Command::LocalMove { .. }
+            | Command::LocalDeleteForever { .. }
+            | Command::LocalTrash { .. }
+            | Command::LocalProps { .. } => 8,
             _ => 5,
         }
     }

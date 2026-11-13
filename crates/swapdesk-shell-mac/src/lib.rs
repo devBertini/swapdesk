@@ -40,6 +40,8 @@ mod system;
 #[cfg(target_os = "macos")]
 mod terminal;
 #[cfg(target_os = "macos")]
+mod trash;
+#[cfg(target_os = "macos")]
 mod video;
 #[cfg(target_os = "macos")]
 mod viewer_window;

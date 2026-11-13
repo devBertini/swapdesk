@@ -493,8 +493,8 @@ impl Window {
     /// Offers a key message to the pipeline. `Some` when it takes the key away from the UI.
     fn forward_key(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let host = self.host()?;
-        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() {
-            return None; // a toolbar control has the keyboard focus, or nobody wants the keys
+        if self.ix.borrow().focus.is_some() || !host.captures_keyboard() || self.shared.state.borrow().explorer_open() {
+            return None; // a toolbar control has the keyboard focus, nobody wants the keys, or the explorer is open
         }
         let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
         let sys = matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP);
@@ -798,8 +798,10 @@ impl Window {
                 }
             };
             let handle = handles.iter_mut().find(|h| h.id == slot.id).expect("the handle was just found or pushed");
-            // The rename field opens prefilled, with its text selected and the keyboard in it.
-            let opening = slot.id == EditId::Rename && (created_now || !handle.visible);
+            // A rename field opens prefilled, with its text selected and the keyboard in it; the explorer's selects the
+            // name without its extension (FILES-UI.md 3.2).
+            let renames = matches!(slot.id, EditId::Rename | EditId::ExpRename);
+            let opening = renames && (created_now || !handle.visible);
             // SAFETY: our child windows.
             unsafe {
                 if handle.font != font.0 as isize {
@@ -814,14 +816,11 @@ impl Window {
                 if opening {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                     let _ = SetFocus(Some(hwnd));
-                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                    let end = if slot.id == EditId::ExpRename { stem_len(&slot.value) } else { -1 };
+                    SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(end)));
                 }
-                // The rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
-                if slot.id != EditId::Rename
-                    && GetFocus() != hwnd
-                    && !slot.value.is_empty()
-                    && edit_text(hwnd) != slot.value
-                {
+                // A rename field keeps what was typed (a click on "Salvar" takes the focus before it acts).
+                if !renames && GetFocus() != hwnd && !slot.value.is_empty() && edit_text(hwnd) != slot.value {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(slot.value.as_str()));
                 }
             }
@@ -879,8 +878,8 @@ impl Window {
                 if id == EditId::Chat {
                     self.clear_edit(id);
                 }
-                // The rename field keeps the focus: a refused name is corrected in place.
-                if id != EditId::Rename {
+                // A rename field keeps the focus: a refused name is corrected in place.
+                if !matches!(id, EditId::Rename | EditId::ExpRename) {
                     // SAFETY: our own window takes the focus back.
                     unsafe {
                         let _ = SetFocus(Some(self.hwnd()));
@@ -891,6 +890,9 @@ impl Window {
             3 => {
                 if id == EditId::Rename {
                     self.shared.activate(ControlId::RenameCancel, self);
+                }
+                if id == EditId::ExpRename {
+                    self.shared.explorer_key(swapdesk_ui::ExplorerKey::Escape, self);
                 }
                 if id == EditId::Name
                     && let Some(n) = self.shared.state.borrow().settings().map(|s| s.name.clone())
@@ -1293,6 +1295,15 @@ impl Window {
                 }
                 Some(LRESULT(0))
             }
+            // Alt+Enter: the explorer's Propriedades (FILES-UI.md 3.2).
+            WM_SYSKEYDOWN
+                if wparam.0 as u16 == VK_RETURN.0
+                    && self.kind == WindowKind::Viewer
+                    && self.shared.state.borrow().explorer_open() =>
+            {
+                self.shared.explorer_key(swapdesk_ui::ExplorerKey::Properties, self);
+                Some(LRESULT(0))
+            }
             WM_KEYDOWN => {
                 let key = wparam.0 as u16;
                 if key == VK_TAB.0 {
@@ -1306,6 +1317,13 @@ impl Window {
                     if let Some(id) = focus.filter(|i| !matches!(i, ControlId::Edit(_))) {
                         self.shared.activate(id, self);
                     }
+                    return Some(LRESULT(0));
+                }
+                if self.kind == WindowKind::Viewer
+                    && self.shared.state.borrow().explorer_open()
+                    && let Some(k) = explorer_key_of(key)
+                {
+                    self.shared.explorer_key(k, self);
                     return Some(LRESULT(0));
                 }
                 if key == VK_ESCAPE.0 {
@@ -1516,12 +1534,23 @@ fn colorref(rgb: u32) -> windows::Win32::Foundation::COLORREF {
     windows::Win32::Foundation::COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
 }
 
+/// The UTF-16 length of a file name without its extension (the whole name when it has none, or starts with its only
+/// dot), what the explorer's rename selects.
+fn stem_len(name: &str) -> isize {
+    let stem = match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    };
+    isize::try_from(stem.encode_utf16().count()).unwrap_or(-1)
+}
+
 fn edit_code(id: EditId) -> usize {
     match id {
         EditId::Name => 1,
         EditId::Chat => 2,
         EditId::Address => 3,
         EditId::Rename => 4,
+        EditId::ExpRename => 5,
     }
 }
 
@@ -1531,6 +1560,7 @@ fn edit_from_code(code: usize) -> Option<EditId> {
         2 => Some(EditId::Chat),
         3 => Some(EditId::Address),
         4 => Some(EditId::Rename),
+        5 => Some(EditId::ExpRename),
         _ => None,
     }
 }
@@ -1722,6 +1752,26 @@ fn message_name(msg: u32) -> &'static str {
         WM_DPICHANGED => "WM_DPICHANGED",
         _ => "window message",
     }
+}
+
+/// The explorer's keys on Windows (FILES-UI.md 3.2): F2, Delete, Shift+Delete, Ctrl+Shift+N, Alt+Enter, Ctrl+X, Ctrl+V
+/// and Esc. Alt+Enter arrives as WM_SYSKEYDOWN and is mapped there.
+fn explorer_key_of(key: u16) -> Option<swapdesk_ui::ExplorerKey> {
+    use swapdesk_ui::ExplorerKey as K;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_DELETE, VK_F2, VK_N, VK_V, VK_X};
+    // SAFETY: plain key state reads.
+    let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
+    let (ctrl, shift) = (down(VK_CONTROL.0), down(VK_SHIFT.0));
+    Some(match key {
+        k if k == VK_F2.0 => K::Rename,
+        k if k == VK_DELETE.0 && shift => K::DeleteForever,
+        k if k == VK_DELETE.0 => K::Delete,
+        k if k == VK_N.0 && ctrl && shift => K::NewFolder,
+        k if k == VK_X.0 && ctrl => K::Cut,
+        k if k == VK_V.0 && ctrl => K::Paste,
+        k if k == VK_ESCAPE.0 => K::Escape,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

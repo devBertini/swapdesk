@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::api::{Listing, Reply, Ticket, UiEvent};
+use crate::api::{ApiCode, Listing, Reply, Ticket, UiEvent};
+use crate::interact::explorer_manage::ExplorerKey;
 use crate::mock::Scenario;
 use crate::state::WindowKind;
 
@@ -29,6 +30,7 @@ fn opened() -> UiState {
             path: PathBuf::from("C:/u/Downloads"),
             entries: vec![entry("foto 10.jpg", false, 10), entry("foto 2.jpg", false, 20), entry("Pasta", true, 0)],
             truncated: false,
+            hidden: Vec::new(),
         }),
     );
     reply(
@@ -188,4 +190,158 @@ fn sizes_read_in_the_unit_that_fits() {
     assert_eq!(human_size(Language::PtBr, 2_400_000), "2,4 MB");
     assert_eq!(human_size(Language::En, 2_400_000), "2.4 MB");
     assert_eq!(human_size(Language::PtBr, 512), "512 B");
+}
+
+// ----- slice 2a: managing this computer's files (FILES-UI.md 3.2, 10) -----
+
+/// The command `a` asked for, sent and answered: tracked under its own ticket like the backend does.
+fn answer(s: &mut UiState, command: &Command, result: Result<Reply, crate::api::ApiError>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(9_000);
+    let t = Ticket(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    s.track(t, command);
+    s.apply(UiEvent::Reply { ticket: t, result });
+}
+
+fn select_here(s: &mut UiState, name: &str) {
+    let rows = s.explorer_pane(false).rows;
+    let n = rows.iter().position(|r| r.name == name).expect("the row");
+    s.activate(ControlId::ExpRow(false, n as u16));
+}
+
+#[test]
+fn a_new_folder_is_named_and_renamed_in_place() {
+    let mut s = opened();
+    let a = s.activate(ControlId::ExpNewFolder);
+    let made = PathBuf::from("C:/u/Downloads").join("Nova pasta");
+    assert_eq!(a.commands, vec![Command::LocalMakeDir { path: made.clone() }]);
+    answer(&mut s, &Command::LocalMakeDir { path: made }, Ok(Reply::Done));
+    assert!(s.take_followups().contains(&Command::LocalList { path: Some(PathBuf::from("C:/u/Downloads")) }));
+    reply(
+        &mut s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("Nova pasta", true, 0), entry("Pasta", true, 0)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+    assert_eq!(s.explorer_manage().renaming, Some(("Nova pasta".into(), None)), "its name opens for editing");
+    let a = s.submit_edit(EditId::ExpRename, "Projetos".into());
+    let rename =
+        Command::LocalRename { path: PathBuf::from("C:/u/Downloads").join("Nova pasta"), name: "Projetos".into() };
+    assert_eq!(a.commands, vec![rename.clone()]);
+    answer(&mut s, &rename, Ok(Reply::Done));
+    assert!(s.explorer_manage().renaming.is_none(), "the field closes");
+}
+
+#[test]
+fn rename_refuses_a_taken_or_invalid_name_and_keeps_the_field_open() {
+    let mut s = opened();
+    select_here(&mut s, "foto 2.jpg");
+    s.activate(ControlId::ExpRename);
+    assert!(s.explorer_manage().renaming.is_some());
+    let a = s.submit_edit(EditId::ExpRename, "a:b.jpg".into());
+    assert!(a.commands.is_empty(), "an invalid name never leaves the window");
+    assert_eq!(s.explorer_manage().renaming.unwrap().1.as_deref(), Some(s.t(MsgKey::ExplorerNameInvalid).as_str()));
+    let a = s.submit_edit(EditId::ExpRename, "foto 10.jpg".into());
+    answer(&mut s, &a.commands[0], Err(crate::api::ApiError::new(ApiCode::Refused)));
+    let (name, error) = s.explorer_manage().renaming.expect("still open");
+    assert_eq!((name.as_str(), error.as_deref()), ("foto 2.jpg", Some(s.t(MsgKey::ExplorerNameTaken).as_str())));
+    s.explorer_key(ExplorerKey::Escape);
+    assert!(s.explorer_manage().renaming.is_none(), "Esc closes it without saving");
+}
+
+#[test]
+fn cut_and_paste_moves_inside_this_computer() {
+    let mut s = opened();
+    select_here(&mut s, "foto 2.jpg");
+    s.explorer_key(ExplorerKey::Cut);
+    let a = s.explorer_key(ExplorerKey::Paste);
+    assert_eq!(
+        a.commands,
+        vec![Command::LocalMove {
+            paths: vec![PathBuf::from("C:/u/Downloads").join("foto 2.jpg")],
+            into: PathBuf::from("C:/u/Downloads")
+        }]
+    );
+    answer(&mut s, &a.commands[0], Err(crate::api::ApiError::new(ApiCode::Invalid)));
+    assert_eq!(s.explorer_manage().notice.as_deref(), Some(s.t(MsgKey::ExplorerMoveIntoItself).as_str()));
+}
+
+#[test]
+fn delete_sends_to_the_bin_and_shift_delete_asks_first() {
+    let mut s = opened();
+    select_here(&mut s, "Pasta");
+    let a = s.explorer_key(ExplorerKey::Delete);
+    let path = PathBuf::from("C:/u/Downloads").join("Pasta");
+    assert_eq!(a.commands, vec![Command::LocalTrash { paths: vec![path.clone()] }], "no question: the bin is the undo");
+
+    let a = s.explorer_key(ExplorerKey::DeleteForever);
+    assert!(a.commands.is_empty(), "for good only after the card");
+    let (title, _) = s.explorer_manage().forever.expect("the card");
+    assert_eq!(title, "Excluir 1 item para sempre?");
+    let ids: Vec<ControlId> = s.controls(WindowKind::Viewer).into_iter().map(|c| c.id).collect();
+    let (cancel, confirm) = (
+        ids.iter().position(|i| *i == ControlId::ExpForeverCancel).unwrap(),
+        ids.iter().position(|i| *i == ControlId::ExpForeverConfirm).unwrap(),
+    );
+    assert!(cancel < confirm, "Cancelar first, the danger button last");
+    let a = s.activate(ControlId::ExpForeverConfirm);
+    assert_eq!(a.commands, vec![Command::LocalDeleteForever { paths: vec![path] }]);
+}
+
+#[test]
+fn delete_on_a_local_volume_without_a_bin_refuses_with_the_notice() {
+    let mut s = opened();
+    select_here(&mut s, "Pasta");
+    let a = s.explorer_key(ExplorerKey::Delete);
+    answer(&mut s, &a.commands[0], Err(crate::api::ApiError::new(ApiCode::Refused)));
+    let notice = s.explorer_manage().notice.expect("the notice");
+    assert_eq!(notice, "Este local não tem Lixeira; nada foi excluído.");
+    assert!(s.controls(WindowKind::Viewer).iter().any(|c| c.label == notice && c.region == Region::Status));
+}
+
+#[test]
+fn properties_count_a_folder_and_close() {
+    let mut s = opened();
+    select_here(&mut s, "Pasta");
+    let a = s.explorer_key(ExplorerKey::Properties);
+    let path = PathBuf::from("C:/u/Downloads").join("Pasta");
+    assert_eq!(a.commands, vec![Command::LocalProps { path: path.clone() }]);
+    assert_eq!(s.explorer_manage().props.unwrap().1, vec!["Contando…".to_owned()]);
+    reply(
+        &mut s,
+        Reply::LocalProps(crate::api::LocalProps {
+            path,
+            files: 1,
+            folders: 2,
+            bytes: 2048,
+            truncated: false,
+            free_bytes: Some(1_000_000_000),
+        }),
+    );
+    let (title, lines) = s.explorer_manage().props.expect("the card");
+    assert_eq!(title, "Propriedades de Pasta");
+    assert!(lines[0].starts_with("1 arquivo e 2 pastas"), "{lines:?}");
+    assert!(lines[1].starts_with("Livre neste disco:"), "{lines:?}");
+    s.activate(ControlId::ExpPropsClose);
+    assert!(s.explorer_manage().props.is_none());
+}
+
+#[test]
+fn hidden_items_show_only_when_asked() {
+    let mut s = opened();
+    reply(
+        &mut s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry("a.txt", false, 1)],
+            truncated: false,
+            hidden: vec![entry(".config", true, 0)],
+        }),
+    );
+    let names = |s: &UiState| s.explorer_pane(false).rows.into_iter().map(|r| r.name).collect::<Vec<_>>();
+    assert_eq!(names(&s), ["a.txt"]);
+    s.activate(ControlId::ExpHidden);
+    assert!(names(&s).contains(&".config".to_owned()));
 }

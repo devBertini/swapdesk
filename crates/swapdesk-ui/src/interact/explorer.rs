@@ -12,9 +12,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::{ControlId, Specs, UiRole};
+use super::{ControlId, Region, Specs, UiRole};
 use crate::api::{ApiCode, Command, DirEntryView, LocalListing, LocalPlace, Msg, PlaceKind};
-use crate::state::{Activation, Changed, DataKind, Effect, Fetch, UiState};
+use crate::state::{Activation, Changed, DataKind, EditId, Effect, Fetch, UiState};
 use crate::strings::MsgKey;
 
 /// Sort columns, as `ControlId::ExpSort` numbers them.
@@ -78,6 +78,10 @@ pub(crate) struct Explorer {
     pub pointer: PointerMods,
     /// A note for the status of the copy (a folder was left out), shown until the next copy.
     pub note: Option<MsgKey>,
+    /// The left pane's rows: the listing's entries, with its hidden ones when shown (slice 2a).
+    pub here_shown: Vec<DirEntryView>,
+    /// Slice 2a: managing this computer's files.
+    pub manage: super::explorer_manage::Manage,
 }
 
 impl Default for Explorer {
@@ -94,6 +98,8 @@ impl Default for Explorer {
             transfers_open: false,
             pointer: PointerMods::default(),
             note: None,
+            here_shown: Vec::new(),
+            manage: super::explorer_manage::Manage::default(),
         }
     }
 }
@@ -277,7 +283,7 @@ impl UiState {
     }
 
     fn here_entries(&self) -> &[DirEntryView] {
-        self.explorer.here.as_ref().map_or(&[], |l| &l.entries)
+        &self.explorer.here_shown
     }
 
     fn there_entries(&self) -> &[DirEntryView] {
@@ -372,6 +378,8 @@ impl UiState {
         self.explorer.here = Some(l);
         self.explorer.here_loading = false;
         self.explorer.here_error = None;
+        self.refresh_here_rows();
+        self.manage_listed();
         Changed::VIEWER
     }
 
@@ -542,7 +550,7 @@ impl UiState {
                 self.explorer.transfers_open = !self.explorer.transfers_open;
                 a.changed = Changed::VIEWER;
             }
-            _ => return false,
+            other => return self.manage_activate(other, a),
         }
         true
     }
@@ -726,6 +734,46 @@ impl UiState {
     pub(super) fn explorer_controls(&self, s: &mut Specs) {
         s.button(ControlId::ExpTela, self.name_of(MsgKey::ExplorerBackToScreen));
         s.button(ControlId::ExpCopy, self.explorer_copy_label());
+        let m = self.explorer_manage();
+        for (id, key, on) in [
+            (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, true),
+            (ControlId::ExpRename, MsgKey::ExplorerRename, m.can_rename),
+            (ControlId::ExpDelete, MsgKey::ExplorerDelete, m.can_delete),
+            (ControlId::ExpProps, MsgKey::ExplorerProps, true),
+        ] {
+            s.button(id, self.name_of(key));
+            if let Some(c) = s.v.last_mut() {
+                c.disabled = !on;
+            }
+        }
+        let hidden = if m.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden };
+        s.button(ControlId::ExpHidden, self.name_of(hidden));
+        if let Some((name, error)) = &m.renaming {
+            let c = s.add(ControlId::Edit(EditId::ExpRename), UiRole::TextInput, self.name_of(MsgKey::ExplorerRename));
+            c.value = Some(name.clone());
+            c.description = error.clone();
+        }
+        if let Some((title, body)) = &m.forever {
+            s.region(Region::Dialog);
+            s.heading(2, title.clone());
+            s.text(UiRole::Text, body.clone());
+            s.button(ControlId::ExpForeverCancel, self.name_of(MsgKey::Cancel));
+            s.button(ControlId::ExpForeverConfirm, self.name_of(MsgKey::ExplorerForeverButton));
+            s.region(Region::Content);
+        } else if let Some((title, lines)) = &m.props {
+            s.region(Region::Dialog);
+            s.heading(2, title.clone());
+            for l in lines {
+                s.text(UiRole::Text, l.clone());
+            }
+            s.button(ControlId::ExpPropsClose, self.name_of(MsgKey::Close));
+            s.region(Region::Content);
+        }
+        if let Some(n) = &m.notice {
+            s.region(Region::Status);
+            s.text(UiRole::Text, n.clone());
+            s.region(Region::Content);
+        }
         for p in self.explorer_places() {
             s.button(ControlId::ExpPlace(p.there, p.index), p.label);
         }

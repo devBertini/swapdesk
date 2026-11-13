@@ -610,7 +610,7 @@ pub fn action_to_wire(a: a::ActionKind) -> p::Action {
 // ---------- commands ----------
 
 /// What a [`a::Command`] becomes in the backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Route {
     /// Sent to the service as this request.
     Op(w::UiOp),
@@ -627,10 +627,9 @@ pub enum Route {
     /// `ActivityExport`: a worker thread lists the activity log and writes the file (the path, the language, the
     /// offset of local time).
     Export(std::path::PathBuf, a::Language, i32),
-    /// `LocalList` and `LocalPlaces`: this computer's disk, read by a worker thread of this process
-    /// (`crate::local_disk`); nothing reaches the service.
-    LocalList(Option<std::path::PathBuf>),
-    LocalPlaces,
+    /// A command on this computer's disk (`LocalList`, `LocalPlaces` and the slice 2a changes): run by a worker
+    /// thread of this process (`local_disk::answer`); nothing about this disk reaches the service (C2.3).
+    Local(crate::api::Command),
 }
 
 /// Routes a command: the op it maps to, a UI-local `Done`, or "no op yet".
@@ -704,8 +703,14 @@ pub fn route(c: &a::Command) -> Route {
         C::ActivityExport { path, language, utc_offset_min } => {
             return Route::Export(path.clone(), *language, *utc_offset_min);
         }
-        C::LocalList { path } => return Route::LocalList(path.clone()),
-        C::LocalPlaces => return Route::LocalPlaces,
+        C::LocalList { .. }
+        | C::LocalPlaces
+        | C::LocalMakeDir { .. }
+        | C::LocalRename { .. }
+        | C::LocalMove { .. }
+        | C::LocalDeleteForever { .. }
+        | C::LocalTrash { .. }
+        | C::LocalProps { .. } => return Route::Local(c.clone()),
         C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }

@@ -55,6 +55,34 @@ const KEY_RETURN: u16 = 36;
 const KEY_ENTER: u16 = 76;
 const KEY_SPACE: u16 = 49;
 const KEY_ESCAPE: u16 = 53;
+/// The explorer's keys (FILES-UI.md 3.2, Mac column): `kVK_F2`, `kVK_Delete` (Backspace), `kVK_ANSI_N`, `kVK_ANSI_I`,
+/// `kVK_ANSI_X`, `kVK_ANSI_V` (HIToolbox `Events.h`).
+const KEY_F2: u16 = 120;
+const KEY_BACKSPACE: u16 = 51;
+const KEY_N: u16 = 45;
+const KEY_I: u16 = 34;
+const KEY_X: u16 = 7;
+const KEY_V: u16 = 9;
+
+/// The explorer's key for an event in the session window: F2 and Esc plain; the others with Command (Command+Option+
+/// Backspace deletes for good, Command+Shift+N makes a folder).
+fn explorer_key_of(code: u16, flags: NSEventModifierFlags) -> Option<swapdesk_ui::ExplorerKey> {
+    use swapdesk_ui::ExplorerKey as K;
+    let cmd = flags.contains(NSEventModifierFlags::Command);
+    let opt = flags.contains(NSEventModifierFlags::Option);
+    let shift = flags.contains(NSEventModifierFlags::Shift);
+    Some(match code {
+        KEY_F2 => K::Rename,
+        KEY_ESCAPE => K::Escape,
+        KEY_BACKSPACE if cmd && opt => K::DeleteForever,
+        KEY_BACKSPACE if cmd => K::Delete,
+        KEY_N if cmd && shift => K::NewFolder,
+        KEY_I if cmd => K::Properties,
+        KEY_X if cmd => K::Cut,
+        KEY_V if cmd => K::Paste,
+        _ => return None,
+    })
+}
 
 thread_local! {
     /// The embedded face and the laid-out labels, shared by every canvas (main thread only).
@@ -297,6 +325,22 @@ define_class!(
             if moved {
                 self.setNeedsDisplay(true);
             }
+        }
+
+        // The explorer's Command shortcuts reach the session window before the menu's Cut and Paste do.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            if self.ivars().kind == WindowKind::Viewer
+                && self.editing().is_none()
+                && crate::shell::explorer_open()
+                && let Some(k) = explorer_key_of(event.keyCode(), event.modifierFlags())
+                && !matches!(k, swapdesk_ui::ExplorerKey::Rename | swapdesk_ui::ExplorerKey::Escape)
+            {
+                crate::shell::explorer_key(k);
+                return true;
+            }
+            // SAFETY: forwards the same event to NSView's implementation.
+            unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
         #[unsafe(method(keyDown:))]
@@ -589,6 +633,13 @@ impl CanvasView {
         if kind == WindowKind::Viewer && crate::terminal::key(self, event) {
             return true;
         }
+        if kind == WindowKind::Viewer
+            && crate::shell::explorer_open()
+            && let Some(k) = explorer_key_of(event.keyCode(), event.modifierFlags())
+        {
+            crate::shell::explorer_key(k);
+            return true;
+        }
         match event.keyCode() {
             KEY_TAB => {
                 self.move_focus(event.modifierFlags().contains(NSEventModifierFlags::Shift));
@@ -748,16 +799,19 @@ impl CanvasView {
                 view.setHidden(false);
             }
             let value = NSString::from_str(&slot.value);
-            if slot.id == EditId::Rename && (created || was_hidden) {
-                // The rename field opens prefilled, with the keyboard in it and its text selected.
+            let renames = matches!(slot.id, EditId::Rename | EditId::ExpRename);
+            if renames && (created || was_hidden) {
+                // A rename field opens prefilled, with the keyboard in it and its text selected; the explorer's selects
+                // the name without its extension (FILES-UI.md 3.2).
                 view.setStringValue(&value);
-                self.focus_control(ControlId::Edit(EditId::Rename), false);
+                self.focus_control(ControlId::Edit(slot.id), false);
                 if let Some(editor) = view.currentEditor() {
-                    editor.setSelectedRange(NSRange::new(0, value.length()));
+                    let end = if slot.id == EditId::ExpRename { stem_utf16(&slot.value) } else { value.length() };
+                    editor.setSelectedRange(NSRange::new(0, end));
                 }
             } else if created {
                 view.setStringValue(&value);
-            } else if slot.id != EditId::Rename
+            } else if !renames
                 && view.currentEditor().is_none()
                 && !slot.value.is_empty()
                 && view.stringValue().to_string() != slot.value
@@ -804,8 +858,8 @@ impl CanvasView {
             if id == EditId::Chat {
                 control.setStringValue(&NSString::from_str(""));
             }
-            // The rename field keeps the keyboard: a refused name is corrected in place.
-            if id != EditId::Rename {
+            // A rename field keeps the keyboard: a refused name is corrected in place.
+            if !matches!(id, EditId::Rename | EditId::ExpRename) {
                 self.take_keyboard();
             }
             true
@@ -818,6 +872,7 @@ impl CanvasView {
         } else if command == sel!(cancelOperation:) {
             match id {
                 EditId::Rename => crate::shell::activate_from(self.ivars().kind, ControlId::RenameCancel),
+                EditId::ExpRename => crate::shell::explorer_key(swapdesk_ui::ExplorerKey::Escape),
                 EditId::Name => {
                     let name = crate::shell::with_state(|st| st.settings().map(|s| s.name.clone())).flatten();
                     if let Some(name) = name {
@@ -919,6 +974,15 @@ impl CanvasView {
         }
         true
     }
+}
+
+/// The UTF-16 length of a file name without its extension (all of it when it has none or starts with its only dot).
+fn stem_utf16(name: &str) -> usize {
+    let stem = match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    };
+    stem.encode_utf16().count()
 }
 
 /// The virtual key code of the key that types `c` on the ANSI layout (`kVK_ANSI_*`, `kVK_Return`, `kVK_Tab`,

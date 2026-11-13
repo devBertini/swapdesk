@@ -17,6 +17,7 @@ mod offscreen;
 mod surface;
 mod system;
 mod terminal;
+mod trash;
 mod tray;
 mod viewer;
 mod window;

@@ -141,6 +141,8 @@ pub enum EditId {
     Rename,
     /// The manual address field (F-FIND-03); acts 150 ms after the last key (R-UI-4).
     Address,
+    /// The explorer's inline rename of a row of this computer (slice 2a): Enter commits, Esc cancels.
+    ExpRename,
 }
 
 /// The data a screen shows that comes from the service and may take a while (R-UI-1, R-UI-3).
@@ -2348,6 +2350,13 @@ impl UiState {
                     Changed::ALL
                 }
                 // The service stored the trimmed name; the pushed device list says so too, this just does not wait.
+                Some(
+                    c @ (Command::LocalMakeDir { .. }
+                    | Command::LocalRename { .. }
+                    | Command::LocalMove { .. }
+                    | Command::LocalTrash { .. }
+                    | Command::LocalDeleteForever { .. }),
+                ) => self.manage_done(&c),
                 Some(Command::RenameDevice { device_id, name }) => {
                     if let Some(d) = self.devices.iter_mut().find(|d| d.id == device_id) {
                         d.name = name;
@@ -2433,6 +2442,7 @@ impl UiState {
                 Changed::ALL
             }
             Reply::LocalListing(l) => self.here_listed(l),
+            Reply::LocalProps(p) => self.props_counted(p),
             Reply::LocalPlaces(p) => self.places_listed(p),
             Reply::Listing(l) => {
                 self.consent_answered(Feature::Files);
@@ -2515,6 +2525,12 @@ impl UiState {
         match &pending.command {
             Command::LocalList { .. } => return self.here_failed(error.code),
             Command::LocalPlaces => return Changed::NONE,
+            c @ (Command::LocalMakeDir { .. }
+            | Command::LocalRename { .. }
+            | Command::LocalMove { .. }
+            | Command::LocalTrash { .. }
+            | Command::LocalDeleteForever { .. }
+            | Command::LocalProps { .. }) => return self.manage_failed(c, error.code),
             _ => {}
         }
         // The step tells how the confirmation failed (a timeout of its own 120 s too): no strip over the content.

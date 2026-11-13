@@ -22,6 +22,7 @@ fn start_button(intent: Intent) -> ControlId {
 const MAX_DEVICE_NAME: usize = 64;
 
 mod explorer;
+pub mod explorer_manage;
 mod files_panel;
 pub(crate) use explorer::Explorer;
 pub use explorer::{
@@ -171,6 +172,17 @@ pub enum ControlId {
     ExpPlace(bool, u8),
     /// "Mostrar" / "Ocultar" of the transfers bar.
     ExpTransfers,
+    /// Slice 2a, the left pane's commands: Nova pasta, Renomear, Excluir, Propriedades, the hidden items switch.
+    ExpNewFolder,
+    ExpRename,
+    ExpDelete,
+    ExpProps,
+    ExpHidden,
+    /// The properties card's "Fechar".
+    ExpPropsClose,
+    /// The "Excluir para sempre" card's buttons.
+    ExpForeverConfirm,
+    ExpForeverCancel,
     ChatSend,
     ClipToggle,
     // host banner
@@ -1831,7 +1843,15 @@ impl UiState {
             | ControlId::ExpUp(_)
             | ControlId::ExpRefresh(_)
             | ControlId::ExpPlace(..)
-            | ControlId::ExpTransfers => {
+            | ControlId::ExpTransfers
+            | ControlId::ExpNewFolder
+            | ControlId::ExpRename
+            | ControlId::ExpDelete
+            | ControlId::ExpProps
+            | ControlId::ExpHidden
+            | ControlId::ExpPropsClose
+            | ControlId::ExpForeverConfirm
+            | ControlId::ExpForeverCancel => {
                 self.explorer_activate(id, &mut a);
             }
             ControlId::BannerChat => a.changed = Changed::NONE,
@@ -2127,6 +2147,7 @@ impl UiState {
                     self.toggle_setting(&mut a, |s| s.name = text);
                 }
             }
+            EditId::ExpRename => self.submit_explorer_rename(text, &mut a),
             EditId::Rename => {
                 let Some(device_id) = self.renaming().map(|r| r.device_id.clone()) else { return a };
                 let name = text.trim().to_owned();

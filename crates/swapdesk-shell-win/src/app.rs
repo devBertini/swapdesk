@@ -135,6 +135,8 @@ fn run_shell(
     });
     let gfx = Gfx::new()?;
     let mut state = state;
+    // The explorer's bin and free space (slice 2a), for the backend's worker thread.
+    swapdesk_ui::local_disk::set_os(crate::trash::local_os());
     // A contrast theme on at start: the first paint is in its colours.
     let _ = state.set_contrast(crate::system::system_contrast());
     // The full-screen monitor setting offers one entry for each monitor.
@@ -318,6 +320,12 @@ impl Shared {
     /// The user activated a control of `from`.
     pub fn activate(self: &Rc<Self>, id: ControlId, from: &Window) {
         let act = self.state.borrow_mut().activate(id);
+        self.dispatch(act, from);
+    }
+
+    /// A key of the explorer (slice 2a), as the window mapped it.
+    pub fn explorer_key(self: &Rc<Self>, key: swapdesk_ui::ExplorerKey, from: &Window) {
+        let act = self.state.borrow_mut().explorer_key(key);
         self.dispatch(act, from);
     }
 

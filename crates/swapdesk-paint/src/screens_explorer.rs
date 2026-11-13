@@ -4,7 +4,9 @@
 //! and the transfers bar. What each control does is `swapdesk_ui::UiState::activate`; this file only lays them out.
 
 use swapdesk_ui::tokens::text;
-use swapdesk_ui::{ControlId, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, TransferState};
+use swapdesk_ui::{
+    ControlId, EditId, ManageView, MsgKey, PaneView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, TransferState,
+};
 
 use crate::painter::{Align, Rect};
 use crate::screens_viewer::human_size;
@@ -63,6 +65,21 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
     let cw = f.button_width(&copy, Kind::Primary);
     let kind = if f.st.explorer_can_copy() { Kind::Primary } else { Kind::Default };
     f.button(ControlId::ExpCopy, Rect::new(bar.right() - 16.0 - cw, bar.y + 8.0, cw, 40.0), kind, &copy, false);
+    // Slice 2a: this computer's commands, before the primary button; disabled, never hidden, when they cannot act.
+    let m = f.st.explorer_manage();
+    let mut x = bar.right() - 16.0 - cw - 12.0;
+    for (id, key, on) in [
+        (ControlId::ExpProps, MsgKey::ExplorerProps, true),
+        (ControlId::ExpDelete, MsgKey::ExplorerDelete, m.can_delete),
+        (ControlId::ExpRename, MsgKey::ExplorerRename, m.can_rename),
+        (ControlId::ExpNewFolder, MsgKey::ExplorerNewFolder, true),
+    ] {
+        let label = f.t(key);
+        let w = f.button_width(&label, Kind::Default);
+        x -= w;
+        command_button(f, id, Rect::new(x, bar.y + 8.0, w, 40.0), &label, on);
+        x -= 8.0;
+    }
 
     // ----- navigation pane -----
     let main_h = body.h - CMD_H - tr_h;
@@ -113,6 +130,67 @@ pub(crate) fn explorer(f: &mut Frame, body: Rect) {
     if has_transfers {
         transfers(f, Rect::new(body.x, body.bottom() - tr_h, body.w, tr_h));
     }
+
+    // ----- slice 2a cards, over the view -----
+    if let Some((title, body_text)) = &m.forever {
+        let cancel = f.t(MsgKey::Cancel);
+        let delete = f.t(MsgKey::ExplorerForeverButton);
+        explorer_card(
+            f,
+            body,
+            title,
+            std::slice::from_ref(body_text),
+            &[
+                (ControlId::ExpForeverCancel, cancel, Kind::Default),
+                (ControlId::ExpForeverConfirm, delete, Kind::Danger),
+            ],
+        );
+    } else if let Some((title, lines)) = &m.props {
+        let close = f.t(MsgKey::Close);
+        explorer_card(f, body, title, lines, &[(ControlId::ExpPropsClose, close, Kind::Default)]);
+    }
+}
+
+/// A command of the bar: a normal button, or the same box with its label in soft ink when it cannot act now (it is
+/// still a place a click reaches; the state ignores it).
+fn command_button(f: &mut Frame, id: ControlId, r: Rect, label: &str, on: bool) {
+    if on {
+        f.button(id, r, Kind::Default, label, false);
+        return;
+    }
+    let (p, pal) = (f.p, f.pal);
+    p.bordered(r, 8.0, pal.line, pal.surface);
+    let l = p.label(label, text::BTN);
+    p.draw(&l, r.x + (r.w - l.w) / 2.0, r.y + (r.h - l.h) / 2.0, pal.soft);
+    f.register(id, r, 8.0);
+}
+
+/// A card centred over the view (D51): its title, its lines, and its buttons as one group, the confirming one on the
+/// right (skill laying-out-buttons).
+fn explorer_card(f: &mut Frame, area: Rect, title: &str, lines: &[String], buttons: &[(ControlId, String, Kind)]) {
+    let p = f.p;
+    let w = 420.0_f32.min(area.w - 48.0);
+    let t = p.label_in(title, text::NAME, w - 48.0, Align::Center);
+    let ls: Vec<_> = lines.iter().map(|l| p.label_in(l, text::BODY, w - 48.0, Align::Center)).collect();
+    let h = 24.0 + t.h + 10.0 + ls.iter().map(|l| l.h + 4.0).sum::<f32>() + 20.0 + 40.0 + 24.0;
+    p.fill_rect(area, f.fx.shadow_dialog);
+    let card = Rect::new(p.snap(area.x + (area.w - w) / 2.0), p.snap(area.y + (area.h - h) / 2.0), w, h);
+    f.panel(card, f.pal.surface);
+    let mut y = card.y + 24.0;
+    p.draw(&t, card.x + 24.0, y, f.pal.ink);
+    y += t.h + 10.0;
+    for l in &ls {
+        p.draw(l, card.x + 24.0, y, f.pal.soft);
+        y += l.h + 4.0;
+    }
+    y += 20.0;
+    let widths: Vec<f32> = buttons.iter().map(|(_, s, k)| f.button_width(s, *k)).collect();
+    let group = widths.iter().sum::<f32>() + 8.0 * (buttons.len().saturating_sub(1)) as f32;
+    let mut x = card.x + (w - group) / 2.0;
+    for ((id, s, k), bw) in buttons.iter().zip(&widths) {
+        f.button(*id, Rect::new(x, y, *bw, 40.0), *k, s, false);
+        x += bw + 8.0;
+    }
 }
 
 fn icon_button(f: &mut Frame, id: ControlId, r: Rect, path: &str, enabled: bool) {
@@ -146,9 +224,19 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     f.laptop(r.x + 14.0, r.y + 12.0, 20.0, 1.6, pal.soft);
     let title = p.label_ellipsis(&v.title, text::NAME, r.w - 60.0);
     p.draw(&title, r.x + 42.0, r.y + (PANE_HEADER_H - title.h) / 2.0, pal.ink);
+    let there = v.there;
+    let m: ManageView = f.st.explorer_manage();
+    if !there {
+        // The left pane's hidden items switch (FILES-UI.md 2.5), at the right of its header.
+        let label = f.t(if m.show_hidden { MsgKey::ExplorerHideHidden } else { MsgKey::ExplorerShowHidden });
+        let l = p.label_ellipsis(&label, text::CAPTION, r.w * 0.45);
+        let hr = Rect::new(r.right() - 14.0 - l.w - 12.0, r.y + 8.0, l.w + 12.0, 28.0);
+        f.tint(ControlId::ExpHidden, hr, 6.0, pal.ink, 0.05, 0.09);
+        p.draw(&l, hr.x + 6.0, hr.y + (28.0 - l.h) / 2.0, pal.link);
+        f.register(ControlId::ExpHidden, hr, 6.0);
+    }
     // Navigation row: back, forward, up, refresh and the breadcrumb.
     let ny = r.y + PANE_HEADER_H;
-    let there = v.there;
     icon_button(f, ControlId::ExpBack(there), Rect::new(r.x + 8.0, ny + 4.0, 32.0, 32.0), BACK, v.can_back);
     icon_button(f, ControlId::ExpForward(there), Rect::new(r.x + 44.0, ny + 4.0, 32.0, 32.0), FORWARD, v.can_forward);
     icon_button(f, ControlId::ExpUp(there), Rect::new(r.x + 80.0, ny + 4.0, 32.0, 32.0), UP, v.can_up);
@@ -222,8 +310,15 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
             f.tint(id, rr, 4.0, pal.ink, 0.04, 0.08);
             let ink = if row.is_dir { pal.link } else { pal.soft };
             p.svg(if row.is_dir { icons::FOLDER } else { FILE }, r.x + 14.0, y + 7.0, 16.0, 1.6, ink);
-            let name = p.label_ellipsis(&row.name, text::BODY, size_x - r.x - 48.0);
-            p.draw(&name, r.x + 40.0, y + (ROW_H - name.h) / 2.0, pal.ink);
+            let renaming = !there && m.renaming.as_ref().is_some_and(|(n, _)| *n == row.name);
+            if renaming {
+                // The inline rename: a native field over the name cell.
+                let cell = Rect::new(r.x + 36.0, y + 2.0, size_x - r.x - 44.0, ROW_H - 4.0);
+                f.edit_field(EditId::ExpRename, cell, &row.name, "");
+            } else {
+                let name = p.label_ellipsis(&row.name, text::BODY, size_x - r.x - 48.0);
+                p.draw(&name, r.x + 40.0, y + (ROW_H - name.h) / 2.0, pal.ink);
+            }
             let size = p.label(&row.size, text::CAPTION);
             p.draw(&size, size_x + 88.0 - size.w - 4.0, y + (ROW_H - size.h) / 2.0, pal.soft);
             if let Some(x) = kind_x {
@@ -245,8 +340,14 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     }
     let sy = r.bottom() - STATUS_H;
     p.fill_rect(Rect::new(r.x + 1.0, sy, r.w - 2.0, p.hairline()), pal.line);
-    let st = p.label_ellipsis(&v.status, text::CAPTION, r.w * 0.6);
-    p.draw(&st, r.x + 14.0, sy + (STATUS_H - st.h) / 2.0, pal.soft);
+    // The left pane's status says why a change did not happen, or why a name was refused, in place of the count.
+    let why = (!there).then(|| m.renaming.as_ref().and_then(|(_, e)| e.clone()).or_else(|| m.notice.clone())).flatten();
+    let (status, ink) = match &why {
+        Some(w) => (w.as_str(), pal.danger),
+        None => (v.status.as_str(), pal.soft),
+    };
+    let st = p.label_ellipsis(status, text::CAPTION, r.w * 0.6);
+    p.draw(&st, r.x + 14.0, sy + (STATUS_H - st.h) / 2.0, ink);
     if let Some(t) = &v.truncated {
         let l = p.label_ellipsis(t, text::CAPTION, r.w * 0.35);
         p.draw(&l, r.right() - 14.0 - l.w, sy + (STATUS_H - l.h) / 2.0, pal.soft);

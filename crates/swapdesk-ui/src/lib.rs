@@ -41,6 +41,7 @@ mod state_tests;
 mod update_tests;
 
 pub use api::*;
+pub use interact::explorer_manage::{ExplorerKey, ManageView};
 pub use interact::{
     ControlId, ControlSpec, DialogTexts, FILES_PAGE, PaneView, PlaceView, PointerMods, Region, RowView, SORT_MODIFIED,
     SORT_NAME, SORT_SIZE, SORT_TYPE, UiRole,

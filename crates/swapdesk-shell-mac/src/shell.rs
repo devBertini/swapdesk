@@ -290,6 +290,19 @@ pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
     with_shell(|s| s.activate_from(kind, id));
 }
 
+/// A key of the explorer (slice 2a), as the viewer's canvas mapped it.
+pub(crate) fn explorer_key(key: swapdesk_ui::ExplorerKey) {
+    with_shell(|s| {
+        let act = s.state.borrow_mut().explorer_key(key);
+        s.dispatch_from(WindowKind::Viewer, act);
+    });
+}
+
+/// Whether the session window shows the explorer now.
+pub(crate) fn explorer_open() -> bool {
+    with_state(|st| st.explorer_open()).unwrap_or(false)
+}
+
 /// Return in a text field (or the keyboard leaving this computer's name): `text` is what input `id` holds.
 pub(crate) fn submit_edit(id: EditId, text: String) {
     with_shell(|s| s.submit_edit(id, text));
@@ -406,6 +419,8 @@ fn start_with(
     swapdesk_paint::term::set_terminal_waker(shell.waker.clone());
     SHELL.with(|s| *s.borrow_mut() = Some(Rc::clone(&shell)));
     shell.observe_system();
+    // The explorer's Trash and free space (slice 2a), for the backend's worker thread.
+    swapdesk_ui::local_disk::set_os(crate::trash::local_os());
     // "Increase contrast" on at launch: the first paint uses the stronger palette.
     {
         let _ = shell.state.borrow_mut().set_contrast(crate::system::system_contrast());

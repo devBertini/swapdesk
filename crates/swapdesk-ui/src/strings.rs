@@ -629,6 +629,28 @@ strings! {
     BlockedLine => "{0} · último endereço {1} · bloqueado em {2}", "{0} · last address {1} · blocked {2}";
     Unblock => "Desbloquear", "Unblock";
     BlockedNote => "O bloqueio usa o endereço físico (MAC) do dispositivo. Um dispositivo com endereço Wi-Fi privado ou rotativo pode voltar com outro.", "Blocking uses the device’s physical (MAC) address. A device with a private or rotating Wi-Fi address can come back with another one.";
+    // Slice 2a: managing this computer's files in the explorer.
+    ExplorerNewFolder => "Nova pasta", "New folder";
+    ExplorerRename => "Renomear", "Rename";
+    ExplorerDelete => "Excluir", "Delete";
+    ExplorerProps => "Propriedades", "Properties";
+    ExplorerShowHidden => "Mostrar itens ocultos", "Show hidden items";
+    ExplorerHideHidden => "Ocultar itens ocultos", "Hide hidden items";
+    ExplorerNameTaken => "Já existe um item com esse nome aqui.", "An item with that name is already here.";
+    ExplorerNameInvalid => "Esse nome não vale: sem / \\ :, sem espaço no começo nem ponto no fim, e não um nome reservado.", "That name is not allowed: no / \\ :, no leading space or trailing dot, and not a reserved name.";
+    ExplorerForeverTitle => "Excluir {0} {0|item|itens} para sempre?", "Delete {0} {0|item|items} for good?";
+    ExplorerForeverBody => "Isso não pode ser desfeito.", "This cannot be undone.";
+    ExplorerForeverButton => "Excluir para sempre", "Delete for good";
+    ExplorerNoBin => "Este local não tem Lixeira; nada foi excluído.", "This place has no Recycle Bin; nothing was deleted.";
+    ExplorerMoveIntoItself => "Uma pasta não pode ir para dentro dela mesma.", "A folder cannot go inside itself.";
+    ExplorerNotPermitted => "Sem permissão para mudar esse item.", "No permission to change that item.";
+    ExplorerGone => "O item não está mais aí.", "The item is no longer there.";
+    ExplorerOpFailed => "Não deu para concluir. Nada foi mudado.", "That could not be done. Nothing was changed.";
+    ExplorerPropsTitle => "Propriedades de {0}", "Properties of {0}";
+    ExplorerPropsCounting => "Contando…", "Counting…";
+    ExplorerPropsContents => "{0} {0|arquivo|arquivos} e {1} {1|pasta|pastas}, {2}", "{0} {0|file|files} and {1} {1|folder|folders}, {2}";
+    ExplorerPropsMore => "A contagem parou em {0} itens.", "The count stopped at {0} items.";
+    ExplorerPropsFree => "Livre neste disco: {0}", "Free on this disk: {0}";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

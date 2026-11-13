@@ -29,7 +29,7 @@ dispatch2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 workspace = true
-features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSLocale", "NSNotification", "NSObject", "NSString", "NSTimer", "NSTimeZone", "NSUserDefaults", "NSRange", "NSRunLoop", "NSDate", "NSThread", "NSURL", "NSValue"]
+features = ["std", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSDistributedNotificationCenter", "NSGeometry", "NSLocale", "NSNotification", "NSObject", "NSString", "NSTimer", "NSTimeZone", "NSUserDefaults", "NSRange", "NSRunLoop", "NSDate", "NSThread", "NSURL", "NSValue", "NSFileManager", "NSError"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 workspace = true

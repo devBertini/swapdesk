@@ -185,6 +185,8 @@ pub enum Step {
     Activate(ControlId),
     /// Activate a control and answer its command with an error, as the service would.
     ActivateRefused(ControlId, ApiCode),
+    /// A key of the explorer (slice 2a).
+    Key(crate::interact::explorer_manage::ExplorerKey),
     /// The launch requests (R-UI-6), sent and not yet answered.
     Startup,
     /// A request for `DataKind` went out and has not been answered.
@@ -234,6 +236,12 @@ pub enum Scenario {
     Arquivos,
     /// The files explorer (FILES-UI.md): both panes listed, two files selected on the right, transfers running.
     Explorador,
+    /// Slice 2a: a row of this computer being renamed in place.
+    ExploradorRenomear,
+    /// Slice 2a: the "Excluir para sempre" card over the explorer.
+    ExploradorExcluirParaSempre,
+    /// Slice 2a: the properties card of a folder of this computer, counted.
+    ExploradorPropriedades,
     Chat,
     /// The drawer's "Área de transferência" tab (1.1: the Mac viewer has it too).
     AreaTransferencia,
@@ -287,7 +295,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 56] = [
+    pub const ALL: [Scenario; 59] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -316,6 +324,9 @@ impl Scenario {
         Scenario::Terminal,
         Scenario::Arquivos,
         Scenario::Explorador,
+        Scenario::ExploradorRenomear,
+        Scenario::ExploradorExcluirParaSempre,
+        Scenario::ExploradorPropriedades,
         Scenario::Chat,
         Scenario::AreaTransferencia,
         Scenario::Banner,
@@ -377,6 +388,9 @@ impl Scenario {
             Scenario::Terminal => "terminal",
             Scenario::Arquivos => "arquivos",
             Scenario::Explorador => "explorador",
+            Scenario::ExploradorRenomear => "explorador-renomear",
+            Scenario::ExploradorExcluirParaSempre => "explorador-excluir-para-sempre",
+            Scenario::ExploradorPropriedades => "explorador-propriedades",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
             Scenario::Banner => "banner",
@@ -443,6 +457,9 @@ impl Scenario {
             Scenario::Terminal => "8. Terminal e ações rápidas (shell only)",
             Scenario::Arquivos => "9. Arquivos",
             Scenario::Explorador => "new: Arquivos, the explorer (FILES-UI.md slice 1)",
+            Scenario::ExploradorRenomear => "new: Arquivos, renaming a row in place (slice 2a)",
+            Scenario::ExploradorExcluirParaSempre => "new: Arquivos, the delete-for-good card (slice 2a)",
+            Scenario::ExploradorPropriedades => "new: Arquivos, a folder's properties (slice 2a)",
             Scenario::Chat => "10. Chat e copiar e colar",
             Scenario::AreaTransferencia => "10. Chat e copiar e colar, the clipboard tab",
             Scenario::Banner => "6. Sendo controlado",
@@ -744,6 +761,7 @@ impl Scenario {
                     path: "C:\\Users\\ana\\Downloads".into(),
                     entries: local_entries(),
                     truncated: false,
+                    hidden: Vec::new(),
                 })))),
                 Event(reply(Ok(Reply::Listing(Listing {
                     path: "Documents".into(),
@@ -774,6 +792,35 @@ impl Scenario {
                     state: TransferState::Running { done: 1_100_000, total: 3_100_000, bytes_per_s: 9_400_000 },
                 }),
             ],
+            Scenario::ExploradorRenomear => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([Activate(ControlId::ExpRow(false, 1)), Activate(ControlId::ExpRename)]);
+                v
+            }
+            Scenario::ExploradorExcluirParaSempre => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([
+                    Activate(ControlId::ExpRow(false, 1)),
+                    Key(crate::interact::explorer_manage::ExplorerKey::DeleteForever),
+                ]);
+                v
+            }
+            Scenario::ExploradorPropriedades => {
+                let mut v = Scenario::Explorador.script();
+                v.extend([
+                    Activate(ControlId::ExpRow(false, 0)),
+                    Activate(ControlId::ExpProps),
+                    Event(reply(Ok(Reply::LocalProps(LocalProps {
+                        path: std::path::Path::new(r"C:\Users\ana\Downloads").join("Fotos da viagem"),
+                        files: 214,
+                        folders: 31,
+                        bytes: 1_840_000_000,
+                        truncated: false,
+                        free_bytes: Some(212_000_000_000),
+                    })))),
+                ]);
+                v
+            }
             Scenario::AreaTransferencia => vec![
                 mac(),
                 Event(Self::viewer_session(21)),
@@ -986,6 +1033,9 @@ impl Scenario {
                 }
                 Step::Startup => {
                     state.startup_commands();
+                }
+                Step::Key(k) => {
+                    state.explorer_key(k);
                 }
                 Step::BeginFetch(k) => state.begin_fetch(k),
                 Step::CrashNotice => state.show_crash_notice(),
@@ -1387,6 +1437,7 @@ impl World {
                 path: path.unwrap_or_else(|| std::path::PathBuf::from("C:\\Users\\ana\\Downloads")),
                 entries: local_entries(),
                 truncated: false,
+                hidden: Vec::new(),
             })),
             Command::LocalPlaces => Ok(Reply::LocalPlaces(local_places())),
             Command::ChatSend { text, .. } => {
@@ -1461,6 +1512,9 @@ mod tests {
             (Scenario::Terminal, Screen::Devices, &[Main, Viewer]),
             (Scenario::Arquivos, Screen::Devices, &[Main, Viewer]),
             (Scenario::Explorador, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorRenomear, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorExcluirParaSempre, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorPropriedades, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),
             (Scenario::Banner, Screen::Home, &[Main, Banner]),
