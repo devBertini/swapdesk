@@ -241,7 +241,13 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
                     let (mut last, mut next) = (8i32, 8i32);
                     for _ in 0..size {
                         if next != 0 {
-                            next = (last + b.se()? + 256) % 256;
+                            // delta_scale is -128 to 127 (H.264 7.4.2.1.1.1); a larger one is a broken SPS and would
+                            // overflow the sum (found by fuzzing).
+                            let delta = b.se()?;
+                            if !(-128..=127).contains(&delta) {
+                                return None;
+                            }
+                            next = (last + delta + 256) % 256;
                         }
                         if next != 0 {
                             last = next;
@@ -259,7 +265,11 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
         b.bit()?;
         b.se()?;
         b.se()?;
+        // num_ref_frames_in_pic_order_cnt_cycle is 0 to 255 (7.4.2.1.1): a larger count is a broken SPS.
         let n = b.ue()?;
+        if n > 255 {
+            return None;
+        }
         for _ in 0..n {
             b.se()?;
         }
@@ -344,7 +354,12 @@ pub fn parse_sps(data: &[u8]) -> Option<SpsInfo> {
 }
 
 fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
-    let cpb = b.ue()? + 1;
+    // cpb_cnt_minus1 is 0 to 31 (E.2.2): a larger count is a broken SPS.
+    let cpb = b.ue()?;
+    if cpb > 31 {
+        return None;
+    }
+    let cpb = cpb + 1;
     b.bits(8)?;
     for _ in 0..cpb {
         b.ue()?;
@@ -358,6 +373,21 @@ fn skip_hrd(b: &mut Bits<'_>) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The input the annex_b fuzz target crashed on: an SPS whose scaling list carries a delta past the i32 sum.
+    #[test]
+    fn a_scaling_list_delta_out_of_range_is_a_broken_sps_not_a_crash() {
+        let data = [
+            0, 0, 0, 1, 199, 128, 0, 45, 49, 45, 37, 64, 64, 64, 64, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 0, 0, 0, 0, 255, 255, 255, 64, 64, 37,
+            37, 179, 37, 37, 70, 37, 37, 37, 0, 53, 43,
+        ];
+        let _ = scan(&data);
+        let _ = parameter_sets(&data);
+        let _ = is_idr(&data);
+        let _ = sps_profile_level(&data);
+        let _ = parse_sps(&data);
+    }
 
     /// HEVC NAL headers are two bytes with the type in bits 1 to 6 of the first: VPS 0x40, SPS 0x42, PPS 0x44, IDR_W_RADL 0x26.
     #[test]
