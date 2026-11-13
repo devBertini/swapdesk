@@ -1443,9 +1443,10 @@ fn an_elevation_is_written_to_the_activity_as_elevated_control() {
 /// open (a peer's "Parear" would reach that program), and it says so instead of opening on what is left.
 #[test]
 fn pairing_does_not_open_when_its_port_is_held_by_another_program() {
-    let free = || std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
-    let (session_port, pair_port) = (free(), free());
-    let squatter = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, pair_port)).unwrap();
+    // The squatter takes its port from the system and keeps it: no window where another test could take it first.
+    let squatter = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let pair_port = squatter.local_addr().unwrap().port();
+    let session_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
     let m = Machine::build_at("sala", FakeNetInterfaces::new(Vec::new()), true, Some((session_port, pair_port)));
     let mut ui = m.client(info(false));
     assert_eq!(ui.call(UiOp::PairOpen { device_id: None }).unwrap_err(), ApiCode::Busy);
