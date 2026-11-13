@@ -293,6 +293,35 @@ fn the_sweep_ends_only_processes_inside_the_install_folder() {
     }
 }
 
+/// A program started through the 8.3 short name of its folder (the GitHub runner's temp folder is
+/// `C:\Users\RUNNER~1\...`) has its image written with that short name: it is still found inside the install folder.
+#[test]
+fn a_program_started_through_a_short_folder_name_is_found_inside_the_install_folder() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let temp = Temp::new();
+    let install = temp.0.join("an install folder with a long name");
+    fs::create_dir_all(&install).unwrap();
+    let wide: Vec<u16> = install.as_os_str().encode_wide().chain([0]).collect();
+    let mut buf = [0u16; 1024];
+    // SAFETY: `wide` ends in a NUL; `buf` holds `buf.len()` units.
+    let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    assert!(len > 0 && len < buf.len(), "the short name of the folder");
+    let short = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+    if short == install {
+        // This volume makes no 8.3 names: the case cannot be built here.
+        return;
+    }
+    let mut child = sleeper(&short.join("swapdesk-helper.exe"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while programs_inside(&install) != vec![child.id()] {
+        assert!(Instant::now() < deadline, "the helper started by its short name never showed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Opens `path` as a hostile local program would: for read, sharing only read.
 fn hold_for_read(path: &Path) -> std::io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;

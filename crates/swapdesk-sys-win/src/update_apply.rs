@@ -382,7 +382,7 @@ pub fn programs_inside(install: &Path) -> Vec<u32> {
     all_pids()
         .into_iter()
         .filter(|&pid| pid != me && pid != 0)
-        .filter(|&pid| image_path(pid).is_some_and(|image| is_program_inside(&image, &folder)))
+        .filter(|&pid| image_path(pid).is_some_and(|image| image_is_program_inside(&image, &folder)))
         .collect()
 }
 
@@ -391,6 +391,21 @@ fn is_program_inside(image: &str, folder: &str) -> bool {
     let image = image.to_lowercase();
     let Some(name) = image.strip_prefix(folder).and_then(|rest| rest.strip_prefix('\\')) else { return false };
     PROGRAMS.iter().any(|p| p.to_lowercase() == name)
+}
+
+/// [`is_program_inside`] for a running image. `QueryFullProcessImageNameW` writes the path the process was opened by,
+/// which can hold 8.3 short names (`C:\Users\RUNNER~1\...`) where the resolved folder has long ones: an image named
+/// like one of the [`PROGRAMS`] whose text does not match has its folder resolved too before it is compared.
+fn image_is_program_inside(image: &str, folder: &str) -> bool {
+    if is_program_inside(image, folder) {
+        return true;
+    }
+    let path = Path::new(image);
+    let named_like_one = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .is_some_and(|n| PROGRAMS.iter().any(|p| p.to_lowercase() == n));
+    named_like_one && path.parent().is_some_and(|parent| comparable(parent) == folder)
 }
 
 /// A folder as `QueryFullProcessImageNameW` writes it: resolved, without the `\\?\` prefix or a trailing separator,
@@ -452,7 +467,7 @@ fn end_programs_inside(install: &Path) {
         if h.is_null() {
             continue;
         }
-        if image_of(h).is_some_and(|image| is_program_inside(&image, &folder)) {
+        if image_of(h).is_some_and(|image| image_is_program_inside(&image, &folder)) {
             // SAFETY: `h` was opened with PROCESS_TERMINATE and PROCESS_SYNCHRONIZE.
             unsafe {
                 TerminateProcess(h, 1);
