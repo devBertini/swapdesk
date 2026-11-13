@@ -359,7 +359,8 @@ fn a_transfer_the_user_pauses_waits_for_retomar_and_continues_from_the_verified_
     assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Pause { transfer_id: id })).is_ok());
     state_of(&mut p.viewer_ui, id, "paused", |s| matches!(s, TransferWire::Paused { .. }));
     // "Retomar".
-    assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
+    let resumed = p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id }));
+    assert!(resumed.is_ok(), "Retomar: {resumed:?}");
     finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("big.bin")).unwrap(), &big));
     assert!(!p.home.join("incoming").join("big.bin.swapdesk-part").exists());
@@ -524,7 +525,8 @@ fn a_transfer_the_user_paused_stays_paused_through_a_reconnect() {
         "a paused transfer is not started again"
     );
     // "Retomar" after the reconnect offers it again and it finishes.
-    assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id })).is_ok());
+    let resumed = p.viewer_ui.call(UiOp::Files(FilesOp::Resume { transfer_id: id }));
+    assert!(resumed.is_ok(), "Retomar: {resumed:?}");
     finished(&mut p.viewer_ui, id, "done after Retomar");
     assert!(same(&std::fs::read(p.home.join("incoming").join("up.bin")).unwrap(), &up));
     p.relay = Some(relay);

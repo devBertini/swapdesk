@@ -384,7 +384,11 @@ impl Hub {
 
     /// `TransferResume` ("Retomar"): the live connection continues it, or, when that connection no longer holds it
     /// (the link broke and came back), it is offered again and the receiver continues from its verified length.
-    pub fn transfer_resume(&self, conn: &Conn, req: u32, id: u32) {
+    ///
+    /// Right after a reconnect the session reports it is back a moment before the new connection's handler is in
+    /// place (see [`Hub::files_reissue`]): a click in that moment waits for the handler as the reissue does, instead
+    /// of being refused as busy while nothing is.
+    pub fn transfer_resume(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, id: u32) {
         let Some((session_id, handle)) = self.local_rec(conn, id) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
@@ -397,12 +401,27 @@ impl Hub {
             r.user_paused = false;
             r.start.clone()
         };
-        let ok = if handle.files().knows(id) {
-            handle.files().command(Command::Resume(id))
-        } else {
-            handle.files().command(command_of(id, &start))
+        let attempt = move || {
+            if handle.files().knows(id) {
+                handle.files().command(Command::Resume(id))
+            } else {
+                handle.files().command(command_of(id, &start))
+            }
         };
-        reply(conn, req, if ok { Ok(ReplyBody::Done) } else { Err(ApiCode::Busy) });
+        if attempt() {
+            return reply(conn, req, Ok(ReplyBody::Done));
+        }
+        let Some(rt) = self.rt() else { return reply(conn, req, Err(ApiCode::Busy)) };
+        let conn = Arc::clone(conn);
+        rt.spawn(async move {
+            for _ in 0..REISSUE_TRIES {
+                tokio::time::sleep(REISSUE_PAUSE).await;
+                if attempt() {
+                    return reply(&conn, req, Ok(ReplyBody::Done));
+                }
+            }
+            reply(&conn, req, Err(ApiCode::Busy));
+        });
     }
 
     /// `TransferCancel`.

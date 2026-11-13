@@ -340,8 +340,18 @@ fn a_lost_graphics_device_is_built_again_and_the_picture_returns_without_ending_
     wait_until("the keyframe request", Duration::from_secs(5), || !r.recorder.keyframes.lock().unwrap().is_empty());
     assert_eq!(r.recorder.keyframes.lock().unwrap()[0].0, SESSION);
 
-    // The host answers with a keyframe and the stream goes on.
-    for (n, e) in frames.iter().enumerate().skip(again) {
+    // The host answers with a keyframe, then the stream goes on. As at the start of a session ([`first_picture`]), the
+    // keyframe goes alone and the test waits for its picture: the new decoder is built by its first decode, which
+    // takes many frame times on a loaded PC, and a stream that kept coming meanwhile is by design shown newest-first
+    // (`show_newest` skips a picture while the stream is two frames ahead), so the keyframe's own picture would never
+    // reach the screen and the test would not see "the picture came back with the keyframe".
+    let key = &frames[again];
+    assert!(key.keyframe, "the stream's second keyframe");
+    r.pipeline.video(SESSION, header(again as u32, key), key.annex_b.clone());
+    wait_until("the keyframe's picture on the new device", Duration::from_secs(20), || {
+        r.presented.lock().unwrap().last().is_some_and(|e| e.frame_id == again as u32)
+    });
+    for (n, e) in frames.iter().enumerate().skip(again + 1) {
         r.pipeline.video(SESSION, header(n as u32, e), e.annex_b.clone());
         std::thread::sleep(Duration::from_millis(33));
     }
