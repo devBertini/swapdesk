@@ -22,6 +22,8 @@ const QUIET: Duration = Duration::from_millis(400);
 
 /// The id the one display has after the monitors changed (see `Tracked::moved`).
 const MOVED_DISPLAY: u16 = 5;
+/// Set by the test of a display whose mode changes under its id (each test runs in its own process).
+static RESIZED: AtomicBool = AtomicBool::new(false);
 
 /// A synthetic screen that counts how many of it are alive.
 struct Tracked {
@@ -47,6 +49,12 @@ impl Drop for Tracked {
 impl ScreenSource for Tracked {
     fn displays(&mut self) -> PResult<Vec<DisplayInfo>> {
         let mut list = self.inner.displays()?;
+        // The owner's defect of 12/11: the same display, a new mode (taller), under the same id.
+        if RESIZED.load(Ordering::SeqCst) {
+            for d in &mut list {
+                d.bounds.height += 160;
+            }
+        }
         if self.is_moved() {
             for d in &mut list {
                 d.id = DisplayId(MOVED_DISPLAY);
@@ -404,6 +412,39 @@ fn a_pointer_for_a_display_that_appeared_after_the_start_is_applied_after_the_di
     let applied = records.iter().position(|r| r.what == InputRecord::Event(pointer.clone())).expect("the pointer");
     assert!(relisted < applied, "the sink learns the display before the pointer is applied");
     assert_eq!(rig.input.events(), [pointer, second]);
+}
+
+/// Owner, 12/11 (the Mac controlling the installed Windows service): the clicks landed below the pointer, y x 1.111.
+/// The helper that injects never captures, so it kept the display list of its start; the display had changed mode
+/// under the same id (1440 to 1600 rows here, the other way round there). While pointers come, the list is read again
+/// every two seconds and the sink gets the new size.
+#[test]
+fn a_display_that_changes_mode_under_its_id_reaches_the_sink_while_pointers_come() {
+    let mut rig = rig(None);
+    let sizes = |m: &Message| match m {
+        Message::Displays(list) => Some(list.displays.iter().map(|d| d.height).collect::<Vec<_>>()),
+        _ => None,
+    };
+    let first = rig.wait(sizes);
+    RESIZED.store(true, Ordering::SeqCst);
+    let pointer = InputEvent::Pointer { display: 0, x: 100, y: 200 };
+    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
+    std::thread::sleep(Duration::from_millis(2_200));
+    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
+    let now = rig.wait(sizes);
+    assert_eq!(now[0], first[0] + 160, "the service learns the new size");
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+    let heights: Vec<u32> = rig
+        .input
+        .records()
+        .iter()
+        .filter_map(|r| match &r.what {
+            InputRecord::DisplaysChanged(list) => list.first().map(|d| d.bounds.height),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(heights.last().copied(), Some(first[0] as u32 + 160), "the sink maps over the new size: {heights:?}");
 }
 
 #[test]

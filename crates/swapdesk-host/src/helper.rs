@@ -788,6 +788,9 @@ enum InputCmd {
 
 /// Pause between two listings of the displays made for pointers that name an unknown one.
 const RELIST_PAUSE: Duration = Duration::from_secs(1);
+/// While pointers come, the input thread reads the displays again this often, so a display whose mode changed under
+/// its id is mapped at its new size (a helper that only injects never captures, so nothing else would tell it).
+const STALE_AFTER: Duration = Duration::from_secs(2);
 
 /// How often a streaming display lists the displays again (the viewer learns of a change within 2 s, F-VIEW-02).
 const RELIST_EVERY: Duration = Duration::from_secs(1);
@@ -882,10 +885,16 @@ fn input_main<I: InputSink, S: ScreenSource, E>(
                     // user's helper only injects the input of a prompted session), and its sink would refuse every
                     // pointer of the session while the keys still work. So the displays are listed again here, at
                     // most once a second, before the event is applied.
-                    if let InputEvent::Pointer { display, .. } = event
-                        && !known.iter().any(|d| d.id.0 == *display)
-                        && relisted.is_none_or(|at| at.elapsed() >= RELIST_PAUSE)
-                    {
+                    //
+                    // A known display can be stale too: a display that changed its mode (2560 x 1600 to 2560 x 1440,
+                    // the same id) keeps its id, and a helper that never captures would map the pointer over the old
+                    // size for the whole session (owner, 12/11: the clicks landed below the pointer, y x 1.111). So
+                    // while pointers come, the list is also read again every `STALE_AFTER`.
+                    let unknown = matches!(event, InputEvent::Pointer { display, .. }
+                        if !known.iter().any(|d| d.id.0 == *display));
+                    let stale = matches!(event, InputEvent::Pointer { .. })
+                        && relisted.is_none_or(|at| at.elapsed() >= STALE_AFTER);
+                    if (unknown && relisted.is_none_or(|at| at.elapsed() >= RELIST_PAUSE)) || stale {
                         relisted = Some(Instant::now());
                         env.refresh_displays();
                         let now = env.display_list();
