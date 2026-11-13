@@ -15,7 +15,7 @@
 //!   reply of `TermOpen` is `Reply::TermId` followed by `UiEvent::Term { Opened }` when the shell runs, or an error
 //!   whose `detail` says why; `TermOutput` messages go to [`ViewerSink::term_output`]; `TermExited` is
 //!   `UiEvent::Term { Exited }`.
-//! - Commands with no op (files, transfers, `CancelSwap`, `BlockAddress`) reply at once
+//! - `CancelSwap` has no op (no library cancels a swap and the interface has no control for it): it replies at once
 //!   `Err(ApiError { code: Internal, detail: None })`. `ListDisplays` is op 27: the reply is the session's display list.
 //! - `Elevate` runs on a worker thread of its own ([`elevation`]): it asks the service for a ticket (op 35), lets the
 //!   platform's [`Elevator`] run, ends the ticket (op 38) and reports `UiEvent::ElevationResult`, then answers `Done`.

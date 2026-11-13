@@ -679,7 +679,6 @@ pub struct Settings {
 }
 pub enum Language { PtBr, En }
 pub enum Theme { System, Light, Dark }   // wire tags 0, 1, 2 (never renumbered); System follows the OS, live
-pub enum SettingsTarget { NetworkCategory, Accessibility, InputMonitoring, ScreenRecording, LoginItems }
 pub struct Msg { pub key: MsgKey, pub args: Vec<String> }   // MsgKey: one variant per string of strings.rs
 
 // ---------- commands (screen in brackets) ----------
@@ -733,8 +732,6 @@ pub enum Command {
     BlockAddress { ipv4: String },                                       // [Atividade alert: Bloquear]
     GetSettings,                                                         // [Ajustes]
     SetSettings { settings: Settings },                                  // machine fields go to the service; per-user fields stay in the UI (C5.1)
-    OpenSystemSettings { target: SettingsTarget },                       // [UI] [Estados buttons]
-    RequestOsPermissions,                                                // [UI] [Conceder permissões]
 }
 
 pub enum Reply {
@@ -777,7 +774,7 @@ impl UiState {
 }
 ```
 
-**Screens covered** (each `docs/design` board, plus the three states the design lacks): Dispositivos and Dispositivos escuro (`ListDevices`, `Connect`, `DevicesChanged`), Pareamento (`PairOpen`, `PairStart`, `PairConfirm`, `Pairing`), Permissões (`SetGrants`, `ForgetDevice`, `Elevate`), Pedido de conexão (`IncomingRequest` Session, `AnswerIncoming`), Visualizador and Visualizador escuro (`Session`, display, scale, quality, audio, keyboard, grab, view-only, `SendKeys`, `Stats`), Sendo controlado (`Session` with role Host, `Disconnect`, `RequestSwap`), Inverter controle (`RequestSwap`, `AnswerSwap`, `Swap`), Terminal e ações rápidas (`TermOpen` and the rest, `RunAction`), Arquivos (`FilesList`, `FilesSend`, `FilesGet`, transfers), Chat e copiar e colar (`ChatSend`, `ChatMarkRead`, `SetClipboardSync`, `ClipboardSkipped`), Erros e estados (`NetworkChanged` notices, `OpenSystemSettings`, `RequestOsPermissions`, Reconectando, `Wake`/Acordando, `SwapEvent::Declined`), Ajustes (`GetSettings`, `SetSettings`), Atividade (`ActivityList`, `ActivityExport`, `BlockAddress`, `ActivityAlert`); new: the D13 consent card (`IncomingRequest` Consent), the elevation step (`Elevate`, `ElevationResult`), "Parear este computador" (`PairOpen { device_id: None }`, `PairingState::Open`).
+**Screens covered** (each `docs/design` board, plus the three states the design lacks): Dispositivos and Dispositivos escuro (`ListDevices`, `Connect`, `DevicesChanged`), Pareamento (`PairOpen`, `PairStart`, `PairConfirm`, `Pairing`), Permissões (`SetGrants`, `ForgetDevice`, `Elevate`), Pedido de conexão (`IncomingRequest` Session, `AnswerIncoming`), Visualizador and Visualizador escuro (`Session`, display, scale, quality, audio, keyboard, grab, view-only, `SendKeys`, `Stats`), Sendo controlado (`Session` with role Host, `Disconnect`, `RequestSwap`), Inverter controle (`RequestSwap`, `AnswerSwap`, `Swap`), Terminal e ações rápidas (`TermOpen` and the rest, `RunAction`), Arquivos (`FilesList`, `FilesSend`, `FilesGet`, transfers), Chat e copiar e colar (`ChatSend`, `ChatMarkRead`, `SetClipboardSync`, `ClipboardSkipped`), Erros e estados (`NetworkChanged` notices with their buttons as shell effects: the system page, Login Items, the macOS grant requests; Reconectando, `Wake`/Acordando, `SwapEvent::Declined`), Ajustes (`GetSettings`, `SetSettings`), Atividade (`ActivityList`, `ActivityExport`, `BlockAddress`, `ActivityAlert`); new: the D13 consent card (`IncomingRequest` Consent), the elevation step (`Elevate`, `ElevationResult`), "Parear este computador" (`PairOpen { device_id: None }`, `PairingState::Open`).
 
 ## C7. Fakes
 

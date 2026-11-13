@@ -105,7 +105,7 @@ systems run the same hub (`swapdesk-host`, in a service on Windows, in process o
 | 23 | Service down or starting (Windows) | `swapdesk-app/src/connect.rs`: one try of the pipe at launch, else `DownBackend` | until the next launch ("There is no reconnection") | placeholders, then strips "O serviço do Swapdesk não está respondendo." | no | the strip | a UI started before the service (sign-in) never recovers; a pipe break mid-run is final |
 | 24 | Service starting (macOS) | in process (`swapdesk-app-mac/src/service.rs`) | starts with the app | n/a | n/a | n/a | none |
 | 25 | macOS permission requests (host, macOS) | `ask_for_grants` at start (`swapdesk-app-mac/src/host.rs`); the shared notice `MacPerms` | until the person acts in System Settings (unbounded) | the system's own prompts; the shared `MacPerms` notice exists only in the mock (no producer found in `swapdesk-host` or `swapdesk-app-mac`), and `RequestOsPermissions` is answered `Internal` by `ServiceBackend` (`Route::Unsupported`) | n/a | nothing | the wait for System Settings is invisible; the notice is not wired. Larger than a waiting fix: its own stage |
-| 26 | macOS login item approval (macOS) | notice `Service` → `OpenSystemSettings { LoginItems }` | unbounded | the notice card | n/a | n/a | whether the notice clears when the person returns is not proven (GUESS: it clears on the next `NetworkChanged`) |
+| 26 | macOS login item approval (macOS) | notice `Service` → `Effect::OpenLoginItems` (the Mac shell calls `SMAppService.openSystemSettingsLoginItems()`) | unbounded | the notice card | n/a | n/a | whether the notice clears when the person returns is not proven (GUESS: it clears on the next `NetworkChanged`) |
 
 ### 1.4 Findings outside the waiting scope (read, not run)
 
