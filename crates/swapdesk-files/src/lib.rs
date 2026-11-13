@@ -25,6 +25,7 @@ pub mod proxy;
 pub mod recv;
 pub mod send;
 pub mod space;
+pub mod system;
 
 pub use access::{AccessState, ReceiveAccess};
 pub use disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, ReadHandle};
@@ -38,3 +39,4 @@ pub use proxy::{
 };
 pub use recv::{FinishError, Incoming};
 pub use send::{ChunkReader, Outgoing};
+pub use system::{SysVolume, SystemDisk};

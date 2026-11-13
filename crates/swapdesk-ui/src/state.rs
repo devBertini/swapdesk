@@ -2083,6 +2083,8 @@ impl UiState {
                 }
                 Changed::VIEWER
             }
+            // Slice 2b (in progress): the explorer's right pane takes the other computer's volumes.
+            UiEvent::RemoteVolumes { .. } => Changed::NONE,
             UiEvent::ServiceReconnected => {
                 // The sessions of the old service ended with it.
                 let ended: Vec<(u64, String)> = self.sessions.iter().map(|s| (s.id, s.device_id.clone())).collect();
@@ -2506,6 +2508,8 @@ impl UiState {
                 Changed::VIEWER
             }
             Reply::TransferIds(_) | Reply::TransferId(_) => Changed::NONE,
+            // Slice 2b (in progress): the explorer's right pane.
+            Reply::RemotePage(_) | Reply::ChangeResults(_) | Reply::RemoteVolumes(_) => Changed::NONE,
         }
     }
 

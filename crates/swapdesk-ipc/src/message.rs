@@ -266,6 +266,9 @@ pub enum Message {
         req: u32,
         result: core::result::Result<FsAnswer, ErrorCode>,
     },
+    /// 0x82, the user helper to the service: its set of published volumes changed (a disk came or went); the
+    /// service asks `FsCall::Volumes` again and pushes `VolumesList` (FILES-UI.md 7.4). No body.
+    FsVolumesChanged,
 }
 
 /// The body limit of message type `ty`, or `None` for an unknown type.
@@ -279,6 +282,7 @@ pub const fn limit_of(ty: u64) -> Option<usize> {
         0x62 | 0x63 => Some(MAX_CLIP_MESSAGE),
         0x60 | 0x61 | 0x64..=0x66 => Some(MAX_OTHER_MESSAGE),
         0x80 | 0x81 => Some(MAX_FS_MESSAGE),
+        0x82 => Some(0),
         // session_id (8) + datagram
         0x51 => Some(8 + MAX_AUDIO_DATAGRAM),
         0x70 | 0x71 => Some(MAX_TERM_OPEN_BODY),
@@ -451,6 +455,7 @@ impl Message {
             Self::TermInput { .. } => 0x79,
             Self::FsRequest { .. } => 0x80,
             Self::FsReply { .. } => 0x81,
+            Self::FsVolumesChanged => 0x82,
         }
     }
 
@@ -600,6 +605,7 @@ impl Message {
             }
             Self::FsRequest { req, call } => put_fs_request(w, *req, call)?,
             Self::FsReply { req, result } => put_fs_reply(w, *req, result)?,
+            Self::FsVolumesChanged => {}
         }
         Ok(&[])
     }
@@ -709,6 +715,7 @@ impl Message {
             }
             0x80 => Self::FsRequest { req: r.u32()?, call: FsCall::get(r)? },
             0x81 => Self::FsReply { req: r.u32()?, result: get_result(r)? },
+            0x82 => Self::FsVolumesChanged,
             other => return Err(IpcError::UnknownType(other)),
         };
         r.finish()?;

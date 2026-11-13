@@ -483,6 +483,118 @@ pub struct Listing {
     pub truncated: bool,
 }
 
+// ---------- the other computer's volumes and changes (FILES-UI.md slice 2b) ----------
+
+/// What an entry of the other computer is; a link is the entry itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKind {
+    File,
+    Dir,
+    Link,
+}
+
+/// One entry of a page of the other computer's folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub kind: RemoteKind,
+    pub size: u64,
+    pub mtime_ms: u64,
+    pub hidden: bool,
+    pub system: bool,
+    pub read_only: bool,
+}
+
+/// A page of a folder of the other computer (`Command::FilesListPage`): `path` as the host spells it (a 1.1 path),
+/// `next` the start of the following page, `free` the free bytes of its volume when the host told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePage {
+    pub path: String,
+    pub start: u32,
+    pub entries: Vec<RemoteEntry>,
+    pub next: Option<u32>,
+    pub free: Option<u64>,
+}
+
+/// A well-known folder of the other computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceName {
+    Desktop,
+    Documents,
+    Downloads,
+    Pictures,
+    Music,
+    Videos,
+    Received,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePlace {
+    pub kind: PlaceName,
+    /// A 1.1 path of the other computer.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeType {
+    System,
+    Fixed,
+    Removable,
+    Network,
+    Optical,
+    Image,
+}
+
+/// A volume the other computer publishes: its paths start with `:<id>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteVolume {
+    pub id: u32,
+    pub kind: VolumeType,
+    pub label: String,
+    /// The Windows drive letter.
+    pub letter: Option<char>,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub has_bin: bool,
+}
+
+/// The other computer's home folder (a 1.1 path), places and volumes (`Command::FilesVolumes`, and pushed as
+/// `UiEvent::RemoteVolumes` when they change).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteVolumes {
+    pub home: String,
+    pub places: Vec<RemotePlace>,
+    pub volumes: Vec<RemoteVolume>,
+}
+
+/// A change of the other computer's files; needs `FILES` and `CONTROL` there (FILES-UI.md 3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteChange {
+    MakeDir { parent: String, name: String },
+    Rename { dir: String, name: String, new_name: String },
+    Move { from_dir: String, names: Vec<String>, to_dir: String },
+    Trash { dir: String, names: Vec<String> },
+}
+
+/// What happened to one name of a `RemoteChange`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeOutcome {
+    Done,
+    /// The new name is taken; nothing is ever replaced.
+    Exists,
+    /// That place has no bin; nothing was deleted.
+    NoBin,
+    /// The volume is no longer there.
+    VolumeGone,
+    /// A name the rules refuse, a link on the way, or a folder moved into itself.
+    InvalidName,
+    /// The system refused, or a protected location.
+    NotPermitted,
+    NotFound,
+    NoSpace,
+    Failed,
+}
+
 /// A folder of this computer, as the explorer's left pane lists it (`Command::LocalList`): hidden entries left out,
 /// What a properties count found inside a path of this computer (slice 2a).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -798,6 +910,24 @@ pub enum Command {
         remote_path: String,
         local_dir: PathBuf,
     },
+    /// Slice 2b: a page of a folder of the other computer (a 1.1 path, empty for the home folder) from entry `start`.
+    /// Answered `RemotePage`; `Invalid` at once when the other computer runs 1.0.
+    FilesListPage {
+        session_id: u64,
+        path: String,
+        start: u32,
+    },
+    /// Slice 2b: a change of the other computer's files. Answered `ChangeResults` (one per name) after the host's
+    /// answer; `Invalid` when the other computer runs 1.0.
+    FilesChange {
+        session_id: u64,
+        change: RemoteChange,
+    },
+    /// Slice 2b: the other computer's home folder, places and volumes. Answered `RemoteVolumes`; `Invalid` when the
+    /// other computer runs 1.0, which is how the explorer learns it.
+    FilesVolumes {
+        session_id: u64,
+    },
     TransferPause {
         transfer_id: u32,
     },
@@ -963,6 +1093,9 @@ impl core::fmt::Debug for Command {
             Self::FilesGet { session_id, remote_path, local_dir } => {
                 dbg_fields!("FilesGet", session_id, remote_path, local_dir)
             }
+            Self::FilesListPage { session_id, path, start } => dbg_fields!("FilesListPage", session_id, path, start),
+            Self::FilesChange { session_id, change } => dbg_fields!("FilesChange", session_id, change),
+            Self::FilesVolumes { session_id } => dbg_fields!("FilesVolumes", session_id),
             Self::TransferPause { transfer_id } => dbg_fields!("TransferPause", transfer_id),
             Self::TransferResume { transfer_id } => dbg_fields!("TransferResume", transfer_id),
             Self::TransferCancel { transfer_id } => dbg_fields!("TransferCancel", transfer_id),
@@ -1024,6 +1157,9 @@ pub enum Reply {
     Listing(Listing),
     TransferIds(Vec<u32>),
     TransferId(u32),
+    RemotePage(RemotePage),
+    ChangeResults(Vec<(String, ChangeOutcome)>),
+    RemoteVolumes(RemoteVolumes),
     Chat(ChatView),
     Activity(Vec<AuditView>),
     Settings(Settings),
@@ -1175,6 +1311,11 @@ pub enum UiEvent {
         session_id: u64,
         name: String,
     },
+    /// Slice 2b: the other computer's volumes changed (a disk came or went).
+    RemoteVolumes {
+        session_id: u64,
+        volumes: RemoteVolumes,
+    },
     ClipboardSkipped {
         session_id: u64,
         reason: ApiCode,
@@ -1223,6 +1364,8 @@ impl Command {
                 | Command::ActivityList { .. }
                 | Command::ListDisplays { .. }
                 | Command::FilesList { .. }
+                | Command::FilesListPage { .. }
+                | Command::FilesVolumes { .. }
                 | Command::LocalList { .. }
                 | Command::LocalProps { .. }
                 | Command::LocalPlaces
@@ -1255,7 +1398,12 @@ impl Command {
             Command::ElevateSession { .. } => 15,
             // The host's user may be asked first (D13: 20 s), and the shell then starts.
             // The same for the first listing of the files (D13), which then lists the folder.
-            Command::TermOpen { .. } | Command::FilesList { .. } => 25,
+            Command::TermOpen { .. }
+            | Command::FilesList { .. }
+            | Command::FilesListPage { .. }
+            | Command::FilesVolumes { .. } => 25,
+            // The service waits 30 s for the host's answer (the host's user may be asked first, D13).
+            Command::FilesChange { .. } => 35,
             Command::ActivityList { .. } | Command::ActivityExport { .. } => 10,
             // A slow volume (a network share, a sleeping disk) fails visibly instead of freezing the pane (R-UI-7).
             Command::LocalList { .. }

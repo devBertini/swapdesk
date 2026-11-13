@@ -606,6 +606,14 @@ impl FsServer {
             }
             FsCall::MetaWrite { dir, name, data } => done(fs.meta_write(&self.folder(&dir.0)?, &name.0, &data.0)),
             FsCall::FreeSpace { dir } => Ok(FsAnswer::Free(fs.free_space(&self.folder(&dir.0)?)?)),
+            // FILES-UI.md 7.4: served on the helper's volume roots (B2 slice 2b, in progress); the UI's token roots
+            // refuse every one of them.
+            FsCall::ListPage { .. }
+            | FsCall::MakeDir { .. }
+            | FsCall::Rename { .. }
+            | FsCall::Move { .. }
+            | FsCall::Trash { .. }
+            | FsCall::Volumes => Err(ErrorCode::InvalidName),
         }
     }
 

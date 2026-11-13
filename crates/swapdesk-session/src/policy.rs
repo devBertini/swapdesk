@@ -31,9 +31,8 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | FileResume(_) | FileCancel(_) => true,
         // Viewer to host.
         Hello(_) | SelectDisplay(_) | VideoSettings(_) | KeyframeRequest(_) | ReceiverReport(_) | AudioControl(_)
-        | SendSpecial(_) | DirRequest(_) | FileGet(_) | TermOpen(_) | TermResize(_) | TermClose(_) | QuickAction(_) => {
-            role == Role::Host
-        }
+        | SendSpecial(_) | DirRequest(_) | FileGet(_) | TermOpen(_) | TermResize(_) | TermClose(_) | QuickAction(_)
+        | DirPage(_) | VolumesRequest(_) | FsOp(_) => role == Role::Host,
         // Host to viewer.
         HelloAck(_)
         | PromptPending(_)
@@ -46,6 +45,9 @@ pub fn may_receive(role: Role, msg: &Message) -> bool {
         | StreamStats(_)
         | HostMute(_)
         | DirListing(_)
+        | DirPageListing(_)
+        | VolumesList(_)
+        | FsOpResult(_)
         | TermOpened(_)
         | TermExited(_)
         | QuickActionResult(_)
@@ -83,7 +85,11 @@ pub fn required(msg: &Message) -> PermissionSet {
         SendSpecial(_) => PermissionSet::UNATTENDED,
         ClipboardSync(_) | ClipboardSkipped(_) => PermissionSet::CLIPBOARD,
         FileOffer(_) | FileAccept(_) | FileDecline(_) | FileDone(_) | FileVerified(_) | FilePause(_)
-        | FileResume(_) | FileCancel(_) | DirRequest(_) | FileGet(_) => PermissionSet::FILES,
+        | FileResume(_) | FileCancel(_) | DirRequest(_) | FileGet(_) | DirPage(_) | VolumesRequest(_) => {
+            PermissionSet::FILES
+        }
+        // A change of the host's files also needs control (FILES-UI.md 3.3): the viewer could do it by hand.
+        FsOp(_) => PermissionSet::FILES.union(PermissionSet::CONTROL),
         TermOpen(m) if m.admin => PermissionSet::ADMIN_TERMINAL,
         TermOpen(_) | TermResize(_) | TermClose(_) => PermissionSet::TERMINAL,
         QuickAction(_) => PermissionSet::CONTROL,
@@ -127,6 +133,9 @@ pub fn about_id(msg: &Message) -> u32 {
         FileCancel(m) => m.transfer_id,
         FileGet(m) => m.transfer_id,
         DirRequest(m) => m.req_id,
+        DirPage(m) => m.req_id,
+        VolumesRequest(m) => m.req_id,
+        FsOp(m) => m.op_id,
         TermOpen(m) => m.term_id,
         TermResize(m) => m.term_id,
         TermClose(m) => m.term_id,
@@ -331,6 +340,19 @@ mod tests {
             Message::DirRequest(DirRequest { req_id: 1, path: None }),
             Message::DirListing(DirListing { req_id: 1, path: String::new(), entries: vec![], truncated: false }),
             Message::FileGet(FileGet { transfer_id: 1, path: String::new() }),
+            Message::DirPage(DirPage { req_id: 1, path: String::new(), start: 0, max: 100 }),
+            Message::DirPageListing(DirPageListing {
+                req_id: 1,
+                path: String::new(),
+                start: 0,
+                entries: vec![],
+                next: None,
+                free_bytes: None,
+            }),
+            Message::VolumesRequest(VolumesRequest { req_id: 1 }),
+            Message::VolumesList(VolumesList { req_id: 0, home: String::new(), places: vec![], volumes: vec![] }),
+            Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: vec![] } }),
+            Message::FsOpResult(FsOpResult { op_id: 1, results: vec![] }),
             Message::TermOpen(TermOpen { term_id: 1, cols: 80, rows: 24, admin: false }),
             Message::TermOpened(TermOpened { term_id: 1, account: String::new() }),
             Message::TermResize(TermResize { term_id: 1, cols: 80, rows: 24 }),
@@ -385,7 +407,19 @@ mod tests {
                 0x000B => assert!(host && viewer, "{m:?}"),
                 0x000C => assert!(host && !viewer, "{m:?}"),
                 // Viewer to host only.
-                0x0001 | 0x0102..=0x0105 | 0x0107 | 0x0109 | 0x0409 | 0x040B | 0x0501 | 0x0503 | 0x0504 | 0x0601 => {
+                0x0001
+                | 0x0102..=0x0105
+                | 0x0107
+                | 0x0109
+                | 0x0409
+                | 0x040B
+                | 0x040C
+                | 0x040E
+                | 0x0410
+                | 0x0501
+                | 0x0503
+                | 0x0504
+                | 0x0601 => {
                     assert!(host && !viewer, "{m:?}")
                 }
                 // Host to viewer only.
@@ -397,6 +431,9 @@ mod tests {
                 | 0x0106
                 | 0x0108
                 | 0x040A
+                | 0x040D
+                | 0x040F
+                | 0x0411
                 | 0x0502
                 | 0x0505
                 | 0x0602
@@ -416,7 +453,8 @@ mod tests {
                 0x0107 => PermissionSet::AUDIO,
                 0x0109 => PermissionSet::UNATTENDED,
                 0x0303 | 0x0304 => PermissionSet::CLIPBOARD,
-                0x0401..=0x0408 | 0x0409 | 0x040B => PermissionSet::FILES,
+                0x0401..=0x0408 | 0x0409 | 0x040B | 0x040C | 0x040E => PermissionSet::FILES,
+                0x0410 => PermissionSet::FILES.union(PermissionSet::CONTROL),
                 0x0501 | 0x0503 | 0x0504 => PermissionSet::TERMINAL,
                 0x0601 => PermissionSet::CONTROL,
                 _ => PermissionSet::EMPTY,

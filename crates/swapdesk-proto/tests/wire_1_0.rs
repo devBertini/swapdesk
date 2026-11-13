@@ -130,7 +130,17 @@ fn a_hello_carries_its_own_minor_and_the_fixture_holds_the_minor_of_1_0() {
 /// Message types introduced after minor 0, with the minor that introduced each. A type added in a later minor
 /// is listed here, with its minor, in the same change that adds it; until then this test fails for it. A type
 /// listed here must still exist, and the crate must name the same minor for it (`Message::type_min_minor`).
-const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[(0x000B, 1), (0x000C, 1), (0x0801, 1)];
+const TYPES_AFTER_MINOR_0: &[(u16, u16)] = &[
+    (0x000B, 1),
+    (0x000C, 1),
+    (0x0801, 1),
+    (0x040C, 2),
+    (0x040D, 2),
+    (0x040E, 2),
+    (0x040F, 2),
+    (0x0410, 2),
+    (0x0411, 2),
+];
 
 /// Enum values introduced after minor 0: `(enum name, tag, minor)`. The same rule as for the types.
 const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[

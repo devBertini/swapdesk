@@ -518,6 +518,12 @@ pub enum ReplyBody {
     TransferIds(Vec<u32>),
     /// The transfer number of `FilesGet` (op 42).
     TransferId(u32),
+    /// A page of a folder of the host (op 46).
+    Listing2(crate::files::FileListing2),
+    /// One result per name of a change (op 47).
+    OpResults(Vec<crate::files::OpResultView>),
+    /// The host's home folder, places and volumes (op 48).
+    Volumes(crate::files::VolumesView),
     /// The machine's updater (op 51).
     Update(crate::types::UpdateView),
     /// The devices blocked by MAC (op 60).
@@ -559,6 +565,9 @@ impl ReplyBody {
             Self::Listing(v) => v.put(&mut w, 0)?,
             Self::TransferIds(v) => v.put(&mut w, crate::files::MAX_PICKS)?,
             Self::TransferId(v) => w.put_u32(*v),
+            Self::Listing2(v) => v.put(&mut w, 0)?,
+            Self::OpResults(v) => v.put(&mut w, crate::files::MAX_OP_NAMES)?,
+            Self::Volumes(v) => v.put(&mut w, 0)?,
             Self::Update(v) => v.put(&mut w, 0)?,
             Self::Blocked(v) => v.put(&mut w, MAX_BLOCKED)?,
         }
@@ -595,6 +604,9 @@ impl ReplyBody {
             40 => Self::Listing(FileListing::get(&mut r, 0)?),
             41 => Self::TransferIds(<Vec<u32>>::get(&mut r, crate::files::MAX_PICKS)?),
             42 => Self::TransferId(r.u32()?),
+            46 => Self::Listing2(crate::files::FileListing2::get(&mut r, 0)?),
+            47 => Self::OpResults(<Vec<crate::files::OpResultView>>::get(&mut r, crate::files::MAX_OP_NAMES)?),
+            48 => Self::Volumes(crate::files::VolumesView::get(&mut r, 0)?),
             51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
             58..=60 => Self::Blocked(<Vec<BlockedView>>::get(&mut r, MAX_BLOCKED)?),
             6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=57 | 61 => Self::Done,

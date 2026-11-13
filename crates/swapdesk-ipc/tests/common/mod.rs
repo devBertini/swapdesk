@@ -9,8 +9,9 @@ use proptest::sample::select;
 use proptest::strategy::Union;
 use swapdesk_ipc::*;
 use swapdesk_proto::{
-    Codec, CursorPosition, CursorShape, CursorShapeHeader, Desktop, Display, DisplayList, ErrorCode, Feature,
-    InputEvent, Intent, KeyframeRequest, MouseButton, Os, Preset, ReceiverReport, VideoHeader,
+    Codec, CursorPosition, CursorShape, CursorShapeHeader, Desktop, Display, DisplayList, EntryKind, ErrorCode,
+    Feature, InputEvent, Intent, KeyframeRequest, MouseButton, Os, PlaceKind, Preset, ReceiverReport, VideoHeader,
+    VolumeKind,
 };
 
 pub fn txt(max: usize) -> BoxedStrategy<String> {
@@ -491,6 +492,12 @@ pub fn fs_call() -> BoxedStrategy<FsCall> {
         (p(), n()).prop_map(|(dir, name)| FsCall::MetaRead { dir, name }).boxed(),
         (p(), n(), bytes(80)).prop_map(|(dir, name, data)| FsCall::MetaWrite { dir, name, data }).boxed(),
         p().prop_map(|dir| FsCall::FreeSpace { dir }).boxed(),
+        (p(), any::<u32>(), any::<u16>()).prop_map(|(path, start, max)| FsCall::ListPage { path, start, max }).boxed(),
+        (p(), n()).prop_map(|(dir, name)| FsCall::MakeDir { dir, name }).boxed(),
+        (p(), n(), n()).prop_map(|(dir, name, new_name)| FsCall::Rename { dir, name, new_name }).boxed(),
+        (p(), n(), p()).prop_map(|(from_dir, name, to_dir)| FsCall::Move { from_dir, name, to_dir }).boxed(),
+        (p(), n()).prop_map(|(dir, name)| FsCall::Trash { dir, name }).boxed(),
+        Just(FsCall::Volumes).boxed(),
     ];
     Union::new(all).boxed()
 }
@@ -523,10 +530,57 @@ pub fn fs_result() -> BoxedStrategy<core::result::Result<FsAnswer, ErrorCode>> {
         fs_stat().prop_map(FsAnswer::StatNow).boxed(),
         any::<u64>().prop_map(FsAnswer::Len).boxed(),
         proptest::option::of(bytes(80)).prop_map(FsAnswer::Meta).boxed(),
+        proptest::option::of(any::<u64>()).prop_map(FsAnswer::Free).boxed(),
+        fs_page().prop_map(FsAnswer::Entries2).boxed(),
+        volumes_view().prop_map(FsAnswer::Volumes).boxed(),
     ];
     prop_oneof![
         4 => Union::new(ok).prop_map(Ok),
         1 => pick(ErrorCode::ALL).prop_map(Err),
+    ]
+    .boxed()
+}
+
+pub fn fs_page() -> BoxedStrategy<FsPage> {
+    let entry = (text(20), pick(EntryKind::ALL), any::<u64>(), any::<u64>(), any::<u8>())
+        .prop_map(|(name, kind, size, mtime_ms, flags)| FsEntry2View { name, kind, size, mtime_ms, flags });
+    (vec(entry, 0..4), proptest::option::of(any::<u32>()), proptest::option::of(any::<u64>()))
+        .prop_map(|(entries, next, free)| FsPage { entries, next, free })
+        .boxed()
+}
+
+pub fn volumes_view() -> BoxedStrategy<VolumesView> {
+    let place = (pick(PlaceKind::ALL), text(40)).prop_map(|(kind, path)| PlaceView { kind, path });
+    let volume = (
+        any::<u32>(),
+        pick(VolumeKind::ALL),
+        text(20),
+        proptest::option::of(any::<u8>()),
+        any::<u64>(),
+        any::<u64>(),
+        any::<bool>(),
+    )
+        .prop_map(|(id, kind, label, letter, total_bytes, free_bytes, has_bin)| VolumeView {
+            id,
+            kind,
+            label,
+            letter,
+            total_bytes,
+            free_bytes,
+            has_bin,
+        });
+    (text(40), vec(place, 0..3), vec(volume, 0..3))
+        .prop_map(|(home, places, volumes)| VolumesView { home, places, volumes })
+        .boxed()
+}
+
+pub fn fs_change() -> BoxedStrategy<FsChange> {
+    let names = || vec(text(20).prop_map(|name| FsNameView { name }), 0..4);
+    prop_oneof![
+        (text(40), text(20)).prop_map(|(parent, name)| FsChange::MakeDir { parent, name }),
+        (text(40), text(20), text(20)).prop_map(|(dir, name, new_name)| FsChange::Rename { dir, name, new_name }),
+        (text(40), names(), text(40)).prop_map(|(from_dir, names, to_dir)| FsChange::Move { from_dir, names, to_dir }),
+        (text(40), names()).prop_map(|(dir, names)| FsChange::Trash { dir, names }),
     ]
     .boxed()
 }
@@ -546,6 +600,11 @@ pub fn files_op() -> BoxedStrategy<FilesOp> {
         any::<u32>().prop_map(|transfer_id| FilesOp::Pause { transfer_id }).boxed(),
         any::<u32>().prop_map(|transfer_id| FilesOp::Resume { transfer_id }).boxed(),
         any::<u32>().prop_map(|transfer_id| FilesOp::Cancel { transfer_id }).boxed(),
+        (any::<u64>(), text(40), any::<u32>())
+            .prop_map(|(session_id, path, start)| FilesOp::ListPage { session_id, path, start })
+            .boxed(),
+        (any::<u64>(), fs_change()).prop_map(|(session_id, change)| FilesOp::Change { session_id, change }).boxed(),
+        any::<u64>().prop_map(|session_id| FilesOp::Volumes { session_id }).boxed(),
     ];
     Union::new(all).boxed()
 }
@@ -581,6 +640,7 @@ pub fn files_note() -> BoxedStrategy<FilesNote> {
             transfer_id,
             name
         }),
+        (any::<u64>(), volumes_view()).prop_map(|(session_id, volumes)| FilesNote::Volumes { session_id, volumes }),
     ]
     .boxed()
 }
@@ -692,6 +752,7 @@ pub fn extra_messages() -> Vec<BoxedStrategy<Message>> {
         (any::<u32>(), bytes(300)).prop_map(|(term_id, bytes)| Message::TermInput { term_id, bytes }).boxed(),
         (any::<u32>(), fs_call()).prop_map(|(req, call)| Message::FsRequest { req, call }).boxed(),
         (any::<u32>(), fs_result()).prop_map(|(req, result)| Message::FsReply { req, result }).boxed(),
+        Just(Message::FsVolumesChanged).boxed(),
         (any::<u32>(), extra_op()).prop_map(|(req, op)| Message::UiRequest { req, op }).boxed(),
         extra_notify().prop_map(Message::UiNotify).boxed(),
     ]
@@ -747,6 +808,11 @@ pub fn reply_body() -> BoxedStrategy<(u16, ReplyBody)> {
         listing.prop_map(|l| (40u16, ReplyBody::Listing(l))),
         vec(any::<u32>(), 0..5).prop_map(|v| (41u16, ReplyBody::TransferIds(v))),
         any::<u32>().prop_map(|v| (42u16, ReplyBody::TransferId(v))),
+        (text(40), any::<u32>(), fs_page())
+            .prop_map(|(path, start, page)| (46u16, ReplyBody::Listing2(FileListing2 { path, start, page }))),
+        vec((text(20), pick(ErrorCode::ALL)).prop_map(|(name, code)| OpResultView { name, code }), 0..4)
+            .prop_map(|v| (47u16, ReplyBody::OpResults(v))),
+        volumes_view().prop_map(|v| (48u16, ReplyBody::Volumes(v))),
     ]
     .boxed()
 }

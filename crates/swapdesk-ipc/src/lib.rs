@@ -21,8 +21,10 @@ mod types;
 pub use clip::{ClipData, ClipFail, ClipReplyBody, MAX_CLIP_MESSAGE};
 pub use error::{IpcError, Result};
 pub use files::{
-    FileEntry, FileListing, FilePick, FilesNote, FilesOp, FsAnswer, FsCall, FsEntryView, FsHandleView, FsKind,
-    FsStatView, MAX_FS_IO, MAX_FS_LIST, MAX_FS_MESSAGE, MAX_FS_META, MAX_FS_NAME, MAX_FS_PATH, MAX_PICKS, TransferWire,
+    FileEntry, FileListing, FileListing2, FilePick, FilesNote, FilesOp, FsAnswer, FsCall, FsChange, FsEntry2View,
+    FsEntryView, FsHandleView, FsKind, FsNameView, FsPage, FsStatView, MAX_FS_IO, MAX_FS_LIST, MAX_FS_MESSAGE,
+    MAX_FS_META, MAX_FS_NAME, MAX_FS_PATH, MAX_OP_NAMES, MAX_PICKS, MAX_PLACES, MAX_VOLUME_LABEL, MAX_VOLUMES,
+    OpResultView, PlaceView, TransferWire, VolumeView, VolumesView,
 };
 pub use frame::{FrameReader, FrameWriter};
 pub use handshake::{ClientHello, Handshake, ServerHello};

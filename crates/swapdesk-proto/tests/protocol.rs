@@ -683,7 +683,11 @@ fn they_have_the_documented_bytes() {
 #[test]
 fn every_type_names_the_minor_that_introduced_it() {
     for id in Message::ALL_TYPE_IDS {
-        let want = u16::from(matches!(*id, 0x000B | 0x000C | 0x0801));
+        let want = match *id {
+            0x000B | 0x000C | 0x0801 => 1,
+            0x040C..=0x0411 => 2,
+            _ => 0,
+        };
         assert_eq!(Message::type_min_minor(*id), want, "{id:#06x}");
     }
     assert_eq!(Message::type_min_minor(0x3FFF), 0, "an unknown type names no minor");
@@ -694,7 +698,8 @@ fn every_type_names_the_minor_that_introduced_it() {
         runner
             .run(&strategy, |m| {
                 let carries_new = format!("{m:?}").contains("AccountAway");
-                let want = u16::from(Message::type_min_minor(m.type_id()) == 1 || carries_new);
+                let of_type = Message::type_min_minor(m.type_id());
+                let want = if of_type == 2 { 2 } else { u16::from(of_type == 1 || carries_new) };
                 prop_assert_eq!(m.min_minor(), want, "{:?}", m);
                 Ok(())
             })

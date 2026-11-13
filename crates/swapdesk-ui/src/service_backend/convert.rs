@@ -475,6 +475,11 @@ pub fn reply_from_wire(body: w::ReplyBody) -> CResult<a::Reply> {
         w::ReplyBody::Listing(v) => a::Reply::Listing(super::files::listing_from_wire(v)),
         w::ReplyBody::TransferIds(v) => a::Reply::TransferIds(v),
         w::ReplyBody::TransferId(v) => a::Reply::TransferId(v),
+        w::ReplyBody::Listing2(v) => a::Reply::RemotePage(super::files::page_from_wire(v)),
+        w::ReplyBody::OpResults(v) => a::Reply::ChangeResults(
+            v.into_iter().map(|r| (r.name.0, super::files::outcome_from_wire(r.code))).collect(),
+        ),
+        w::ReplyBody::Volumes(v) => a::Reply::RemoteVolumes(super::files::volumes_from_wire(v)),
         w::ReplyBody::Blocked(v) => a::Reply::Blocked(
             v.into_iter()
                 .map(|b| a::BlockedItem {
@@ -695,7 +700,13 @@ pub fn route(c: &a::Command) -> Route {
             let chunks = bytes.chunks(w::MAX_TERM_CHUNK).map(|c| w::Message::TermInput { term_id: *term_id, bytes: w::Bytes(c.to_vec()) }).collect();
             return Route::Messages(chunks);
         }
-        C::FilesList { .. } | C::TransferPause { .. } | C::TransferResume { .. } | C::TransferCancel { .. } => match super::files::op_of(c) {
+        C::FilesList { .. }
+        | C::FilesListPage { .. }
+        | C::FilesChange { .. }
+        | C::FilesVolumes { .. }
+        | C::TransferPause { .. }
+        | C::TransferResume { .. }
+        | C::TransferCancel { .. } => match super::files::op_of(c) {
             Some(op) => op,
             None => return Route::Unsupported,
         },

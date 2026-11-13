@@ -130,6 +130,10 @@ impl Hub {
             FilesOp::Pause { transfer_id } => self.transfer_pause(conn, req, transfer_id),
             FilesOp::Resume { transfer_id } => self.transfer_resume(conn, req, transfer_id),
             FilesOp::Cancel { transfer_id } => self.transfer_cancel(conn, req, transfer_id),
+            // Slice 2b (in progress): served once the engine carries the minor-2 messages.
+            FilesOp::ListPage { .. } | FilesOp::Change { .. } | FilesOp::Volumes { .. } => {
+                reply(conn, req, Err(ApiCode::Invalid))
+            }
         }
     }
 

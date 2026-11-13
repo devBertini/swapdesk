@@ -344,6 +344,165 @@ wire_struct! {
     FileGet { transfer_id: u32, path: String [1024] }
 }
 
+// ---------- files, minor 2 (FILES-UI.md 7.3) ----------
+
+wire_enum! {
+    /// What a `DirEntry2` is; a link is the entry itself, never its target.
+    EntryKind: u8 { File = 0, Dir = 1, Link = 2 }
+}
+
+/// `DirEntry2.flags`: hidden.
+pub const ENTRY_HIDDEN: u8 = 1;
+/// `DirEntry2.flags`: a system file.
+pub const ENTRY_SYSTEM: u8 = 2;
+/// `DirEntry2.flags`: read-only.
+pub const ENTRY_READ_ONLY: u8 = 4;
+
+wire_struct! {
+    /// One entry of a `DirPageListing`; `flags` holds `ENTRY_*` bits, the others 0.
+    DirEntry2 { name: String [255], kind: EntryKind, size: u64, mtime_ms: u64, flags: u8 }
+}
+
+wire_struct! {
+    /// 0x040C, viewer to host: a page of the folder `path` (a 1.1 path: empty is the home folder, `:<id>/...` a
+    /// volume) from entry `start`, at most `max` (≤ 2000) entries.
+    DirPage { req_id: u32, path: String [1024], start: u32, max: u16 }
+}
+
+wire_struct! {
+    /// 0x040D, host to viewer: a page stops before the frame passes 65 535 bytes; `next` is the `start` of the
+    /// following page.
+    DirPageListing {
+        req_id: u32,
+        path: String [1024],
+        start: u32,
+        entries: Vec<DirEntry2> [2000],
+        next: Option<u32>,
+        free_bytes: Option<u64>,
+    }
+}
+
+wire_struct! {
+    /// 0x040E, viewer to host.
+    VolumesRequest { req_id: u32 }
+}
+
+wire_enum! {
+    /// A well-known folder of the other computer.
+    PlaceKind: u8 { Desktop = 0, Documents = 1, Downloads = 2, Pictures = 3, Music = 4, Videos = 5, Received = 6 }
+}
+
+wire_struct! {
+    Place { kind: PlaceKind, path: String [1024] }
+}
+
+wire_enum! {
+    VolumeKind: u8 { System = 0, Fixed = 1, Removable = 2, Network = 3, Optical = 4, Image = 5 }
+}
+
+wire_struct! {
+    /// A published volume: its paths start with `:<id>`; `letter` is the Windows drive letter (`b'A'..=b'Z'`). The
+    /// label is shown, never used as a path.
+    Volume {
+        id: u32,
+        kind: VolumeKind,
+        label: String [64],
+        letter: Option<u8>,
+        total_bytes: u64,
+        free_bytes: u64,
+        has_bin: bool,
+    }
+}
+
+wire_struct! {
+    /// 0x040F, host to viewer: `req_id` 0 when pushed unasked (the set changed, at most once a second).
+    VolumesList { req_id: u32, home: String [1024], places: Vec<Place> [16], volumes: Vec<Volume> [32] }
+}
+
+wire_struct! {
+    /// A name inside an `FsOpKind`.
+    FsName { name: String [255] }
+}
+
+/// What an `FsOp` changes on the host (FILES-UI.md 7.3). Tag `u8`: 0 `MakeDir`, 1 `Rename`, 2 `Move`, 3 `Trash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsOpKind {
+    MakeDir { parent: String, name: String },
+    Rename { dir: String, name: String, new_name: String },
+    Move { from_dir: String, names: Vec<FsName>, to_dir: String },
+    Trash { dir: String, names: Vec<FsName> },
+}
+
+/// Most names one `Move` or `Trash` carries.
+pub const MAX_OP_NAMES: usize = 64;
+
+impl FsOpKind {
+    /// The names it acts on, in order (one result each).
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Self::MakeDir { name, .. } | Self::Rename { name, .. } => vec![name.as_str()],
+            Self::Move { names, .. } | Self::Trash { names, .. } => names.iter().map(|n| n.name.as_str()).collect(),
+        }
+    }
+}
+
+impl Wire for FsOpKind {
+    const MIN_SIZE: usize = 3;
+
+    fn put(&self, w: &mut Writer, _lim: usize) -> Result<()> {
+        match self {
+            Self::MakeDir { parent, name } => {
+                w.put_u8(0);
+                w.put_str(parent, 1024)?;
+                w.put_str(name, 255)
+            }
+            Self::Rename { dir, name, new_name } => {
+                w.put_u8(1);
+                w.put_str(dir, 1024)?;
+                w.put_str(name, 255)?;
+                w.put_str(new_name, 255)
+            }
+            Self::Move { from_dir, names, to_dir } => {
+                w.put_u8(2);
+                w.put_str(from_dir, 1024)?;
+                names.put(w, MAX_OP_NAMES)?;
+                w.put_str(to_dir, 1024)
+            }
+            Self::Trash { dir, names } => {
+                w.put_u8(3);
+                w.put_str(dir, 1024)?;
+                names.put(w, MAX_OP_NAMES)
+            }
+        }
+    }
+
+    fn get(r: &mut Reader<'_>, _lim: usize) -> Result<Self> {
+        Ok(match r.u8()? {
+            0 => Self::MakeDir { parent: r.str(1024)?, name: r.str(255)? },
+            1 => Self::Rename { dir: r.str(1024)?, name: r.str(255)?, new_name: r.str(255)? },
+            2 => Self::Move { from_dir: r.str(1024)?, names: Vec::get(r, MAX_OP_NAMES)?, to_dir: r.str(1024)? },
+            3 => Self::Trash { dir: r.str(1024)?, names: Vec::get(r, MAX_OP_NAMES)? },
+            tag => return Err(CodecError::UnknownTag { what: "FsOpKind", tag: u64::from(tag) }),
+        })
+    }
+}
+
+wire_struct! {
+    /// 0x0410, viewer to host: a change on the host's disk; needs `FILES` and `CONTROL`; at most 4 in flight per
+    /// session (`BUSY` beyond).
+    FsOp { op_id: u32, op: FsOpKind }
+}
+
+wire_struct! {
+    /// The outcome for one name of an `FsOp`: `NO_ERROR` when done.
+    OpItem { name: String [255], code: ErrorCode }
+}
+
+wire_struct! {
+    /// 0x0411, host to viewer: one result per name, in the order of the `FsOp`.
+    FsOpResult { op_id: u32, results: Vec<OpItem> [64] }
+}
+
 // ---------- terminal ----------
 
 wire_struct! {
@@ -505,6 +664,12 @@ messages! {
     DirRequest(DirRequest) = 0x0409,
     DirListing(DirListing) = 0x040A,
     FileGet(FileGet) = 0x040B,
+    DirPage(DirPage) = 0x040C,
+    DirPageListing(DirPageListing) = 0x040D,
+    VolumesRequest(VolumesRequest) = 0x040E,
+    VolumesList(VolumesList) = 0x040F,
+    FsOp(FsOp) = 0x0410,
+    FsOpResult(FsOpResult) = 0x0411,
     TermOpen(TermOpen) = 0x0501,
     TermOpened(TermOpened) = 0x0502,
     TermResize(TermResize) = 0x0503,
@@ -535,6 +700,7 @@ impl Message {
     pub const fn type_min_minor(type_id: u16) -> u16 {
         match type_id {
             0x000B | 0x000C | 0x0801 => 1,
+            0x040C..=0x0411 => 2,
             _ => 0,
         }
     }
@@ -677,13 +843,36 @@ mod tests {
     #[test]
     fn type_ids_are_unique_and_match_the_table() {
         let mut ids = Message::ALL_TYPE_IDS.to_vec();
-        assert_eq!(ids.len(), 58);
+        assert_eq!(ids.len(), 64);
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 58);
+        assert_eq!(ids.len(), 64);
         let ping = Message::Ping(Ping { nonce: 1, t_send_us: 2 });
         assert_eq!(ping.type_id(), 0x0F01);
         assert_eq!(ping.encode_frame().unwrap()[..3], [0x4F, 0x01, 12]);
+    }
+
+    /// FILES-UI.md 7.3: every kind of change round trips, an unknown kind and a 65th name are refused.
+    #[test]
+    fn fs_op_kinds_round_trip_and_refuse_bad_input() {
+        let names = |n: usize| (0..n).map(|i| FsName { name: format!("f{i}") }).collect::<Vec<_>>();
+        for op in [
+            FsOpKind::MakeDir { parent: ":3/Fotos".into(), name: "Nova pasta".into() },
+            FsOpKind::Rename { dir: String::new(), name: "a.txt".into(), new_name: "b.txt".into() },
+            FsOpKind::Move { from_dir: "Docs".into(), names: names(2), to_dir: ":1".into() },
+            FsOpKind::Trash { dir: "Docs".into(), names: names(MAX_OP_NAMES) },
+        ] {
+            let msg = Message::FsOp(FsOp { op_id: 7, op });
+            assert_eq!(Message::decode_frame_exact(&msg.encode_frame().unwrap()).unwrap(), msg);
+            assert_eq!(msg.min_minor(), 2);
+        }
+        let too_many = Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: names(65) } });
+        assert!(too_many.encode_frame().is_err());
+        let mut bad = Message::FsOp(FsOp { op_id: 1, op: FsOpKind::Trash { dir: String::new(), names: names(1) } })
+            .encode_payload()
+            .unwrap();
+        bad[4] = 9;
+        assert!(Message::decode_payload(0x0410, &bad).is_err());
     }
 
     #[test]
