@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use super::{ControlId, Region, Specs, UiRole};
 use crate::api::{ApiCode, Command, DirEntryView, LocalListing, LocalPlace, Msg, PlaceKind};
-use crate::state::{Activation, Changed, DataKind, EditId, Effect, Fetch, UiState};
+use crate::state::{Activation, Changed, DataKind, EditId, Effect, Fetch, UiState, WaitBar};
 use crate::strings::MsgKey;
 
 /// Sort columns, as `ControlId::ExpSort` numbers them.
@@ -81,6 +81,8 @@ pub(crate) struct Explorer {
     pub pointer: PointerMods,
     /// A note for the status of the copy (a folder was left out), shown until the next copy.
     pub note: Option<MsgKey>,
+    /// A line over the picture of the Tela view, with the seconds it has left: why a drop there did nothing.
+    pub screen_note: Option<(MsgKey, u8)>,
     /// The left pane's rows: the listing's entries, with its hidden ones when shown (slice 2a).
     pub here_shown: Vec<DirEntryView>,
     /// Slice 2a: managing this computer's files.
@@ -91,6 +93,9 @@ pub(crate) struct Explorer {
     pub drag: super::explorer_drag::DragState,
     pub menu: Option<super::explorer_menu::Menu>,
 }
+
+/// How long the line over the picture stays, in seconds.
+pub(super) const SCREEN_NOTE_S: u8 = 6;
 
 impl Default for Explorer {
     fn default() -> Self {
@@ -106,6 +111,7 @@ impl Default for Explorer {
             transfers_open: false,
             pointer: PointerMods::default(),
             note: None,
+            screen_note: None,
             here_shown: Vec::new(),
             manage: super::explorer_manage::Manage::default(),
             there: super::explorer_remote::There::default(),
@@ -154,6 +160,9 @@ pub struct PaneView {
     /// and whether it shows them.
     pub hidden_switch: bool,
     pub show_hidden: bool,
+    /// The right pane while the other computer asks its user whether the files may be used (D13, R-UI-13): the
+    /// sentence ("Esperando quem usa o {0} permitir os arquivos.") and the countdown row, drawn in place of the list.
+    pub wait: Option<(String, WaitBar)>,
 }
 
 /// A place or volume of the navigation pane.
@@ -525,6 +534,13 @@ impl UiState {
                 pane.anchor = None;
                 a.changed = Changed::VIEWER;
             }
+            ControlId::ExpCrumb(there, i) => {
+                self.explorer.focus_there = there;
+                match self.crumb_folder(there, i) {
+                    Some(folder) if self.pane_folder(there).is_some_and(|c| c != folder) => self.go(there, folder, a),
+                    _ => a.changed = Changed::VIEWER,
+                }
+            }
             ControlId::ExpSort(there, col) => {
                 let pane = &mut self.explorer.panes[idx(there)];
                 pane.sort = if pane.sort.0 == col { (col, !pane.sort.1) } else { (col, true) };
@@ -603,6 +619,19 @@ impl UiState {
         out
     }
 
+    /// The folder segment `i` of a pane's breadcrumb opens: the pane's current folder with the segments after `i`
+    /// taken off (the last segment is the current folder itself). `None` when there is no such segment or the path
+    /// has no folder above.
+    pub(super) fn crumb_folder(&self, there: bool, i: u8) -> Option<String> {
+        let last = if there { self.crumbs_there().len() } else { self.crumbs_here().len() }.checked_sub(1)?;
+        let up = last.checked_sub(usize::from(i))?;
+        let mut folder = self.pane_folder(there)?;
+        for _ in 0..up {
+            folder = if there { parent(&folder)? } else { Path::new(&folder).parent()?.to_string_lossy().into_owned() };
+        }
+        Some(folder)
+    }
+
     fn place_label(&self, p: &LocalPlace) -> String {
         match p.kind {
             PlaceKind::Home => self.t(MsgKey::ExplorerPlaceHome),
@@ -647,6 +676,12 @@ impl UiState {
             hint: n.hint,
         }));
         out
+    }
+
+    /// The question the other computer's user is being asked about the files, and its countdown.
+    fn files_consent_wait(&self) -> Option<(String, WaitBar)> {
+        let bar = self.consent_wait(crate::api::Feature::Files)?;
+        Some((self.tm(&Msg::new(MsgKey::FilesConsentWaiting).with(self.peer_name())), bar))
     }
 
     /// One pane of the explorer.
@@ -732,6 +767,7 @@ impl UiState {
             free: if there { self.there_free_text() } else { None },
             hidden_switch: !there || self.there_v11(),
             show_hidden: if there { self.explorer.there.show_hidden } else { self.explorer.manage.show_hidden },
+            wait: if there { self.files_consent_wait() } else { None },
         }
     }
 
@@ -752,6 +788,19 @@ impl UiState {
     /// The note under the command bar (a folder left out of a copy, a file that opens only there).
     pub fn explorer_note(&self) -> Option<String> {
         self.explorer.note.map(|k| self.tm(&Msg::new(k).with(self.peer_name())))
+    }
+
+    /// The line over the picture of the Tela view (a drop on it that did nothing, and why) while it lasts.
+    pub fn screen_note(&self) -> Option<String> {
+        let (key, _) = self.explorer.screen_note.filter(|_| !self.explorer.open)?;
+        Some(self.tm(&Msg::new(key).with(self.peer_name())))
+    }
+
+    /// One second passed: the line over the picture counts down and goes.
+    pub(crate) fn screen_note_tick(&mut self) -> Changed {
+        let Some((key, left)) = self.explorer.screen_note else { return Changed::NONE };
+        self.explorer.screen_note = left.checked_sub(1).filter(|l| *l > 0).map(|l| (key, l));
+        Changed::VIEWER
     }
 
     pub fn explorer_transfers_open(&self) -> bool {
@@ -839,6 +888,9 @@ impl UiState {
                 s.button(ControlId::ExpUp(there), self.name_of(MsgKey::ExplorerUp));
             }
             s.button(ControlId::ExpRefresh(there), self.name_of(MsgKey::ExplorerRefresh));
+            for (i, name) in v.crumbs.iter().enumerate().take(usize::from(u8::MAX)) {
+                s.button(ControlId::ExpCrumb(there, i as u8), name.clone());
+            }
             // The Type column shows only in a wide pane (FILES-UI.md 2.3); its header is reached there by the mouse.
             for (col, key) in [
                 (SORT_NAME, MsgKey::ExplorerColName),
@@ -848,6 +900,10 @@ impl UiState {
                 s.button(ControlId::ExpSort(there, col), self.name_of(key));
             }
             s.button(ControlId::ExpPane(there), v.title.clone());
+            if let Some((text, bar)) = v.wait {
+                s.text(UiRole::Text, text);
+                self.bar_progress(s, Some(bar));
+            }
             for (i, r) in v.rows.iter().enumerate().take(usize::from(u16::MAX)) {
                 s.add(ControlId::ExpRow(there, i as u16), UiRole::Button, format!("{} {}", r.name, r.kind));
             }

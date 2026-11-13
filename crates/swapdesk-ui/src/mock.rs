@@ -267,6 +267,8 @@ pub enum Scenario {
     ExploradorSoltando,
     /// Slice 4: a file of the system's file manager hovering the picture of the Tela view, with its caption.
     TelaSoltando,
+    /// R-UI-13: the explorer while the other side's user is asked whether the files may be used.
+    ExploradorAguardandoConsentimento,
     /// Slice 3: the state right after a right click on a row (the menu itself is the system's and is not painted).
     ExploradorMenu,
     Chat,
@@ -322,7 +324,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 65] = [
+    pub const ALL: [Scenario; 66] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -359,6 +361,7 @@ impl Scenario {
         Scenario::ExploradorArrastando,
         Scenario::ExploradorSoltando,
         Scenario::TelaSoltando,
+        Scenario::ExploradorAguardandoConsentimento,
         Scenario::ExploradorMenu,
         Scenario::Chat,
         Scenario::AreaTransferencia,
@@ -429,6 +432,7 @@ impl Scenario {
             Scenario::ExploradorArrastando => "explorador-arrastando",
             Scenario::ExploradorSoltando => "explorador-soltando",
             Scenario::TelaSoltando => "tela-soltando",
+            Scenario::ExploradorAguardandoConsentimento => "explorador-aguardando-consentimento",
             Scenario::ExploradorMenu => "explorador-menu",
             Scenario::Chat => "chat",
             Scenario::AreaTransferencia => "area-de-transferencia",
@@ -508,6 +512,9 @@ impl Scenario {
                 "new: Arquivos, a file of the system's file manager over a folder row of the right pane (slice 4)"
             }
             Scenario::TelaSoltando => "new: Tela, a file of the system's file manager over the picture (slice 4)",
+            Scenario::ExploradorAguardandoConsentimento => {
+                "new: Arquivos while the other side's user is asked, with the seconds left (R-UI-13)"
+            }
             Scenario::ExploradorMenu => {
                 "new: Arquivos, right after a right click on a row; the menu is native (slice 3)"
             }
@@ -936,6 +943,20 @@ impl Scenario {
                 mac(),
                 Event(Self::viewer_session(21)),
                 SystemDrag(&[("C:/Users/ana/Desktop/proposta.pdf", false)], None),
+            ],
+            Scenario::ExploradorAguardandoConsentimento => vec![
+                mac(),
+                Event(Self::viewer_session(18)),
+                Activate(ControlId::TbFiles),
+                Event(reply(Ok(Reply::LocalPlaces(local_places())))),
+                Event(reply(Ok(Reply::LocalListing(LocalListing {
+                    path: "C:\\Users\\ana\\Downloads".into(),
+                    entries: local_entries(),
+                    truncated: false,
+                    hidden: Vec::new(),
+                })))),
+                Event(UiEvent::ConsentPending { session_id: 1, feature: Feature::Files, remaining_s: 20 }),
+                Ticks(6),
             ],
             Scenario::ExploradorMenu => {
                 let mut v = Scenario::Explorador.script();
@@ -1686,6 +1707,7 @@ mod tests {
             (Scenario::ExploradorArrastando, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorSoltando, Screen::Devices, &[Main, Viewer]),
             (Scenario::TelaSoltando, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorAguardandoConsentimento, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorMenu, Screen::Devices, &[Main, Viewer]),
             (Scenario::Chat, Screen::Devices, &[Main, Viewer]),
             (Scenario::AreaTransferencia, Screen::Devices, &[Main, Viewer]),

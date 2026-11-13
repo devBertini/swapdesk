@@ -345,3 +345,31 @@ fn hidden_items_show_only_when_asked() {
     s.activate(ControlId::ExpHidden);
     assert!(names(&s).contains(&".config".to_owned()));
 }
+
+// ---------- R-UI-13: the host asks its user about the files first (D13) ----------
+
+#[test]
+fn the_right_pane_says_who_is_asked_and_counts_down_until_the_listing_comes() {
+    let mut s = Scenario::Visualizador.prepared_state();
+    s.activate(ControlId::TbFiles);
+    assert_eq!(s.explorer_pane(true).wait, None, "nobody is asked yet");
+    s.apply(UiEvent::ConsentPending { session_id: 1, feature: crate::api::Feature::Files, remaining_s: 20 });
+    let peer = s.explorer_pane(true).title;
+    let (text, bar) = s.explorer_pane(true).wait.expect("the question shows in the other computer's pane");
+    assert_eq!(text, s.tm(&Msg::new(MsgKey::FilesConsentWaiting).with(peer.clone())));
+    assert!(text.contains(&peer), "{text}");
+    assert_eq!(bar.text.as_deref(), Some("0:20"));
+    assert_eq!(s.explorer_pane(false).wait, None, "this computer's pane asks nobody");
+    // The accessibility tree carries the sentence and the countdown as it does for the terminal's card.
+    let controls = s.controls(WindowKind::Viewer);
+    assert!(controls.iter().any(|c| c.label == text), "{controls:?}");
+    assert!(controls.iter().any(|c| c.role == super::UiRole::Progress && c.value.as_deref() == Some("0:20")));
+    s.tick();
+    assert_eq!(s.explorer_pane(true).wait.unwrap().1.text.as_deref(), Some("0:19"));
+    reply(
+        &mut s,
+        Reply::Listing(Listing { path: String::new(), entries: vec![entry("nota.txt", false, 5)], truncated: false }),
+    );
+    assert_eq!(s.explorer_pane(true).wait, None, "the listing came: the question is over");
+    assert!(!s.controls(WindowKind::Viewer).iter().any(|c| c.label == text));
+}

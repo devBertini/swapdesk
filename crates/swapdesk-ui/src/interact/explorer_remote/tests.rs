@@ -922,7 +922,7 @@ fn a_folder_download_over_the_limits_does_not_start() {
     assert!(s.explorer.there.download.is_none());
     assert_eq!(
         s.explorer_pane(true).notice.as_deref(),
-        Some("Esta cópia passa do limite de 10.000 arquivos ou 32 níveis de pastas. Nada foi copiado.")
+        Some("Esta cópia passa do limite de 10\u{a0}000 arquivos ou 32 níveis de pastas. Nada foi copiado.")
     );
     // 32 levels: the 32nd folder still holds a folder.
     let mut s = opened_11();

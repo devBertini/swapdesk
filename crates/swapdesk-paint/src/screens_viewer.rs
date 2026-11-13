@@ -85,6 +85,7 @@ pub fn paint_viewer(f: &mut Frame) {
             bar_handle(f, video_col);
         }
     }
+    screen_note(f, video);
     // Slice 4: files dragged from the system over the picture: the pill and "Solte para enviar ao ..." (no outline).
     if let Some(d) = f.st.explorer_drag() {
         crate::screens_explorer::drag(f, &d);
@@ -101,6 +102,18 @@ pub fn paint_viewer(f: &mut Frame) {
 
 /// The parts of `outer` not covered by `hole` (which lies inside it): above, below, left and right, without overlap.
 /// Empty strips are left out.
+/// The short line over the bottom of the picture saying why a drop on it did nothing (it goes by itself).
+fn screen_note(f: &Frame, video: Rect) {
+    let Some(note) = f.st.screen_note() else { return };
+    let (p, pal) = (f.p, f.pal);
+    let l = p.label_in(&note, text::CAPTION, (video.w - 64.0).clamp(40.0, 520.0), Align::Start);
+    let x = p.snap(video.center().0 - (l.w + 32.0) / 2.0);
+    let r = Rect::new(x, p.snap(video.bottom() - 28.0 - l.h - 16.0), l.w + 32.0, l.h + 16.0);
+    p.shadow(r, 10.0, 4.0, 12.0, f.fx.shadow_dialog);
+    p.bordered(r, 10.0, pal.line, pal.surface);
+    p.draw(&l, r.x + 16.0, r.y + 8.0, pal.ink);
+}
+
 fn around(outer: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
     [
         Rect::new(outer.x, outer.y, outer.w, hole.y - outer.y),

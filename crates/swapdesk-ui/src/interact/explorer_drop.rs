@@ -218,7 +218,8 @@ impl UiState {
             let local_paths: Vec<PathBuf> = kinds.iter().filter(|(_, d)| !d).map(|(p, _)| p.clone()).collect();
             if local_paths.is_empty() {
                 // The default receive folder is not known here, so a folder (walked into a named parent) cannot go.
-                self.explorer.note = Some(MsgKey::ExplorerFoldersLater);
+                // Nothing of the explorer is on screen here: the reason is a short line over the picture.
+                self.explorer.screen_note = Some((MsgKey::ExplorerFoldersLater, super::explorer::SCREEN_NOTE_S));
             } else {
                 a.commands.push(Command::FilesSend { session_id, local_paths, remote_dir: None });
             }

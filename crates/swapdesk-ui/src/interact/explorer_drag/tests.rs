@@ -439,3 +439,158 @@ fn the_drag_and_menu_scenarios_hold_their_states() {
     let s = Scenario::ExploradorMenu.prepared_state();
     assert_eq!(s.context_items().len(), 10);
 }
+
+// ----- the breadcrumb's segments take a drop for their folder -----
+
+/// The other computer's pane in its "Desktop" folder (a 1.1 path under the home folder): "Sub" and "a.txt".
+fn there_in_documents(s: &mut UiState) {
+    let desk = s.remote_nav().iter().position(|n| n.path.ends_with("Desktop")).unwrap() as u8;
+    let go = s.activate(ControlId::ExpPlace(true, desk));
+    let cmd = go.commands.into_iter().next().unwrap();
+    assert!(matches!(&cmd, Command::FilesListPage { path, .. } if path == ":1/Users/ana/Desktop"), "{cmd:?}");
+    let entries = vec![remote("Sub", RemoteKind::Dir), remote("a.txt", RemoteKind::File)];
+    let page = RemotePage { path: ":1/Users/ana/Desktop".into(), start: 0, entries, next: None, free: None };
+    answer(s, &cmd, Ok(Reply::RemotePage(page)));
+    assert_eq!(s.explorer_pane(true).crumbs, ["Pasta pessoal", "Desktop"]);
+}
+
+#[test]
+fn a_breadcrumb_segment_takes_a_move_inside_its_computer_and_the_current_folder_takes_nothing() {
+    let mut s = opened_11();
+    // This computer: "foto.jpg" onto the segment of the folder above the one shown.
+    let up = s.explorer_pane(false).crumbs.len() as u8 - 2;
+    let seg = ControlId::ExpCrumb(false, up);
+    drag(&mut s, row(false, 1), Some(seg), false);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.target, Some(seg), "the segment is highlighted");
+    assert_eq!(
+        v.caption.as_deref(),
+        Some(format!("Mover para {}", s.explorer_pane(false).crumbs[up as usize]).as_str())
+    );
+    let a = s.drag_release(Some(seg), FAR, false).unwrap();
+    assert_eq!(
+        a.commands,
+        vec![Command::LocalMove {
+            paths: vec![PathBuf::from("C:/u/Downloads").join("foto.jpg")],
+            into: PathBuf::from("C:/u/Downloads").parent().unwrap().to_path_buf(),
+        }]
+    );
+    // The last segment is the folder the pane shows: nothing to do, no highlight, no caption.
+    let cur = Some(ControlId::ExpCrumb(false, up + 1));
+    drag(&mut s, row(false, 1), cur, false);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!((v.target, v.caption), (None, None));
+    assert!(s.drag_release(cur, FAR, false).unwrap().commands.is_empty());
+    // The copy key inside one computer says why it does nothing, as on a folder row.
+    drag(&mut s, row(false, 1), Some(seg), true);
+    let v = s.explorer_drag().unwrap();
+    assert!(v.caption_is_reason && v.target.is_none());
+    assert_eq!(v.caption.as_deref(), Some("Para copiar, solte no outro painel."));
+    assert!(s.drag_release(Some(seg), FAR, true).unwrap().commands.is_empty());
+    // A segment that does not exist is no target.
+    drag(&mut s, row(false, 1), Some(ControlId::ExpCrumb(false, 99)), false);
+    assert_eq!(s.explorer_drag().unwrap().target, None);
+}
+
+#[test]
+fn a_breadcrumb_segment_of_the_other_computer_moves_there_and_copies_across() {
+    let mut s = opened_11();
+    there_in_documents(&mut s);
+    let home = Some(ControlId::ExpCrumb(true, 0));
+    // Inside the other computer: a move into the home folder.
+    drag(&mut s, row(true, 1), home, false);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.caption.as_deref(), Some("Mover para Pasta pessoal"));
+    assert_eq!(v.target, home);
+    let a = s.drag_release(home, FAR, false).unwrap();
+    assert!(
+        a.commands
+            .iter()
+            .any(|c| matches!(c, Command::FilesChange { change: RemoteChange::Move { from_dir, names, to_dir }, .. }
+            if from_dir == ":1/Users/ana/Desktop" && names == &["a.txt".to_string()] && to_dir == ":1/Users/ana")),
+        "{:?}",
+        a.commands
+    );
+    // Across: this computer's file is copied into the segment's folder, whatever key is held.
+    drag(&mut s, row(false, 1), home, false);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.caption.as_deref(), Some("Copiar para Pasta pessoal, no MacBook do escritório"));
+    assert!(v.copy);
+    let a = s.drag_release(home, FAR, false).unwrap();
+    assert!(
+        a.commands.iter().any(|c| matches!(c, Command::FilesSend { remote_dir: Some(d), .. } if d == ":1/Users/ana")),
+        "{:?}",
+        a.commands
+    );
+    // A folder cannot go into itself: its own segment is never above it, but the folder shown is "Desktop",
+    // and "Sub" dragged on the segment of "Desktop" (the current folder) does nothing.
+    let cur = Some(ControlId::ExpCrumb(true, 1));
+    drag(&mut s, row(true, 0), cur, false);
+    assert_eq!(s.explorer_drag().unwrap().target, None);
+    // Clicking a segment opens its folder and the click on the last one stays.
+    let a = s.activate(ControlId::ExpCrumb(true, 0));
+    assert!(
+        matches!(a.commands.first(), Some(Command::FilesListPage { path, .. }) if path == ":1/Users/ana"),
+        "{:?}",
+        a.commands
+    );
+}
+
+// ----- the limits of a folder upload say so (FILES-UI.md 5: 10 000 files, 32 levels) -----
+
+/// The folder "Fotos" of this computer on its way up: its folder is made there and its listing is asked for.
+fn start_folder_upload(s: &mut UiState) -> Command {
+    s.explorer.focus_there = false;
+    let n = s.explorer_pane(false).rows.iter().position(|r| r.name == "Fotos").unwrap();
+    s.activate(row(false, n as u16));
+    let mk = s.activate(ControlId::ExpCopy).commands.into_iter().next().expect("the folder is made first");
+    answer(s, &mk, Ok(Reply::ChangeResults(vec![("Fotos".into(), crate::api::ChangeOutcome::Done)])));
+    s.take_followups().into_iter().next().expect("the folder is listed")
+}
+
+const TOO_BIG: &str = "Esta cópia passa do limite de 10\u{a0}000 arquivos ou 32 níveis de pastas. Nada foi copiado.";
+
+#[test]
+fn a_folder_upload_over_10000_files_stops_with_the_limit_text() {
+    let mut s = opened_11();
+    let list = start_folder_upload(&mut s);
+    let Command::LocalList { path: Some(local) } = &list else { panic!("{list:?}") };
+    let entries = (0..10_001).map(|i| entry(&format!("f{i}.jpg"), false)).collect();
+    answer(
+        &mut s,
+        &list,
+        Ok(Reply::LocalListing(LocalListing { path: local.clone(), entries, truncated: false, hidden: Vec::new() })),
+    );
+    assert_eq!(s.explorer_pane(true).notice.as_deref(), Some(TOO_BIG));
+    assert!(s.take_followups().is_empty(), "nothing is sent");
+    // The English text carries the same numbers.
+    s.set_language(crate::api::Language::En);
+    assert_eq!(
+        s.explorer_pane(true).notice.as_deref(),
+        Some("This copy is over the limit of 10\u{a0}000 files or 32 folder levels. Nothing was copied.")
+    );
+}
+
+#[test]
+fn a_folder_upload_deeper_than_32_levels_stops_with_the_limit_text() {
+    let mut s = opened_11();
+    let mut list = start_folder_upload(&mut s);
+    for level in 0..40 {
+        let Command::LocalList { path: Some(local) } = &list else { panic!("{list:?}") };
+        let listing =
+            LocalListing { path: local.clone(), entries: vec![entry("d", true)], truncated: false, hidden: Vec::new() };
+        answer(&mut s, &list, Ok(Reply::LocalListing(listing)));
+        let next = s.take_followups();
+        let Some(mk) = next.into_iter().find(|c| matches!(c, Command::FilesChange { .. })) else {
+            // "Fotos" is level 1: the 32nd listing (index 31) is the last level, and a folder below it is refused.
+            assert_eq!(level, 31, "the walk stops below level 32 and not before");
+            assert_eq!(s.explorer_pane(true).notice.as_deref(), Some(TOO_BIG));
+            return;
+        };
+        let Command::FilesChange { change: RemoteChange::MakeDir { name, .. }, .. } = &mk else { panic!("{mk:?}") };
+        let name = name.clone();
+        answer(&mut s, &mk, Ok(Reply::ChangeResults(vec![(name, crate::api::ChangeOutcome::Done)])));
+        list = s.take_followups().into_iter().next().expect("the next folder is listed");
+    }
+    panic!("the walk never stopped");
+}

@@ -1908,6 +1908,7 @@ impl UiState {
             w.remaining_s -= 1;
             changed = changed.union(Changed::VIEWER);
         }
+        changed = changed.union(self.screen_note_tick());
         let mut gave_up: Vec<(u64, String)> = Vec::new();
         for s in &mut self.sessions {
             if let Some(left) = &mut s.reconnect_left_s

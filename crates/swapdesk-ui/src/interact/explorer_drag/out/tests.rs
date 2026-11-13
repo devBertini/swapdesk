@@ -153,3 +153,46 @@ fn wait_until(mut done: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn folders_only_leaving_the_window_say_why_in_the_caption_until_the_pointer_is_back() {
+    let mut s = opened_11();
+    // "Contratos" is the right pane's only folder (row 0).
+    drag(&mut s, row(true, 0), None, false);
+    assert_eq!(s.explorer_drag().unwrap().caption, None, "inside the window nothing is said");
+    let a = s.drag_left_window();
+    assert_eq!(a.effect, None);
+    assert!(a.changed.hits(crate::state::WindowKind::Viewer), "the caption repaints the window");
+    assert!(s.drag_active(), "the in-app drag goes on");
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.caption.as_deref(), Some("Pastas ainda não podem ser arrastadas para fora do app."));
+    assert!(v.caption_is_reason && v.target.is_none() && !v.copy);
+    // Back inside the window: the reason goes, and the pointer over a target reads as before (a folder of the other
+    // computer cannot be copied down in 1.1 either: that reason, not this one).
+    s.drag_move(Some(row(false, 0)), (100.0, 120.0), false, 2_000);
+    let v = s.explorer_drag().unwrap();
+    assert_ne!(v.caption.as_deref(), Some("Pastas ainda não podem ser arrastadas para fora do app."));
+    assert!(v.caption.is_some() && v.caption_is_reason, "{v:?}");
+    // The left pane's folders say nothing: they are the system's own files.
+    let mut s = opened_11();
+    drag(&mut s, row(false, 0), None, false);
+    s.drag_left_window();
+    assert_eq!(s.explorer_drag().unwrap().caption, None);
+}
+
+#[test]
+fn files_and_folders_mixed_leaving_the_window_drag_the_files_and_leave_the_folders() {
+    let mut s = opened_11();
+    s.set_staging_root(temp_root("mixed"));
+    // Row 0 "Contratos" (a folder) and row 1 "foto.jpg" selected, dragged by the file.
+    s.activate(row(true, 0));
+    s.set_pointer_mods(crate::PointerMods { toggle: true, ..crate::PointerMods::default() });
+    s.activate(row(true, 1));
+    drag(&mut s, row(true, 1), None, false);
+    assert_eq!(s.explorer_drag().unwrap().pill, "2 itens");
+    let a = s.drag_left_window();
+    assert_eq!(a.effect, Some(Effect::SystemDrag), "the files go");
+    let out = s.take_system_drag().expect("the drag out");
+    assert_eq!(out.files().iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["foto.jpg"]);
+    assert!(!s.drag_active() && s.explorer_drag().is_none(), "no refusal is shown: the drag became the system's");
+}

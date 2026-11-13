@@ -162,10 +162,8 @@ impl UiState {
         self.explorer.there.notice = Some(notice);
     }
 
-    fn too_big(&self) -> Msg {
-        Msg::new(MsgKey::ExplorerJobTooBig)
-            .with(crate::format::count(self.lang, MAX_JOB_FILES as u64))
-            .with(MAX_DEPTH.to_string())
+    pub(super) fn too_big(&self) -> Msg {
+        Msg::new(MsgKey::ExplorerJobTooBig).with(crate::format::count(MAX_JOB_FILES as u64)).with(MAX_DEPTH.to_string())
     }
 
     fn failure_notice(code: ApiCode) -> Msg {
@@ -402,14 +400,14 @@ impl UiState {
             } else {
                 lines.push(
                     self.tm(&Msg::new(MsgKey::ExplorerPropsContents)
-                        .with(crate::format::count(self.lang, c.files))
-                        .with(crate::format::count(self.lang, c.folders))
+                        .with(crate::format::count(c.files))
+                        .with(crate::format::count(c.folders))
                         .with(human_size(self.lang, c.bytes))),
                 );
                 if c.truncated {
-                    lines.push(self.tm(
-                        &Msg::new(MsgKey::ExplorerPropsMore).with(crate::format::count(self.lang, c.files + c.folders)),
-                    ));
+                    lines.push(
+                        self.tm(&Msg::new(MsgKey::ExplorerPropsMore).with(crate::format::count(c.files + c.folders))),
+                    );
                 }
             }
         }

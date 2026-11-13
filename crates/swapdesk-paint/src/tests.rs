@@ -740,3 +740,77 @@ fn the_session_bar_stays_inside_the_pictures_column_when_a_side_panel_is_open() 
     let drawn = painter.drawn.borrow();
     assert!(!drawn.iter().any(|t| t == "Inverter"), "Inverter keeps only its icon: {drawn:?}");
 }
+
+#[test]
+fn the_explorer_draws_the_files_question_and_its_countdown_in_the_right_pane_only() {
+    let state = Scenario::ExploradorAguardandoConsentimento.prepared_state();
+    let (text, bar) = state.explorer_pane(true).wait.expect("the question is pending");
+    assert_eq!(bar.text.as_deref(), Some("0:14"));
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let out = paint(Frame::new(&p, &state, &ix, design_size(WindowKind::Viewer), true), WindowKind::Viewer);
+    let drawn = p.drawn.borrow().clone();
+    let placed = p.placed.borrow().clone();
+    let at = drawn.iter().position(|t| *t == text).expect("the sentence with the other computer's name is drawn");
+    assert!(drawn.contains(&"0:14".to_string()), "the countdown row's time is drawn: {drawn:?}");
+    let pane = out.widgets.iter().find(|w| w.id == ControlId::ExpPane(true)).expect("the right pane").rect;
+    let (x, y, _) = placed[at];
+    assert!(x >= pane.x && x < pane.right() && y > pane.y && y < pane.bottom(), "inside the right pane: {x},{y}");
+    let list = state.t(swapdesk_ui::MsgKey::ExplorerEmpty);
+    assert!(!drawn.contains(&list), "in place of the empty list");
+}
+
+#[test]
+fn every_breadcrumb_segment_is_a_control_of_its_own_inside_its_pane() {
+    let state = Scenario::Explorador.prepared_state();
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let out = paint(Frame::new(&p, &state, &ix, design_size(WindowKind::Viewer), true), WindowKind::Viewer);
+    for there in [false, true] {
+        let n = state.explorer_pane(there).crumbs.len();
+        assert!(n >= 1, "the pane has a breadcrumb");
+        let pane = out.widgets.iter().find(|w| w.id == ControlId::ExpPane(there)).unwrap().rect;
+        let mut rects: Vec<Rect> = (0..n)
+            .map(|i| {
+                let id = ControlId::ExpCrumb(there, i as u8);
+                out.widgets.iter().rev().find(|w| w.id == id).unwrap_or_else(|| panic!("{id:?} not placed")).rect
+            })
+            .collect();
+        assert!(rects.iter().all(|r| r.x >= pane.x && r.right() <= pane.right() && r.w > 0.0), "{rects:?}");
+        let sorted = rects.clone();
+        rects.sort_by(|a, b| a.x.total_cmp(&b.x));
+        assert_eq!(rects, sorted, "in reading order");
+        assert!(rects.windows(2).all(|w| w[0].right() <= w[1].x), "no overlap: {rects:?}");
+    }
+}
+
+#[test]
+fn the_picture_shows_the_line_of_a_folders_only_drop_over_its_bottom_and_nothing_without_it() {
+    use swapdesk_ui::{Command, Reply, Ticket, UiEvent};
+    let mut state = Scenario::TelaSoltando.prepared_state();
+    let paint_texts = |state: &swapdesk_ui::UiState| {
+        let p = Fixed::default();
+        let ix = Interaction::default();
+        let out = paint(Frame::new(&p, state, &ix, design_size(WindowKind::Viewer), true), WindowKind::Viewer);
+        let drawn = p.drawn.borrow().clone();
+        let placed = p.placed.borrow().clone();
+        (out, drawn, placed)
+    };
+    let r = state.system_drop(None, (420.0, 300.0));
+    let ask = r.activation.commands.into_iter().find(|c| matches!(c, Command::LocalKinds { .. })).expect("kinds asked");
+    let Command::LocalKinds { paths } = &ask else { unreachable!() };
+    let kinds = paths.iter().map(|p| (p.clone(), true)).collect();
+    state.track(Ticket(9_001), &ask);
+    state.apply(UiEvent::Reply { ticket: Ticket(9_001), result: Ok(Reply::LocalKinds(kinds)) });
+    let note = state.screen_note().expect("the reason is pending");
+    let (out, drawn, placed) = paint_texts(&state);
+    let at = drawn.iter().position(|t| *t == note).expect("the line is drawn over the picture");
+    let video = out.video.expect("the picture");
+    let (x, y, _) = placed[at];
+    assert!(x >= video.x && x < video.right() && y > video.center().1 && y < video.bottom(), "bottom of the picture");
+    for _ in 0..6 {
+        state.tick();
+    }
+    let (_, drawn, _) = paint_texts(&state);
+    assert!(!drawn.contains(&note), "gone with its time");
+}

@@ -230,7 +230,11 @@ pub(crate) fn drag(f: &mut Frame, d: &DragView) {
         p.stroke_rrect(w.rect, w.radius.max(4.0), width, pal.link);
     }
     let name = p.label_ellipsis(&d.pill, text::SMALL_BOLD, 220.0);
-    let pill = Rect::new(p.snap(d.at.0 + 14.0), p.snap(d.at.1 + 14.0), name.w + 46.0, 30.0);
+    // The pointer may be outside the window (a drag that left it): the pill and its caption stay inside.
+    let pw = name.w + 46.0;
+    let px = (d.at.0 + 14.0).min(f.w - 336.0_f32.max(pw) - 8.0).max(8.0);
+    let py = (d.at.1 + 14.0).min(f.h - 30.0 - 6.0 - 28.0 - 8.0).max(8.0);
+    let pill = Rect::new(p.snap(px), p.snap(py), pw, 30.0);
     p.shadow(pill, 15.0, 4.0, 12.0, f.fx.shadow_dialog);
     p.bordered(pill, 15.0, pal.line, pal.surface);
     let icon = if d.is_dir { icons::FOLDER } else { FILE };
@@ -299,6 +303,34 @@ fn icon_button(f: &mut Frame, id: ControlId, r: Rect, path: &str, enabled: bool)
     p.svg(path, r.x + (r.w - 18.0) / 2.0, r.y + (r.h - 18.0) / 2.0, 18.0, 1.8, ink);
 }
 
+/// The breadcrumb inside the address bar: one control per segment (it opens that folder and takes a drop for it), a
+/// chevron between them; when they do not all fit, every segment shrinks by the same share and is cut with an ellipsis.
+fn crumbs(f: &mut Frame, addr: Rect, there: bool, names: &[String]) {
+    const CHEVRON: f32 = 18.0;
+    const PAD: f32 = 6.0;
+    let (p, pal) = (f.p, f.pal);
+    let labels: Vec<_> = names.iter().map(|n| p.label(n, text::BODY)).collect();
+    let natural: f32 = labels.iter().map(|l| l.w + 2.0 * PAD).sum();
+    let chevrons = CHEVRON * labels.len().saturating_sub(1) as f32;
+    let room = addr.w - 8.0 - chevrons;
+    let scale = if natural > room { (room / natural).max(0.1) } else { 1.0 };
+    let mut x = addr.x + 4.0;
+    for (i, (name, l)) in names.iter().zip(&labels).enumerate() {
+        if i > 0 {
+            p.svg(FORWARD, x + 3.0, addr.y + 10.0, 12.0, 1.6, pal.soft);
+            x += CHEVRON;
+        }
+        let w = ((l.w + 2.0 * PAD) * scale).max(PAD * 2.0 + 4.0);
+        let seg = Rect::new(x, addr.y + 3.0, w, addr.h - 6.0);
+        let id = ControlId::ExpCrumb(there, u8::try_from(i).unwrap_or(u8::MAX));
+        f.tint(id, seg, 6.0, pal.ink, 0.05, 0.09);
+        let t = if scale < 1.0 { p.label_ellipsis(name, text::BODY, w - 2.0 * PAD) } else { p.label(name, text::BODY) };
+        p.draw(&t, seg.x + PAD, addr.y + (addr.h - t.h) / 2.0, if i + 1 == names.len() { pal.ink } else { pal.soft });
+        f.register(id, seg, 6.0);
+        x += w;
+    }
+}
+
 /// Column positions inside a pane: (x of size, x of type, x of modified, whether type and modified show).
 fn columns(r: Rect) -> (f32, Option<f32>, Option<f32>) {
     let right = r.right() - 14.0;
@@ -351,9 +383,7 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     icon_button(f, ControlId::ExpRefresh(there), Rect::new(r.right() - 40.0, ny + 4.0, 32.0, 32.0), REFRESH, true);
     let addr = Rect::new(r.x + 120.0, ny + 4.0, (r.right() - 48.0 - r.x - 120.0).max(40.0), 32.0);
     p.bordered(addr, 8.0, pal.line, pal.sunken);
-    let crumbs = v.crumbs.join("  ›  ");
-    let cl = p.label_ellipsis(&crumbs, text::BODY, addr.w - 20.0);
-    p.draw(&cl, addr.x + 10.0, addr.y + (32.0 - cl.h) / 2.0, pal.ink);
+    crumbs(f, addr, there, &v.crumbs);
     // Column header.
     let hy = ny + NAV_ROW_H;
     let head = Rect::new(r.x + 1.0, hy, r.w - 2.0, COLUMNS_H);
@@ -383,7 +413,16 @@ fn pane(f: &mut Frame, r: Rect, v: &PaneView) {
     }
     // Rows, states and the status line.
     let rows = Rect::new(r.x + 1.0, head.bottom(), r.w - 2.0, r.bottom() - STATUS_H - head.bottom());
-    if v.loading && v.rows.is_empty() {
+    if let Some((msg, bar)) = &v.wait {
+        // The other computer asks its user first (D13): who is asked and the time the question has left, in place of
+        // an empty or loading list.
+        let w = (rows.w - 32.0).clamp(40.0, 360.0);
+        let l = p.label_in(msg, text::CAPTION, w, Align::Start);
+        let x = rows.x + 16.0;
+        p.draw(&l, x, rows.y + 14.0, pal.soft);
+        let colors = [pal.line, pal.link, pal.sunken];
+        f.countdown_row((x, rows.y + 14.0 + l.h + 10.0), w, bar, colors);
+    } else if v.loading && v.rows.is_empty() {
         for i in 0..8 {
             let y = rows.y + 6.0 + i as f32 * ROW_H;
             f.block(Rect::new(rows.x + 14.0, y + 7.0, 16.0, 16.0), 3.0);

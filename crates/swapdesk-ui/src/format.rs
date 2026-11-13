@@ -147,10 +147,11 @@ pub fn size_mb(lang: Language, bytes: u64) -> String {
     if lang == Language::PtBr { s.replace('.', ",") } else { s }
 }
 
-/// A whole count with the language's thousands mark: "10.000" in Portuguese, "10,000" in English.
-pub fn count(lang: Language, n: u64) -> String {
+/// A whole count in groups of three digits with a no-break space ("10 000"), the SI form both languages read: a
+/// count is formatted when its message is made, and the same text stays right after the language changes.
+pub fn count(n: u64) -> String {
     let digits = n.to_string();
-    let mark = if lang == Language::PtBr { '.' } else { ',' };
+    let mark = '\u{a0}';
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
@@ -216,12 +217,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_count_carries_the_thousands_mark_of_its_language() {
-        assert_eq!(count(Language::PtBr, 10_000), "10.000");
-        assert_eq!(count(Language::En, 10_000), "10,000");
-        assert_eq!(count(Language::PtBr, 999), "999");
-        assert_eq!(count(Language::En, 1_234_567), "1,234,567");
-        assert_eq!(count(Language::PtBr, 0), "0");
+    fn a_count_is_grouped_by_three_digits_with_a_no_break_space() {
+        assert_eq!(count(10_000), "10\u{a0}000");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_234_567), "1\u{a0}234\u{a0}567");
+        assert_eq!(count(0), "0");
     }
 
     /// 2026-11-08 15:30 UTC.

@@ -289,3 +289,73 @@ fn a_folder_row_hovered_by_a_system_drop_opens() {
     let r = s.system_drag_over(Some(row(true, 0)), HERE, 1_000 + SPRING_MS + 1);
     assert!(r.activation.commands.iter().any(|c| matches!(c, Command::FilesListPage { .. })), "{:?}", r.activation);
 }
+
+#[test]
+fn a_system_drop_on_a_breadcrumb_segment_of_the_other_computer_uploads_into_its_folder() {
+    let mut s = opened_11();
+    let desk = s.remote_nav().iter().position(|n| n.path.ends_with("Desktop")).unwrap() as u8;
+    let go = s.activate(ControlId::ExpPlace(true, desk));
+    let cmd = go.commands.into_iter().next().unwrap();
+    let page = RemotePage {
+        path: ":1/Users/ana/Desktop".into(),
+        start: 0,
+        entries: vec![remote("Sub", RemoteKind::Dir)],
+        next: None,
+        free: None,
+    };
+    answer(&mut s, &cmd, Ok(Reply::RemotePage(page)));
+    let home = Some(ControlId::ExpCrumb(true, 0));
+    let r = s.system_drag_enter(files(&["C:/docs/relatorio.pdf"]), home, HERE, 1_000);
+    assert_eq!(r.effect, DropEffect::Copy);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.target, home, "the segment is outlined");
+    assert_eq!(v.caption.as_deref(), Some("Copiar para Pasta pessoal, no MacBook do escritório"));
+    let r = s.system_drop(home, HERE);
+    let commands = resolve(&mut s, &r, &[]);
+    assert_eq!(sent(&commands), vec![(vec![PathBuf::from("C:/docs/relatorio.pdf")], Some(":1/Users/ana".into()))]);
+    // The segment of the folder shown is the pane's own folder: the button's path, with its conflict check.
+    let cur = Some(ControlId::ExpCrumb(true, 1));
+    let r = s.system_drag_enter(files(&["C:/docs/a.txt"]), cur, HERE, 2_000);
+    assert_eq!(r.effect, DropEffect::Copy);
+    // This computer's segments take no copy: they say why and the OS is told "none".
+    let mine = Some(ControlId::ExpCrumb(false, s.explorer_pane(false).crumbs.len() as u8 - 2));
+    let r = s.system_drag_enter(files(&["C:/docs/a.txt"]), mine, HERE, 3_000);
+    assert_eq!(r.effect, DropEffect::None);
+    let v = s.explorer_drag().unwrap();
+    assert_eq!(v.caption.as_deref(), Some("Para copiar, solte no outro painel."));
+    assert!(v.caption_is_reason && v.target.is_none());
+}
+
+#[test]
+fn folders_only_on_the_picture_say_why_over_the_picture_and_the_line_goes_by_itself() {
+    let mut s = on_screen();
+    assert_eq!(s.screen_note(), None);
+    s.system_drag_enter(files(&["C:/docs/Fotos"]), None, HERE, 1_000);
+    let r = s.system_drop(None, HERE);
+    let commands = resolve(&mut s, &r, &["C:/docs/Fotos"]);
+    assert!(sent(&commands).is_empty());
+    let note = s.screen_note().expect("the reason shows where the drop happened: the picture");
+    assert_eq!(note, "Pastas ainda não são enviadas: escolha os arquivos de dentro delas.");
+    // The accessibility tree reads it as a status of the picture's window.
+    assert!(s.controls(crate::state::WindowKind::Viewer).iter().any(|c| c.label == note));
+    // It is a short-lived line: it counts down with the clock and goes.
+    for _ in 0..5 {
+        s.tick();
+    }
+    assert!(s.screen_note().is_some(), "still there before its time is up");
+    assert!(s.tick().hits(crate::state::WindowKind::Viewer), "its going repaints the window");
+    assert_eq!(s.screen_note(), None);
+    assert!(!s.controls(crate::state::WindowKind::Viewer).iter().any(|c| c.label == note));
+    // Files among the folders send the files and leave no line.
+    s.system_drag_enter(files(&["C:/docs/foto.jpg", "C:/docs/Fotos"]), None, HERE, 2_000);
+    let r = s.system_drop(None, HERE);
+    resolve(&mut s, &r, &["C:/docs/Fotos"]);
+    assert_eq!(s.screen_note(), None);
+    // The line is for the picture: the explorer shows nothing of it.
+    s.system_drag_enter(files(&["C:/docs/Fotos"]), None, HERE, 3_000);
+    let r = s.system_drop(None, HERE);
+    resolve(&mut s, &r, &["C:/docs/Fotos"]);
+    assert!(s.screen_note().is_some());
+    s.activate(ControlId::TbFiles);
+    assert_eq!(s.screen_note(), None, "hidden while the explorer is open");
+}

@@ -439,6 +439,14 @@ impl UiState {
             .map(|((name, _), (size, mtime_ms))| DragOutFile { name: name.clone(), size: *size, mtime_ms: *mtime_ms })
             .collect();
         if files.is_empty() {
+            // Folders only: they stay in the app (1.1), and the caption says so while the pointer is outside.
+            if drag.items.iter().all(|(_, is_dir)| *is_dir)
+                && let Some(d) = &mut self.explorer.drag.active
+                && !d.out_refused
+            {
+                d.out_refused = true;
+                a.changed = Changed::VIEWER;
+            }
             return a;
         }
         let folder = drag.folder.clone();

@@ -1197,8 +1197,8 @@ impl UiState {
         let Some(walk) = self.explorer.there.walk.as_mut() else { return Err(l) };
         walk.files += files.len();
         if walk.files > MAX_JOB_FILES || (!dirs.is_empty() && item.depth >= MAX_DEPTH) {
-            // The job does not go on (FILES-UI.md 5: 10 000 files and 32 levels). The closest text there is.
-            self.walk_abort(Msg::new(MsgKey::ExplorerOpFailed));
+            // The job does not go on (FILES-UI.md 5: 10 000 files and 32 levels).
+            self.walk_abort(self.too_big());
             return Ok(Changed::VIEWER);
         }
         for d in dirs {

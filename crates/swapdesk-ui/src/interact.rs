@@ -157,6 +157,8 @@ pub enum ControlId {
     /// A pane's whole area, registered under its rows: the empty part of the list, and the pane's current folder as a
     /// drop target (slice 3).
     ExpPane(bool),
+    /// Segment `n` of a pane's breadcrumb: opens that folder, and is a drop target for it.
+    ExpCrumb(bool, u8),
     /// A column header: sorts by it (`SORT_NAME` to `SORT_MODIFIED`), again reverses.
     ExpSort(bool, u8),
     ExpBack(bool),
@@ -1184,6 +1186,11 @@ impl UiState {
             s.region(Region::Content);
             s.button(ControlId::SwapDeclinedClose, self.name_of(MsgKey::Close));
         }
+        if let Some(note) = self.screen_note() {
+            s.region(Region::Status);
+            s.text(UiRole::Text, note);
+            s.region(Region::Content);
+        }
         if let Some(w) = self.swap_wait() {
             s.region(Region::Status);
             s.heading(2, w.title);
@@ -1849,6 +1856,7 @@ impl UiState {
             | ControlId::ExpCopy
             | ControlId::ExpRow(..)
             | ControlId::ExpPane(_)
+            | ControlId::ExpCrumb(..)
             | ControlId::ExpSort(..)
             | ControlId::ExpBack(_)
             | ControlId::ExpForward(_)

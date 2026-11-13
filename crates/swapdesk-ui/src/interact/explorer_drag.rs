@@ -58,6 +58,9 @@ struct Active {
     hover: Option<(ControlId, u64)>,
     /// Size and time of each item (slice 5, `out_capture_meta`).
     meta: Vec<(u64, u64)>,
+    /// The pointer left the window carrying folders only, which cannot go out of the app (slice 5): the caption says
+    /// so until the pointer is back inside.
+    out_refused: bool,
 }
 
 /// What the explorer remembers of a drag between events.
@@ -156,6 +159,7 @@ impl UiState {
         drag.at = at;
         drag.copy = copy_key;
         drag.under = under;
+        drag.out_refused = false;
         drag.hover = match (under, drag.hover) {
             (Some(ControlId::ExpRow(..)), Some((id, since))) if Some(id) == under => Some((id, since)),
             (Some(id @ ControlId::ExpRow(..)), _) => Some((id, now_ms)),
@@ -215,8 +219,17 @@ impl UiState {
         self.explorer.focus_there = there;
         self.explorer.pointer = Default::default();
         self.explorer.drag.press = None;
-        self.explorer.drag.active =
-            Some(Active { there, folder, items, at, copy: false, under: None, hover: None, meta: Vec::new() });
+        self.explorer.drag.active = Some(Active {
+            there,
+            folder,
+            items,
+            at,
+            copy: false,
+            under: None,
+            hover: None,
+            meta: Vec::new(),
+            out_refused: false,
+        });
         self.out_capture_meta();
     }
 
@@ -256,6 +269,13 @@ impl UiState {
                 Some(Target { there, folder, label, highlight: ControlId::ExpPlace(there, i) })
             }
             ControlId::ExpPane(there) => pane(there),
+            // A breadcrumb segment stands for its folder, as a folder row of the pane does.
+            ControlId::ExpCrumb(there, i) => {
+                let folder = self.crumb_folder(there, i)?;
+                let label =
+                    if there { self.crumbs_there() } else { self.crumbs_here() }.into_iter().nth(usize::from(i))?;
+                Some(Target { there, folder, label, highlight: ControlId::ExpCrumb(there, i) })
+            }
             _ => None,
         }
     }
@@ -318,6 +338,7 @@ impl UiState {
         };
         let target = self.drag_target(drag.under);
         let (caption, caption_is_reason, highlight, copy) = match target.as_ref().map(|t| (t, self.verdict(t))) {
+            _ if drag.out_refused => (Some(self.t(MsgKey::ExplorerFoldersStayIn)), true, None, false),
             None | Some((_, Verdict::Nothing)) => (None, false, None, false),
             Some((_, Verdict::Refused(why))) => (Some(why), true, None, false),
             Some((t, Verdict::Move)) => (
