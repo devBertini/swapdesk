@@ -1407,6 +1407,13 @@ impl Window {
                 }
                 Some(LRESULT(0))
             }
+            crate::system::WM_QUIT_APP if self.kind == WindowKind::Main => {
+                // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+                Some(LRESULT(0))
+            }
             WM_CLOSE if self.kind == WindowKind::Main && self.shared.tray.get() => {
                 // D32 on both systems: the interface stays in the notification area, connected to the service.
                 // SAFETY: hides our own window.

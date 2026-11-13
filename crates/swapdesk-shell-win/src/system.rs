@@ -14,6 +14,9 @@ use windows::core::{HSTRING, w};
 pub const WM_WAKE: u32 = WM_APP;
 /// A screen reader asked for an action (UI Automation `Invoke`, focus).
 pub const WM_ACCESS: u32 = WM_APP + 1;
+/// Ends the run (an update about to be installed, a test that is done): the main window is destroyed as a close
+/// without the notification area does. A person's close (`WM_CLOSE`) only hides it while the icon is up.
+pub const WM_QUIT_APP: u32 = WM_APP + 42;
 /// A native text input says something (Enter, Tab, Escape, focus lost): wParam is the input's id, lParam the event.
 pub const WM_EDIT_EVENT: u32 = WM_APP + 2;
 

@@ -538,18 +538,18 @@ impl Shared {
 
     /// A session of this computer just came up (either role): the main window goes to the taskbar, once per session,
     /// unless it is already minimized or hidden. Nothing brings it back when the session ends.
-    /// An update is being installed (UPDATES.md 6.2 step 4): the main window closes the way a person closes it, so
-    /// the window state is saved, and the process ends before the applier's sweep.
+    /// An update is being installed (UPDATES.md 6.2 step 4): the run ends before the applier's sweep, through
+    /// `WM_QUIT_APP` (a `WM_CLOSE` would only hide the window into the notification area).
     fn close_for_update(&self) {
         if !self.state.borrow_mut().take_quit_request() {
             return;
         }
         if let Some(h) = self.main_hwnd() {
-            // SAFETY: our window; WM_CLOSE goes through the window's own close path.
+            // SAFETY: our window; the message ends the run from its own thread.
             unsafe {
                 let _ = PostMessageW(
                     Some(h),
-                    WM_CLOSE,
+                    crate::system::WM_QUIT_APP,
                     windows::Win32::Foundation::WPARAM(0),
                     windows::Win32::Foundation::LPARAM(0),
                 );

@@ -105,9 +105,9 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        // SAFETY: closing our window ends the message loop of its thread.
+        // SAFETY: our window; the message ends the run and the message loop of its thread.
         unsafe {
-            let _ = PostMessageW(Some(self.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(self.hwnd()), crate::system::WM_QUIT_APP, WPARAM(0), LPARAM(0));
         }
         if let Some(j) = self.join.take() {
             let _ = j.join();
@@ -314,6 +314,42 @@ fn settles_iconic(live: &Live, want: bool) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     iconic(live) == want
+}
+
+/// D32 with the notification area (B16): in a real run a person's close hides the main window and the run goes on;
+/// an update about to be installed still ends the run (a close that only hid the window would keep the process alive
+/// and block the applier).
+#[test]
+fn closing_the_main_window_of_a_real_run_hides_it_and_an_update_still_ends_the_run() {
+    use swapdesk_ui::UiWaker;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let backend = Arc::new(Scripted::default());
+    let b = Arc::clone(&backend);
+    let mut live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    let hwnd = live.hwnd();
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    // SAFETY: plain queries of our window.
+    assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool(), "the close keeps the window");
+    assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "the close hides it into the notification area");
+    assert!(!live.join.as_ref().expect("running").is_finished(), "the run goes on");
+
+    backend.push(swapdesk_ui::UiEvent::UpdateRestarting);
+    live.waker.wake();
+    let join = live.join.take().expect("running");
+    let started = Instant::now();
+    while !join.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(5), "the update's restart did not end the run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    join.join().expect("the shell thread");
 }
 
 #[test]
