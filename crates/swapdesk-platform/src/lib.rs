@@ -484,6 +484,13 @@ pub trait NetInterfaces: Send + Sync {
     fn list(&self) -> Result<Vec<NetInterface>>;
 }
 
+/// The link-layer (MAC) address of a peer on this network, from the system's neighbour table (ARP for IPv4, Neighbour
+/// Discovery for IPv6). Every Swapdesk peer is on-link (D36), so its entry exists after it reached us; a lookup may
+/// ask the network when the entry is gone. `None`: no answer (not on-link, gone, or a loopback address) (D65).
+pub trait NeighborTable: Send + Sync {
+    fn mac_of(&self, peer: core::net::IpAddr) -> Option<[u8; 6]>;
+}
+
 // ---------- trace log (own logger, D14) ----------
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
