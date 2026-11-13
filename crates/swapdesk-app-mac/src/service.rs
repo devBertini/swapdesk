@@ -309,7 +309,13 @@ impl InProcessService {
                 let (hub, trace) = (hub.clone(), Arc::clone(&trace));
                 Some(start(Box::new(move || {
                     trace.log(Level::Info, "app", format_args!("the network changed"));
+                    let started = std::time::Instant::now();
                     hub.network_changed();
+                    trace.log(
+                        Level::Info,
+                        "app",
+                        format_args!("the network change was handled in {} ms", started.elapsed().as_millis()),
+                    );
                 }))?)
             }
             None => None,

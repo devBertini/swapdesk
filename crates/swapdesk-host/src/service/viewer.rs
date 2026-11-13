@@ -719,6 +719,7 @@ struct Redial {
     expected: swapdesk_trust::Spki,
     /// The configuration of the first dial: same intent, same request (an unattended entry stays unattended).
     cfg: ViewerConfig,
+    trace: Arc<dyn TraceSink>,
 }
 
 impl Redial {
@@ -727,7 +728,26 @@ impl Redial {
         cfg.resume = Some(resume);
         cfg.swap_token = None;
         cfg.on_prompt = None;
-        ViewerSession::connect(&self.endpoint, &self.identity, self.addr, self.expected, cfg).await
+        let started = std::time::Instant::now();
+        let result = ViewerSession::connect_within(
+            &self.endpoint,
+            &self.identity,
+            self.addr,
+            self.expected,
+            cfg,
+            ReconnectPolicy::default().dial_limit,
+        )
+        .await;
+        let how = match &result {
+            Ok(_) => "resumed".to_string(),
+            Err(e) => format!("failed: {e:?}"),
+        };
+        self.trace.log(
+            Level::Debug,
+            "service",
+            format_args!("redial {how} after {} ms", started.elapsed().as_millis()),
+        );
+        result
     }
 }
 
@@ -999,7 +1019,14 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         device,
         since_ms,
         stop: Arc::clone(&stop),
-        redial: Arc::new(Redial { endpoint: endpoint.clone(), identity, addr, expected, cfg: redial_cfg }),
+        redial: Arc::new(Redial {
+            endpoint: endpoint.clone(),
+            identity,
+            addr,
+            expected,
+            cfg: redial_cfg,
+            trace: Arc::clone(&trace),
+        }),
         terms: Arc::clone(&terms),
         elevation: Arc::clone(&elevation),
     };

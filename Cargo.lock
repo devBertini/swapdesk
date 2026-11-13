@@ -1001,6 +1001,7 @@ dependencies = [
  "quinn",
  "swapdesk-fakes",
  "swapdesk-lan",
+ "swapdesk-netsim",
  "swapdesk-platform",
  "swapdesk-proto",
  "swapdesk-session",

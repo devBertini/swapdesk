@@ -89,7 +89,8 @@ pub fn main() -> ExitCode {
         grants = grants.with(Permission::Files);
     }
     // `--reconnect`: the viewer's link is dropped for about 10 s; the host's script logs the session's drop and return
-    // (it needs no grant), and the session timeout below must cover the drop.
+    // (it needs no grant), waits for the viewer to take the lost session back, and the session timeout below must
+    // cover the drop and the resume window.
     if args.iter().any(|a| a == "--reconnect") {
         log("HOST_RECONNECT_WATCH");
     }
@@ -115,6 +116,8 @@ pub fn main() -> ExitCode {
         chat_say: value(&args, "--chat").map(PathBuf::from),
         // `--swap`: the proof of the swap; the host accepts the question the viewer asks.
         swap: args.iter().any(|a| a == "--swap"),
+        // `--reconnect`: the lost session is waited out; the viewer takes it back.
+        reconnect: args.iter().any(|a| a == "--reconnect"),
         audit: value(&args, "--audit-dir")
             .filter(|_| term)
             .map(|dir| AuditCheck { dir: PathBuf::from(dir), wait_action: false }),

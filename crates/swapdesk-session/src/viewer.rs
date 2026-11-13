@@ -213,7 +213,25 @@ impl ViewerSession {
         expected: Spki,
         cfg: ViewerConfig,
     ) -> Result<Self, OpenError> {
-        let conn = connect_session(endpoint, identity, addr, expected).await.map_err(|_| OpenError::Lost)?;
+        Self::connect_within(endpoint, identity, addr, expected, cfg, Duration::from_secs(10)).await
+    }
+
+    /// As [`connect`](Self::connect), with the QUIC handshake bounded by `handshake` (the decision after it is not).
+    /// A dial that runs while the link is down sends its first packet at once and then waits for QUIC's own
+    /// retransmissions, which come after 1 s, 3 s, 7 s: a link that returns in a gap is not noticed until the
+    /// next one. A caller that redials (the reconnect of F-NET-01) bounds each attempt and starts a fresh one instead.
+    pub async fn connect_within(
+        endpoint: &Endpoint,
+        identity: &Identity,
+        addr: std::net::SocketAddr,
+        expected: Spki,
+        cfg: ViewerConfig,
+        handshake: Duration,
+    ) -> Result<Self, OpenError> {
+        let conn = tokio::time::timeout(handshake, connect_session(endpoint, identity, addr, expected))
+            .await
+            .map_err(|_| OpenError::Lost)?
+            .map_err(|_| OpenError::Lost)?;
         Self::open(conn, Some(device_id(&expected)), cfg).await
     }
 

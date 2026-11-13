@@ -385,6 +385,7 @@ fn the_two_drivers_pair_run_a_session_and_forget_each_other() {
         grants: Permissions::NONE.with(Permission::Control).with(Permission::Audio),
         chat_say: Some(dir.join("chat-host-say")),
         swap: false,
+        reconnect: false,
         audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(
@@ -512,6 +513,7 @@ fn different_codes_end_the_pairing_without_a_device() {
         grants: Permissions::NONE.with(Permission::Control),
         chat_say: None,
         swap: false,
+        reconnect: false,
         audit: None,
     };
     let mut viewer_cfg = ViewerConfig::new(

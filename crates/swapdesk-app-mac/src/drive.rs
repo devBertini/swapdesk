@@ -90,13 +90,15 @@ pub fn start(dir: &Path, data_dir: &Path, backend: Tee, trace: Arc<dyn TraceSink
         pair_timeout: Duration::from_secs(150),
         session_timeout: Duration::from_secs(180),
         grants,
-        // The chat proof: the host sends the text the orchestrator writes to `<dir>/chat-host-say`. The reconnect proof
-        // needs nothing more here: the script logs the session's drop and return on its own.
+        // The chat proof: the host sends the text the orchestrator writes to `<dir>/chat-host-say`. The reconnect proof's
+        // switch is below: the script logs the session's drop and return.
         chat_say: Some(dir.join("chat-host-say")),
-        // Two switches the orchestrator sets by creating a file in the folder before it starts the app. `swap`: the
+        // Three switches the orchestrator sets by creating a file in the folder before it starts the app. `swap`: the
         // host accepts the swap the viewer asks for. `term`: the host grants the terminal and reads its own audit file
         // once the session is over (the quick action of that proof runs toward a Mac, so its line is waited for).
         swap: dir.join("swap").exists(),
+        // `reconnect`: the viewer's link drops for about 10 s; the host waits for it to take the lost session back.
+        reconnect: dir.join("reconnect").exists(),
         audit: term.then(|| AuditCheck { dir: data_dir.to_path_buf(), wait_action: true }),
     };
     std::thread::Builder::new()

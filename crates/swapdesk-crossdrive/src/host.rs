@@ -28,6 +28,9 @@ use crate::pump::{Pump, wait_file};
 
 const REPLY: Duration = Duration::from_secs(10);
 
+/// How long after a lost session the host's resume token works (PROTOCOL.md 6.4), with a margin for the poll.
+pub const RESUME_WINDOW: Duration = Duration::from_secs(65);
+
 pub struct HostConfig {
     /// The file the orchestrator writes the viewer's code to; compared with ours before `PairConfirm`.
     pub peer_code: PathBuf,
@@ -42,6 +45,12 @@ pub struct HostConfig {
     pub chat_say: Option<PathBuf>,
     /// Swap proof: accept the swap the viewer asks for and watch the reverse session ([`crate::swap`]).
     pub swap: bool,
+    /// Reconnect proof: a session that ends as lost (the host's interface reports `Ended` with the timeout reason once
+    /// the link has been silent for QUIC's idle timeout) is not the end: the script waits [`RESUME_WINDOW`] for the
+    /// viewer to take the same session back (`HOST_SESSION_LOST`, then `HOST_SESSION_ACTIVE_AGAIN`) and only a
+    /// final end (a `Bye`) finishes it. Without the switch the first `Ended` finishes the script, and the device is
+    /// forgotten at once, which kills the resume token.
+    pub reconnect: bool,
     /// Terminal and quick action proof: where to read this host's own audit file once the session is over.
     pub audit: Option<AuditCheck>,
 }
@@ -246,6 +255,8 @@ fn watch_session(
     let mut cursor = 0;
     let mut sent = false;
     let mut reconnecting = false;
+    // Reconnect proof: when the session ended as lost, and so how long the viewer has to take it back.
+    let mut lost_at = None::<Instant>;
     let mut swap = None::<Swap>;
     loop {
         for e in pump.fresh(&mut cursor) {
@@ -308,14 +319,20 @@ fn watch_session(
                             sw.old_ended = true;
                             log(&format!("HOST_SWAP_OLD_SESSION_ENDED reason={reason:?}"));
                         }
+                        // A lost link: the host's interface says the session ended, but its token lives on.
+                        None if cfg.reconnect && lost_at.is_none() && reason == Some(ApiCode::Timeout) => {
+                            lost_at = Some(Instant::now());
+                            log("HOST_SESSION_LOST");
+                        }
                         None => return Ok(reason),
                     },
                     SessionState::Reconnecting { .. } if !reconnecting => {
                         reconnecting = true;
                         log("HOST_SESSION_RECONNECTING");
                     }
-                    SessionState::Active { .. } if reconnecting => {
+                    SessionState::Active { .. } if reconnecting || lost_at.is_some() => {
                         reconnecting = false;
+                        lost_at = None;
                         log("HOST_SESSION_ACTIVE_AGAIN");
                     }
                     _ => {}
@@ -336,6 +353,11 @@ fn watch_session(
             sent = true;
             pump.ask(Command::ChatSend { session_id, text: text.trim().to_string() }, REPLY)?;
             log("HOST_CHAT_SENT");
+        }
+        if let Some(lost) = lost_at
+            && lost.elapsed() >= RESUME_WINDOW
+        {
+            return Err(format!("the viewer did not take the lost session back within {}s", RESUME_WINDOW.as_secs()));
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -393,5 +415,90 @@ pub fn host_stay(backend: &dyn UiBackend, grants: Permissions, log: &dyn Fn(&str
         }
         pump.ask(Command::AnswerIncoming { request_id, decision: Decision::Accept { grants } }, REPLY)?;
         log(&format!("HOST_ACCEPTED request={request_id} device={device}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use swapdesk_ui::Ticket;
+
+    use super::*;
+
+    /// A backend that plays a list of event batches, one per `drain`.
+    struct Played(Mutex<VecDeque<Vec<UiEvent>>>);
+
+    impl UiBackend for Played {
+        fn send(&self, _command: Command) -> Ticket {
+            Ticket(0)
+        }
+        fn drain(&self) -> Vec<UiEvent> {
+            self.0.lock().unwrap().pop_front().unwrap_or_default()
+        }
+    }
+
+    fn session(state: SessionState) -> Vec<UiEvent> {
+        vec![UiEvent::Session { session_id: 7, device_id: "peer".into(), state }]
+    }
+
+    fn active() -> SessionState {
+        SessionState::Active {
+            since_ms: 1,
+            role: Role::Host,
+            granted: Permissions::NONE,
+            elevation: swapdesk_ui::ElevationLevel::Unavailable,
+        }
+    }
+
+    /// What a host's interface shows when the viewer's link drops and comes back (seen on the Mac, 13/11): the silent
+    /// link first reads `Reconnecting`, then, once QUIC's idle timeout has passed, the session `Ended` with the timeout
+    /// reason although its resume token lives on; the viewer's resume then makes the same session `Active` again.
+    fn drop_and_return() -> Played {
+        Played(Mutex::new(VecDeque::from([
+            session(SessionState::Reconnecting { attempt: 0 }),
+            session(SessionState::Ended { reason: Some(ApiCode::Timeout) }),
+            session(active()),
+            session(SessionState::Ended { reason: None }),
+        ])))
+    }
+
+    fn watch(backend: &Played, reconnect: bool) -> (Result<Option<ApiCode>, String>, Vec<String>) {
+        let cfg = HostConfig {
+            peer_code: PathBuf::new(),
+            pair_timeout: Duration::from_secs(1),
+            session_timeout: Duration::from_secs(5),
+            grants: Permissions::NONE,
+            chat_say: None,
+            swap: false,
+            reconnect,
+            audit: None,
+        };
+        let lines = Mutex::new(Vec::new());
+        let log = |l: &str| lines.lock().unwrap().push(l.to_string());
+        let mut pump = Pump::new(backend);
+        let end = watch_session(&mut pump, &cfg, &log, 7, "peer");
+        (end, lines.into_inner().unwrap())
+    }
+
+    #[test]
+    fn without_the_switch_a_lost_session_is_the_end_of_the_script() {
+        let (end, lines) = watch(&drop_and_return(), false);
+        assert_eq!(end, Ok(Some(ApiCode::Timeout)));
+        assert_eq!(lines, ["HOST_SESSION_RECONNECTING"]);
+    }
+
+    #[test]
+    fn with_the_reconnect_switch_a_lost_session_is_waited_out_until_the_viewer_takes_it_back() {
+        let (end, lines) = watch(&drop_and_return(), true);
+        assert_eq!(end, Ok(None), "the end that finishes the script is the viewer's own");
+        assert_eq!(lines, ["HOST_SESSION_RECONNECTING", "HOST_SESSION_LOST", "HOST_SESSION_ACTIVE_AGAIN"]);
+    }
+
+    #[test]
+    fn a_final_end_during_the_reconnect_proof_still_finishes_the_script() {
+        let bye = Played(Mutex::new(VecDeque::from([session(SessionState::Ended { reason: Some(ApiCode::Refused) })])));
+        assert_eq!(watch(&bye, true).0, Ok(Some(ApiCode::Refused)));
     }
 }
