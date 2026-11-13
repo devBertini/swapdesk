@@ -4,9 +4,10 @@
 
 Um acesso remoto que funciona só na sua rede local, para Windows e macOS, feito para todas as direções: Windows com Windows, Windows com Mac, Mac com Windows e Mac com Mac. Escrito em Rust, com interface nativa em cada sistema. Licença MIT OU Apache-2.0.
 
-> **Status: versão 1.0.0.** Um PC com Windows e um Mac se controlam numa rede local de verdade depois de parear por um código comparado: tela, áudio do sistema e mouse nos dois sentidos, e o teclado do Mac para o PC. Entre dois PCs com Windows roda tudo o que está abaixo, incluindo terminal, arquivos, área de transferência, inversão, chat, Wake-on-LAN e reconexão, provado com duas instâncias num mesmo PC. O que não está na 1.0 está em [Fora da 1.0](#fora-da-10); a prova de cada recurso está em [Status](#status).
+> **Status: versão 1.1.0.** Um PC com Windows e um Mac se controlam numa rede local de verdade depois de parear por um código comparado, nos dois sentidos: tela, áudio do sistema, mouse, teclado, área de transferência, um explorador de arquivos com os dois computadores lado a lado, terminal e ações rápidas, chat, inversão e reconexão depois de uma queda do link, tudo provado entre as duas máquinas. Entre dois PCs com Windows tudo roda também, provado com duas instâncias num mesmo PC. O app se atualiza pelas releases do GitHub com um clique seu, e cada conta do Windows tem o seu próprio Swapdesk. O que não está na 1.1 está em [Próximos passos](#próximos-passos); a prova de cada recurso está em [Status](#status).
 
 <p>
+  <img src=".github/images/explorer.png" alt="O explorador de arquivos de uma sessão: este computador à esquerda, o MacBook à direita, com lugares, discos, ordenação e o botão de copiar" width="720">
   <img src=".github/images/home.png" alt="A tela Início do Swapdesk no Windows: este computador, o MacBook pareado online, o pareamento e a atividade recente" width="720">
   <img src=".github/images/request.png" alt="O pedido no PC controlado: o MacBook quer controlar este computador, com o que permitir nesta sessão" width="400">
 </p>
@@ -24,14 +25,14 @@ O Swapdesk não tem relay, nuvem, travessia de NAT nem conta. Na 1.x nenhuma ses
 Baixe o zip do seu sistema na [última versão](https://github.com/devBertini/swapdesk/releases/latest): Windows 10 ou 11 (x64) ou macOS 14 ou mais novo (Apple silicon). Cada zip tem um arquivo `.sha256` ao lado, e o workflow de release publica uma atestação de origem do build. Com o [GitHub CLI](https://cli.github.com/) você confere que o zip foi gerado a partir deste repositório:
 
 ```sh
-gh attestation verify Swapdesk-windows-x64-1.0.0.zip -R devBertini/swapdesk
+gh attestation verify Swapdesk-windows-x64-1.1.0.zip -R devBertini/swapdesk
 ```
 
 ## Instalar no Windows
 
 Requisitos: Windows 10 ou 11 (x64) numa rede local definida como **Privada** (as regras de firewall que o instalador cria cobrem só os perfis Privado e Domínio).
 
-1. Baixe `Swapdesk-windows-x64-1.0.0.zip` na página de [releases](https://github.com/devBertini/swapdesk/releases) e confira o SHA-256 com o arquivo `.sha256` ao lado.
+1. Baixe `Swapdesk-windows-x64-1.1.0.zip` na página de [releases](https://github.com/devBertini/swapdesk/releases) e confira o SHA-256 com o arquivo `.sha256` ao lado.
 2. Descompacte, leia o `install.ps1` se quiser (cada mudança está listada no cabeçalho dele) e dê dois cliques em `install.cmd`. Aprove o aviso do Windows (UAC). Ele instala em `%ProgramFiles%\Swapdesk`, registra o serviço `SwapdeskService`, cria as regras de firewall (UDP 47820 a 47883 e mDNS 5353, só para a sub-rede local: cada conta do Windows que usa o Swapdesk ganha o seu próprio par de portas, a partir de 47820 e 47821, para até 32 contas) e um atalho no menu Iniciar.
 3. Abra o **Swapdesk** pelo menu Iniciar.
 
@@ -43,8 +44,8 @@ Os binários não são assinados (decisão D22: sem certificado pago). O SmartSc
 
 Requisitos: macOS 14 ou mais novo, em Apple silicon.
 
-1. Baixe `Swapdesk-macos-arm64-1.0.0.zip` na página de [releases](https://github.com/devBertini/swapdesk/releases), confira o SHA-256, descompacte e mova o **Swapdesk** para Aplicativos.
-2. O app é assinado ad hoc, não com um Apple Developer ID (decisão D22), então o macOS recusa a primeira abertura. Abra uma vez, vá em Ajustes do Sistema > Privacidade e Segurança, encontre a linha dizendo que o Swapdesk foi bloqueado e clique em **Abrir Mesmo Assim**.
+1. Baixe `Swapdesk-macos-arm64-1.1.0.zip` na página de [releases](https://github.com/devBertini/swapdesk/releases), confira o SHA-256, descompacte e mova o **Swapdesk** para Aplicativos.
+2. O app é assinado com o certificado do próprio projeto ("Swapdesk Release"), não com um Apple Developer ID (decisão D22), então o macOS recusa a primeira abertura. Abra uma vez, vá em Ajustes do Sistema > Privacidade e Segurança, encontre a linha dizendo que o Swapdesk foi bloqueado e clique em **Abrir Mesmo Assim**. O certificado é o mesmo em todas as versões, então uma atualização mantém as permissões que você deu.
 3. Permita o que ele pedir: **Rede Local** (para achar e alcançar o outro computador) e, para este Mac ser controlado, **Gravação do Áudio do Sistema e da Tela** e **Acessibilidade**. Para controlar outro computador a partir do Mac, também **Monitoramento de Entrada**.
 
 Na primeira vez que é aberto, o Swapdesk se adiciona aos itens que abrem no início de sessão e fica na barra de menus quando a janela é fechada, então o Mac pode ser alcançado enquanto você estiver com a sessão aberta. O interruptor "Abrir ao ligar o computador", em Ajustes, tira o Swapdesk dos itens de início de sessão e o coloca de volta. Da 1.1 em diante, as atualizações mantêm as permissões; instalar a 1.1 por cima da 1.0 pede as permissões mais uma vez.
@@ -73,49 +74,43 @@ A interface está em português do Brasil e em inglês: ela segue o idioma do si
 
 ## Status
 
-Cada recurso está num de três estados, descritos de forma conservadora:
+Cada recurso está num de três estados, escritos com cautela:
 
-- **Entre máquinas:** provado em dois computadores separados numa rede local de verdade (um PC com Windows e um MacBook).
-- **Um PC:** provado num PC com Windows, com duas instâncias conversando por loopback ou pelo serviço instalado.
-- **Fora da 1.0:** veja [Fora da 1.0](#fora-da-10).
+- **Entre máquinas:** provado em dois computadores separados numa rede local de verdade (um PC com Windows e um MacBook), por um harness de testes sobre o código de host e visualizador que é distribuído, em 13/11/2026.
+- **Um PC:** provado num PC com Windows, duas instâncias conversando por loopback ou pelo serviço instalado.
+- **Construído:** construído e coberto por testes de unidade e integração, ainda não provado num aparelho real para esse caso.
 
 | Recurso | Mac controla Windows | Windows controla Mac | Windows com Windows |
 |---|---|---|---|
 | Pareamento por código comparado, chaves fixadas | Entre máquinas | Entre máquinas | Um PC |
-| Tela (captura, H.264, transporte, decodificação, exibição) | Entre máquinas | Entre máquinas (3420x2214, primeiro quadro em 0,6 s) | Um PC |
-| Áudio do sistema | Entre máquinas | Entre máquinas | Um PC |
-| Mouse | Entre máquinas | Entre máquinas | Um PC |
-| Teclado | Entre máquinas (digitando no Bloco de Notas) | Entre máquinas (digitando no Editor de Texto, Cmd+S) | Um PC |
-| Adicionar por endereço e a proteção de rede local | Entre máquinas | Entre máquinas | Um PC |
-| Descoberta na rede local (DNS-SD) | Entre máquinas | Entre máquinas | Um PC |
-| Inversão, chat, Wake-on-LAN, reconexão | Fora da 1.0 | Fora da 1.0 | Um PC |
-| Área de transferência (texto e imagens, nos dois sentidos) | Entre máquinas | Entre máquinas | Um PC |
-| Terminal, arquivos, ações rápidas | Fora da 1.0 | Fora da 1.0 | Um PC |
-| Tela cheia e atalhos do visualizador | Construído | Construído | Um PC |
-| Alcançável com a sessão aberta e a janela fechada | n/a | Item de início e barra de menus | Serviço do Windows |
-| Sem ninguém na frente (tela de login, tela bloqueada, UAC) | Fora da 1.0 | Fora da 1.0 (o macOS só permite com sessão aberta e desbloqueada) | Fora da 1.0 |
+| Tela (H.264, ou HEVC quando os dois lados têm o hardware) | Entre máquinas | Entre máquinas | Um PC |
+| Áudio do sistema, mouse, teclado | Entre máquinas | Entre máquinas | Um PC |
+| Área de transferência (texto e imagens) | Entre máquinas | Entre máquinas | Um PC |
+| Explorador de arquivos: os dois computadores lado a lado, cópia nos dois sentidos, arrastar e soltar, os discos do outro computador, nova pasta, renomear, mover, a lixeira dele | Entre máquinas (cópia, cancelar) | Entre máquinas (cópia, cancelar) | Um PC |
+| Terminal como o usuário do host, ações rápidas | Entre máquinas | Entre máquinas | Um PC |
+| Chat com confirmação de leitura | Entre máquinas | Entre máquinas | Um PC |
+| Inversão (em menos de 1 s, sem novo pareamento) | Entre máquinas | Entre máquinas | Um PC |
+| Reconexão depois de 10 s sem Wi-Fi | Entre máquinas | Entre máquinas | Um PC |
+| Atualizações pelas releases do GitHub, assinadas | Construído | Construído | Um PC |
+| Contas: um Swapdesk por conta do Windows | n/a | n/a | Um PC |
+| Sem ninguém na frente no Windows (tela de entrada, tela bloqueada, UAC), depois de "Elevar controle" | Construído, não provado num reinício real | n/a | Construído |
+| Instalador com entrada na lista de apps instalados | Construído, não provado numa máquina limpa | n/a | Construído |
 
-**Na interface, nos dois apps:** uma tela Início com este computador, o pareamento e a atividade recente; renomear um dispositivo pareado no próprio app (um nome local: o outro computador não é avisado); e a escolha de tema (Sistema, Claro, Escuro), guardada por usuário com os outros ajustes pessoais. Conferido à mão no app do Windows; no app do Mac está construído e com testes unitários. Corrigido nos testes da 1.0: um Mac que muda de endereço aparece uma vez só e na rede, o aceite de um pedido vindo de um computador recém-pareado, e as cores de uma tela com HDR do Windows (Cor Avançada) ligado.
-
-As execuções entre máquinas são conduzidas por um harness de testes sobre o código de host e visualizador que é distribuído, mais uma sessão manual com o Mac controlando o PC. Windows com Windows em dois PCs separados e Mac com Mac não foram verificados: o projeto tem um PC e um Mac. O mapa de prova fluxo a fluxo é o [docs/FLUXOS.md](docs/FLUXOS.md).
+**Na interface, os dois apps usam um só renderizador:** tela Início, guia do primeiro uso, ícone na bandeja do Windows e na barra de menus do Mac, barra da sessão que recolhe numa alça, Ajustes com os dispositivos bloqueados, e toda espera mostrando o que espera e o tempo que falta. Uma revisão de segurança de toda a superfície rodou antes da 1.1.0 ([docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)). Windows com Windows em dois PCs separados e Mac com Mac não estão verificados: o projeto tem um PC e um Mac. O mapa de prova fluxo a fluxo é [docs/FLUXOS.md](docs/FLUXOS.md).
 
 **Dependências:** o projeto mantém um conjunto pequeno de crates de terceiros, conferido no CI por `cargo deny` e `cargo vet`: parte delas se apoia em auditorias públicas importadas de outros projetos (Mozilla, Google, Bytecode Alliance e outros), e o restante é uma lista de isenções que nenhuma auditoria cobre ainda (`supply-chain/`); transporte e criptografia ficam em `quinn`, `rustls` e `ring` ([docs/DECISIONS.md](docs/DECISIONS.md), D28). As licenças delas estão em [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
-## Fora da 1.0
+## Próximos passos
 
-Planejado para a 1.1:
+A seguir:
 
-- Inversão, terminal e arquivos entre Windows e Mac (já funcionam de Windows para Windows).
-- Acesso sem ninguém na frente no Windows, na tela de login, na tela bloqueada e nos avisos do UAC, provado depois de uma reinicialização real.
-- Um teste de 8 horas com quedas de Wi-Fi, com os orçamentos de CPU, GPU e memória medidos nele.
-- Troca entre as telas do host, provada em duas telas com escalas diferentes.
-- Menos cópias no caminho dos quadros e um layout de texto em cache na interface.
-- A próxima rodada da interface: telas, textos, acessibilidade, um ícone na bandeja do Windows e um guia de primeiro uso.
-- Um instalador com entrada na lista de aplicativos instalados, e um caminho de assinatura para os dois sistemas.
-- Capturas de tela, um relatório de desempenho, fuzzing guiado por cobertura dos decodificadores, um job de CI no Linux.
-- Uma demonstração curta em loop no topo deste README: parear, ver a outra tela, mover o mouse e inverter os papéis.
+- Acesso sem ninguém na frente no Mac dentro do que o macOS permite (com sessão aberta e desbloqueada), e o caminho do Windows provado num reinício real.
+- Um segundo PC com Windows para as provas Windows com Windows e o instalador numa máquina limpa.
+- Um relatório de desempenho medido (CPU, GPU, memória, cauda de latência) e execuções longas com quedas de Wi-Fi.
+- Um loop curto de demonstração no topo deste README.
+- Assinatura de código para os dois sistemas quando uma via gratuita servir (decisão D41).
 
-Depois, sem data (D36): acesso de fora da rede local como um modo que você liga, começando por uma VPN que você já usa entre as suas máquinas, e grupos de dispositivos. Cada passo ganha seu próprio projeto e modelo de ameaças antes de qualquer código.
+Depois, sem data (D36): acesso de fora da rede local como um modo que você liga, começando por uma VPN que você já usa entre suas máquinas, e grupos de dispositivos. Cada passo tem o seu próprio projeto e modelo de ameaças antes de qualquer código.
 
 ## Como ele fica na rede local
 
@@ -135,7 +130,7 @@ O detalhamento completo está em [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) (e
 - **Pareamento comparando um código de 6 dígitos.** Os dois usuários abrem "Parear este computador" em até 2 minutos. As duas telas mostram o mesmo código, derivado de uma troca de compromissos e das duas chaves (no estilo do ZRTP, argumento da RFC 6189). Uma chave só é fixada depois que os dois usuários confirmam que os códigos são iguais. Três tentativas erradas em 15 minutos bloqueiam o pareamento por 15 minutos, e cada novo bloqueio em 24 horas dobra esse tempo, até 24 horas.
 - **Chaves fixadas.** Cada conta do Windows e cada usuário do Mac tem a sua própria chave de dispositivo Ed25519. As sessões usam TLS 1.3 com autenticação mútua e só chaves fixadas. Nenhum session ticket e nenhum 0-RTT são aceitos, e a chave é conferida de novo depois de cada handshake.
 - **Permissões por dispositivo e por direção.** `VIEW`, `CONTROL`, `AUDIO`, `TERMINAL`, `ADMIN_TERMINAL`, `FILES`, `CLIPBOARD`, `UNATTENDED`. Um dispositivo recém-pareado não tem nenhuma, então cada sessão pede a aceitação do usuário do host até que mais seja concedido.
-- **Acesso sem ninguém na frente só com administrador.** Conceder `UNATTENDED` ou `ADMIN_TERMINAL` exige um administrador local (elevação UAC no Windows; para uma conta padrão, um administrador aprova no aviso do UAC na sessão dessa conta e o registro de atividade guarda quem aprovou), conferido pelo serviço privilegiado, nunca pela interface, e o mesmo vale para ampliar o que um dispositivo com `UNATTENDED` pode fazer. Entrar sem perguntar abre a sessão com o alcance do próprio usuário; um botão na sessão ("Elevar controle") amplia esse alcance para a tela de entrada, a tela de bloqueio e os avisos de administrador, depois da confirmação do próprio sistema no computador que controla (UAC no Windows, a senha de administrador no Mac). Pareamento, permissões e conexões de saída ficam reservados à interface da sessão do console. Uma conta só hospeda enquanto está na tela do computador: um dispositivo pareado com a conta A nunca vê nem controla a sessão da conta B. No macOS, o acesso sem ninguém na frente não está na 1.0.
+- **Acesso sem ninguém na frente só com administrador.** Conceder `UNATTENDED` ou `ADMIN_TERMINAL` exige um administrador local (elevação UAC no Windows; para uma conta padrão, um administrador aprova no aviso do UAC na sessão dessa conta e o registro de atividade guarda quem aprovou), conferido pelo serviço privilegiado, nunca pela interface, e o mesmo vale para ampliar o que um dispositivo com `UNATTENDED` pode fazer. Entrar sem perguntar abre a sessão com o alcance do próprio usuário; um botão na sessão ("Elevar controle") amplia esse alcance para a tela de entrada, a tela de bloqueio e os avisos de administrador, depois da confirmação do próprio sistema no computador que controla (UAC no Windows, a senha de administrador no Mac). Pareamento, permissões e conexões de saída ficam reservados à interface da sessão do console. Uma conta só hospeda enquanto está na tela do computador: um dispositivo pareado com a conta A nunca vê nem controla a sessão da conta B. No macOS, o acesso sem ninguém na frente não está na 1.1.
 - No Windows a chave privada fica no serviço privilegiado; no macOS ela é um arquivo que só o usuário com a sessão aberta consegue ler (decisão D31). O visualizador, o terminal e o acesso a arquivos rodam como o usuário da sessão, nunca como SYSTEM ou root.
 
 Para relatar vulnerabilidades, siga o [SECURITY.md](SECURITY.md).

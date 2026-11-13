@@ -2,7 +2,7 @@
 
 This is a reader's overview. The normative sources are [SPEC.md](SPEC.md) (flows, "Data and architecture"), [CONTRACTS.md](CONTRACTS.md) (C2 processes and IPC, crates) and [PROTOCOL.md](PROTOCOL.md) (the wire). Where this file and those differ, they win. Marks used there: **UNPROVEN** means no primary source settles it yet, **GUESS** means a design number still to confirm.
 
-Status: version 1.0.0 (see the status table in the [README](../README.md)). Windows runs the service, helper and interface processes below. macOS runs everything in one process, Swapdesk.app, as the logged-in user (decisions D27 and D32); the root daemon and agents under "macOS, later" are design.
+Status: version 1.1.0 (see the status table in the [README](../README.md)). Windows runs the service, helper and interface processes below. macOS runs everything in one process, Swapdesk.app, as the logged-in user (decisions D27 and D32); the root daemon and agents under "macOS, later" are design.
 
 ## Principles
 
