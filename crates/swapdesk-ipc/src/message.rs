@@ -70,6 +70,14 @@ pub enum Message {
     ForceKeyframe {
         display: u16,
     },
+    /// 0x2B (F-VIEW-06): the size the display is encoded at, from the viewer's `VideoSettings`
+    /// (`scale::target_size`); 0 in either axis means native. A separate message from `SetRate`: the rate follows
+    /// the congestion control, the size follows the viewer's window, and neither is sent with the other.
+    SetScale {
+        display: u16,
+        width: u16,
+        height: u16,
+    },
     Input {
         events: Events,
     },
@@ -264,7 +272,7 @@ pub enum Message {
 pub const fn limit_of(ty: u64) -> Option<usize> {
     match ty {
         0x24 | 0x54 => Some(MAX_INPUT_MESSAGE),
-        0x01..=0x03 | 0x20..=0x2A | 0x30 | 0x32 | 0x33 | 0x35..=0x3A => Some(MAX_OTHER_MESSAGE),
+        0x01..=0x03 | 0x20..=0x2B | 0x30 | 0x32 | 0x33 | 0x35..=0x3A => Some(MAX_OTHER_MESSAGE),
         0x40..=0x42 | 0x52 | 0x53 | 0x55 | 0x56 => Some(MAX_OTHER_MESSAGE),
         0x31 | 0x50 => Some(MAX_VIDEO_MESSAGE),
         0x34 => Some(MAX_AUDIO_DATAGRAM),
@@ -403,6 +411,7 @@ impl Message {
             Self::SetAudioMuted { .. } => 0x28,
             Self::Shutdown => 0x29,
             Self::ResumeCapture { .. } => 0x2A,
+            Self::SetScale { .. } => 0x2B,
             Self::CaptureHeld { .. } => 0x3A,
             Self::Displays(_) => 0x30,
             Self::VideoFrame { .. } => 0x31,
@@ -472,6 +481,11 @@ impl Message {
                 w.put_u16(*display);
                 w.put_u32(*kbps);
                 w.put_u16(*fps);
+            }
+            Self::SetScale { display, width, height } => {
+                w.put_u16(*display);
+                w.put_u16(*width);
+                w.put_u16(*height);
             }
             Self::Input { events } => put_events(w, events)?,
             Self::ReleaseAll | Self::StopAudio | Self::Shutdown | Self::SasRequest => {}
@@ -616,6 +630,7 @@ impl Message {
             0x28 => Self::SetAudioMuted { muted: r.bool()? },
             0x29 => Self::Shutdown,
             0x2A => Self::ResumeCapture { generation: r.u64()? },
+            0x2B => Self::SetScale { display: r.u16()?, width: r.u16()?, height: r.u16()? },
             0x3A => Self::CaptureHeld { generation: r.u64()? },
             0x30 => Self::Displays(DisplayList::get(r, 0)?),
             0x31 => {

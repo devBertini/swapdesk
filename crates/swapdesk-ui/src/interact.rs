@@ -1737,6 +1737,8 @@ impl UiState {
                         scale: if self.fit { Scale::Fit } else { Scale::OneToOne },
                     });
                 }
+                // Fit encodes at the window's size, 1:1 at the display's own.
+                a.commands.extend(self.view_size_command());
                 a.changed = Changed::VIEWER;
             }
             ControlId::TbQuality => {
@@ -2010,6 +2012,28 @@ impl UiState {
         .into_iter()
         .map(|(q, key)| (q, self.name_of(key), q == self.quality))
         .collect()
+    }
+
+    /// F-VIEW-06: the viewer window's video area in physical pixels and the refresh rate of its monitor (0 = unknown),
+    /// reported by the shell whenever the layout, the DPI or the monitor changes. Returns the command that tells the
+    /// host when what it should encode at changed: in Fit the area, in 1:1 mode 0x0 (native). The same figures again
+    /// return nothing.
+    pub fn set_view_area(&mut self, width: u32, height: u32, refresh_hz: u16) -> Vec<Command> {
+        self.view_area = (width, height);
+        self.view_hz = refresh_hz;
+        self.view_size_command().into_iter().collect()
+    }
+
+    fn view_size_command(&mut self) -> Option<Command> {
+        let session_id = self.session_id()?;
+        let clamp = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+        let (width, height) = if self.fit { (clamp(self.view_area.0), clamp(self.view_area.1)) } else { (0, 0) };
+        let key = (session_id, width, height, self.view_hz);
+        if self.view_sent == Some(key) {
+            return None;
+        }
+        self.view_sent = Some(key);
+        Some(Command::SetViewSize { session_id, width, height, max_fps: self.view_hz })
     }
 
     /// The user picked a quality in the viewer's select: it changes at once and reverts if the service refuses.

@@ -321,6 +321,11 @@ pub struct EncodedFrame {
 }
 
 pub trait VideoEncoder {
+    /// `config.width/height` is the size encoded, not the capture's (F-VIEW-06): a frame of another size given to
+    /// `encode` is scaled to it (Windows: the D3D11 video processor pass that converts the colour; Mac:
+    /// `VTPixelTransferSession`), and `EncodedFrame.width/height` is the configured size. A new size is a new
+    /// `configure`. A size the encoder refuses is an `Err`; the helper then configures the capture's own size and
+    /// does not try the refused size again until the viewer asks for another.
     fn configure(&mut self, config: &EncoderConfig) -> Result<EncoderInfo>;
     /// May return nothing while the encoder fills, or more than one frame.
     /// `force_keyframe` is best effort (VideoToolbox): check `keyframe` on the output and ask again.

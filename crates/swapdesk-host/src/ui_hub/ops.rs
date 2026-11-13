@@ -10,16 +10,14 @@ use swapdesk_ipc::{
 };
 use swapdesk_lan::guard::{ManualError, validate_manual};
 use swapdesk_platform::Level;
-use swapdesk_proto::{
-    DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special, VideoSettings,
-};
+use swapdesk_proto::{DisplayList, ErrorCode, InputEvent, Intent, KeyframeRequest, Os, PermissionSet, Special};
 use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef, Direction, device_id_hex};
 use tokio::time::Instant;
 
 use super::extras::{ENTRY_ID_BIT, Entry};
 use super::store::{store_settings, valid_name};
 use super::views::{Manual, parse_device_id};
-use super::{Conn, Hub, Viewer, lock};
+use super::{Conn, Hub, VideoPrefs, Viewer, lock};
 use crate::service::{
     ApplyError, ConnectError, DEFAULT_SESSION_PORT, TermOut, ViewerHandle, ViewerMessages, ViewerOut, WaitHook,
 };
@@ -263,11 +261,16 @@ impl Hub {
             UiOp::ListDisplays { session_id } => {
                 self.with_viewer(conn, session_id, |v| Ok(v.displays.clone())).map(ReplyBody::Displays)
             }
-            UiOp::SetQuality { session_id, quality } => {
-                let settings =
-                    VideoSettings { preset: quality, max_fps: 60, max_kbps: 0, view_width: 0, view_height: 0 };
-                done(self.with_viewer(conn, session_id, |v| v.handle.set_video_settings(settings).map_err(apply_code)))
-            }
+            UiOp::SetQuality { session_id, quality } => done(self.with_viewer(conn, session_id, |v| {
+                v.video.preset = quality;
+                v.handle.set_video_settings(v.video.settings()).map_err(apply_code)
+            })),
+            // F-VIEW-06: the viewer's video area and its monitor's refresh; the preset stays as last chosen.
+            UiOp::SetViewSize { session_id, width, height, max_fps } => done(self.with_viewer(conn, session_id, |v| {
+                v.video.view = (width, height);
+                v.video.max_fps = max_fps;
+                v.handle.set_video_settings(v.video.settings()).map_err(apply_code)
+            })),
             UiOp::SetAudio { session_id, on } => {
                 done(self.with_viewer(conn, session_id, |v| v.handle.set_audio(on).map_err(apply_code)))
             }
@@ -710,7 +713,14 @@ impl Hub {
         handle.files().bind(conn.fs.clone());
         lock(&conn.viewers).insert(
             session_id,
-            Viewer { handle: handle.clone(), device: id, view_only: false, displays: Vec::new(), elevated: false },
+            Viewer {
+                handle: handle.clone(),
+                device: id,
+                view_only: false,
+                displays: Vec::new(),
+                elevated: false,
+                video: VideoPrefs::default(),
+            },
         );
         let (me, c) = (Arc::clone(self), Arc::clone(conn));
         rt.spawn(async move { me.pump_viewer(c, session_id, id, handle, messages, mode, Some(entry_id)).await });

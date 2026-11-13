@@ -115,7 +115,12 @@ fn run(codec: Codec) -> (Vec<Codec>, Vec<Codec>) {
         desktop_sent: Mutex::default(),
     };
     let p = StartParams { display: 0, fps: 60, kbps: 8_000, preset: Preset::Auto, backend: VideoBackend::Auto, codec };
-    let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };
+    let ctl = VideoCtl {
+        stop: AtomicBool::new(false),
+        force_key: AtomicBool::new(false),
+        rate: Mutex::new(None),
+        scale: Mutex::new((0, 0)),
+    };
     let ids = AtomicU32::new(0);
     let headers = std::thread::scope(|s| {
         let h = s.spawn(|| {

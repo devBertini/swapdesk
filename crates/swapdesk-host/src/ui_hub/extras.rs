@@ -31,7 +31,7 @@ use tokio::task::AbortHandle;
 
 use super::ops::reply;
 use super::views::parse_device_id;
-use super::{Conn, Hub, Viewer, lock};
+use super::{Conn, Hub, VideoPrefs, Viewer, lock};
 use crate::service::{ChatNote, ConnectError, ExtrasHooks, ViewerHandle, ViewerMessages};
 
 /// The entries (a waking attempt, a connect that waits for the host) get ids with this bit set so they never meet a
@@ -238,7 +238,14 @@ impl Hub {
         handle.files().bind(conn.fs.clone());
         lock(&conn.viewers).insert(
             session_id,
-            Viewer { handle: handle.clone(), device, view_only: false, displays: Vec::new(), elevated: false },
+            Viewer {
+                handle: handle.clone(),
+                device,
+                view_only: false,
+                displays: Vec::new(),
+                elevated: false,
+                video: VideoPrefs::default(),
+            },
         );
         let me = Arc::clone(self);
         rt.spawn(

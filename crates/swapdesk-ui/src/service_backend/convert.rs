@@ -664,6 +664,9 @@ pub fn route(c: &a::Command) -> Route {
         }
         C::SelectDisplay { session_id, display_id } => O::SelectDisplay { session_id: *session_id, display: *display_id },
         C::SetQuality { session_id, quality } => O::SetQuality { session_id: *session_id, quality: quality_to_wire(*quality) },
+        C::SetViewSize { session_id, width, height, max_fps } => {
+            O::SetViewSize { session_id: *session_id, width: *width, height: *height, max_fps: *max_fps }
+        }
         C::SetAudio { session_id, on } => O::SetAudio { session_id: *session_id, on: *on },
         C::SetViewOnly { session_id, on } => O::SetViewOnly { session_id: *session_id, on: *on },
         C::SendKeys { session_id, keys } => O::SendKeys { session_id: *session_id, keys: keys_to_wire(*keys) },
@@ -924,6 +927,10 @@ mod tests {
             Route::Op(w::UiOp::SetQuality { session_id: 1, quality: p::Preset::Text })
         );
         assert_eq!(route(&C::SetScale { session_id: 1, scale: a::Scale::Fit }), Route::LocalDone);
+        assert_eq!(
+            route(&C::SetViewSize { session_id: 1, width: 960, height: 540, max_fps: 144 }),
+            Route::Op(w::UiOp::SetViewSize { session_id: 1, width: 960, height: 540, max_fps: 144 })
+        );
         assert_eq!(
             route(&C::Wake { device_id: "d".into() }),
             Route::Op(w::UiOp::Wake { device_id: "d".into(), intent: p::Intent::Control })

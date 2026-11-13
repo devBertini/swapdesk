@@ -1,5 +1,8 @@
 //! `VideoEncoder` over a Media Foundation H.264 encoder MFT.
 //!
+//! F-VIEW-06: the configured size is the size encoded. A frame of another size (the display's own, while the viewer's
+//! window asks for less) is scaled to it by the same video-processor pass that converts the colour.
+//!
 //! Frames reach the MFT as NV12: BGRA (CPU rows or a D3D11 texture) goes through the D3D11 video processor into a pool of
 //! NV12 textures; a hardware MFT takes those textures (DXGI buffers), the software MFT takes a system-memory copy. Hardware
 //! MFTs are asynchronous (`METransformNeedInput` / `METransformHaveOutput` through [`crate::events`]); the software MFT is
@@ -268,6 +271,8 @@ struct Active {
     // GPU side.
     gpu: Gpu,
     proc: VideoProc,
+    /// The size of the frames `proc` reads (the capture's); the encoded size is `cfg`'s (F-VIEW-06).
+    src_size: (u32, u32),
     bgra_in: Option<ID3D11Texture2D>,
     pool: Vec<ID3D11Texture2D>,
     next_pool: usize,
@@ -474,17 +479,8 @@ impl VideoEncoder for MfH264Encoder {
                 None => return Err(err(ErrorKind::Closed, "VideoEncoder::encode", "configure was not called")),
             }
         }
-        let (w, h) = {
-            let a = self.active_mut()?;
-            (a.cfg.width, a.cfg.height)
-        };
-        if frame.width != w || frame.height != h {
-            // A display size change: new MFT instance, new SPS/PPS, first frame a keyframe with `config_change`.
-            let mut cfg = self.active_mut()?.cfg;
-            cfg.width = frame.width;
-            cfg.height = frame.height;
-            self.configure(&cfg)?;
-        }
+        // The frame may be larger than the configured size: `Active::encode` scales it (F-VIEW-06). A new encoded
+        // size is a new `configure` (new MFT, new SPS/PPS, a keyframe with `config_change`), the caller's decision.
         self.active_mut()?.encode(frame, force_keyframe)
     }
 
@@ -536,7 +532,7 @@ impl VideoEncoder for MfH264Encoder {
             return Ok(Vec::new()); // already refined, nothing changed since
         }
         let a = self.active_mut()?;
-        if frame.width != a.cfg.width || frame.height != a.cfg.height {
+        if (frame.width, frame.height) != a.src_size {
             return Ok(Vec::new()); // the display changed size since the picture was captured: nothing to refine
         }
         if let Some(done) = self.refine_live(frame) {
@@ -879,6 +875,7 @@ impl Active {
             out_info,
             gpu: gpu.clone(),
             proc,
+            src_size: (cfg.width, cfg.height),
             bgra_in: None,
             pool,
             next_pool: 0,
@@ -891,6 +888,17 @@ impl Active {
             force_next: false,
             timing: FrameTiming::default(),
         })
+    }
+
+    /// The capture's size changed (or differs from the encoded size from the start): a video processor that reads
+    /// `src` and writes the configured size. Its source rectangle is the whole input and its destination rectangle
+    /// the whole output, so the one blit scales and converts (see `VideoProc::new`).
+    fn set_source_size(&mut self, src: (u32, u32)) -> Result<()> {
+        let out = (self.cfg.width, self.cfg.height);
+        self.proc = VideoProc::new(&self.gpu, src, src, out, Space::Rgb, Space::Yuv709Limited, self.coded_fps)?;
+        self.bgra_in = None;
+        self.src_size = src;
+        Ok(())
     }
 
     /// The BGRA texture holding this frame (uploaded for CPU frames).
@@ -954,6 +962,9 @@ impl Active {
             return Ok(out);
         }
 
+        if (frame.width, frame.height) != self.src_size {
+            self.set_source_size((frame.width, frame.height))?;
+        }
         let src = self.source_texture(frame)?;
         let nv12 = self.pool[self.next_pool].clone();
         self.next_pool = (self.next_pool + 1) % POOL;

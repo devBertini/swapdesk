@@ -76,7 +76,7 @@ fn user_helper(core: &ServiceCore, clip: &FakeClipboard, actions: &FakeActions) 
     let (clip, actions) = (clip.clone(), actions.clone());
     let deps = HelperDeps::new(
         |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
-        |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+        |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
         || Ok(RecordingInputSink::new()),
         move || Ok(SineSource::new(audio_clock.clone()).realtime()),
         clock,

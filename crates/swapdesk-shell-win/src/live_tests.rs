@@ -582,3 +582,71 @@ fn closing_the_elevated_window_is_no_approval_and_a_click_on_confirmar_is_one() 
     }
     assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(Some(true)));
 }
+
+impl Recording {
+    fn view_sizes(&self) -> Vec<(u16, u16, u16)> {
+        let c = self.commands.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        c.iter()
+            .filter_map(|c| match c {
+                swapdesk_ui::Command::SetViewSize { width, height, max_fps, .. } => Some((*width, *height, *max_fps)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// F-VIEW-06: a real viewer window reports its video area in physical pixels, and again when it is resized; the same
+/// size again sends nothing.
+#[test]
+fn a_viewer_window_reports_its_video_area_and_a_resize_reports_it_again() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, GetWindowRect, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    };
+    let (live, backend) = start_recording(Scenario::Visualizador.prepared_state());
+    let first = backend.view_sizes();
+    assert_eq!(first.len(), 1, "one report for the first layout: {first:?}");
+    let (w, h, _hz) = first[0];
+
+    // The viewer is the thread's other window (the waker holds the main one).
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `lparam` is the vector passed below, alive for the whole enumeration.
+        unsafe { (*(lparam.0 as *mut Vec<isize>)).push(hwnd.0 as isize) };
+        true.into()
+    }
+    let mut all: Vec<isize> = Vec::new();
+    // SAFETY: enumerates this test's window thread; the callback only reads the handles.
+    unsafe {
+        let _ = EnumThreadWindows(live.thread_id, Some(collect), LPARAM(std::ptr::from_mut(&mut all) as isize));
+    }
+    let main = live.hwnd().0 as isize;
+    let viewer = all
+        .into_iter()
+        .filter(|h| *h != main)
+        .map(|h| HWND(h as *mut std::ffi::c_void))
+        .find(|h| {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            // SAFETY: a plain read of a window of this thread.
+            unsafe { GetWindowRect(*h, &mut r).is_ok() && r.right - r.left > 600 }
+        })
+        .expect("the viewer window");
+    let mut rc = windows::Win32::Foundation::RECT::default();
+    // SAFETY: our window, from another thread (blocks until the window thread has handled it).
+    unsafe {
+        let _ = GetWindowRect(viewer, &mut rc);
+        let _ = SetWindowPos(
+            viewer,
+            None,
+            0,
+            0,
+            rc.right - rc.left + 160,
+            rc.bottom - rc.top + 100,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
+    }
+    std::thread::sleep(Duration::from_millis(900));
+    let after = backend.view_sizes();
+    assert_eq!(after.len(), 2, "a resize reports once more: {after:?}");
+    assert!(after[1].0 > w && after[1].1 > h, "the area grew from {w}x{h}: {after:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(backend.view_sizes().len(), 2, "nothing more while the size holds");
+}

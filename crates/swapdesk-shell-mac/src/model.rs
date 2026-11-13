@@ -28,6 +28,14 @@ pub struct VideoArea {
     pub scale: f64,
 }
 
+impl VideoArea {
+    /// The area in physical pixels (points times the screen's scale), what the host encodes at (F-VIEW-06).
+    pub fn physical(&self) -> (u32, u32) {
+        let px = |v: f64| (v * self.scale).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        (px(self.w), px(self.h))
+    }
+}
+
 /// The viewer window's title while a viewer session exists, else `None` (no viewer window).
 pub fn viewer_title(state: &UiState) -> Option<String> {
     state.viewer_session().map(|_| a11y::window_title(state, WindowKind::Viewer))
@@ -116,5 +124,20 @@ pub fn pointer_shape(hit: Option<ControlId>, over_video: bool) -> PointerShape {
         Some(_) => PointerShape::Hand,
         None if over_video => PointerShape::Video,
         None => PointerShape::Arrow,
+    }
+}
+
+#[cfg(test)]
+mod view_area_tests {
+    use super::VideoArea;
+
+    #[test]
+    fn the_area_is_reported_in_physical_pixels() {
+        let a = VideoArea { x: 0.0, y: 40.0, w: 960.0, h: 540.0, scale: 2.0 };
+        assert_eq!(a.physical(), (1920, 1080));
+        let one = VideoArea { scale: 1.0, ..a };
+        assert_eq!(one.physical(), (960, 540));
+        let fractional = VideoArea { w: 800.5, h: 600.25, scale: 2.0, ..a };
+        assert_eq!(fractional.physical(), (1601, 1201));
     }
 }

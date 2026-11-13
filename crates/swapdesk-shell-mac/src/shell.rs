@@ -107,6 +107,12 @@ define_class!(
             with_shell(|s| s.resized(n));
         }
 
+        // F-VIEW-06: another monitor may refresh at another rate.
+        #[unsafe(method(windowDidChangeScreen:))]
+        fn window_did_change_screen(&self, n: &NSNotification) {
+            with_shell(|s| s.resized(n));
+        }
+
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, n: &NSNotification) {
             with_shell(|s| s.resized(n));
@@ -814,8 +820,11 @@ impl Shell {
     fn after_paint(&self) {
         self.main.canvas.place_fields();
         self.main.canvas.ax_after_paint();
-        let viewer = self.viewer.borrow().as_ref().map(|v| (v.canvas.clone(), v.place_video()));
-        if let Some((canvas, moved)) = viewer {
+        let viewer = self.viewer.borrow().as_ref().map(|v| (v.canvas.clone(), v.place_video(), v.view_report()));
+        if let Some((canvas, moved, (w, h, hz))) = viewer {
+            // F-VIEW-06: the host encodes at this size; the state sends a command only when it changed.
+            let commands = self.state.borrow_mut().set_view_area(w, h, hz);
+            self.send_commands(commands);
             canvas.place_fields();
             canvas.ax_after_paint();
             if let (Some(area), Some(slot)) = (moved, &self.hooks.video) {

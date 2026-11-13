@@ -158,7 +158,12 @@ fn run(schedule: Vec<Duration>, run_for: Duration, refuse: bool) -> (Vec<(bool, 
         backend: VideoBackend::Auto,
         codec: swapdesk_platform::Codec::H264,
     };
-    let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };
+    let ctl = VideoCtl {
+        stop: AtomicBool::new(false),
+        force_key: AtomicBool::new(false),
+        rate: Mutex::new(None),
+        scale: Mutex::new((0, 0)),
+    };
     let ids = AtomicU32::new(0);
     std::thread::scope(|s| {
         let h = s.spawn(|| {

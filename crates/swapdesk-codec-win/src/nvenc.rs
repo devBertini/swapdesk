@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::core::{GUID, Interface};
 
-use crate::gpu::{BGRA, Gpu, USAGE_DEFAULT};
+use crate::gpu::{BGRA, Gpu, Space, USAGE_DEFAULT, VideoProc};
 use crate::nvenc_sys::*;
 use crate::preset::{RATE_CBR, effective, level_idc, preset_plan};
 use crate::sys::{Ctx, err};
@@ -134,6 +134,9 @@ struct Active {
     registered: Vec<Registered>,
     /// BGRA texture CPU frames are uploaded to.
     cpu_in: Option<ID3D11Texture2D>,
+    /// F-VIEW-06: reads frames of the capture's size and writes the encoded size (`scaled`), when they differ.
+    scaler: Option<((u32, u32), VideoProc)>,
+    scaled: Option<ID3D11Texture2D>,
     /// BGRA texture a GPU frame is copied to when the driver would not register it as it came.
     copy_in: Option<ID3D11Texture2D>,
     needs_copy: bool,
@@ -239,17 +242,8 @@ impl VideoEncoder for NvencEncoder {
                 None => return Err(err(ErrorKind::Closed, "VideoEncoder::encode", "configure was not called")),
             }
         }
-        let (w, h) = {
-            let a = self.active_mut()?;
-            (a.cfg.width, a.cfg.height)
-        };
-        if frame.width != w || frame.height != h {
-            // A display size change: a new session, new SPS/PPS, the first frame an IDR with `config_change`.
-            let mut cfg = self.active_mut()?.cfg;
-            cfg.width = frame.width;
-            cfg.height = frame.height;
-            self.configure(&cfg)?;
-        }
+        // A frame of another size than the configured one is scaled (F-VIEW-06); a new encoded size is a new
+        // `configure`, the caller's decision.
         self.active_mut()?.encode(frame, force_keyframe)
     }
 
@@ -258,13 +252,7 @@ impl VideoEncoder for NvencEncoder {
     }
 
     fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
-        let (w, h) = {
-            let a = self.active_mut()?;
-            (a.cfg.width, a.cfg.height)
-        };
-        if frame.width != w || frame.height != h {
-            return Ok(Vec::new()); // the display changed size since the picture was captured: nothing to refine
-        }
+        // A picture of another size than the encoded one is scaled like any frame (F-VIEW-06).
         let (out, restored) = self.active_mut()?.refine(frame)?;
         if !restored {
             // Constant QP would stay in force: the next `encode` starts a new session from the last configuration.
@@ -494,6 +482,8 @@ impl Active {
             bitstream,
             registered: Vec::new(),
             cpu_in: None,
+            scaler: None,
+            scaled: None,
             copy_in: None,
             needs_copy: false,
             last_copied: false,
@@ -512,9 +502,13 @@ impl Active {
     }
 
     fn bgra_texture(&self) -> Result<ID3D11Texture2D> {
+        self.bgra_texture_of(self.cfg.width, self.cfg.height)
+    }
+
+    fn bgra_texture_of(&self, width: u32, height: u32) -> Result<ID3D11Texture2D> {
         self.gpu.texture(
-            self.cfg.width,
-            self.cfg.height,
+            width,
+            height,
             BGRA,
             USAGE_DEFAULT,
             windows::Win32::Graphics::Direct3D11::D3D11_BIND_FLAG(
@@ -524,8 +518,30 @@ impl Active {
         )
     }
 
-    /// The texture holding this frame as it came (CPU frames are uploaded first).
+    /// The BGRA texture of the encoded size to register: the frame itself when it has that size, else the frame
+    /// scaled by the video processor (F-VIEW-06; destination rectangle and target rectangle are the whole output, see
+    /// `VideoProc::new`).
     fn source_texture(&mut self, frame: &Frame) -> Result<ID3D11Texture2D> {
+        let tex = self.frame_texture(frame)?;
+        let (src, out) = ((frame.width, frame.height), (self.cfg.width, self.cfg.height));
+        if src == out {
+            return Ok(tex);
+        }
+        if self.scaler.as_ref().is_none_or(|(s, _)| *s != src) {
+            let proc = VideoProc::new(&self.gpu, src, src, out, Space::Rgb, Space::Rgb, u32::from(self.cfg.fps))?;
+            self.scaler = Some((src, proc));
+        }
+        if self.scaled.is_none() {
+            self.scaled = Some(self.bgra_texture()?);
+        }
+        let dst = self.scaled.clone().expect("created above");
+        let (_, proc) = self.scaler.as_mut().expect("created above");
+        proc.blt(&tex, 0, &dst)?;
+        Ok(dst)
+    }
+
+    /// The texture holding this frame as it came (CPU frames are uploaded first).
+    fn frame_texture(&mut self, frame: &Frame) -> Result<ID3D11Texture2D> {
         match &frame.pixels {
             Pixels::Cpu { stride, data } => {
                 let need = *stride as usize * frame.height as usize;
@@ -536,8 +552,14 @@ impl Active {
                         "BGRA buffer smaller than stride * height",
                     ));
                 }
-                if self.cpu_in.is_none() {
-                    self.cpu_in = Some(self.bgra_texture()?);
+                let stale = self.cpu_in.as_ref().is_none_or(|t| {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    // SAFETY: GetDesc only fills the struct.
+                    unsafe { t.GetDesc(&mut desc) };
+                    (desc.Width, desc.Height) != (frame.width, frame.height)
+                });
+                if stale {
+                    self.cpu_in = Some(self.bgra_texture_of(frame.width, frame.height)?);
                 }
                 let tex = self.cpu_in.clone().expect("created above");
                 self.gpu.upload_bgra(&tex, data, *stride);
@@ -559,11 +581,11 @@ impl Active {
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 // SAFETY: GetDesc only fills the struct.
                 unsafe { tex.GetDesc(&mut desc) };
-                if desc.Format != BGRA || desc.Width != self.cfg.width || desc.Height != self.cfg.height {
+                if desc.Format != BGRA || (desc.Width, desc.Height) != (frame.width, frame.height) {
                     return Err(err(
                         ErrorKind::InvalidInput,
                         "VideoEncoder::encode",
-                        "GPU frame is not BGRA of the configured size",
+                        "GPU frame is not BGRA of the frame's own size",
                     ));
                 }
                 Ok(tex.clone())

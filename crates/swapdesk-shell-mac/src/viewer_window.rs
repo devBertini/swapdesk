@@ -80,6 +80,14 @@ impl ViewerWindow {
         ViewerWindow { window, video, canvas, content, area: Cell::new(None) }
     }
 
+    /// F-VIEW-06: what the host should encode at: the video view's size in physical pixels (0x0 while the view is
+    /// hidden: the Arquivos view) and the refresh rate of the screen the window is on (0 when unknown).
+    pub fn view_report(&self) -> (u32, u32, u16) {
+        let hz = self.window.screen().map_or(0, |s| u16::try_from(s.maximumFramesPerSecond()).unwrap_or(0));
+        let (w, h) = if self.video.isHidden() { (0, 0) } else { self.video.area().physical() };
+        (w, h, hz)
+    }
+
     pub fn surface(&self) -> Option<VideoSurface> {
         let layer = self.video.layer()?;
         Some(VideoSurface { view: view_of(&self.video), layer, area: self.video.area() })

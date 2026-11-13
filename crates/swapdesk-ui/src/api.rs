@@ -720,6 +720,14 @@ pub enum Command {
         session_id: u64,
         quality: Quality,
     },
+    /// F-VIEW-06: the video area of the viewer window in physical pixels (0x0 in 1:1 mode: the host sends native) and
+    /// the refresh rate of the monitor it is on. The host encodes at that size; a change is reported once.
+    SetViewSize {
+        session_id: u64,
+        width: u16,
+        height: u16,
+        max_fps: u16,
+    },
     SetAudio {
         session_id: u64,
         on: bool,
@@ -932,6 +940,9 @@ impl core::fmt::Debug for Command {
             Self::SelectDisplay { session_id, display_id } => dbg_fields!("SelectDisplay", session_id, display_id),
             Self::SetScale { session_id, scale } => dbg_fields!("SetScale", session_id, scale),
             Self::SetQuality { session_id, quality } => dbg_fields!("SetQuality", session_id, quality),
+            Self::SetViewSize { session_id, width, height, max_fps } => {
+                dbg_fields!("SetViewSize", session_id, width, height, max_fps)
+            }
             Self::SetAudio { session_id, on } => dbg_fields!("SetAudio", session_id, on),
             Self::SetKeyboardMode { session_id, mode } => dbg_fields!("SetKeyboardMode", session_id, mode),
             Self::SetGrab { session_id, on } => dbg_fields!("SetGrab", session_id, on),
@@ -1220,6 +1231,7 @@ impl Command {
                 | Command::SelectDisplay { .. }
                 | Command::SetScale { .. }
                 | Command::SetQuality { .. }
+                | Command::SetViewSize { .. }
                 | Command::SetAudio { .. }
                 | Command::SetKeyboardMode { .. }
                 | Command::SetGrab { .. }

@@ -259,7 +259,7 @@ impl Machine {
         let input = sink.clone();
         let deps = tune(HelperDeps::new(
             |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
-            |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+            |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
             move || Ok(input.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
             clock,
@@ -1017,6 +1017,17 @@ fn connect_prompts_the_hosts_ui_then_video_flows_and_disconnect_ends_both_sides(
     assert!(viewer_ui.call(UiOp::SetViewOnly { session_id, on: false }).is_ok());
     assert!(viewer_ui.call(UiOp::SelectDisplay { session_id, display: 0 }).is_ok());
     assert!(viewer_ui.call(UiOp::SetQuality { session_id, quality: swapdesk_proto::Preset::Text }).is_ok());
+    // F-VIEW-06: the viewer's area is accepted for the session and for no other.
+    assert!(
+        viewer_ui.call(UiOp::SetViewSize { session_id, width: 32, height: 24, max_fps: 60 }).is_ok(),
+        "SetViewSize answers Done"
+    );
+    assert_eq!(
+        viewer_ui
+            .call(UiOp::SetViewSize { session_id: session_id + 1, width: 32, height: 24, max_fps: 60 })
+            .unwrap_err(),
+        ApiCode::NotFound
+    );
     assert!(viewer_ui.call(UiOp::SetAudio { session_id, on: true }).is_ok());
     assert_eq!(
         viewer_ui.call(UiOp::SelectDisplay { session_id: session_id + 1, display: 0 }).unwrap_err(),

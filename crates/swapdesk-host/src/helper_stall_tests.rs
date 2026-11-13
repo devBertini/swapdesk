@@ -115,7 +115,7 @@ impl Stalled {
                     is_open: false,
                 })
             },
-            |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+            |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
             move || Ok(sink.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
             clock,

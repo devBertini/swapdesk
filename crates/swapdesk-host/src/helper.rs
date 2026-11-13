@@ -31,6 +31,7 @@ use swapdesk_proto::{
 use crate::helper_pty::{PtyFactory, PtyServer};
 use crate::outbox::{DEFAULT_BYTES, Limits, Outbox, TryControl, spawn_writer};
 use crate::proxy::{answer_action, answer_clipboard, no_actions, no_clipboard};
+use crate::scale::SizeDebounce;
 
 /// Longest wait of the capture loop for a frame: also how fast `StopVideo` is noticed.
 const CAPTURE_POLL: Duration = Duration::from_millis(50);
@@ -337,6 +338,8 @@ struct VideoCtl {
     stop: AtomicBool,
     force_key: AtomicBool,
     rate: Mutex<Option<(u32, u16)>>,
+    /// F-VIEW-06: the size the viewer's window wants (0 in either axis = native), set by `SetScale`.
+    scale: Mutex<(u16, u16)>,
 }
 
 struct VideoRun {
@@ -513,6 +516,11 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     let mut still = Still::default();
     let mut cursor = CursorState::default();
 
+    // F-VIEW-06: the size encoded at follows the viewer's window, at most once per `RESIZE_DEBOUNCE_US`.
+    let mut sizing = SizeDebounce::default();
+    let mut native = (0, 0);
+    // A smaller size the encoder refused: native is encoded instead until the viewer wants another size.
+    let mut refused: Option<(u32, u32)> = None;
     let mut relist = Throttle::new(RELIST_EVERY);
     while !ctl.stop.load(Ordering::Acquire) && !env.outbox.is_closed() {
         // F-VIEW-02: a monitor plugged in or out, or another mode, reaches the viewer within seconds even while this
@@ -548,22 +556,37 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     }
                     continue;
                 };
-                let size_changed = config.is_some_and(|c| c.width != frame.width || c.height != frame.height);
+                // A display that changed size is followed at once; a new window size waits out the debounce. The
+                // encoder scales the captured frame to the configured size (the codec crates' contract).
+                if native != (frame.width, frame.height) {
+                    native = (frame.width, frame.height);
+                    sizing = SizeDebounce::default();
+                }
+                let wanted = wanted_size(native, *lock(&ctl.scale));
+                let (mut width, mut height) = sizing.apply(wanted, env.clock.now().0);
+                if refused == Some((width, height)) {
+                    (width, height) = native;
+                } else {
+                    refused = None;
+                }
+                let size_changed = config.is_some_and(|c| c.width != width || c.height != height);
                 if encoder.is_none() || size_changed {
-                    let cfg = EncoderConfig {
-                        width: frame.width,
-                        height: frame.height,
-                        fps,
-                        kbps,
-                        preset: p.preset,
-                        adapter,
-                        codec: p.codec,
-                    };
+                    let mut cfg = EncoderConfig { width, height, fps, kbps, preset: p.preset, adapter, codec: p.codec };
                     let enc = match encoder.as_mut() {
                         Some(e) => e,
                         None => encoder.insert((env.encoder)(&frame, &cfg, p.backend)?),
                     };
-                    let info = enc.configure(&cfg)?;
+                    let info = match enc.configure(&cfg) {
+                        Ok(info) => info,
+                        // A scaled size the encoder cannot take: the picture stays native rather than stopping.
+                        Err(e) if (width, height) != native => {
+                            note(&env.outbox, format!("video {}: {width}x{height} refused ({e}), native", p.display));
+                            refused = Some((width, height));
+                            (cfg.width, cfg.height) = native;
+                            enc.configure(&cfg)?
+                        }
+                        Err(e) => return Err(e),
+                    };
                     note(&env.outbox, encoder_note(p.display, &cfg, &info, "encoding with"));
                     config = Some(cfg);
                     discontinuity = true;
@@ -641,6 +664,13 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
         }
     }
     Ok(())
+}
+
+/// F-VIEW-06: the size to encode a `native` capture at for the `SetScale` the service sent; native when none was sent
+/// or when it is not smaller than the capture (the display shrank since).
+pub(crate) fn wanted_size(native: (u32, u32), scale: (u16, u16)) -> (u32, u32) {
+    let (w, h) = (u32::from(scale.0), u32::from(scale.1));
+    if w < 2 || h < 2 || (w >= native.0 && h >= native.1) { native } else { (w & !1, h & !1) }
 }
 
 /// Sends what the encoder produced for one display as video frames, keeping the discontinuity and force-keyframe
@@ -1052,6 +1082,11 @@ where
             Message::SetRate { display, kbps, fps } => {
                 if let Some(run) = self.videos.get(&display) {
                     *lock(&run.ctl.rate) = Some((kbps, fps.max(1)));
+                }
+            }
+            Message::SetScale { display, width, height } => {
+                if let Some(run) = self.videos.get(&display) {
+                    *lock(&run.ctl.scale) = (width, height);
                 }
             }
             Message::ForceKeyframe { display } => {

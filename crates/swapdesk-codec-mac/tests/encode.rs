@@ -282,6 +282,8 @@ fn a_new_size_rebuilds_the_session_and_flags_the_config_change() {
     assert_eq!(first.len(), 5);
     assert!(first[0].config_change && !first[1].config_change);
 
+    // A new encoded size is the caller's `configure` (a frame of another size is scaled, F-VIEW-06).
+    enc.configure(&config(640, 360, 6000)).expect("configure at the new size");
     let small = enc.encode(&cpu_frame(640, 360, 5, gradient(640, 360, 5)), false).expect("encode at a new size");
     assert_eq!(small.len(), 1);
     assert!(small[0].keyframe && small[0].config_change);
@@ -428,4 +430,63 @@ fn wait_modes_compared() {
             );
         }
     }
+}
+
+/// F-VIEW-06: a 1920x1080 frame goes in, the session is configured for 960x540, and what comes out decodes at
+/// 960x540 and matches the source shrunk by hand (the transfer session scaled it). CPU frames and `Pixels::Gpu` frames.
+#[test]
+fn a_1920x1080_frame_is_scaled_to_the_configured_960x540() {
+    let (w, h, ow, oh) = (1920usize, 1080usize, 960usize, 540usize);
+    let mut enc = encoder();
+    enc.configure(&config(ow as u32, oh as u32, 6000)).expect("configure at the target size");
+    let mut sources = Vec::new();
+    let mut outputs = Vec::new();
+    for n in 0..30 {
+        let data = gradient(w, h, n);
+        // The source shrunk by averaging 2x2 blocks: what a correct scale of this gradient looks like.
+        let mut small = vec![255u8; ow * oh * 4];
+        for y in 0..oh {
+            for x in 0..ow {
+                let mut sum = 0u32;
+                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    sum += u32::from(data[((2 * y + dy) * w + 2 * x + dx) * 4]);
+                }
+                let o = (y * ow + x) * 4;
+                small[o..o + 3].fill((sum / 4) as u8);
+            }
+        }
+        sources.push(small);
+        outputs.extend(enc.encode(&cpu_frame(w, h, n, data), false).expect("encode"));
+    }
+    outputs.extend(enc.flush().expect("flush"));
+    assert!(!outputs.is_empty());
+    assert!(outputs.iter().all(|f| (f.width, f.height) == (ow as u16, oh as u16)), "every frame reports 960x540");
+    assert!(outputs[0].keyframe && outputs[0].config_change);
+    assert_eq!(outputs.iter().filter(|f| f.config_change).count(), 1, "no rebuild while the size holds");
+
+    let mut dec = VtH264Decoder::new(DecoderOptions { output: DecoderOutput::CpuBgra });
+    let mut worst = 0.0f64;
+    for (i, f) in outputs.iter().enumerate() {
+        let pic = dec.decode(&header(i as u32, f), &f.annex_b).expect("decode").expect("a picture");
+        assert_eq!((pic.width, pic.height), (ow as u32, oh as u32));
+        let Pixels::Cpu { data, .. } = &pic.pixels else { panic!("CPU pixels") };
+        let idx = ((f.captured_at.0 - START_US) / FRAME_US) as usize;
+        worst = worst.max(mean_abs_luma_diff(&sources[idx], data));
+    }
+    println!("scaled luma mean abs diff, worst frame {worst:.2}");
+    assert!(worst < 8.0, "worst mean absolute luma difference {worst} against the shrunk source");
+
+    // A native-size GPU frame (an NV12 pixel buffer as the screen lane delivers) scales through the same session.
+    let gpu = Frame {
+        display: DisplayId(0),
+        captured_at: MonoMicros(START_US + 40 * FRAME_US),
+        width: w as u32,
+        height: h as u32,
+        pixels: Pixels::Gpu(GpuSurface(Box::new(nv12_buffer(w, h, 0)))),
+        dirty: Vec::new(),
+        content_changed: true,
+    };
+    let mut out = enc.encode(&gpu, true).expect("encode a large GPU frame");
+    out.extend(enc.flush().expect("flush"));
+    assert!(!out.is_empty() && out.iter().all(|f| (f.width, f.height) == (ow as u16, oh as u16)));
 }

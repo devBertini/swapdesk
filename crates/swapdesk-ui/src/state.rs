@@ -659,6 +659,11 @@ pub struct UiState {
     pub(crate) audio_on: bool,
     pub(crate) grab_on: bool,
     pub(crate) fit: bool,
+    /// F-VIEW-06: the video area the shell last reported (physical pixels) and its monitor's refresh rate, and what
+    /// the host was last told for which viewer session.
+    pub(crate) view_area: (u32, u32),
+    pub(crate) view_hz: u16,
+    pub(crate) view_sent: Option<(u64, u16, u16, u16)>,
     /// The viewer's own "Assistir" switch and quality preset (per viewer session; reset when it ends).
     pub(crate) view_only: bool,
     pub(crate) quality: Quality,
@@ -782,6 +787,9 @@ impl UiState {
             audio_on: true,
             grab_on: true,
             fit: true,
+            view_area: (0, 0),
+            view_hz: 0,
+            view_sent: None,
             view_only: false,
             quality: Quality::Auto,
             viewer_extras: false,

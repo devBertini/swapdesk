@@ -275,7 +275,7 @@ impl TestHelper {
         let rows = Arc::clone(&height);
         let deps = tune(HelperDeps::new(
             move |_| Ok(SyntheticScreen::new(64, rows.load(Ordering::SeqCst), 100).with_pacing(Pacing::Realtime)),
-            |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+            |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
             move || Ok(input.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
             clock,
@@ -636,6 +636,48 @@ fn revoking_view_pauses_and_stops_video_and_restoring_it_resumes_with_a_keyframe
     wait_for("a second StartVideo", || (rig.system.count(|m| matches!(m, Ipc::StartVideo { .. })) >= 2).then_some(()));
     let (resumed, _) = seen.video();
     assert!(resumed.keyframe, "the stream resumes with a keyframe: {resumed:?}");
+    drop(handle);
+    rig.finish();
+}
+
+/// F-VIEW-06: a `VideoSettings` with a view turns into `SetScale` with `target_size`'s answer; Texto nitido and an
+/// unreported area stay native, and the size follows a new view.
+#[test]
+fn a_video_settings_with_a_view_becomes_a_set_scale_with_the_target_size() {
+    use swapdesk_proto::{Preset, VideoSettings};
+    let rig = Rig::new();
+    let (handle, mut seen) = rig.connect();
+    seen.video();
+    let scales = || -> Vec<(u16, u16)> {
+        rig.system
+            .sent()
+            .iter()
+            .filter_map(|m| match m {
+                Ipc::SetScale { display: 0, width, height } => Some((*width, *height)),
+                _ => None,
+            })
+            .collect()
+    };
+    let settings = |preset, w, h| VideoSettings { preset, max_fps: 60, max_kbps: 0, view_width: w, view_height: h };
+    assert!(scales().is_empty(), "native until the viewer reports an area");
+
+    // The display is 64x48; an area of 33x30 fits at 32x24 (the aspect kept, even sizes).
+    handle.set_video_settings(settings(Preset::Auto, 33, 30)).expect("sent");
+    wait_for("a SetScale", || (!scales().is_empty()).then_some(()));
+    assert_eq!(scales(), [(32, 24)]);
+
+    // Texto nitido stays native: the preset change restarts the video (a helper run starts native), and no size follows.
+    let starts = || rig.system.count(|m| matches!(m, Ipc::StartVideo { .. }));
+    let before = starts();
+    handle.set_video_settings(settings(Preset::Text, 33, 30)).expect("sent");
+    wait_for("the restart for Texto nitido", || (starts() > before).then_some(()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(scales(), [(32, 24)], "nothing sent for Texto nitido");
+
+    // Back to Automatica at another area: its own answer.
+    handle.set_video_settings(settings(Preset::Auto, 16, 40)).expect("sent");
+    wait_for("the new size", || (scales().last() == Some(&(16, 12))).then_some(()));
+    assert_eq!(scales(), [(32, 24), (16, 12)]);
     drop(handle);
     rig.finish();
 }

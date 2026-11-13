@@ -209,6 +209,14 @@ pub enum UiOp {
     },
     /// Op 60: the devices blocked by MAC, the reply `Blocked`.
     ListBlocked,
+    /// F-VIEW-06: the viewer's video area in physical pixels (0x0 = native, 1:1 mode) and the refresh rate of its
+    /// monitor; the host encodes at that size. Answered with `Done`.
+    SetViewSize {
+        session_id: u64,
+        width: u16,
+        height: u16,
+        max_fps: u16,
+    },
     /// Op 50: "Elevar controle" in viewer session `session_id` (ACCOUNTS.md 9.3). Needs an administrator connection
     /// or the pass of `ElevAction::ElevateSession`, else `NeedsAdmin`. `Done` once the host's answer holds
     /// `UNATTENDED`; `NotPermitted` on its refusal; `Invalid` toward a host of minor 0; `Timeout` after 10 s.
@@ -271,6 +279,7 @@ impl UiOp {
             Self::BlockDevice { .. } => 58,
             Self::UnblockDevice { .. } => 59,
             Self::ListBlocked => 60,
+            Self::SetViewSize { .. } => 61,
         }
     }
 
@@ -316,6 +325,12 @@ impl UiOp {
             Self::SetQuality { session_id, quality } => {
                 w.put_u64(*session_id);
                 quality.put(w, 0)?;
+            }
+            Self::SetViewSize { session_id, width, height, max_fps } => {
+                w.put_u64(*session_id);
+                w.put_u16(*width);
+                w.put_u16(*height);
+                w.put_u16(*max_fps);
             }
             Self::SetAudio { session_id, on } | Self::SetViewOnly { session_id, on } => {
                 w.put_u64(*session_id);
@@ -445,6 +460,7 @@ impl UiOp {
             58 => Self::BlockDevice { ipv4: r.str(MAX_IPV4)?, name: r.str(MAX_NAME)? },
             59 => Self::UnblockDevice { mac: r.str(MAX_MAC)? },
             60 => Self::ListBlocked,
+            61 => Self::SetViewSize { session_id: r.u64()?, width: r.u16()?, height: r.u16()?, max_fps: r.u16()? },
             other => return Err(IpcError::Codec(unknown_op(other))),
         })
     }
@@ -581,7 +597,7 @@ impl ReplyBody {
             42 => Self::TransferId(r.u32()?),
             51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
             58..=60 => Self::Blocked(<Vec<BlockedView>>::get(&mut r, MAX_BLOCKED)?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=56 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=57 | 61 => Self::Done,
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;
@@ -795,5 +811,24 @@ impl Notify {
                 return Err(IpcError::Codec(CodecError::UnknownTag { what: "UiNotify kind", tag: u64::from(other) }));
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod reply_arm_tests {
+    use super::*;
+
+    fn unknown(r: &Result<impl Sized>) -> bool {
+        matches!(r, Err(IpcError::Codec(CodecError::UnknownTag { what: "UiRequest op", .. })))
+    }
+
+    /// Every op a request can carry has a reply arm, so its answer decodes (op 57 had none).
+    #[test]
+    fn every_request_op_has_a_reply_arm() {
+        for op in 0..=u16::from(u8::MAX) {
+            let request = UiOp::get_body(op, &mut Reader::new(&[]));
+            let reply = ReplyBody::decode(op, &[]);
+            assert_eq!(unknown(&request), unknown(&reply), "op {op}: request known {}", !unknown(&request));
+        }
     }
 }

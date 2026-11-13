@@ -2929,3 +2929,33 @@ fn ajustes_lists_the_blocked_devices_and_unblocking_one_takes_it_away() {
     let texts: Vec<String> = s.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
     assert!(texts.contains(&"Nenhum dispositivo bloqueado.".to_owned()), "{texts:?}");
 }
+
+/// F-VIEW-06: the viewer window's area reaches the host as `SetViewSize`, once per change; 1:1 mode reports native.
+#[test]
+fn the_viewer_area_is_reported_in_physical_pixels_in_fit_and_as_native_in_one_to_one() {
+    let mut s = viewer();
+    let set =
+        |id: u64, w: u16, h: u16, hz: u16| Command::SetViewSize { session_id: id, width: w, height: h, max_fps: hz };
+
+    assert_eq!(s.set_view_area(1280, 720, 144), vec![set(1, 1280, 720, 144)], "Fit reports the area");
+    assert_eq!(s.set_view_area(1280, 720, 144), vec![], "nothing when the size is unchanged");
+    assert_eq!(s.set_view_area(1000, 720, 144), vec![set(1, 1000, 720, 144)], "a resize");
+    assert_eq!(s.set_view_area(1000, 720, 60), vec![set(1, 1000, 720, 60)], "the monitor's refresh changed");
+
+    // 1:1 reports 0x0 at once, and the resizes that follow are not reported.
+    let a = s.activate(ControlId::TbFit);
+    assert!(!s.fit());
+    assert!(a.commands.contains(&set(1, 0, 0, 60)), "{:?}", a.commands);
+    assert_eq!(s.set_view_area(800, 600, 60), vec![], "1:1 stays native whatever the window does");
+
+    // Back to Fit: the latest area.
+    let a = s.activate(ControlId::TbFit);
+    assert!(s.fit());
+    assert!(a.commands.contains(&set(1, 800, 600, 60)), "{:?}", a.commands);
+}
+
+#[test]
+fn no_viewer_session_reports_no_area() {
+    let mut s = UiState::default();
+    assert_eq!(s.set_view_area(1280, 720, 60), vec![]);
+}

@@ -397,6 +397,9 @@ pub fn message() -> BoxedStrategy<Message> {
             .prop_map(|(display, kbps, fps)| Message::SetRate { display, kbps, fps })
             .boxed(),
         any::<u16>().prop_map(|display| Message::ForceKeyframe { display }).boxed(),
+        (any::<u16>(), any::<u16>(), any::<u16>())
+            .prop_map(|(display, width, height)| Message::SetScale { display, width, height })
+            .boxed(),
         events().prop_map(|events| Message::Input { events }).boxed(),
         Just(Message::ReleaseAll).boxed(),
         any::<u32>().prop_map(|exclude_pid| Message::StartAudio { exclude_pid }).boxed(),

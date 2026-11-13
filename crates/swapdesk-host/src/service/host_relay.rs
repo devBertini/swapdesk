@@ -174,6 +174,17 @@ struct RunVideo {
     /// The codec picked for this session's video (F-VIEW-07).
     codec: Codec,
     kbps_sent: u32,
+    /// The `SetScale` the helper last got for this run (0x0 = native, what a new `StartVideo` begins with).
+    scale_sent: (u16, u16),
+}
+
+/// F-VIEW-06: what to tell the helper to encode at: `scale::target_size` of the display for the viewer's area and
+/// preset, as 0x0 (native) when that is the display's own size, so a display that changes size is still followed.
+fn wire_scale(display: Option<&swapdesk_proto::Display>, view: (u16, u16), preset: Preset) -> (u16, u16) {
+    let Some(d) = display else { return (0, 0) };
+    let native = (d.width, d.height);
+    let (w, h) = crate::scale::target_size(native, (u32::from(view.0), u32::from(view.1)), preset);
+    if (w, h) == native { (0, 0) } else { (u16::try_from(w).unwrap_or(0), u16::try_from(h).unwrap_or(0)) }
 }
 
 struct HostRelay {
@@ -186,6 +197,8 @@ struct HostRelay {
     selected: Option<u16>,
     preset: Preset,
     max_fps: u16,
+    /// The viewer's video area in physical pixels, 0x0 = native (`VideoSettings.view_width/height`).
+    view: (u16, u16),
     video: Option<RunVideo>,
     path: Arc<VideoPath>,
     out: Arc<DirectOut>,
@@ -229,6 +242,7 @@ impl HostRelay {
             selected: None,
             preset: Preset::Auto,
             max_fps: 0,
+            view: (0, 0),
             video: None,
             audio_on: false,
             audio: None,
@@ -281,6 +295,7 @@ impl HostRelay {
             Ctl::VideoSettings(m) => {
                 self.preset = m.preset;
                 self.max_fps = m.max_fps;
+                self.view = (m.view_width, m.view_height);
                 if let Some(s) = &self.sender {
                     s.set_bitrate_cap(m.max_kbps);
                 }
@@ -459,8 +474,15 @@ impl HostRelay {
                     ),
                 );
                 if started {
-                    self.video =
-                        Some(RunVideo { helper: Arc::clone(helper), display, fps, preset, codec, kbps_sent: kbps });
+                    self.video = Some(RunVideo {
+                        helper: Arc::clone(helper),
+                        display,
+                        fps,
+                        preset,
+                        codec,
+                        kbps_sent: kbps,
+                        scale_sent: (0, 0),
+                    });
                     let (link, rt) = (Arc::clone(helper), self.shared.rt.clone());
                     // A keyframe is asked for from the video task, which must not wait on the helper's queue.
                     let key = Arc::new(move || {
@@ -472,6 +494,18 @@ impl HostRelay {
                     self.path.set_run(Some(VideoRun { display, key }));
                 }
             }
+        }
+        // The viewer's window size goes to the encoder (the helper holds it back with `SizeDebounce`).
+        let wanted = self
+            .video
+            .as_ref()
+            .map(|run| wire_scale(self.displays.iter().find(|d| d.id == run.display), self.view, run.preset));
+        if let (Some(run), Some(scale)) = (self.video.as_mut(), wanted)
+            && scale != run.scale_sent
+        {
+            run.scale_sent = scale;
+            let helper = Arc::clone(&run.helper);
+            helper.send(Ipc::SetScale { display: run.display, width: scale.0, height: scale.1 }).await;
         }
         // The rate control's target goes to the encoder.
         let target = self.target_kbps.load(Ordering::Relaxed);
@@ -670,6 +704,17 @@ mod display_tests {
             rotation: 0,
             primary,
         }
+    }
+
+    #[test]
+    fn the_wire_scale_is_the_target_size_or_native() {
+        let d = display(0, 0, 1000, true); // 1920x1080
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Auto), (960, 540));
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Motion), (960, 540));
+        assert_eq!(wire_scale(Some(&d), (960, 540), Preset::Text), (0, 0), "Texto nitido is native");
+        assert_eq!(wire_scale(Some(&d), (0, 0), Preset::Auto), (0, 0), "1:1 mode reports 0x0");
+        assert_eq!(wire_scale(Some(&d), (3840, 2160), Preset::Auto), (0, 0), "an area above the display");
+        assert_eq!(wire_scale(None, (960, 540), Preset::Auto), (0, 0), "no display to size against");
     }
 
     #[test]

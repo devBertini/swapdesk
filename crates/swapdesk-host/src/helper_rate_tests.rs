@@ -124,7 +124,12 @@ fn a_rate_change_the_encoder_refuses_rebuilds_it_and_the_video_goes_on() {
         backend: VideoBackend::Auto,
         codec: swapdesk_platform::Codec::H264,
     };
-    let ctl = VideoCtl { stop: AtomicBool::new(false), force_key: AtomicBool::new(false), rate: Mutex::new(None) };
+    let ctl = VideoCtl {
+        stop: AtomicBool::new(false),
+        force_key: AtomicBool::new(false),
+        rate: Mutex::new(None),
+        scale: Mutex::new((0, 0)),
+    };
     let ids = AtomicU32::new(0);
     let result = std::thread::scope(|s| {
         let h = s.spawn(|| {

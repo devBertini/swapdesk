@@ -25,4 +25,4 @@ swapdesk-platform = { path = "../swapdesk-platform" }
 objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-media = { workspace = true, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-core-video = { workspace = true, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
-objc2-video-toolbox = { workspace = true, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+objc2-video-toolbox = { workspace = true, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionSession", "VTErrors", "VTPixelTransferSession", "VTSession", "objc2-core-media", "objc2-core-video"] }

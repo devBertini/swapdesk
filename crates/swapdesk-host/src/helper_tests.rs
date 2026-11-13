@@ -76,14 +76,28 @@ impl ScreenSource for Tracked {
     }
 }
 
+/// A size `Passthrough` refuses to configure, as a hardware encoder may refuse one (F-VIEW-06).
+pub(crate) const REFUSED_SIZE: (u32, u32) = (20, 14);
+
 /// Emits a 4-byte marker (the encode counter) as the payload; keyframe on the first and on forced frames.
 pub(crate) struct Passthrough {
     pub(crate) n: u32,
+    /// The size `configure` was given: the frames come out at it, as a real encoder's do (F-VIEW-06).
+    pub(crate) size: Option<(u32, u32)>,
 }
 
 impl VideoEncoder for Passthrough {
-    fn configure(&mut self, _config: &EncoderConfig) -> PResult<EncoderInfo> {
+    fn configure(&mut self, config: &EncoderConfig) -> PResult<EncoderInfo> {
+        if (config.width, config.height) == REFUSED_SIZE {
+            return Err(PlatformError {
+                kind: swapdesk_platform::ErrorKind::Unavailable,
+                op: "configure",
+                os_code: None,
+                detail: "size refused".into(),
+            });
+        }
         self.n = 0;
+        self.size = Some((config.width, config.height));
         Ok(EncoderInfo {
             name: "passthrough".into(),
             hardware: false,
@@ -101,8 +115,8 @@ impl VideoEncoder for Passthrough {
             encode_us: 7,
             keyframe: first || force_keyframe,
             config_change: first,
-            width: u16::try_from(frame.width).unwrap(),
-            height: u16::try_from(frame.height).unwrap(),
+            width: u16::try_from(self.size.map_or(frame.width, |s| s.0)).unwrap(),
+            height: u16::try_from(self.size.map_or(frame.height, |s| s.1)).unwrap(),
             annex_b: marker,
         }])
     }
@@ -122,6 +136,8 @@ pub(crate) struct Rig {
     helper: Option<JoinHandle<Result<HelperStats, HelperError>>>,
     input: RecordingInputSink,
     live: Arc<AtomicUsize>,
+    /// The helper's clock: a test that waits out the resize debounce moves it.
+    clock: Arc<FakeClock>,
 }
 
 /// The helper's parts over the fakes; with `moved`, the screens follow that flag (see `Tracked::moved`).
@@ -130,9 +146,10 @@ fn deps_moving(
     input: &RecordingInputSink,
     live: &Arc<AtomicUsize>,
     moved: Option<Arc<AtomicBool>>,
+    clock: &Arc<FakeClock>,
 ) -> Deps {
     let screens = Arc::clone(live);
-    let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
+    let clock = Arc::clone(clock);
     let audio_clock = Arc::clone(&clock);
     HelperDeps::new(
         move |_| {
@@ -143,7 +160,7 @@ fn deps_moving(
             screens.fetch_add(1, Ordering::SeqCst);
             Ok(Tracked { inner, live: Arc::clone(&screens), moved: moved.clone() })
         },
-        |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
+        |_frame, _config, _backend| Ok(Passthrough { n: 0, size: None }),
         {
             let input = input.clone();
             move || Ok(input.clone())
@@ -188,7 +205,8 @@ fn rig_probed(
     let input = RecordingInputSink::new();
     let live = Arc::new(AtomicUsize::new(0));
     let (helper_end, service_end) = duplex();
-    let d = deps_moving(lost_at, &input, &live, moved);
+    let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
+    let d = deps_moving(lost_at, &input, &live, moved, &clock);
     let d = if fence { d.with_fence() } else { d };
     let d = match desktop {
         Some(cell) => d.with_desktop_probe(move || *cell.lock().unwrap()),
@@ -213,7 +231,7 @@ fn rig_probed(
             }
         }
     });
-    Rig { writer: Some(writer), inbox, helper: Some(helper), input, live }
+    Rig { writer: Some(writer), inbox, helper: Some(helper), input, live, clock }
 }
 
 impl Rig {
@@ -708,7 +726,7 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
                 moved: None,
             })
         },
-        |_, _, _| Ok(Passthrough { n: 0 }),
+        |_, _, _| Ok(Passthrough { n: 0, size: None }),
         || {
             Err(PlatformError {
                 kind: swapdesk_platform::ErrorKind::Unavailable,
@@ -761,4 +779,86 @@ fn a_failing_input_factory_is_a_fault_input_is_dropped_and_the_loop_goes_on() {
     assert!(saw_fault, "the factory failure is reported");
     writer.write_message(&Message::Shutdown).unwrap();
     helper.join().unwrap().expect("the loop went on and ended cleanly");
+}
+
+/// F-VIEW-06: a smaller size from the viewer rebuilds the encoder once per debounce period, and the frames come out at
+/// the size that was configured.
+#[test]
+fn a_set_scale_rebuilds_the_encoder_once_per_debounce_period_and_frames_follow_the_target() {
+    let mut rig = rig(None);
+    rig.start_video();
+    let (first, _) = rig.next_frame();
+    assert_eq!((first.width, first.height, first.config), (64, 48, true), "native until the viewer says otherwise");
+
+    // Two sizes inside one debounce period: the clock has not moved, so neither is applied yet.
+    rig.send(&Message::SetScale { display: 0, width: 32, height: 24 });
+    rig.send(&Message::SetScale { display: 0, width: 16, height: 12 });
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (64, 48, false), "held back by the debounce");
+    }
+
+    // Past the period, the latest size is applied: one rebuild (a keyframe with config) at the target size.
+    rig.clock.advance(Duration::from_millis(600));
+    let rebuilt = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((rebuilt.width, rebuilt.height, rebuilt.keyframe), (16, 12, true));
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (16, 12, false), "no second rebuild without a new size");
+    }
+
+    // 0x0 is native again, after the next period.
+    rig.send(&Message::SetScale { display: 0, width: 0, height: 0 });
+    rig.clock.advance(Duration::from_millis(600));
+    let back = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((back.width, back.height), (64, 48));
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
+}
+
+#[test]
+fn a_set_scale_not_smaller_than_the_capture_stays_native() {
+    assert_eq!(crate::helper::wanted_size((64, 48), (0, 0)), (64, 48));
+    assert_eq!(crate::helper::wanted_size((64, 48), (32, 24)), (32, 24));
+    assert_eq!(crate::helper::wanted_size((64, 48), (64, 48)), (64, 48), "equal is native");
+    assert_eq!(crate::helper::wanted_size((64, 48), (100, 80)), (64, 48), "the display shrank below the target");
+    assert_eq!(crate::helper::wanted_size((64, 48), (33, 25)), (32, 24), "even sizes only");
+}
+
+/// F-VIEW-06: a scaled size the encoder refuses leaves the picture native, without retrying that size every frame,
+/// and a later size the encoder takes is applied.
+#[test]
+fn a_scaled_size_the_encoder_refuses_falls_back_to_native() {
+    let mut rig = rig(None);
+    rig.start_video();
+    let (first, _) = rig.next_frame();
+    assert_eq!((first.width, first.height), (64, 48));
+
+    rig.send(&Message::SetScale { display: 0, width: 20, height: 14 });
+    rig.clock.advance(Duration::from_millis(600));
+    let back = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((back.width, back.height), (64, 48), "native after the refusal");
+    for _ in 0..8 {
+        let (h, _) = rig.next_frame();
+        assert_eq!((h.width, h.height, h.config), (64, 48, false), "the refused size is not tried again");
+    }
+
+    rig.send(&Message::SetScale { display: 0, width: 32, height: 24 });
+    rig.clock.advance(Duration::from_millis(600));
+    let scaled = rig.wait(|m| match m {
+        Message::VideoFrame { header, .. } if header.config => Some(*header),
+        _ => None,
+    });
+    assert_eq!((scaled.width, scaled.height), (32, 24));
+    rig.send(&Message::Shutdown);
+    rig.finish().expect("clean end");
 }

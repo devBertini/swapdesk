@@ -145,6 +145,37 @@ pub(crate) struct Viewer {
     /// This machine elevated the session (op 50 after its confirmation): its administrator terminal needs no
     /// second pass (ELEVATION.md 3.2). A session the host let in already elevated does not count.
     pub elevated: bool,
+    /// What the UI last chose for this session's video: `VideoSettings` carries everything at once, so a change of
+    /// the preset keeps the view size and a change of the view size keeps the preset (F-VIEW-06).
+    pub video: VideoPrefs,
+}
+
+/// The viewer's video choices as the host last heard them (F-VIEW-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VideoPrefs {
+    pub preset: swapdesk_proto::Preset,
+    pub max_fps: u16,
+    /// The video area in physical pixels; 0x0 is native.
+    pub view: (u16, u16),
+}
+
+impl Default for VideoPrefs {
+    fn default() -> Self {
+        Self { preset: swapdesk_proto::Preset::Auto, max_fps: 60, view: (0, 0) }
+    }
+}
+
+impl VideoPrefs {
+    /// The one `VideoSettings` message that carries every choice (no bitrate ceiling of its own).
+    pub fn settings(&self) -> swapdesk_proto::VideoSettings {
+        swapdesk_proto::VideoSettings {
+            preset: self.preset,
+            max_fps: self.max_fps,
+            max_kbps: 0,
+            view_width: self.view.0,
+            view_height: self.view.1,
+        }
+    }
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -654,5 +685,26 @@ impl UiHub {
             ),
         );
         end
+    }
+}
+
+#[cfg(test)]
+mod video_prefs_tests {
+    use super::*;
+    use swapdesk_proto::Preset;
+
+    /// One `VideoSettings` carries everything (F-VIEW-06): a new preset keeps the view and rate, a new view keeps the
+    /// preset.
+    #[test]
+    fn the_preset_and_the_view_size_each_keep_the_other() {
+        let mut v = VideoPrefs::default();
+        assert_eq!((v.settings().view_width, v.settings().view_height, v.settings().max_fps), (0, 0, 60));
+        v.view = (960, 540);
+        v.max_fps = 144;
+        v.preset = Preset::Motion;
+        let s = v.settings();
+        assert_eq!((s.preset, s.max_fps, s.view_width, s.view_height), (Preset::Motion, 144, 960, 540));
+        v.view = (0, 0);
+        assert_eq!(v.settings().preset, Preset::Motion);
     }
 }

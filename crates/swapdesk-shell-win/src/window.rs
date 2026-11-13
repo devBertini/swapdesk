@@ -82,6 +82,9 @@ pub struct Window {
     video: Cell<Option<Rect>>,
     /// The viewer pipeline was told this window exists (and with which video rectangle and DPI).
     announced: Cell<Option<(swapdesk_platform::Rect, u32)>>,
+    /// The refresh rate of the monitor the window is on, read once per monitor (`(HMONITOR, Hz)`; reset by
+    /// `WM_DISPLAYCHANGE`, which a mode change sends).
+    refresh: Cell<(isize, u16)>,
     /// Mouse buttons (bit per `PointerButton`) whose press went to the pipeline and has not been released.
     held: Cell<u8>,
     /// The explorer's second list (its right pane) and its largest scroll offset, for the wheel.
@@ -165,6 +168,7 @@ impl Window {
             list_area: Cell::new(None),
             video: Cell::new(None),
             announced: Cell::new(None),
+            refresh: Cell::new((0, 0)),
             held: Cell::new(0),
             second_list: Cell::new(None),
             last_click: Cell::new(None),
@@ -364,6 +368,46 @@ impl Window {
                 self.announced.set(Some((area, dpi)));
             }
             Some(_) => {}
+        }
+    }
+
+    /// F-VIEW-06: tells the state the video area in physical pixels (`video_px` is already scaled by the DPI) and the
+    /// refresh rate of this window's monitor; the state sends `SetViewSize` when it changed. The Arquivos view has no
+    /// video rectangle: 0x0.
+    fn report_view_size(&self) {
+        if self.kind != WindowKind::Viewer {
+            return;
+        }
+        let (w, h) = self.video_px().map_or((0, 0), |r| (r.width, r.height));
+        let hz = self.monitor_refresh_hz();
+        let commands = self.shared.state.borrow_mut().set_view_area(w, h, hz);
+        self.shared.send_commands(commands);
+    }
+
+    /// The refresh rate in Hz of the monitor the window is on (0 when unknown).
+    fn monitor_refresh_hz(&self) -> u16 {
+        use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, MONITORINFOEXW};
+        // SAFETY: plain Win32 queries on our own window and on structs of the right size and `cbSize`.
+        unsafe {
+            let monitor = MonitorFromWindow(self.hwnd(), MONITOR_DEFAULTTONEAREST);
+            let key = monitor.0 as isize;
+            let (cached, hz) = self.refresh.get();
+            if cached == key && hz != 0 {
+                return hz;
+            }
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            if !GetMonitorInfoW(monitor, std::ptr::from_mut(&mut info).cast()).as_bool() {
+                return 0;
+            }
+            let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+            if !EnumDisplaySettingsW(PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool() {
+                return 0;
+            }
+            // 0 and 1 mean "the hardware's default" (docs: DEVMODEW.dmDisplayFrequency).
+            let hz = if mode.dmDisplayFrequency > 1 { u16::try_from(mode.dmDisplayFrequency).unwrap_or(0) } else { 0 };
+            self.refresh.set((key, hz));
+            hz
         }
     }
 
@@ -984,6 +1028,7 @@ impl Window {
         self.second_list.set(out.second_list);
         self.video.set(out.video);
         self.sync_viewer_host();
+        self.report_view_size();
         // The wheel can leave the list scrolled past a shorter list; another scrolling content starts at its top.
         {
             let mut ix = self.ix.borrow_mut();
@@ -1045,6 +1090,12 @@ impl Window {
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
                 }
                 Some(LRESULT(0))
+            }
+            WM_DISPLAYCHANGE => {
+                // A mode change may have changed the monitor's refresh rate.
+                self.refresh.set((0, 0));
+                self.invalidate();
+                None
             }
             WM_SIZE => {
                 if wparam.0 as u32 != SIZE_MINIMIZED {

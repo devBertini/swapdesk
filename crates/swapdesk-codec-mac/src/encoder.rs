@@ -283,13 +283,14 @@ mod vt {
         kCVPixelFormatType_32BGRA, kCVReturnSuccess,
     };
     use objc2_video_toolbox::{
-        VTCompressionSession, VTEncodeInfoFlags, VTIsHardwareDecodeSupported, VTSessionCopyProperty,
-        VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-        kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
-        kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-        kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-        kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kVTEncodeFrameOptionKey_ForceKeyFrame,
-        kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+        VTCompressionSession, VTEncodeInfoFlags, VTIsHardwareDecodeSupported, VTPixelTransferSession,
+        VTSessionCopyProperty, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
+        kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+        kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+        kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kVTCompressionPropertyKey_ProfileLevel,
+        kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+        kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+        kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
         kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
@@ -631,6 +632,35 @@ mod vt {
         /// Why the last unreadable sample was dropped.
         last_unreadable: Option<PlatformError>,
         dropped: u64,
+        /// Scales a frame larger than the configured size (F-VIEW-06); made at the first such frame.
+        scaler: Option<PixelTransfer>,
+    }
+
+    /// A `VTPixelTransferSession`, invalidated when dropped.
+    struct PixelTransfer(CFRetained<VTPixelTransferSession>);
+
+    impl PixelTransfer {
+        fn new() -> Result<Self> {
+            let mut out: *mut VTPixelTransferSession = ptr::null_mut();
+            // SAFETY: a valid out pointer; the session comes back retained (`VTPixelTransferSessionCreate` returns it
+            // +1, `CM_RETURNS_RETAINED_PARAMETER`).
+            let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut out)) };
+            if status != 0 {
+                return Err(status_err("VTPixelTransferSessionCreate", status));
+            }
+            let p = NonNull::new(out)
+                .ok_or_else(|| err(ErrorKind::Os, "VTPixelTransferSessionCreate", "no session returned"))?;
+            // SAFETY: Create rule.
+            Ok(Self(unsafe { CFRetained::from_raw(p) }))
+        }
+    }
+
+    impl Drop for PixelTransfer {
+        fn drop(&mut self) {
+            // SAFETY: a live session, torn down before its last reference goes (deterministic teardown, as the header
+            // asks).
+            unsafe { self.0.invalidate() };
+        }
     }
 
     impl VtH264Encoder {
@@ -649,6 +679,7 @@ mod vt {
                 force_key: false,
                 last_unreadable: None,
                 dropped: 0,
+                scaler: None,
             }
         }
 
@@ -776,7 +807,34 @@ mod vt {
             self.drain()
         }
 
-        fn source_buffer(&self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
+        /// The buffer to hand the session: the frame's own when it has the configured size, else the frame scaled to
+        /// it by a `VTPixelTransferSession` into a buffer of the session's pool (F-VIEW-06: the configured size is the
+        /// size encoded, the capture may be larger). Apple, VideoToolbox `VTPixelTransferSession.h` (macOS SDK, read
+        /// 2026-11-12): `VTPixelTransferSessionTransferImage` scales the full width and height of the source buffer to
+        /// the full width and height of the destination buffer by default.
+        fn source_buffer(&mut self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
+            let source = self.frame_buffer(frame)?;
+            let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "encode", "not configured"))?;
+            let (w, h) = (session.width, session.height);
+            if (frame.width, frame.height) == (w, h) {
+                return Ok(source);
+            }
+            let dst = new_bgra_buffer(session, w as usize, h as usize)?;
+            let transfer = match self.scaler.take() {
+                Some(t) => t,
+                None => PixelTransfer::new()?,
+            };
+            // SAFETY: a live transfer session and two live BGRA pixel buffers.
+            let status = unsafe { transfer.0.transfer_image(&source, &dst) };
+            self.scaler = Some(transfer);
+            if status != 0 {
+                return Err(status_err("VTPixelTransferSessionTransferImage", status));
+            }
+            Ok(dst)
+        }
+
+        /// The frame as a pixel buffer of its own size (a CPU frame is copied in).
+        fn frame_buffer(&self, frame: &Frame) -> Result<CFRetained<CVPixelBuffer>> {
             let session = self.session.as_ref().ok_or_else(|| err(ErrorKind::Closed, "encode", "not configured"))?;
             match &frame.pixels {
                 Pixels::Gpu(surface) => {
@@ -823,17 +881,9 @@ mod vt {
             }
             let mut out = Vec::new();
             let mut force = force_keyframe || self.force_key;
-            if (frame.width, frame.height) != (cfg.width, cfg.height) {
-                // A display size change: a new session, new SPS/PPS, the first frame a keyframe with `config_change`.
-                // A session that is already gone has nothing left to flush.
-                out = match self.flush() {
-                    Ok(frames) => frames,
-                    Err(e) if is_session_gone(&e) => Vec::new(),
-                    Err(e) => return Err(e),
-                };
-                self.build(&EncoderConfig { width: frame.width, height: frame.height, ..cfg })?;
-                force = true;
-            } else if self.session.is_none() {
+            // A frame of another size than the configured one is scaled in `source_buffer` (F-VIEW-06); a new encoded
+            // size is a new `configure` (new session, new SPS/PPS, a key frame with `config_change`), the caller's call.
+            if self.session.is_none() {
                 // An earlier rebuild failed (or `set_rate` found the session gone): try again with the stored
                 // configuration; the new session starts with a key frame.
                 self.build(&cfg)?;
@@ -889,8 +939,8 @@ mod vt {
         /// (`tests/encode.rs::refinement_raises_the_psnr_of_a_still_frame`).
         fn refine(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>> {
             let cfg = self.cfg.ok_or_else(|| err(ErrorKind::Closed, "refine", "not configured"))?;
-            if self.session.is_none() || (frame.width, frame.height) != (cfg.width, cfg.height) {
-                return Ok(Vec::new()); // no session, or the display changed size since the capture: nothing to refine
+            if self.session.is_none() {
+                return Ok(Vec::new()); // no session: nothing to refine (a frame of another size is scaled like any)
             }
             let boosted =
                 effective(cfg.preset, cfg.kbps.saturating_mul(8).clamp(REFINE_MIN_KBPS, REFINE_MAX_KBPS), cfg.fps);
@@ -1242,8 +1292,11 @@ mod vt {
     /// A BGRA buffer from the session's pool (the pool exists once the session does), else a plain one.
     fn new_bgra_buffer(session: &Session, w: usize, h: usize) -> Result<CFRetained<CVPixelBuffer>> {
         let mut out: *mut CVPixelBuffer = ptr::null_mut();
+        // The pool makes buffers of the session's size only.
         // SAFETY: a live session.
-        if let Some(pool) = unsafe { session.session.pixel_buffer_pool() } {
+        if (w as u32, h as u32) == (session.width, session.height)
+            && let Some(pool) = unsafe { session.session.pixel_buffer_pool() }
+        {
             // SAFETY: a live pool; `out` is a valid out pointer and receives a +1 buffer.
             let status = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out)) };
             if status == kCVReturnSuccess
@@ -1463,12 +1516,18 @@ mod vt {
         fn a_failed_rebuild_leaves_the_encoder_able_to_build_again() {
             let mut enc = encoder();
             enc.encode(&frame(0), false).expect("frame 0");
-            // A size the encoder cannot build: the rebuild for the new size fails, the error comes back and no session
-            // is left.
-            let mut huge = frame(1);
-            huge.width = 20_000;
-            huge.height = 20_000;
-            assert!(enc.encode(&huge, false).is_err());
+            // A size the encoder cannot build: the configure for it fails, the error comes back and no session is
+            // left.
+            let huge = EncoderConfig {
+                width: 20_000,
+                height: 20_000,
+                fps: 30,
+                kbps: 2000,
+                preset: Preset::Auto,
+                adapter: AdapterId(0),
+                codec: swapdesk_platform::Codec::H264,
+            };
+            assert!(enc.configure(&huge).is_err());
             // The stored configuration is untouched, and the next normal frame builds a session again.
             let out = enc.encode(&frame(2), false).expect("the encoder builds a session again");
             assert!(out[0].keyframe && out[0].config_change);
