@@ -20,8 +20,8 @@ use swapdesk_ipc::{
     Shape, Text, VideoBackend,
 };
 use swapdesk_platform::{
-    ActionRunner, AudioSource, CaptureConfig, ClipboardProvider, Clock, DisplayId, DisplayInfo, EncoderConfig,
-    ErrorKind, Frame, InputSink, PlatformError, ScreenSource, VideoEncoder,
+    ActionRunner, AdapterId, AudioSource, CaptureConfig, ClipboardProvider, Clock, DisplayId, DisplayInfo,
+    EncoderConfig, ErrorKind, Frame, InputSink, PlatformError, Rect, ScreenSource, VideoEncoder,
 };
 use swapdesk_proto::{
     Codec, CursorPosition, CursorShapeHeader, Desktop, Display, DisplayList, ErrorCode, InputEvent, MAX_VIDEO_PAYLOAD,
@@ -299,6 +299,20 @@ fn to_wire(px: i32, size: u32) -> u16 {
     let span = u64::from(size - 1);
     let px = u64::try_from(px).unwrap_or(0).min(span);
     u16::try_from((px * 65535 + span / 2) / span).unwrap_or(u16::MAX)
+}
+
+/// A display of the wire as the input sink takes it; the sinks never read the adapter.
+fn from_proto(d: &Display) -> DisplayInfo {
+    DisplayInfo {
+        id: DisplayId(d.id),
+        name: d.name.clone(),
+        bounds: Rect { x: d.x, y: d.y, width: d.width, height: d.height },
+        scale_milli: d.scale_milli,
+        refresh_mhz: d.refresh_mhz,
+        rotation: d.rotation,
+        primary: d.primary,
+        adapter: AdapterId(0),
+    }
 }
 
 fn to_proto(d: &DisplayInfo) -> Display {
@@ -782,15 +796,10 @@ fn pump_cursor<S: ScreenSource, E>(
 enum InputCmd {
     Events(Vec<InputEvent>),
     ReleaseAll,
-    /// The displays changed: the sink maps the pointer onto the new ones.
+    /// The displays the pointer is mapped onto: this helper's own listing when it captures, or the media helper's list
+    /// the service relays (the pictures the viewer clicks on are of those displays).
     Displays(Vec<DisplayInfo>),
 }
-
-/// Pause between two listings of the displays made for pointers that name an unknown one.
-const RELIST_PAUSE: Duration = Duration::from_secs(1);
-/// While pointers come, the input thread reads the displays again this often, so a display whose mode changed under
-/// its id is mapped at its new size (a helper that only injects never captures, so nothing else would tell it).
-const STALE_AFTER: Duration = Duration::from_secs(2);
 
 /// How often a streaming display lists the displays again (the viewer learns of a change within 2 s, F-VIEW-02).
 const RELIST_EVERY: Duration = Duration::from_secs(1);
@@ -854,7 +863,6 @@ fn input_main<I: InputSink, S: ScreenSource, E>(
     // The displays the sink was last given.
     let mut known = env.display_list();
     sink.displays_changed(&known);
-    let mut relisted: Option<Instant> = None;
     let mut faulted = false;
     let report = |faulted: &mut bool, what: &str, e: &PlatformError| {
         if !*faulted {
@@ -880,29 +888,6 @@ fn input_main<I: InputSink, S: ScreenSource, E>(
             InputCmd::Events(_) if env.fence.is_held() => {}
             InputCmd::Events(events) => {
                 for event in &events {
-                    // A pointer for a display the sink does not know: the monitors changed since the list it has.
-                    // The capture side lists again when a video starts, but this helper may never start one (the
-                    // user's helper only injects the input of a prompted session), and its sink would refuse every
-                    // pointer of the session while the keys still work. So the displays are listed again here, at
-                    // most once a second, before the event is applied.
-                    //
-                    // A known display can be stale too: a display that changed its mode (2560 x 1600 to 2560 x 1440,
-                    // the same id) keeps its id, and a helper that never captures would map the pointer over the old
-                    // size for the whole session (owner, 12/11: the clicks landed below the pointer, y x 1.111). So
-                    // while pointers come, the list is also read again every `STALE_AFTER`.
-                    let unknown = matches!(event, InputEvent::Pointer { display, .. }
-                        if !known.iter().any(|d| d.id.0 == *display));
-                    let stale = matches!(event, InputEvent::Pointer { .. })
-                        && relisted.is_none_or(|at| at.elapsed() >= STALE_AFTER);
-                    if (unknown && relisted.is_none_or(|at| at.elapsed() >= RELIST_PAUSE)) || stale {
-                        relisted = Some(Instant::now());
-                        env.refresh_displays();
-                        let now = env.display_list();
-                        if now != known {
-                            known = now;
-                            sink.displays_changed(&known);
-                        }
-                    }
                     let r =
                         if matches!(event, InputEvent::ReleaseAll) { sink.release_all() } else { sink.apply(event) };
                     if let Err(e) = r {
@@ -1079,6 +1064,11 @@ where
             }
             Message::ReleaseAll => {
                 let _ = self.input_tx.send(InputCmd::ReleaseAll);
+            }
+            // The media helper's displays, relayed by the service: the pointer is mapped onto the displays the viewer
+            // sees, whichever helper captured them (D64).
+            Message::Displays(list) => {
+                let _ = self.input_tx.send(InputCmd::Displays(list.displays.iter().map(from_proto).collect()));
             }
             Message::StartAudio { exclude_pid } => self.start_audio((exclude_pid != 0).then_some(exclude_pid)),
             Message::StopAudio => self.stop_audio(),

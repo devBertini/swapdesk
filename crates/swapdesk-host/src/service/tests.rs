@@ -4,7 +4,7 @@
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -206,6 +206,8 @@ struct TestHelper {
     sink: RecordingInputSink,
     from_service: Arc<Mutex<Vec<Ipc>>>,
     thread: Option<JoinHandle<()>>,
+    /// The height of the helper's one display: a test that changes it plays a mode change under the same id.
+    height: Arc<AtomicU32>,
 }
 
 impl TestHelper {
@@ -231,6 +233,7 @@ impl TestHelper {
         held: Option<Arc<Gate>>,
     ) -> Self {
         let sink = RecordingInputSink::new();
+        let height = Arc::new(AtomicU32::new(48));
         let (core_end, spy_core): (End, End) = duplex_blocking();
         let (spy_helper, helper_end): (End, End) = duplex_blocking();
         let from_service = Arc::new(Mutex::new(Vec::new()));
@@ -269,8 +272,9 @@ impl TestHelper {
         let clock = Arc::new(FakeClock::new(MonoMicros(1_000)));
         let audio_clock = Arc::clone(&clock);
         let input = sink.clone();
+        let rows = Arc::clone(&height);
         let deps = tune(HelperDeps::new(
-            |_| Ok(SyntheticScreen::new(64, 48, 100).with_pacing(Pacing::Realtime)),
+            move |_| Ok(SyntheticScreen::new(64, rows.load(Ordering::SeqCst), 100).with_pacing(Pacing::Realtime)),
             |_frame, _config, _backend| Ok(Passthrough { n: 0 }),
             move || Ok(input.clone()),
             move || Ok(SineSource::new(audio_clock.clone()).realtime()),
@@ -281,7 +285,7 @@ impl TestHelper {
         });
         let kind = core.attach_helper(role, core_end.reader, core_end.writer).expect("attach");
         assert_eq!(Some(kind), HelperKind::of_role(role));
-        Self { sink, from_service, thread: Some(thread) }
+        Self { sink, from_service, thread: Some(thread), height }
     }
 
     fn sent(&self) -> Vec<Ipc> {
@@ -409,6 +413,41 @@ impl Rig {
         self.system.join();
         self.user.join();
     }
+}
+
+/// Owner, 12/11: with the Mac controlling the installed service, the clicks landed below the pointer (y x 1.111). The
+/// user's helper injected over the display list of its own start while the media helper's display had changed mode
+/// under the same id. Now the injector gets the media helper's displays before the session's first input, and again
+/// whenever they change while the session runs (D64).
+#[test]
+fn the_injecting_helper_maps_the_pointer_onto_the_media_helpers_displays_of_now() {
+    let rig = Rig::new();
+    let (handle, mut seen) = rig.connect();
+    seen.video();
+    let pointer = vec![InputEvent::Pointer { display: 0, x: 100, y: 200 }];
+    handle.send_input(pointer.clone()).expect("input accepted");
+    wait_for("the pointer at the user helper's sink", || (!rig.user.sink.events().is_empty()).then_some(()));
+    let sent = rig.user.sent();
+    let listed = sent.iter().position(|m| matches!(m, Ipc::Displays(_))).expect("the media list reached the injector");
+    let input = sent.iter().position(|m| matches!(m, Ipc::Input { .. })).expect("the input");
+    assert!(listed < input, "the displays come before the first input: {sent:?}");
+    assert_eq!(rig.system.count(|m| matches!(m, Ipc::Displays(_))), 0, "the media helper lists its own");
+
+    // The media display changes mode under its id while the session runs: the injector maps over the new size.
+    rig.system.height.store(64, Ordering::SeqCst);
+    let tall = |r: &swapdesk_fakes::Recorded| match &r.what {
+        InputRecord::DisplaysChanged(list) => list.first().is_some_and(|d| d.bounds.height == 64),
+        _ => false,
+    };
+    wait_for("the new size at the user helper's sink", || rig.user.sink.records().iter().any(tall).then_some(()));
+    handle.send_input(pointer).expect("input accepted");
+    wait_for("the second pointer", || (rig.user.sink.events().len() == 2).then_some(()));
+    let records = rig.user.sink.records();
+    let changed = records.iter().position(tall).expect("the new size");
+    let last = records.iter().rposition(|r| matches!(r.what, InputRecord::Event(_))).expect("the pointer");
+    assert!(changed < last, "the second pointer is mapped over the new size");
+    drop(handle);
+    rig.finish();
 }
 
 #[test]

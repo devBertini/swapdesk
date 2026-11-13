@@ -22,8 +22,6 @@ const QUIET: Duration = Duration::from_millis(400);
 
 /// The id the one display has after the monitors changed (see `Tracked::moved`).
 const MOVED_DISPLAY: u16 = 5;
-/// Set by the test of a display whose mode changes under its id (each test runs in its own process).
-static RESIZED: AtomicBool = AtomicBool::new(false);
 
 /// A synthetic screen that counts how many of it are alive.
 struct Tracked {
@@ -49,12 +47,6 @@ impl Drop for Tracked {
 impl ScreenSource for Tracked {
     fn displays(&mut self) -> PResult<Vec<DisplayInfo>> {
         let mut list = self.inner.displays()?;
-        // The owner's defect of 12/11: the same display, a new mode (taller), under the same id.
-        if RESIZED.load(Ordering::SeqCst) {
-            for d in &mut list {
-                d.bounds.height += 160;
-            }
-        }
         if self.is_moved() {
             for d in &mut list {
                 d.id = DisplayId(MOVED_DISPLAY);
@@ -377,74 +369,37 @@ fn a_video_started_after_the_monitors_changed_sends_the_new_display_list_and_str
     rig.finish().expect("clean end");
 }
 
-/// The helper that only injects input (the user's, in a prompted session) never starts a video, so nothing made it
-/// list the displays again: after the owner changed monitors its sink refused every pointer ("unknown display")
-/// while the keys still worked. A pointer for a display the sink does not know makes the helper list again, tell the
-/// service and the sink, and only then apply the pointer.
-#[test]
-fn a_pointer_for_a_display_that_appeared_after_the_start_is_applied_after_the_displays_are_listed_again() {
-    let moved = Arc::new(AtomicBool::new(false));
-    let mut rig = rig_moving(None, None, Some(Arc::clone(&moved)));
-    let ids = |m: &Message| match m {
-        Message::Displays(list) => Some(list.displays.iter().map(|d| d.id).collect::<Vec<_>>()),
-        _ => None,
-    };
-    assert_eq!(rig.wait(ids), [0], "the list of the start");
-
-    moved.store(true, Ordering::SeqCst);
-    let pointer = InputEvent::Pointer { display: MOVED_DISPLAY, x: 100, y: 200 };
-    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
-    assert_eq!(rig.wait(ids), [MOVED_DISPLAY], "the service learns the displays of now");
-    // A second pointer right after needs no new listing: the sink knows the display now.
-    let second = InputEvent::Pointer { display: MOVED_DISPLAY, x: 300, y: 400 };
-    rig.send(&Message::Input { events: Events(vec![second.clone()]) });
-    rig.send(&Message::Shutdown);
-    rig.finish().expect("clean end");
-
-    let sink_ids = |r: &InputRecord| match r {
-        InputRecord::DisplaysChanged(list) => Some(list.iter().map(|d| d.id.0).collect::<Vec<_>>()),
-        _ => None,
-    };
-    let records = rig.input.records();
-    let lists: Vec<Vec<u16>> = records.iter().filter_map(|r| sink_ids(&r.what)).collect();
-    assert_eq!(lists, [vec![0], vec![MOVED_DISPLAY]], "the sink got the list of the start, then the new one, once");
-    let relisted = records.iter().position(|r| sink_ids(&r.what) == Some(vec![MOVED_DISPLAY])).expect("the new list");
-    let applied = records.iter().position(|r| r.what == InputRecord::Event(pointer.clone())).expect("the pointer");
-    assert!(relisted < applied, "the sink learns the display before the pointer is applied");
-    assert_eq!(rig.input.events(), [pointer, second]);
-}
-
 /// Owner, 12/11 (the Mac controlling the installed Windows service): the clicks landed below the pointer, y x 1.111.
-/// The helper that injects never captures, so it kept the display list of its start; the display had changed mode
-/// under the same id (1440 to 1600 rows here, the other way round there). While pointers come, the list is read again
-/// every two seconds and the sink gets the new size.
+/// The helper that injected never captured, so it kept the display list of its start while the display had changed
+/// mode under the same id. The media helper's list, relayed by the service, reaches the sink before the next pointer,
+/// and the helper lists nothing itself on the pointer's path.
 #[test]
-fn a_display_that_changes_mode_under_its_id_reaches_the_sink_while_pointers_come() {
+fn the_displays_the_service_relays_reach_the_sink_before_the_next_pointer() {
     let mut rig = rig(None);
-    let sizes = |m: &Message| match m {
-        Message::Displays(list) => Some(list.displays.iter().map(|d| d.height).collect::<Vec<_>>()),
+    let listed = |m: &Message| match m {
+        Message::Displays(list) => Some(list.clone()),
         _ => None,
     };
-    let first = rig.wait(sizes);
-    RESIZED.store(true, Ordering::SeqCst);
+    let mut relayed = rig.wait(listed);
+    for d in &mut relayed.displays {
+        d.height += 160;
+    }
+    let tall = relayed.displays[0].height;
     let pointer = InputEvent::Pointer { display: 0, x: 100, y: 200 };
+    rig.send(&Message::Displays(relayed));
     rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
-    std::thread::sleep(Duration::from_millis(2_200));
-    rig.send(&Message::Input { events: Events(vec![pointer.clone()]) });
-    let now = rig.wait(sizes);
-    assert_eq!(now[0], first[0] + 160, "the service learns the new size");
     rig.send(&Message::Shutdown);
     rig.finish().expect("clean end");
-    let heights: Vec<u32> = rig
-        .input
-        .records()
+    let sent: Vec<Message> = rig.inbox.try_iter().collect();
+    assert!(!sent.iter().any(|m| matches!(m, Message::Displays(_))), "no listing on the pointer's path: {sent:?}");
+
+    let records = rig.input.records();
+    let changed = records
         .iter()
-        .filter_map(|r| match &r.what {
-            InputRecord::DisplaysChanged(list) => list.first().map(|d| d.bounds.height),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(heights.last().copied(), Some(first[0] as u32 + 160), "the sink maps over the new size: {heights:?}");
+        .position(|r| matches!(&r.what, InputRecord::DisplaysChanged(l) if l[0].bounds.height == tall))
+        .expect("the sink got the relayed list");
+    let applied = records.iter().position(|r| r.what == InputRecord::Event(pointer.clone())).expect("the pointer");
+    assert!(changed < applied, "the sink maps over the new size before the pointer is applied");
 }
 
 #[test]

@@ -17,6 +17,7 @@ use super::helper_link::{HelperEvent, HelperLink};
 use super::media_path::{DirectOut, VideoPath};
 use super::pty_proxy::PtyRoutes;
 use super::routing::{HelperKind, media_helper};
+use swapdesk_ipc::Message as Ipc;
 
 /// Events queued for the core's owner before an advisory one is dropped.
 pub const CORE_EVENTS: usize = 64;
@@ -424,6 +425,13 @@ pub(crate) async fn pump(
                 link.set_displays(list.displays.clone());
                 // A new display list from a helper that is not the media one changes nothing for the sessions.
                 if is_media {
+                    // The injecting helper maps the pointer onto these displays, not onto a listing of its own that
+                    // may be older (owner, 12/11: a mode change under the same id moved every click, D64).
+                    for other in [HelperKind::System, HelperKind::User].into_iter().filter_map(|k| shared.helper(k)) {
+                        if other.id != link.id {
+                            other.send(Ipc::Displays(list.clone())).await;
+                        }
+                    }
                     shared.fan(MediaEv::Displays(list.displays)).await;
                 }
             }

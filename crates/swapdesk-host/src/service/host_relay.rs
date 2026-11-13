@@ -588,6 +588,8 @@ async fn input_task(shared: Arc<Shared>, ctx: SessionCtx, mut recv: RecvStream) 
 struct InputState {
     /// The helper that got the last batch.
     last: Option<HelperKind>,
+    /// The helper link that was last given the media helper's displays in this session.
+    listed: Option<u64>,
     warned: bool,
     /// A batch was dropped (paused host, no helper, a closed pipe): the next one that goes through is preceded by a
     /// `ReleaseAll`, since the dropped batch may have held the key-up of a key that is down at the helper (D9).
@@ -632,6 +634,16 @@ async fn deliver(shared: &Shared, ctx: &SessionCtx, events: Vec<InputEvent>, st:
         old.send(Ipc::ReleaseAll).await;
     }
     st.last = Some(kind);
+    // D64: each session maps its pointer onto the displays of now, the ones its pictures show. A helper that is not
+    // the media one gets them before its first batch; later changes reach it from the pump.
+    if st.listed != Some(helper.id) {
+        st.listed = Some(helper.id);
+        if let Some((_, media)) = shared.media()
+            && media.id != helper.id
+        {
+            helper.send(Ipc::Displays(DisplayList { displays: media.displays() })).await;
+        }
+    }
     if std::mem::take(&mut st.dropped) {
         helper.send(Ipc::ReleaseAll).await;
     }
