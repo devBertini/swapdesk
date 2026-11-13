@@ -21,9 +21,12 @@ use swapdesk_host::ui_hub::{DevOptions, DnsSdPresence, HubParams, NoPresence, Pr
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
 use swapdesk_net_win::{NetworkWatcher, WindowsNetInterfaces};
-use swapdesk_platform::{Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink};
-use swapdesk_proto::{Os, Special};
+use swapdesk_platform::{
+    ActionRunner, Level, NetInterface, NetInterfaces, PtySpawner, SessionEvent, SessionWatcher, TraceSink,
+};
+use swapdesk_proto::{Action, Os, Special};
 use swapdesk_secret_win::{FolderSpec, WinSecretStore};
+use swapdesk_sys_win::actions::WinActions;
 use swapdesk_sys_win::pty::{ConPtySpawner, Shell};
 use swapdesk_sys_win::{
     FileTrace, InstallPolicy, KeepAwake, ServiceContext, active_console_session, console_state, current_user_sid,
@@ -101,6 +104,31 @@ impl TerminalEnv for WinTerminalEnv {
 struct WinHooks {
     awake: Mutex<Option<KeepAwake>>,
     trace: Arc<dyn TraceSink>,
+    /// The service's own quick-action runner (`WinActions::service()`): what "Bloquear a tela" runs when no user helper
+    /// is attached. `LockWorkStation` locks the calling process's session, which is session 0 for the service, so
+    /// the console session is locked the way the runner does it (`WTSDisconnectSession` to the logon screen).
+    locker: Arc<Mutex<Box<dyn ActionRunner + Send>>>,
+}
+
+impl WinHooks {
+    fn new(trace: Arc<dyn TraceSink>) -> Self {
+        Self::with_locker(trace, WinActions::service())
+    }
+
+    fn with_locker(trace: Arc<dyn TraceSink>, locker: impl ActionRunner + Send + 'static) -> Self {
+        Self { awake: Mutex::new(None), trace, locker: Arc::new(Mutex::new(Box::new(locker))) }
+    }
+}
+
+/// Locks the console session `session` with the quick action `Lock` of `runner`: the one function the lock of "Bloquear
+/// a tela" and the lock on the end of a session share. A failure is logged, not returned: the session is over.
+fn lock_console(runner: &mut dyn ActionRunner, trace: &dyn TraceSink, session: u32) {
+    match runner.run(Action::Lock) {
+        Ok(()) => trace.log(Level::Info, "service", format_args!("lock on end: console session {session} locked")),
+        Err(e) => {
+            trace.log(Level::Warn, "service", format_args!("lock on end: console session {session} not locked: {e}"));
+        }
+    }
 }
 
 impl SystemHooks for WinHooks {
@@ -119,13 +147,16 @@ impl SystemHooks for WinHooks {
         }
     }
 
-    fn lock_screen(&self) {
-        // The workstation lock is an action of the user helper (stage 20's ActionRunner); nothing in this build runs it.
-        self.trace.log(
-            Level::Warn,
-            "service",
-            format_args!("lock on end was asked; the lock action is not wired in this build"),
-        );
+    fn lock_screen(&self, console_session: u32) {
+        // The end of a session is judged on the core's thread: the lock is a system call that may wait, so it runs
+        // on its own thread.
+        let (locker, trace) = (Arc::clone(&self.locker), Arc::clone(&self.trace));
+        let spawned = std::thread::Builder::new().name("lock-on-end".into()).spawn(move || {
+            lock_console(&mut **lock(&locker), &*trace, console_session);
+        });
+        if let Err(e) = spawned {
+            self.trace.log(Level::Warn, "service", format_args!("lock on end: no thread to lock with: {e}"));
+        }
     }
 
     fn service_enabled(&self, on: bool) {
@@ -761,7 +792,7 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 clock: clock.clone(),
                 wall: Arc::new(SystemWallClock),
                 trace: Arc::clone(&trace),
-                hooks: Arc::new(WinHooks { awake: Mutex::new(None), trace: Arc::clone(&trace) }),
+                hooks: Arc::new(WinHooks::new(Arc::clone(&trace))),
                 dev: dev_loopback.then(|| DevOptions { pair_listen: vec![lo(seat.pair_port)] }),
             });
             let receiving = trust.read(|s| !s.devices.is_empty());
@@ -1037,3 +1068,6 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
 
 #[cfg(test)]
 mod first_start_tests;
+
+#[cfg(test)]
+mod lock_end_tests;

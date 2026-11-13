@@ -63,7 +63,8 @@ impl ClipActionHooks for Scripted {
         lock(&self.skipped).push((session_id, reason));
     }
 
-    fn action_ran(&self, session_id: u64, action: Action) {
+    fn action_starting(&self, session_id: u64, device: Option<DeviceId>, action: Action) {
+        assert!(device.is_some(), "a hosted session always names its peer");
         lock(&self.ran).push((session_id, action));
     }
 }
@@ -190,10 +191,13 @@ fn a_quick_action_runs_in_the_user_helper_and_is_audited() {
     let rt = viewer.core.runtime();
     assert_eq!(rt.block_on(handle.run_action(Action::Lock)), Ok(ErrorCode::NoError));
     assert_eq!(actions.ran(), vec![Action::Lock], "the helper ran it, as the user");
-    // A refusal is the answer, not a crash, and a refused action is not audited as run.
+    // A refusal is the answer, not a crash; the attempt was announced to the audit before the runner refused.
     assert_eq!(rt.block_on(handle.run_action(Action::Restart)), Ok(ErrorCode::NotPermitted));
     assert_eq!(actions.ran(), vec![Action::Lock]);
-    assert_eq!(*lock(&host_hooks.ran), vec![(handle.session_id(), Action::Lock)]);
+    assert_eq!(
+        *lock(&host_hooks.ran),
+        vec![(handle.session_id(), Action::Lock), (handle.session_id(), Action::Restart)]
+    );
 
     drop(handle);
     host.core.shutdown();
@@ -217,7 +221,11 @@ fn with_no_user_helper_the_service_runs_the_action_itself_and_refuses_what_needs
     assert_eq!(rt.block_on(handle.run_action(Action::Sleep)), Ok(ErrorCode::NoError));
     assert_eq!(rt.block_on(handle.run_action(Action::TaskMonitor)), Ok(ErrorCode::NotPermitted));
     assert_eq!(service_actions.ran(), vec![Action::Sleep]);
-    assert_eq!(*lock(&host_hooks.ran), vec![(handle.session_id(), Action::Sleep)]);
+    // The refused Task Manager was announced too: the entry comes before the runner's answer.
+    assert_eq!(
+        *lock(&host_hooks.ran),
+        vec![(handle.session_id(), Action::Sleep), (handle.session_id(), Action::TaskMonitor)]
+    );
 
     drop(handle);
     host.core.shutdown();

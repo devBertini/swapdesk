@@ -61,8 +61,11 @@ pub use store::{AuditLog, FileAuditLog, MachineSettings, load_settings, store_se
 pub trait SystemHooks: Send + Sync {
     /// A session is live (or none is) and the "keep awake" setting is on: hold off sleep.
     fn keep_awake(&self, _on: bool) {}
-    /// "Bloquear ao terminar" (F-SESS-03): lock the workstation.
-    fn lock_screen(&self) {}
+    /// "Bloquear ao terminar" (F-SESS-03): a hosted session ended with the setting on; lock the screen of the
+    /// console session `console_session`, the one the session's account is signed in at. Called once, for the end
+    /// itself (never for a lost link the core keeps resumable), and never when another account owns the console or
+    /// nobody is at it: there is nothing of this account to lock. It may block briefly; it must not panic.
+    fn lock_screen(&self, _console_session: u32) {}
     /// The "service" switch of Ajustes changed.
     fn service_enabled(&self, _on: bool) {}
 }

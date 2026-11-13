@@ -374,6 +374,31 @@ fn a_runner_failure_is_reported_as_a_code() {
     assert_eq!(relay.runner().awake_calls(), vec![true]);
 }
 
+/// What must be on record before an action can take the machine down is written before the runner is called, and only
+/// for a request the relay lets through.
+#[test]
+fn the_before_hook_runs_before_the_runner_and_only_for_a_request_that_reaches_it() {
+    let fake = FakeActions::new();
+    let mut relay = ActionRelay::new(fake.clone());
+    let seen = std::cell::RefCell::new(Vec::new());
+    let probe = fake.clone();
+    let done = relay.handle_with(&qa(Action::Restart), &actx(PermissionSet::CONTROL, true), |a| {
+        seen.borrow_mut().push((a, probe.ran().len()));
+    });
+    assert_eq!(done.result.code, ErrorCode::NoError);
+    assert_eq!(*seen.borrow(), vec![(Action::Restart, 0)], "called with nothing run yet");
+    // Refused first (no CONTROL, paused): the hook is not called.
+    relay.handle_with(&qa(Action::Sleep), &actx(PermissionSet::VIEW, true), |_| panic!("not CONTROL"));
+    let paused = ActionContext { granted: PermissionSet::CONTROL, user_present: true, paused: true };
+    relay.handle_with(&qa(Action::Sleep), &paused, |_| panic!("paused"));
+    // A failure of the runner still had its hook call: the entry was written before the outcome was known.
+    fake.refuse(Action::Lock, ErrorKind::Os);
+    let called = std::cell::Cell::new(false);
+    let done = relay.handle_with(&qa(Action::Lock), &actx(PermissionSet::CONTROL, true), |_| called.set(true));
+    assert!(called.get());
+    assert_eq!(done.result.code, ErrorCode::IoFailed);
+}
+
 // ---------- D13 ----------
 
 struct Asker {

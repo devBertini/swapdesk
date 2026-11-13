@@ -39,6 +39,13 @@ impl<R: ActionRunner> ActionRelay<R> {
     /// nobody there the host answers `NOBODY_PRESENT` without calling the runner). Lock, sleep and restart go to the
     /// runner either way (with nobody logged in the service's runner makes system calls).
     pub fn handle(&mut self, req: &QuickAction, ctx: &ActionContext) -> ActionDone {
+        self.handle_with(req, ctx, |_| {})
+    }
+
+    /// [`ActionRelay::handle`], calling `before` with the action right before the runner is called (and not when the
+    /// relay refuses the request first): what must be on record before the action can take the machine down
+    /// (restart, sleep) is written there.
+    pub fn handle_with(&mut self, req: &QuickAction, ctx: &ActionContext, before: impl FnOnce(Action)) -> ActionDone {
         let done = |code: ErrorCode, ran: bool| ActionDone {
             action: req.kind,
             result: QuickActionResult { action_id: req.action_id, code },
@@ -56,6 +63,7 @@ impl<R: ActionRunner> ActionRelay<R> {
         if req.kind == Action::TaskMonitor && !ctx.user_present {
             return done(ErrorCode::NobodyPresent, false);
         }
+        before(req.kind);
         match self.runner.run(req.kind) {
             Ok(()) => done(ErrorCode::NoError, true),
             Err(e) => done(code_for(&e), true),

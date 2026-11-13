@@ -337,7 +337,18 @@ impl HostUi for HubHostUi {
     }
 
     fn lock_screen(&self) {
-        self.hub.p.hooks.lock_screen();
+        use swapdesk_session::ConsoleOwner;
+        let hub = &self.hub;
+        // Only the account at the console has a screen to lock: with another account at it (or the sign-in screen
+        // up) the console is not this account's to touch.
+        let session = *lock(&hub.console);
+        match (hub.console_owner(), session) {
+            (ConsoleOwner::This, Some(session)) => hub.p.hooks.lock_screen(session),
+            (owner, session) => hub.log(
+                swapdesk_platform::Level::Info,
+                format_args!("lock on end: nothing of this account to lock (console {owner:?}, session {session:?})"),
+            ),
+        }
     }
 
     fn start_info(&self) -> StartInfo {

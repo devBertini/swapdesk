@@ -41,6 +41,7 @@ mod elevation;
 mod extras;
 mod files;
 mod grants_sync;
+mod lock_end;
 mod presence;
 mod resume;
 mod security;
@@ -75,11 +76,17 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 #[derive(Default)]
 struct TestHooks {
     awake: Mutex<Vec<bool>>,
+    /// The console sessions `lock_screen` was asked to lock, in order.
+    locks: Mutex<Vec<u32>>,
 }
 
 impl SystemHooks for TestHooks {
     fn keep_awake(&self, on: bool) {
         lock(&self.awake).push(on);
+    }
+
+    fn lock_screen(&self, console_session: u32) {
+        lock(&self.locks).push(console_session);
     }
 }
 

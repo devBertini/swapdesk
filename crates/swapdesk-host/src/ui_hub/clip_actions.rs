@@ -7,13 +7,13 @@
 //!   UI(s) that show the session.
 //! * **Quick actions.** `RunAction` on a viewer session sends `QuickAction` to the host and replies when its
 //!   `QuickActionResult` arrives: `Done` when it ran, else the code of why not. The host's runner and its audit
-//!   (`ActionRun`) are in the core.
+//!   (`ActionRun`, written before the action runs) are in the core.
 
 use std::sync::{Arc, Weak};
 
 use swapdesk_ipc::{ApiCode, Message as Ipc, Notify};
 use swapdesk_proto::{Action, ClipSkip, ErrorCode};
-use swapdesk_trust::{AuditEntry, AuditEvent, DeviceRef};
+use swapdesk_trust::{AuditEntry, AuditEvent, DeviceId, DeviceRef};
 
 use super::ops::reply;
 use super::views::api_of;
@@ -91,18 +91,22 @@ impl ClipActionHooks for HubClipActions {
         }
     }
 
-    fn action_ran(&self, session_id: u64, action: Action) {
+    fn action_starting(&self, session_id: u64, device: Option<DeviceId>, action: Action) {
         let Some(hub) = self.hub.upgrade() else { return };
-        let Some(device) = hub
-            .core()
-            .and_then(|c| c.host().sessions().into_iter().find(|s| s.session_id == session_id))
-            .map(|s| s.device)
-        else {
-            return;
+        // The session's own peer first: it is known even when the session has left the live table. Only a session
+        // that never carried a device (none on a host) is looked up there, and one nobody can name is still recorded.
+        let device = device.or_else(|| {
+            hub.core()
+                .and_then(|c| c.host().sessions().into_iter().find(|s| s.session_id == session_id))
+                .map(|s| s.device)
+        });
+        let device = match device {
+            Some(d) => DeviceRef::Known(d),
+            None => DeviceRef::Unknown { addr: [0; 4], device_id: None },
         };
         hub.p.audit.append(AuditEntry {
             time_ms: hub.p.wall.unix_ms(),
-            device: DeviceRef::Known(device),
+            device,
             event: AuditEvent::ActionRun(action),
             duration_s: None,
         });

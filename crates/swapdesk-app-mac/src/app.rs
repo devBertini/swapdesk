@@ -27,6 +27,7 @@ use swapdesk_secret_mac::{
     KeychainLocation, MacSecretStore, SecretLocation, create_keychain_file, delete_keychain_file,
 };
 use swapdesk_shell_mac::{ViewerHooks, Waker, run_with_host, system_dark, system_language};
+use swapdesk_sys_mac::actions::MacActions;
 use swapdesk_ui::mock::{MockBackend, Scenario};
 use swapdesk_ui::service_backend::ViewerSink;
 use swapdesk_ui::{UiBackend, UiState};
@@ -214,6 +215,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }));
     // This Mac hosts (stage 24): the helper loop runs in this process. A self-test run stays a viewer only.
     if options.selftest.is_none() {
+        // "Bloquear ao terminar" (F-SESS-03): the end of a hosted session locks the screen as the quick action does.
+        params.hooks = Arc::new(crate::lock_end::LockOnEnd::new(MacActions::user, Arc::clone(&trace)));
         params.host_helper = Some(crate::host::host_helper(Arc::clone(&clock)));
     }
     // The administrator confirmation (docs/ELEVATION-MAC.md): macOS's own dialog on a normal run. The self-test, the

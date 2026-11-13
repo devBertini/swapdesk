@@ -361,6 +361,23 @@ fn lock_on_end_kills_the_token_and_locks_the_host() {
     });
 }
 
+/// F-SESS-03: the screen locks when a session ends, only with the setting on, and once per end: a final end (the
+/// host's "Desconectar" here) locks with it on and does not with it off.
+#[test]
+fn a_final_end_locks_the_host_once_with_the_setting_on_and_never_with_it_off() {
+    run_paused(async {
+        for (on, locks) in [(true, 1), (false, 0)] {
+            let f = fx(CF, CF);
+            f.ui.set_lock_on_end(on);
+            let mut s = f.session(CF).await;
+            assert!(f.mem.host.disconnect(s.grant().session_id));
+            wait_event(&mut s, Duration::from_secs(1), "the end", |e| matches!(e, ViewerEvent::Ended(_))).await;
+            eventually(Duration::from_secs(1), "the host to end", || f.mem.host.sessions().is_empty()).await;
+            assert_eq!(f.ui.locks.load(std::sync::atomic::Ordering::SeqCst), locks, "setting {on}");
+        }
+    });
+}
+
 #[test]
 fn a_token_lasts_60_seconds_from_the_loss() {
     run_paused(async {
