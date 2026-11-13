@@ -93,6 +93,17 @@ fn found(ev: &DiscoveryEvent, fp: u8) -> Option<&Peer> {
     }
 }
 
+/// Each test's private mDNS port, below Windows' dynamic range (49152 and up): Hyper-V and WinNAT reserve blocks of
+/// that range at each boot, and an mDNS port inside such a block binds nothing, so every peer goes unseen (and a test of
+/// absence would pass without testing). The port must bind now, or the test stops on that.
+fn mdns_port(n: u16) -> u16 {
+    let port = 45353 + n;
+    if let Err(e) = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)) {
+        panic!("the test's mDNS port {port} cannot be bound on this machine: {e}");
+    }
+    port
+}
+
 fn config(mdns_port: u16, service_port: u16) -> Config {
     Config { mdns_port, service_port, ..Config::default() }
 }
@@ -104,8 +115,9 @@ fn two_instances_discover_each_other_on_an_approved_interface_within_5_seconds()
     let b_nets: Arc<dyn NetInterfaces> =
         Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
 
-    let a = Discovery::start(a_nets, txt("Alpha", 0xA1, Os::Windows), config(54353, 47820)).unwrap();
-    let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::MacOs), config(54353, 47822)).unwrap();
+    let port = mdns_port(0);
+    let a = Discovery::start(a_nets, txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
+    let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::MacOs), config(port, 47822)).unwrap();
     assert!(!a.applied().is_empty() && !b.applied().is_empty());
 
     let t0 = Instant::now();
@@ -151,8 +163,9 @@ fn two_instances_discover_each_other_on_an_approved_interface_within_5_seconds()
 fn an_instance_never_reports_itself_nor_a_peer_at_its_own_address() {
     let Some((_real, _fake)) = setup() else { return };
     // Both instances share this machine's real address: each answer is "own address" for the guard.
-    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(54354, 47820)).unwrap();
-    let b = Discovery::start(real_nets(), txt("Beta", 0xB2, Os::Windows), config(54354, 47822)).unwrap();
+    let port = mdns_port(1);
+    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
+    let b = Discovery::start(real_nets(), txt("Beta", 0xB2, Os::Windows), config(port, 47822)).unwrap();
     assert!(
         wait_for(&a, Duration::from_secs(4), |_| true).is_none(),
         "A reported a peer that sits at this machine's own address"
@@ -168,11 +181,12 @@ fn an_instance_never_reports_itself_nor_a_peer_at_its_own_address() {
 #[test]
 fn nothing_is_announced_or_browsed_when_no_interface_is_approved() {
     let Some((real, fake)) = setup() else { return };
-    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(54355, 47820)).unwrap();
+    let port = mdns_port(2);
+    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
     // B sees the same PC but every physical interface looks virtual: the guard approves nothing.
     let b_nets: Arc<dyn NetInterfaces> =
         Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: true });
-    let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::Windows), config(54355, 47822)).unwrap();
+    let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::Windows), config(port, 47822)).unwrap();
     assert!(b.applied().is_empty());
     assert!(
         wait_for(&a, Duration::from_secs(4), |e| found(e, 0xB2).is_some()).is_none(),
@@ -214,8 +228,9 @@ fn an_address_change_starts_a_fresh_daemon_and_both_sides_follow_the_new_address
     let moved = Ipv4Addr::new(a, b, c, if d == 247 { 246 } else { 247 });
     let b_nets =
         Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
-    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(54356, 47820)).unwrap();
-    let b = Discovery::start(b_nets.clone(), txt("Beta", 0xB2, Os::MacOs), config(54356, 47822)).unwrap();
+    let port = mdns_port(3);
+    let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
+    let b = Discovery::start(b_nets.clone(), txt("Beta", 0xB2, Os::MacOs), config(port, 47822)).unwrap();
     wait_for(&a, Duration::from_secs(5), |e| found(e, 0xB2).is_some_and(|p| p.links.iter().any(|l| l.remote == fake)))
         .expect("A did not find B at its first address");
     wait_for(&b, Duration::from_secs(5), |e| found(e, 0xA1).is_some()).expect("B did not find A");
