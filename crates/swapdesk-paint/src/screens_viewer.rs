@@ -279,7 +279,10 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
         .then(|| (p.label_ellipsis(peer, SEG_NAME, seg_text), p.label_ellipsis(line, SEG_LINE, seg_text)));
     let seg_w = segment.as_ref().map_or(0.0, |(n, s)| SEG_FRAME + n.w.max(s.w));
     let total = buttons_w(&widths) + if segment.is_some() { seg_w + SEG_SEP } else { 0.0 };
-    let bar = Rect::new(p.snap(col.x + (col.w - total) / 2.0), col.y + 14.0, total, 52.0);
+    // Whole DIPs for the bar's width and its left edge: the text widths of the two systems differ by hundredths, and
+    // a centred edge snapped at 1x and at 2x would land a pixel apart (stage 28 compares the two layouts).
+    let total = total.ceil();
+    let bar = Rect::new(p.snap(col.x + ((col.w - total) / 2.0).floor()), col.y + 14.0, total, 52.0);
     p.shadow(bar, 12.0, 10.0, 30.0, f.fx.shadow_dialog);
     p.fill_rrect(bar, 12.0, f.fx.toolbar);
     let seg_x = bar.x + 6.0;
