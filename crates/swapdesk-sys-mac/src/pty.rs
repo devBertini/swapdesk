@@ -30,7 +30,7 @@ const HUP_GRACE: Duration = Duration::from_millis(400);
 /// How long `kill` waits for the reaped exit after `SIGKILL`.
 const KILL_WAIT: Duration = Duration::from_secs(2);
 /// Environment variables the shell inherits from this process, when set.
-const INHERITED: [&str; 5] = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"];
+const INHERITED: [&str; 6] = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "ZDOTDIR"];
 
 fn error(kind: ErrorKind, op: &'static str, os_code: Option<i64>, detail: impl Into<String>) -> PlatformError {
     PlatformError { kind, op, os_code, detail: detail.into() }
@@ -500,9 +500,53 @@ impl Read for MasterReader {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::mpsc;
+    use std::sync::{Mutex, Once};
 
     use super::*;
+
+    /// A folder of its own for the test shells' zsh start-up files, so the login shells these tests start never
+    /// touch the user's `~/.zsh_history`. An interactive zsh reads that file at start and writes it at exit under a
+    /// lock file (`.zsh_history.LOCK`) it retries for about ten seconds: a stale lock stalls every login shell on the
+    /// Mac, and a test run would write its commands into the owner's history. The spawner passes `ZDOTDIR` on, and
+    /// zsh then keeps its history and profile there instead of in `$HOME`.
+    static SHELL_DIR_USERS: Mutex<usize> = Mutex::new(0);
+
+    struct ShellDir(PathBuf);
+
+    impl ShellDir {
+        fn open() -> ShellDir {
+            let dir = std::env::temp_dir().join(format!("swapdesk-sys-mac-zdotdir-{}", std::process::id()));
+            let mut users = SHELL_DIR_USERS.lock().unwrap();
+            std::fs::create_dir_all(&dir).expect("the shells' start-up folder");
+            static SET: Once = Once::new();
+            SET.call_once(|| {
+                // SAFETY: done once, under the lock every test that starts a shell takes first, with the same value.
+                unsafe { std::env::set_var("ZDOTDIR", &dir) };
+            });
+            *users += 1;
+            ShellDir(dir)
+        }
+    }
+
+    impl Drop for ShellDir {
+        fn drop(&mut self) {
+            // The last test of this process out removes the folder; a test that starts later makes it again.
+            let mut users = SHELL_DIR_USERS.lock().unwrap();
+            *users -= 1;
+            if *users == 0 {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    /// A login shell of this user on its own start-up folder; keep the folder guard alive as long as the shell
+    /// (bind it first: it is dropped last).
+    fn isolated_pty(request: &PtyRequest) -> (ShellDir, MacPty) {
+        let dir = ShellDir::open();
+        (dir, MacPtySpawner::current_user().spawn_pty(request).unwrap())
+    }
 
     fn request(admin: bool) -> PtyRequest {
         PtyRequest { cols: 80, rows: 24, admin }
@@ -599,7 +643,7 @@ mod tests {
 
     #[test]
     fn a_shell_runs_a_command_as_the_calling_user() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         // SAFETY: no preconditions.
         assert_eq!(pty.child_uid().unwrap(), unsafe { libc::getuid() }, "the shell's own uid is the caller's");
         assert_eq!(pty.account(), user_name(), "the account is the current user's name");
@@ -615,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_login_shell_has_the_dash_argv0() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         // zsh and bash keep the leading dash of a login shell in `$0`.
@@ -626,7 +670,7 @@ mod tests {
 
     #[test]
     fn the_exit_code_reaches_try_wait_and_the_output_ends() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         writer.write_all(b"exit 3\n").unwrap();
@@ -638,7 +682,7 @@ mod tests {
 
     #[test]
     fn resize_changes_the_window_size_the_shell_sees() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         pty.resize(120, 40).unwrap();
@@ -650,8 +694,7 @@ mod tests {
 
     #[test]
     fn the_shell_reports_its_user_and_the_size_it_was_opened_with() {
-        let mut pty =
-            MacPtySpawner::current_user().spawn_pty(&PtyRequest { cols: 97, rows: 31, admin: false }).unwrap();
+        let (_dir, mut pty) = isolated_pty(&PtyRequest { cols: 97, rows: 31, admin: false });
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         // The echoed command line holds `$(whoami)`, never the expanded text, so a match is the shell's own output.
@@ -668,7 +711,7 @@ mod tests {
 
     #[test]
     fn a_resize_reaches_the_shell_as_sigwinch() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         writer
@@ -685,7 +728,7 @@ mod tests {
 
     #[test]
     fn kill_ends_the_shell_and_what_it_started() {
-        let mut pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, mut pty) = isolated_pty(&request(false));
         let rx = pump(pty.reader().unwrap());
         let mut writer = pty.writer().unwrap();
         writer.write_all(b"sleep 300 & echo child=$!\n").unwrap();
@@ -699,7 +742,7 @@ mod tests {
 
     #[test]
     fn dropping_the_terminal_kills_the_shell() {
-        let pty = MacPtySpawner::current_user().spawn_pty(&request(false)).unwrap();
+        let (_dir, pty) = isolated_pty(&request(false));
         let pid = pty.pid() as libc::pid_t;
         drop(pty);
         // SAFETY: signal 0 only checks that the process exists.

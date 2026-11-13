@@ -8,8 +8,9 @@
 //! quick actions are proven where a recorder stands in for the system (`swapdesk_sys_mac::actions`, `swapdesk-term`).
 //! Run with `scripts/mac/remote.sh test -p swapdesk-app-mac`.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use swapdesk_ipc::{Bytes, FrameReader, FrameWriter, Handshake, Message, Text};
@@ -20,6 +21,43 @@ use crate::host::host_helper;
 use crate::pipe::{PipeWriter, duplex};
 
 const WAIT: Duration = Duration::from_secs(30);
+
+/// A folder of its own for the shells' zsh start-up files, so the login shells these tests start never touch the
+/// user's `~/.zsh_history`. Every interactive zsh reads that file at start and writes it at exit under a lock file
+/// (`.zsh_history.LOCK`) it retries for about ten seconds; a stale lock (a shell killed while it held it, which is what
+/// ending a terminal does) or a busy one stalls every login shell on this Mac, and a test run also rewrote the
+/// owner's history with its commands. The helper passes `ZDOTDIR` on to its shells (`swapdesk_sys_mac::pty`), and zsh
+/// reads its history and profile from there instead of `$HOME`.
+static SHELL_DIR_USERS: Mutex<usize> = Mutex::new(0);
+
+struct ShellDir(PathBuf);
+
+impl ShellDir {
+    fn open() -> ShellDir {
+        let dir = std::env::temp_dir().join(format!("swapdesk-app-mac-zdotdir-{}", std::process::id()));
+        let mut users = SHELL_DIR_USERS.lock().unwrap();
+        std::fs::create_dir_all(&dir).expect("the shells' start-up folder");
+        static SET: Once = Once::new();
+        SET.call_once(|| {
+            // SAFETY: done once, before this test starts the helper whose threads read the environment; the other
+            // tests that run in this process (under `cargo test`) take this same lock first and set the same value.
+            unsafe { std::env::set_var("ZDOTDIR", &dir) };
+        });
+        *users += 1;
+        ShellDir(dir)
+    }
+}
+
+impl Drop for ShellDir {
+    fn drop(&mut self) {
+        // The last test of this process out removes the folder; a test that starts later makes it again.
+        let mut users = SHELL_DIR_USERS.lock().unwrap();
+        *users -= 1;
+        if *users == 0 {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
 
 struct TestClock(Instant);
 
@@ -34,10 +72,13 @@ struct Service {
     writer: FrameWriter<PipeWriter>,
     inbox: Receiver<Message>,
     helper: Option<std::thread::JoinHandle<()>>,
+    /// Dropped last: the shells have ended by then and nothing writes into the folder any more.
+    _shell_dir: ShellDir,
 }
 
 impl Service {
     fn start() -> Service {
+        let shell_dir = ShellDir::open();
         let (service_end, helper_end) = duplex();
         let run = host_helper(Arc::new(TestClock(Instant::now())));
         let helper = std::thread::spawn(move || {
@@ -54,7 +95,7 @@ impl Service {
                 }
             }
         });
-        Service { writer, inbox, helper: Some(helper) }
+        Service { writer, inbox, helper: Some(helper), _shell_dir: shell_dir }
     }
 
     fn send(&mut self, m: Message) {
