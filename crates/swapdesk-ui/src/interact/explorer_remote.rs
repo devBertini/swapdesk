@@ -24,6 +24,9 @@ use crate::api::{
 use crate::state::{Activation, Changed, DataKind, EditId, Effect, Fetch, UiState};
 use crate::strings::MsgKey;
 
+mod scan;
+use scan::{Download, ThereProps};
+
 /// Most entries the right pane loads of one folder.
 pub(crate) const MAX_ENTRIES: usize = 10_000;
 /// Limits of one folder upload (FILES-UI.md 5, the GUESS values).
@@ -135,6 +138,9 @@ pub(crate) struct There {
     pub conflict: Option<Conflict>,
     pub held: Option<Held>,
     pub walk: Option<Walk>,
+    /// A folder download (right to left) scanning or making its local folders, and the properties card of the pane.
+    pub download: Option<Download>,
+    pub props: Option<ThereProps>,
 }
 
 /// A button of a card, as the screen draws it.
@@ -598,13 +604,16 @@ impl UiState {
         })
     }
 
+    /// The free bytes of the shown folder's volume, when known (a 1.1 peer).
+    pub(crate) fn there_free_bytes(&self) -> Option<u64> {
+        let t = &self.explorer.there;
+        (t.proto == Proto::V11).then_some(())?;
+        t.free.or_else(|| self.folder_volume().map(|v| v.free_bytes))
+    }
+
     /// The free space of the shown folder's volume, as the header or status line says it.
     pub(crate) fn there_free_text(&self) -> Option<String> {
-        let t = &self.explorer.there;
-        if t.proto != Proto::V11 {
-            return None;
-        }
-        let free = t.free.or_else(|| self.folder_volume().map(|v| v.free_bytes))?;
+        let free = self.there_free_bytes()?;
         Some(match self.folder_volume() {
             Some(v) if v.total_bytes > 0 => self.tm(&Msg::new(MsgKey::ExplorerVolumeSpace)
                 .with(human_size(self.lang, free))
@@ -629,6 +638,10 @@ impl UiState {
             ControlId::ExpNewFolder => self.there_new_folder(a),
             ControlId::ExpRename => self.there_start_rename(a),
             ControlId::ExpDelete => self.there_ask_trash(a),
+            ControlId::ExpProps => {
+                a.commands.extend(self.there_props_open());
+                a.changed = Changed::VIEWER;
+            }
             _ => return false,
         }
         true
@@ -766,7 +779,13 @@ impl UiState {
     /// Esc: closes what the right pane has open; true when something was.
     pub(crate) fn there_escape(&mut self) -> bool {
         let t = &mut self.explorer.there;
-        let open = t.renaming.is_some() || t.trash.is_some() || t.conflict.is_some();
+        let open = t.renaming.is_some()
+            || t.trash.is_some()
+            || t.conflict.is_some()
+            || t.props.is_some()
+            || t.download.is_some();
+        t.props = None;
+        t.download = None;
         t.renaming = None;
         t.rename_error = None;
         t.trash = None;
@@ -899,7 +918,8 @@ impl UiState {
         let picked = self.entries(there).iter().filter(|e| sel.contains(&e.name));
         let mut any = false;
         for e in picked {
-            if !e.is_dir || (!there && self.upload_folder_block().is_none()) {
+            let folder_ok = if there { self.download_folder_block() } else { self.upload_folder_block() }.is_none();
+            if !e.is_dir || folder_ok {
                 any = true;
             }
         }
@@ -948,7 +968,7 @@ impl UiState {
         let files: Vec<String> = picked.iter().filter(|(_, d)| !d).map(|(n, _)| n.clone()).collect();
         let mut folders: Vec<String> = picked.iter().filter(|(_, d)| *d).map(|(n, _)| n.clone()).collect();
         if !folders.is_empty() {
-            let block = if to_there { self.upload_folder_block() } else { Some(MsgKey::ExplorerFoldersLater) };
+            let block = if to_there { self.upload_folder_block() } else { self.download_folder_block() };
             if let Some(why) = block {
                 self.explorer.note = Some(why);
                 folders.clear();
@@ -1044,20 +1064,28 @@ impl UiState {
                 });
             }
         }
-        if replace.is_empty() {
-            a.commands.extend(copy);
-        } else {
-            let trash = if job.to_there {
+        let trash = (!replace.is_empty()).then(|| {
+            if job.to_there {
                 Command::FilesChange {
                     session_id,
                     change: RemoteChange::Trash { dir: job.remote_dir.clone(), names: replace },
                 }
             } else {
                 Command::LocalTrash { paths: replace.iter().map(|n| job.local_dir.join(n)).collect() }
-            };
-            self.explorer.there.held = Some(Held { trash: trash.clone(), commands: copy });
-            a.commands.push(trash);
+            }
+        });
+        if !job.to_there && !job.folders.is_empty() {
+            // A folder download scans first: nothing is made or sent before the limits passed (FILES-UI.md 5).
+            if self.download_making() {
+                self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerOpFailed));
+                return;
+            }
+            a.commands.extend(self.download_start(job.folders, &job.local_dir, &job.remote_dir, (trash, copy)));
+            self.explorer.transfers_open = true;
+            a.changed = Changed::VIEWER;
+            return;
         }
+        a.commands.extend(self.release(trash, copy));
         if !job.folders.is_empty() {
             let walk = self.explorer.there.walk.get_or_insert_with(Walk::default);
             let idle = walk.step.is_none();
@@ -1075,6 +1103,17 @@ impl UiState {
         }
         self.explorer.transfers_open = true;
         a.changed = Changed::VIEWER;
+    }
+
+    /// The commands of a copy's files: after the bin took the files they replace, when there are any.
+    fn release(&mut self, trash: Option<Command>, copy: Vec<Command>) -> Vec<Command> {
+        match trash {
+            None => copy,
+            Some(trash) => {
+                self.explorer.there.held = Some(Held { trash: trash.clone(), commands: copy });
+                vec![trash]
+            }
+        }
     }
 
     /// The bin answered for a command a replace waits on: the copy goes on when it took everything.

@@ -65,8 +65,8 @@ pub struct ManageView {
     /// Rename and Properties act on one selected row; Delete on one or more.
     pub can_rename: bool,
     pub can_delete: bool,
-    /// Slice 2b: the commands act on the focused pane. Nova pasta needs a folder shown there; Propriedades is for
-    /// this computer's pane only.
+    /// Slice 2b: the commands act on the focused pane. Nova pasta needs a folder shown there; Propriedades needs
+    /// at most one selected row (a 1.1 listing on the other computer's pane).
     pub can_new_folder: bool,
     pub can_props: bool,
     /// The row being renamed is in the other computer's pane (`renaming` names it).
@@ -183,7 +183,7 @@ impl UiState {
     pub(crate) fn manage_activate(&mut self, id: ControlId, a: &mut Activation) -> bool {
         // On the other computer's pane the same gestures are changes there (slice 2b).
         if self.explorer.focus_there
-            && matches!(id, ControlId::ExpNewFolder | ControlId::ExpRename | ControlId::ExpDelete)
+            && matches!(id, ControlId::ExpNewFolder | ControlId::ExpRename | ControlId::ExpDelete | ControlId::ExpProps)
         {
             return self.there_activate(id, a);
         }
@@ -238,6 +238,7 @@ impl UiState {
                     let name = path
                         .file_name()
                         .map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+                    self.explorer.there.props = None;
                     self.explorer.manage.props = Some((name, path.clone(), None));
                     a.commands.push(Command::LocalProps { path });
                     a.changed = Changed::VIEWER;
@@ -245,6 +246,7 @@ impl UiState {
             }
             ControlId::ExpPropsClose => {
                 self.explorer.manage.props = None;
+                self.explorer.there.props = None;
                 a.changed = Changed::VIEWER;
             }
             ControlId::ExpHidden => {
@@ -281,6 +283,11 @@ impl UiState {
 
     /// A slice 2a command was done: the listing is read again, and a new folder opens its rename field.
     pub(crate) fn manage_done(&mut self, command: &Command) -> Changed {
+        if let Command::LocalMakeDir { path } = command
+            && let Some(changed) = self.download_made(path, None)
+        {
+            return changed;
+        }
         match command {
             Command::LocalRename { .. } => {
                 self.explorer.manage.renaming = None;
@@ -304,6 +311,11 @@ impl UiState {
     /// A slice 2a command failed with `code`: the rename field stays open with the reason, any other change says why
     /// in the left pane's status.
     pub(crate) fn manage_failed(&mut self, command: &Command, code: ApiCode) -> Changed {
+        if let Command::LocalMakeDir { path } = command
+            && let Some(changed) = self.download_made(path, Some(code))
+        {
+            return changed;
+        }
         self.held_after(command, false);
         let reason = match (command, code) {
             (Command::LocalRename { .. }, ApiCode::Refused) => {
@@ -400,6 +412,7 @@ impl UiState {
             };
             (title, lines)
         });
+        let props = props.or_else(|| self.there_props_view());
         let renaming = match (&there.renaming, &m.renaming) {
             (Some(r), _) => Some((r.clone(), there.rename_error.map(|k| self.t(k)))),
             (None, Some(r)) => Some((r.clone(), m.rename_error.map(|k| self.t(k)))),
@@ -417,7 +430,7 @@ impl UiState {
             renaming,
             renaming_there: there.renaming.is_some(),
             can_new_folder: if focus_there { there_ok } else { true },
-            can_props: here,
+            can_props: if focus_there { self.there_props_ok() } else { here },
             change_why,
             delete_why,
             trash_there: self.there_trash_card(),

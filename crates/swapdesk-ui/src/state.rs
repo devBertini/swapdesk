@@ -2541,7 +2541,10 @@ impl UiState {
                     Some(Command::FilesListPage { path, start, .. }) => Some((path, start)),
                     _ => None,
                 };
-                self.there_page(asked, page)
+                match self.scan_page(asked.as_ref(), page) {
+                    Ok(changed) => changed,
+                    Err(page) => self.there_page(asked, page),
+                }
             }
             Reply::ChangeResults(results) => self.there_change_results(pending.map(|p| p.command), results),
             Reply::RemoteVolumes(v) => self.there_volumes(v),
@@ -2577,7 +2580,12 @@ impl UiState {
                 return self.here_failed(error.code);
             }
             Command::FilesVolumes { .. } => return self.there_volumes_failed(error.code),
-            c @ Command::FilesListPage { .. } => return self.there_page_failed(c, error.code),
+            c @ Command::FilesListPage { path, start, .. } => {
+                if self.scan_failed(path, *start, error.code) {
+                    return Changed::VIEWER;
+                }
+                return self.there_page_failed(c, error.code);
+            }
             c @ Command::FilesChange { .. } => return self.there_change_failed(c, error.code),
             Command::LocalPlaces => return Changed::NONE,
             Command::LocalKinds { .. } => return self.drop_failed(),

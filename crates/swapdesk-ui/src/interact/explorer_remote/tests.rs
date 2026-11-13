@@ -812,6 +812,221 @@ fn a_folder_upload_needs_control_and_a_1_1_peer() {
     assert!(s.explorer_note().is_some_and(|n| n.contains("precisa também da permissão de controlar")));
 }
 
+// ----- the folder download and the right pane's properties (FILES-UI.md 5, 3.2) -----
+
+fn list_cmd(s: &UiState, path: &str, start: u32) -> Command {
+    Command::FilesListPage { session_id: s.session_id().unwrap(), path: path.into(), start }
+}
+
+fn make_dir(path: PathBuf) -> Command {
+    Command::LocalMakeDir { path }
+}
+
+fn get(path: &str, dir: PathBuf) -> Command {
+    Command::FilesGet { session_id: 1, remote_path: path.into(), local_dir: dir }
+}
+
+fn page_of(s: &mut UiState, path: &str, start: u32, entries: Vec<RemoteEntry>, next: Option<u32>) {
+    let c = list_cmd(s, path, start);
+    answer(s, &c, Ok(Reply::RemotePage(page(path, start, entries, next))));
+}
+
+fn copy_folder_down(s: &mut UiState, name: &str) -> Activation {
+    s.explorer.focus_there = true;
+    select_there(s, name);
+    s.activate(ControlId::ExpCopy)
+}
+
+fn select_there_more(s: &mut UiState, name: &str) {
+    s.explorer.panes[1].selected.insert(name.to_string());
+}
+
+#[test]
+fn a_folder_download_makes_the_local_folders_before_fetching_the_files_into_them() {
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    select_there(&mut s, "Contratos");
+    assert!(s.explorer_can_copy(), "a folder can come from a 1.1 peer");
+    let a = s.activate(ControlId::ExpCopy);
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)], "the scan starts; nothing is made or fetched");
+    page_of(
+        &mut s,
+        "Contratos",
+        0,
+        vec![remote("a.txt", RemoteKind::File, 1), remote("Sub", RemoteKind::Dir, 0)],
+        Some(2),
+    );
+    assert_eq!(s.take_followups(), vec![list_cmd(&s, "Contratos", 2)], "every page of a folder");
+    page_of(&mut s, "Contratos", 2, vec![remote("b.txt", RemoteKind::File, 1)], None);
+    assert_eq!(s.take_followups(), vec![list_cmd(&s, "Contratos/Sub", 0)]);
+    page_of(&mut s, "Contratos/Sub", 0, vec![remote("c.txt", RemoteKind::File, 1)], None);
+    let root = PathBuf::from("C:/u/Downloads").join("Contratos");
+    let f = s.take_followups();
+    assert_eq!(f, vec![make_dir(root.clone())], "the scan is over: the folders are made, on the worker");
+    answer(&mut s, &f[0], Ok(Reply::Done));
+    let f = s.take_followups();
+    assert_eq!(f, vec![make_dir(root.join("Sub"))], "one at a time, parents first");
+    answer(&mut s, &f[0], Err(ApiError::new(ApiCode::Refused)));
+    assert!(s.explorer.there.notice.is_none(), "a folder that exists is merged into");
+    let f = s.take_followups();
+    assert_eq!(
+        &f[..3],
+        &[
+            get("Contratos/a.txt", root.clone()),
+            get("Contratos/b.txt", root.clone()),
+            get("Contratos/Sub/c.txt", root.join("Sub")),
+        ],
+        "the files go into their folders, in order"
+    );
+    assert!(matches!(f.get(3), Some(Command::LocalList { .. })), "the left pane lists the new folders");
+    assert!(s.explorer.there.download.is_none());
+    assert!(s.explorer_transfers_open());
+}
+
+#[test]
+fn a_folder_download_asks_about_the_files_that_exist_and_can_be_cancelled() {
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    select_there(&mut s, "foto.jpg");
+    select_there_more(&mut s, "Contratos");
+    let a = s.activate(ControlId::ExpCopy);
+    assert!(a.commands.is_empty(), "foto.jpg exists here: the card asks first");
+    let a = s.activate(ControlId::ExpConflictKeepBoth);
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)]);
+    // The file of the selection goes after the folders are made, not before.
+    page_of(&mut s, "Contratos", 0, vec![], None);
+    let f = s.take_followups();
+    assert_eq!(f.len(), 1);
+    answer(&mut s, &f[0], Ok(Reply::Done));
+    let f = s.take_followups();
+    assert_eq!(f[0], get("foto.jpg", PathBuf::from("C:/u/Downloads")));
+    // Esc during the scan stops it.
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    s.explorer_key(ExplorerKey::Escape);
+    assert!(s.explorer.there.download.is_none());
+    page_of(&mut s, "Contratos", 0, vec![remote("a.txt", RemoteKind::File, 1)], None);
+    assert!(s.take_followups().iter().all(|c| !matches!(c, Command::LocalMakeDir { .. })));
+}
+
+#[test]
+fn a_folder_download_over_the_limits_does_not_start() {
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    let many: Vec<RemoteEntry> = (0..10_001).map(|i| remote(&format!("f{i}"), RemoteKind::File, 1)).collect();
+    page_of(&mut s, "Contratos", 0, many, None);
+    assert!(s.take_followups().is_empty(), "nothing is made or fetched");
+    assert!(s.explorer.there.download.is_none());
+    assert_eq!(
+        s.explorer_pane(true).notice.as_deref(),
+        Some("Esta cópia passa do limite de 10000 arquivos ou 32 níveis de pastas. Nada foi copiado.")
+    );
+    // 32 levels: the 32nd folder still holds a folder.
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    let mut path = "Contratos".to_string();
+    for level in 1..=32 {
+        page_of(&mut s, &path, 0, vec![remote("d", RemoteKind::Dir, 0)], None);
+        if level < 32 {
+            assert_eq!(s.take_followups().len(), 1, "level {level} goes on");
+            path = format!("{path}/d");
+        }
+    }
+    assert!(s.take_followups().is_empty(), "nothing is made");
+    assert!(s.explorer.there.download.is_none());
+    assert!(s.explorer_pane(true).notice.is_some_and(|n| n.contains("32 níveis")));
+}
+
+#[test]
+fn a_folder_download_from_a_1_0_host_is_unchanged() {
+    let mut s = opened_10();
+    s.explorer.focus_there = true;
+    select_there(&mut s, "Documents");
+    assert!(!s.explorer_can_copy(), "folders only: nothing to copy");
+    let a = s.activate(ControlId::ExpCopy);
+    assert!(a.commands.is_empty());
+    assert!(s.explorer.there.download.is_none());
+    select_there_more(&mut s, "nota.txt");
+    let a = s.activate(ControlId::ExpCopy);
+    assert_eq!(a.commands, vec![get("nota.txt", PathBuf::from("C:/u/Downloads"))], "files only, as before");
+    assert!(s.explorer_note().is_some(), "and the note says folders are left out");
+}
+
+#[test]
+fn properties_of_a_remote_file_come_from_the_listing() {
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    s.explorer.there.entries.iter_mut().find(|e| e.name == "notas.txt").unwrap().mtime_ms = 1_700_000_000_000;
+    s.refresh_there_rows();
+    select_there(&mut s, "notas.txt");
+    assert!(s.explorer_manage().can_props, "enabled on the right pane with one selection");
+    let a = s.activate(ControlId::ExpProps);
+    assert!(a.commands.is_empty(), "a file needs no walk");
+    let (title, lines) = s.explorer_manage().props.expect("the card");
+    assert_eq!(title, "Propriedades de notas.txt");
+    assert!(lines.contains(&"Tipo: Documento de texto".to_string()), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("Tamanho: 1 KB")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("Modificado: ")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("Livre neste disco")), "{lines:?}");
+    let specs = s.controls(WindowKind::Viewer);
+    assert!(specs.iter().any(|c| c.id == ControlId::ExpPropsClose && c.region == Region::Dialog));
+    s.activate(ControlId::ExpPropsClose);
+    assert!(s.explorer_manage().props.is_none());
+}
+
+#[test]
+fn properties_of_a_remote_folder_count_pages_and_subfolders() {
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    select_there(&mut s, "Contratos");
+    let a = s.activate(ControlId::ExpProps);
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)]);
+    assert!(s.explorer_manage().props.unwrap().1.contains(&"Contando…".to_string()));
+    page_of(
+        &mut s,
+        "Contratos",
+        0,
+        vec![remote("a", RemoteKind::File, 100), remote("Sub", RemoteKind::Dir, 0)],
+        Some(2),
+    );
+    assert_eq!(s.take_followups(), vec![list_cmd(&s, "Contratos", 2)]);
+    page_of(&mut s, "Contratos", 2, vec![remote("b", RemoteKind::File, 200)], None);
+    assert_eq!(s.take_followups(), vec![list_cmd(&s, "Contratos/Sub", 0)]);
+    assert!(s.explorer_manage().props.unwrap().1.contains(&"Contando…".to_string()));
+    page_of(&mut s, "Contratos/Sub", 0, vec![remote("c", RemoteKind::File, 300)], None);
+    assert!(s.take_followups().is_empty());
+    let lines = s.explorer_manage().props.unwrap().1;
+    let size = super::super::explorer::human_size(Language::PtBr, 600);
+    assert!(lines.contains(&format!("3 arquivos e 1 pasta, {size}")), "{lines:?}");
+    assert!(!lines.contains(&"Contando…".to_string()));
+    assert!(lines.contains(&"Tipo: Pasta".to_string()));
+    assert_eq!(s.explorer.there.folder, "", "the pane's own listing was not touched by the count");
+}
+
+#[test]
+fn properties_are_enabled_on_the_right_pane_for_one_selection_or_none_only() {
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    assert!(s.explorer_manage().can_props, "nothing selected: the folder shown");
+    select_there(&mut s, "notas.txt");
+    assert!(s.explorer_manage().can_props);
+    select_there_more(&mut s, "foto.jpg");
+    assert!(!s.explorer_manage().can_props, "two rows: disabled");
+    let a = s.activate(ControlId::ExpProps);
+    assert!(a.commands.is_empty() && s.explorer_manage().props.is_none());
+    // A 1.0 peer lists no pages to count with.
+    let mut s = opened_10();
+    s.explorer.focus_there = true;
+    assert!(!s.explorer_manage().can_props);
+    // The shown folder, when nothing is selected; Esc closes the card.
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    let a = s.activate(ControlId::ExpProps);
+    assert_eq!(a.commands, vec![list_cmd(&s, "", 0)]);
+    s.explorer_key(ExplorerKey::Escape);
+    assert!(s.explorer_manage().props.is_none());
+}
+
 // ----- the scenarios -----
 
 #[test]
