@@ -128,8 +128,47 @@ pub const MAX_FS_OPS: usize = 4;
 
 /// The answer to an `FsOp` that is one too many: `BUSY` for every name, in order.
 pub fn busy_result(op: &FsOp) -> Message {
-    let results = op.op.names().into_iter().map(|n| OpItem { name: n.to_string(), code: ErrorCode::Busy }).collect();
+    failed_result(op, ErrorCode::Busy)
+}
+
+/// An answer that gives `code` to every name of `op`, in order.
+pub fn failed_result(op: &FsOp, code: ErrorCode) -> Message {
+    let results = op.op.names().into_iter().map(|n| OpItem { name: n.to_string(), code }).collect();
     Message::FsOpResult(FsOpResult { op_id: op.op_id, results })
+}
+
+/// The disk work of one `FsOp`, apart from the engine: it holds only the disk, so it runs without the engine's lock
+/// and a long change (a copy across volumes) leaves the session's other messages alone.
+pub struct OpJob {
+    fs: Arc<dyn Fs>,
+    op: FsOp,
+}
+
+impl OpJob {
+    pub fn op(&self) -> &FsOp {
+        &self.op
+    }
+
+    /// Does the change: each name its own call, in order, and its own result; what was done stays done. Blocks.
+    pub fn run(&self) -> Vec<OpItem> {
+        use std::path::Path;
+        let fs = &self.fs;
+        let item = |name: &str, r: Result<(), ErrorCode>| OpItem {
+            name: name.to_string(),
+            code: r.err().unwrap_or(ErrorCode::NoError),
+        };
+        match &self.op.op {
+            FsOpKind::MakeDir { parent, name } => vec![item(name, fs.make_dir(Path::new(parent), name))],
+            FsOpKind::Rename { dir, name, new_name } => vec![item(name, fs.rename(Path::new(dir), name, new_name))],
+            FsOpKind::Move { from_dir, names, to_dir } => names
+                .iter()
+                .map(|n| item(&n.name, fs.move_into(Path::new(from_dir), &n.name, Path::new(to_dir)).map(|_| ())))
+                .collect(),
+            FsOpKind::Trash { dir, names } => {
+                names.iter().map(|n| item(&n.name, fs.trash(Path::new(dir), &n.name))).collect()
+            }
+        }
+    }
 }
 
 /// What the caller must do.
@@ -814,39 +853,36 @@ impl Engine {
         }
     }
 
-    /// Host: one change message. Each name gets its own call, in order, and its own result; what was done stays done.
+    /// Host: one change message, run to its end on this thread. Each name gets its own call, in order, and its own
+    /// result; what was done stays done. The handler does not use this: it splits the work (see [`Engine::begin_op`]) so
+    /// a long change never holds the session's message worker.
     fn on_fs_op(&mut self, m: FsOp) -> Vec<Out> {
-        if self.cfg.side != Side::Host {
-            return vec![error_msg(ErrorCode::NotPermitted, 0x0410, m.op_id)];
+        match self.begin_op(m) {
+            Ok(job) => {
+                let done = job.run();
+                self.finish_op(&job, done)
+            }
+            Err(outs) => outs,
         }
-        use std::path::Path;
-        let fs = Arc::clone(&self.fs);
-        let item = |name: &str, r: Result<(), ErrorCode>| OpItem {
-            name: name.to_string(),
-            code: r.err().unwrap_or(ErrorCode::NoError),
-        };
-        let (op, first_dir, other_dir, results) = match &m.op {
-            FsOpKind::MakeDir { parent, name } => {
-                (0u8, parent.as_str(), None, vec![item(name, fs.make_dir(Path::new(parent), name))])
-            }
-            FsOpKind::Rename { dir, name, new_name } => {
-                (1, dir.as_str(), None, vec![item(name, fs.rename(Path::new(dir), name, new_name))])
-            }
-            FsOpKind::Move { from_dir, names, to_dir } => (
-                2,
-                from_dir.as_str(),
-                Some(to_dir.as_str()),
-                names
-                    .iter()
-                    .map(|n| item(&n.name, fs.move_into(Path::new(from_dir), &n.name, Path::new(to_dir)).map(|_| ())))
-                    .collect(),
-            ),
-            FsOpKind::Trash { dir, names } => (
-                3,
-                dir.as_str(),
-                None,
-                names.iter().map(|n| item(&n.name, fs.trash(Path::new(dir), &n.name))).collect(),
-            ),
+    }
+
+    /// Host: takes a change message apart. `Err` is the answer when there is nothing to run (this is not a host);
+    /// `Ok` is the disk work, which [`OpJob::run`] does without the engine, and [`Engine::finish_op`] then turns into
+    /// the answer and the audit events.
+    pub fn begin_op(&mut self, m: FsOp) -> Result<OpJob, Vec<Out>> {
+        if self.cfg.side != Side::Host {
+            return Err(vec![error_msg(ErrorCode::NotPermitted, 0x0410, m.op_id)]);
+        }
+        Ok(OpJob { fs: Arc::clone(&self.fs), op: m })
+    }
+
+    /// Host: the answer and the audit events of a change whose disk work is done.
+    pub fn finish_op(&mut self, job: &OpJob, results: Vec<OpItem>) -> Vec<Out> {
+        let (op, first_dir, other_dir) = match &job.op.op {
+            FsOpKind::MakeDir { parent, .. } => (0u8, parent.as_str(), None),
+            FsOpKind::Rename { dir, .. } => (1, dir.as_str(), None),
+            FsOpKind::Move { from_dir, to_dir, .. } => (2, from_dir.as_str(), Some(to_dir.as_str())),
+            FsOpKind::Trash { dir, .. } => (3, dir.as_str(), None),
         };
         let count = u32::try_from(results.iter().filter(|r| r.code == ErrorCode::NoError).count()).unwrap_or(u32::MAX);
         let mut outs: Vec<Out> = Vec::new();
@@ -861,7 +897,7 @@ impl Engine {
         } else {
             2
         };
-        outs.push(Out::Msg(Message::FsOpResult(FsOpResult { op_id: m.op_id, results })));
+        outs.push(Out::Msg(Message::FsOpResult(FsOpResult { op_id: job.op.op_id, results })));
         if count > 0 {
             outs.push(Out::Event(Event::Changed { op, count, area }));
         }

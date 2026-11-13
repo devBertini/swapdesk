@@ -12,7 +12,7 @@
 //! * **Listings** are answered when the host's `DirListing` arrives (up to 8 s: the host answers a refused or failed
 //!   request with nothing the protocol lets this side tell from silence).
 //! * **The explorer** (ops 46 to 48, minor 2): a page, a change and the volume list go to the host as `DirPage`,
-//!   `FsOp` and `VolumesRequest` and are answered when its message comes back (a change waits up to 30 s). Toward a
+//!   `FsOp` and `VolumesRequest` and are answered when its message comes back (a change waits as long as the host may take, see `op_wait`). Toward a
 //!   host of minor below 2 each answers `Invalid` at once, which is how the interface learns the peer is a 1.0 host.
 //!   A volume list the host pushes unasked becomes the notification of kind 22. The host side's audit events of the
 //!   explorer (a change done, a new kind of volume reached) are written here too: counts and kinds only.
@@ -41,8 +41,20 @@ const MAX_TRANSFERS: usize = 8;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How long a listing waits for the host.
 const LIST_WAIT: Duration = Duration::from_secs(8);
-/// How long a change waits for the host's answer (FILES-UI.md 7.4).
-const OP_WAIT: Duration = Duration::from_secs(30);
+/// Slack on top of what the host may take, for the trip and the queue.
+const OP_SLACK: Duration = Duration::from_secs(10);
+
+/// How long a change waits for the host's answer (FILES-UI.md 7.4): what the host may take for every name (each its own
+/// call, so `CALL_TIMEOUT`, or `MOVE_CALL_TIMEOUT` for a move) plus some slack. The host always answers inside that, with
+/// the true result, so `Timeout` means the host went silent, never "a long move is still running".
+fn op_wait(op: &FsOpKind) -> Duration {
+    let (each, n) = match op {
+        FsOpKind::Move { names, .. } => (swapdesk_files::MOVE_CALL_TIMEOUT, names.len()),
+        FsOpKind::Trash { names, .. } => (swapdesk_files::CALL_TIMEOUT, names.len()),
+        FsOpKind::MakeDir { .. } | FsOpKind::Rename { .. } => (swapdesk_files::CALL_TIMEOUT, 1),
+    };
+    each.saturating_mul(u32::try_from(n.max(1)).unwrap_or(u32::MAX)).saturating_add(OP_SLACK)
+}
 /// The first protocol minor that has the explorer's messages.
 const EXPLORER_MINOR: u16 = 2;
 /// How many times a reissue looks for the new connection's handler, and the pause between looks.
@@ -214,7 +226,8 @@ impl Hub {
     pub fn files_change(self: &Arc<Self>, conn: &Arc<Conn>, req: u32, session_id: u64, change: FsChange) {
         let Some(handle) = self.explorer_handle(conn, req, session_id) else { return };
         let op = op_of(change);
-        self.explorer_ask(conn, req, &handle, Waits::Op, OP_WAIT, |op_id| Command::FsOp { op_id, op });
+        let wait = op_wait(&op);
+        self.explorer_ask(conn, req, &handle, Waits::Op, wait, |op_id| Command::FsOp { op_id, op });
     }
 
     /// `FilesVolumes` (48): the host's home, places and volumes.
@@ -665,5 +678,25 @@ fn command_of(id: u32, start: &Start) -> Command {
         }
         // Never reissued: the filter keeps these out.
         Start::Theirs => Command::Cancel(id),
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn names(n: usize) -> Vec<FsName> {
+        (0..n).map(|i| FsName { name: format!("n{i}") }).collect()
+    }
+
+    #[test]
+    fn a_change_is_waited_for_longer_than_the_host_may_take_for_it() {
+        let mv = |n| FsOpKind::Move { from_dir: String::new(), names: names(n), to_dir: String::new() };
+        assert!(op_wait(&mv(1)) > swapdesk_files::MOVE_CALL_TIMEOUT, "a long move is not a timeout");
+        assert!(op_wait(&mv(64)) > swapdesk_files::MOVE_CALL_TIMEOUT * 64, "each name has its own call");
+        let trash = FsOpKind::Trash { dir: String::new(), names: names(3) };
+        assert!(op_wait(&trash) > swapdesk_files::CALL_TIMEOUT * 3);
+        let dir = FsOpKind::MakeDir { parent: String::new(), name: "x".into() };
+        assert!(op_wait(&dir) > swapdesk_files::CALL_TIMEOUT);
     }
 }

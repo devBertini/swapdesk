@@ -31,13 +31,16 @@ mod volumes;
 
 pub use access::{AccessState, ReceiveAccess};
 pub use disk::{DirRead, Fs, FsEntry, FsStat, Kind, MAX_IO, Moved, ReadHandle};
-pub use engine::{DEFAULT_MAX_FILE_SIZE, Engine, Event, FilesConfig, MAX_FS_OPS, Out, Side, busy_result};
+pub use engine::{
+    DEFAULT_MAX_FILE_SIZE, Engine, Event, FilesConfig, MAX_FS_OPS, OpJob, Out, Side, busy_result, failed_result,
+};
 pub use handler::{Command, FilesHandler, FilesSink};
 pub use listing::{Listing, list_dir, list_dir_with};
 pub use local::{FreeSpaceFn, LocalFs};
 pub use name::validate_name;
 pub use proxy::{
-    CALL_TIMEOUT, CallerSource, DEFAULT_RECEIVE, FsCaller, FsServer, Pending, PipeCaller, PipeFs, Roots, Tokens,
+    CALL_TIMEOUT, CallerSource, DEFAULT_RECEIVE, FsCaller, FsServer, MOVE_CALL_TIMEOUT, Pending, PipeCaller, PipeFs,
+    Roots, Tokens,
 };
 pub use recv::{FinishError, Incoming};
 pub use send::{ChunkReader, Outgoing};

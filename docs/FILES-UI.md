@@ -340,6 +340,8 @@ Which volumes are published: on Windows, the drive letters whose drive type is f
 
 **As built (slice 2b).** The link and protection rules also cover the writes of a received file (`PartCreate` to `PartRename`, `RemoveFile`, `MetaWrite`), on the home folder too: a home path through a link or junction no longer receives. A link is what `FileType::is_symlink` says (symlinks and junctions); cloud placeholders pass. A protected folder protects itself, what it holds and the folders that hold it. The reach bit of tag 20 is set by listings, `FileGet` paths, `FileOffer.dest` and `FsOp` folders; tag 19 is written only when at least one name was done.
 
+**Long moves (as built).** A change runs as its own task beside the session's other file messages (at most 4 in flight); a `Move` across volumes runs on its own helper thread (at most 8) with a call limit of 1 hour instead of the generic 30 s, and the interface waits for each change as long as the host may take for it, so the viewer always learns the true outcome. Changes of one session have no order among them.
+
 **A volume that goes away.** During a listing: the listing fails with `VOLUME_GONE` (or the page already sent stands and the next page fails); the pane shows its error state. During a transfer: section 5. During an operation: each name not yet done answers `VOLUME_GONE`; what was done stays done. The helper never retries on another volume.
 
 ### 8.2 What the wider reach and the changes add to the threat model

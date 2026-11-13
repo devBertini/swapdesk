@@ -46,6 +46,11 @@ pub const DEFAULT_RECEIVE: &str = "Downloads/Swapdesk";
 
 /// How long a call waits for its answer before it fails with `IoFailed`.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a `Move` waits. A move across volumes copies, verifies and sends the source to the bin, which takes as long
+/// as the bytes need, so it has its own, much longer limit: the generic 30 s would tell the viewer `IoFailed` while the
+/// helper carries on and finishes the move. The limit only catches a hung volume; a move that is merely long gets its
+/// true result. The user helper runs each `Move` on a thread of its own, so a long one holds no other call.
+pub const MOVE_CALL_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Bits of a read id that belong to the serving process; the link tag sits above them.
 const ID_BITS: u32 = 48;
 
@@ -394,16 +399,24 @@ pub struct PipeCaller {
     pending: Arc<Pending>,
     write: Box<dyn Fn(Message) -> bool + Send + Sync>,
     timeout: Duration,
+    move_timeout: Duration,
 }
 
 impl PipeCaller {
     pub fn new(link_id: u64, pending: Arc<Pending>, write: impl Fn(Message) -> bool + Send + Sync + 'static) -> Self {
-        Self { link_id, pending, write: Box::new(write), timeout: CALL_TIMEOUT }
+        Self { link_id, pending, write: Box::new(write), timeout: CALL_TIMEOUT, move_timeout: MOVE_CALL_TIMEOUT }
     }
 
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Another limit for `Move` calls (see [`MOVE_CALL_TIMEOUT`]).
+    #[must_use]
+    pub fn with_move_timeout(mut self, timeout: Duration) -> Self {
+        self.move_timeout = timeout;
         self
     }
 
@@ -418,7 +431,8 @@ impl FsCaller for PipeCaller {
     }
 
     fn call(&self, call: FsCall) -> Result<FsAnswer, ErrorCode> {
-        self.pending.call(self.timeout, |req| (self.write)(Message::FsRequest { req, call }))
+        let timeout = if matches!(call, FsCall::Move { .. }) { self.move_timeout } else { self.timeout };
+        self.pending.call(timeout, |req| (self.write)(Message::FsRequest { req, call }))
     }
 
     fn send(&self, call: FsCall) {

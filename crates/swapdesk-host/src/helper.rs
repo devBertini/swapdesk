@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -49,6 +49,8 @@ const DEFAULT_OUTBOX: Limits = Limits::new(16, DEFAULT_BYTES);
 /// Disk calls queued toward the files thread before the reader waits.
 const FS_QUEUE: usize = 64;
 /// How often the file server looks at the set of mounted volumes, while it serves files (FILES-UI.md 7.4).
+/// Moves the helper runs at once, each on a thread of its own (the service allows 4 changes in flight per session).
+const MAX_MOVES: usize = 8;
 const VOLUME_POLL: Duration = Duration::from_secs(1);
 /// Most cursor updates read per loop turn.
 const CURSOR_BURST: usize = 8;
@@ -1356,8 +1358,32 @@ where
                 .name("helper-fs".into())
                 .spawn(move || {
                     let mut looked = Instant::now();
+                    let moves = Arc::new(AtomicUsize::new(0));
                     loop {
                         match rx.recv_timeout(VOLUME_POLL) {
+                            Ok(Message::FsRequest { req, call: call @ swapdesk_ipc::FsCall::Move { .. } }) => {
+                                // A move across volumes copies every byte: on a thread of its own, so it holds no
+                                // other call (a listing, a transfer's read) and the service's wait for it can be long.
+                                if moves.fetch_add(1, Ordering::SeqCst) >= MAX_MOVES {
+                                    moves.fetch_sub(1, Ordering::SeqCst);
+                                    outbox.send_control(Message::FsReply { req, result: Err(ErrorCode::Busy) });
+                                    continue;
+                                }
+                                let spawned = std::thread::Builder::new().name("helper-fs-move".into()).spawn({
+                                    let (server, outbox, moves) =
+                                        (Arc::clone(&server), outbox.clone(), Arc::clone(&moves));
+                                    move || {
+                                        if let Some(reply) = server.serve(Message::FsRequest { req, call }) {
+                                            outbox.send_control(reply);
+                                        }
+                                        moves.fetch_sub(1, Ordering::SeqCst);
+                                    }
+                                });
+                                if spawned.is_err() {
+                                    moves.fetch_sub(1, Ordering::SeqCst);
+                                    outbox.send_control(Message::FsReply { req, result: Err(ErrorCode::IoFailed) });
+                                }
+                            }
                             Ok(msg) => {
                                 if let Some(reply) = server.serve(msg) {
                                     outbox.send_control(reply);

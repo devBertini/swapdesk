@@ -390,3 +390,34 @@ fn a_wrong_shaped_answer_is_an_io_failure() {
     assert_eq!(none.part_len(Path::new(""), "a").err(), Some(ErrorCode::IoFailed));
     none.close_read(1);
 }
+
+#[test]
+fn a_move_outlasts_the_generic_call_timeout_and_gets_its_true_answer() {
+    // The generic limit is short, the move's is long: a copy that takes longer than the generic limit must answer what
+    // the helper did, not `IoFailed` while the helper carries on.
+    let pending = Arc::new(Pending::new());
+    let answerer = Arc::clone(&pending);
+    let caller = PipeCaller::new(79, Arc::clone(&pending), move |m| {
+        if let Message::FsRequest { req, call } = m {
+            let answerer = Arc::clone(&answerer);
+            let slow = matches!(call, FsCall::Move { .. });
+            std::thread::spawn(move || {
+                // The move takes four times the generic limit; everything else is never answered.
+                if slow {
+                    std::thread::sleep(Duration::from_millis(200));
+                    answerer.complete(req, Ok(FsAnswer::Done));
+                }
+            });
+        }
+        true
+    })
+    .with_timeout(Duration::from_millis(50))
+    .with_move_timeout(Duration::from_secs(10));
+    let mv = FsCall::Move { from_dir: Text("a".into()), name: Text("n".into()), to_dir: Text("b".into()) };
+    assert_eq!(caller.call(mv).ok(), Some(FsAnswer::Done), "a long move is not a failed one");
+    assert_eq!(
+        caller.call(FsCall::PartLen { dir: Text("".into()), name: Text("a".into()) }).err(),
+        Some(ErrorCode::IoFailed),
+        "every other call keeps the generic limit"
+    );
+}

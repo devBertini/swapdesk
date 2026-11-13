@@ -18,7 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::disk::Fs;
-use crate::engine::{Engine, Event, FilesConfig, MAX_FS_OPS, Out, Side, busy_result};
+use crate::engine::{Engine, Event, FilesConfig, MAX_FS_OPS, Out, Side, busy_result, failed_result};
 use crate::local::LocalFs;
 use crate::send::ChunkReader;
 
@@ -447,13 +447,30 @@ async fn worker(
             }
             Work::Msg(m) => {
                 work_tx.peer.fetch_sub(1, Ordering::SeqCst);
-                let is_op = matches!(m, Message::FsOp(_));
-                let e = Arc::clone(&engine);
-                let outs = blocking(move || lock(&e).on_message(m)).await.unwrap_or_default();
-                if is_op {
-                    ops.give();
+                if let Message::FsOp(op) = m {
+                    // A change of the files never runs on this worker: a long one (a copy across volumes) would hold
+                    // every other file message of the session behind it. It takes its place in `ops` (at most
+                    // MAX_FS_OPS, already counted by `on_message`) and gives it back with its answer.
+                    let e = Arc::clone(&engine);
+                    match blocking(move || lock(&e).begin_op(op)).await {
+                        Some(Ok(job)) => {
+                            let task = run_op(Arc::clone(&engine), work_tx.clone(), Arc::clone(&ops), job);
+                            ctx.spawn(task);
+                            continue;
+                        }
+                        Some(Err(outs)) => {
+                            ops.give();
+                            outs
+                        }
+                        None => {
+                            ops.give();
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    let e = Arc::clone(&engine);
+                    blocking(move || lock(&e).on_message(m)).await.unwrap_or_default()
                 }
-                outs
             }
             Work::Cmd(c, place) => {
                 drop(place);
@@ -503,6 +520,25 @@ async fn worker(
             }
         }
     }
+}
+
+/// One change of the host's files, off the worker: the disk work on a blocking thread without the engine's lock, then
+/// the answer and the audit events through the worker's queue, so the viewer always hears what became of it. The
+/// session ending stops the wait, not the disk work: a move that began finishes (copied, verified, source to the bin) or
+/// takes its copy away, never half.
+async fn run_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, job: crate::engine::OpJob) {
+    let job = Arc::new(job);
+    let j = Arc::clone(&job);
+    let outs = match blocking(move || j.run()).await {
+        Some(results) => {
+            let (e, j) = (Arc::clone(&engine), Arc::clone(&job));
+            blocking(move || lock(&e).finish_op(&j, results)).await
+        }
+        None => None,
+    };
+    let outs = outs.unwrap_or_else(|| vec![Out::Msg(failed_result(job.op(), ErrorCode::Internal))]);
+    work.outs(outs).await;
+    ops.give();
 }
 
 /// The sending side of one data stream: header, the bytes from `from`, finish, then `FileDone` through the engine.
