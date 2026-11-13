@@ -564,7 +564,7 @@ fn transfers(f: &mut Frame, r: Rect) {
                 (done as f32 / total.max(1) as f32, f.t(MsgKey::TransferPaused))
             }
             TransferState::Done => (1.0, f.t(MsgKey::TransferReceived)),
-            TransferState::Failed { .. } => (0.0, f.t(MsgKey::TransferFailed)),
+            TransferState::Failed { reason } => (0.0, f.st.transfer_failure_text(reason)),
             TransferState::Queued => (0.0, String::new()),
         };
         let l = p.label(&line, text::CAPTION);

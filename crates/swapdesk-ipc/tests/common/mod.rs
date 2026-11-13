@@ -157,6 +157,7 @@ pub fn network() -> BoxedStrategy<NetworkStatus> {
         Just(Notice::PublicNetwork),
         Just(Notice::FirewallBlocks),
         Just(Notice::ServiceNeedsApproval),
+        txt(64).prop_map(Notice::ReceiveFolderDenied),
         vec(pick(OsPermission::ALL), 0..4).prop_map(|mut v| {
             v.truncate(3);
             Notice::MacPermissionsMissing(v)

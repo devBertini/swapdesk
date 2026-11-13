@@ -237,7 +237,14 @@ pub(crate) struct Hub {
     had_1_0: AtomicBool,
     /// The machine's updater (UPDATES.md 13), shared by the account hubs; none in a development instance.
     updater: std::sync::OnceLock<Arc<update::Updater>>,
+    /// Which folder the system refuses this process for receiving, when it does (macOS "Files and Folders", F-FILE-03).
+    receive_probe: Mutex<Option<ReceiveProbe>>,
+    /// The folder the UIs were last told about, so a change is pushed once.
+    receive_told: Mutex<Option<String>>,
 }
+
+/// Asks the platform which receiving folder it refuses ([`UiHub::set_receive_folder_probe`]).
+pub type ReceiveProbe = Arc<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>;
 
 impl Hub {
     /// Who owns the console, seen from this account (ACCOUNTS.md 5.1).
@@ -404,6 +411,8 @@ impl UiHub {
             shutting: AtomicBool::new(false),
             had_1_0: AtomicBool::new(false),
             updater: std::sync::OnceLock::new(),
+            receive_probe: Mutex::new(None),
+            receive_told: Mutex::new(None),
         });
         let weak = Arc::downgrade(&hub);
         hub.p.presence.set_listener(Arc::new(move || {
@@ -495,6 +504,13 @@ impl UiHub {
     pub fn set_updater(&self, updater: Arc<update::Updater>) {
         updater.subscribe(&self.hub);
         let _ = self.hub.updater.set(updater);
+    }
+
+    /// The Mac's way to learn which receiving folder macOS refused (F-FILE-03). The network status carries the notice
+    /// while the probe names a folder; the UIs are told again after each transfer that ends, so the notice comes
+    /// right after a refused receive and goes once access works.
+    pub fn set_receive_folder_probe(&self, probe: ReceiveProbe) {
+        *lock(&self.hub.receive_probe) = Some(probe);
     }
 
     /// A 1.0 install left its data on this computer (ACCOUNTS.md 10.2): this account's empty Pareados list shows the

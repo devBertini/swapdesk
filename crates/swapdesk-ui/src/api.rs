@@ -51,6 +51,8 @@ pub enum ApiCode {
     Locked,
     Invalid,
     Internal,
+    /// The other computer's volume has too little free space for a file (F-FILE-03).
+    NoSpace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -184,6 +186,8 @@ pub enum Notice {
     FirewallBlocks,
     ServiceNeedsApproval,
     MacPermissionsMissing(Vec<OsPermission>),
+    /// macOS has not given this Mac access to the receiving folder (F-FILE-03): the folder's display name.
+    ReceiveFolderDenied(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

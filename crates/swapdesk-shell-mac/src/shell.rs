@@ -822,7 +822,7 @@ impl Shell {
             Handling::OpenLogsFolder => self.open_logs(),
             Handling::OpenWebPage => {
                 let page = self.state.borrow_mut().take_web_page();
-                if let Some(url) = page.filter(|u| u.starts_with("https://")) {
+                if let Some(url) = page.filter(|u| swapdesk_ui::state::openable_page(u)) {
                     let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
                 }
             }

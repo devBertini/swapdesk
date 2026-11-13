@@ -66,7 +66,7 @@ pub fn desktop_from_wire(v: p::Desktop) -> a::DesktopKind {
 }
 
 pair_enum!(code_to_wire, code_from_wire, a::ApiCode, w::ApiCode;
-    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal);
+    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal, NoSpace);
 pair_enum!(ready_to_wire, ready_from_wire, a::Ready, w::Ready; ReadyToReceive, ServiceOff, ServiceNeedsApproval, NoNetwork);
 pair_enum!(category_to_wire, category_from_wire, a::NetCategoryView, w::NetCategoryView; Public, Private, Domain);
 pair_enum!(os_perm_to_wire, os_perm_from_wire, a::OsPermission, w::OsPermission; ScreenRecording, Accessibility, InputMonitoring);
@@ -116,6 +116,7 @@ fn notice_to_wire(n: &a::Notice) -> w::Notice {
         a::Notice::MacPermissionsMissing(l) => {
             w::Notice::MacPermissionsMissing(l.iter().copied().map(os_perm_to_wire).collect())
         }
+        a::Notice::ReceiveFolderDenied(name) => w::Notice::ReceiveFolderDenied(name.clone()),
     }
 }
 
@@ -127,6 +128,7 @@ fn notice_from_wire(n: w::Notice) -> a::Notice {
         w::Notice::MacPermissionsMissing(l) => {
             a::Notice::MacPermissionsMissing(l.into_iter().map(os_perm_from_wire).collect())
         }
+        w::Notice::ReceiveFolderDenied(name) => a::Notice::ReceiveFolderDenied(name),
     }
 }
 
@@ -807,6 +809,7 @@ mod tests {
             notices: vec![
                 a::Notice::PublicNetwork,
                 a::Notice::MacPermissionsMissing(vec![a::OsPermission::Accessibility]),
+                a::Notice::ReceiveFolderDenied("Downloads".into()),
             ],
         };
         assert_eq!(network_from_wire(network_to_wire(&n)), n);

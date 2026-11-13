@@ -100,6 +100,8 @@ pub enum NoticeKind {
     Firewall,
     Service,
     MacPerms,
+    /// The Mac cannot save into the receiving folder until the user grants it (F-FILE-03).
+    ReceiveFolder,
     /// The last run of Swapdesk ended in a panic (D12): shown once, first.
     Crash,
 }
@@ -731,8 +733,14 @@ pub struct UiState {
 /// 2026-11-12): where a network's profile is set to Private and the firewall is reached.
 pub const WINDOWS_NETWORK_SETTINGS: &str = "ms-settings:network-status";
 
+/// macOS System Settings > Privacy & Security > Files & Folders, where the user grants the receiving folder. The same
+/// text as `swapdesk_sys_mac::FILES_AND_FOLDERS_PANE` (a test in `swapdesk-app-mac` keeps them equal; this crate is
+/// not macOS-only).
+pub const MAC_FILES_AND_FOLDERS_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+
 /// The system pages [`Effect::OpenWebPage`] may open besides an `https://` page. Nothing else is handed to the system.
-pub const SYSTEM_PAGES: &[&str] = &[WINDOWS_NETWORK_SETTINGS];
+pub const SYSTEM_PAGES: &[&str] = &[WINDOWS_NETWORK_SETTINGS, MAC_FILES_AND_FOLDERS_SETTINGS];
 
 /// Whether a shell may hand `page` to the system: an `https://` page or one of [`SYSTEM_PAGES`].
 pub fn openable_page(page: &str) -> bool {
@@ -1458,6 +1466,7 @@ impl UiState {
                 Notice::FirewallBlocks => NoticeKind::Firewall,
                 Notice::ServiceNeedsApproval => NoticeKind::Service,
                 Notice::MacPermissionsMissing(_) => NoticeKind::MacPerms,
+                Notice::ReceiveFolderDenied(_) => NoticeKind::ReceiveFolder,
             }))
             .collect()
     }
@@ -2734,6 +2743,7 @@ impl UiState {
             ApiCode::Locked => MsgKey::ErrLocked,
             ApiCode::Invalid => MsgKey::ErrInvalid,
             ApiCode::Internal => MsgKey::ErrInternal,
+            ApiCode::NoSpace => MsgKey::TransferNoSpace,
         };
         match &error.detail {
             // These say everything themselves: the generic line before them would read as a second problem.

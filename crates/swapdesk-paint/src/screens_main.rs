@@ -958,7 +958,7 @@ fn notice_icon(kind: NoticeKind) -> String {
     match kind {
         NoticeKind::Public | NoticeKind::Firewall => icons::WIFI.to_owned(),
         NoticeKind::Service => icons::lock(),
-        NoticeKind::MacPerms => icons::SHIELD.to_owned(),
+        NoticeKind::MacPerms | NoticeKind::ReceiveFolder => icons::SHIELD.to_owned(),
         NoticeKind::Crash => icons::SHIELD_ALERT.to_owned(),
     }
 }
@@ -968,8 +968,11 @@ fn notice_icon(kind: NoticeKind) -> String {
 fn notice_card(f: &mut Frame, look: Look, kind: NoticeKind, r: Rect) -> Rect {
     let pal = f.pal;
     let (title, body, button) = f.st.notice_texts(kind);
-    let (tint, ink) =
-        if matches!(kind, NoticeKind::MacPerms) { (pal.link_tint, pal.link) } else { (pal.danger_tint, pal.danger) };
+    let (tint, ink) = if matches!(kind, NoticeKind::MacPerms | NoticeKind::ReceiveFolder) {
+        (pal.link_tint, pal.link)
+    } else {
+        (pal.danger_tint, pal.danger)
+    };
     let icon = notice_icon(kind);
     let buttons = [(ControlId::Notice(kind), button, Kind::Primary)];
     let c = Card {

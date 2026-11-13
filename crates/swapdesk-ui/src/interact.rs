@@ -578,6 +578,23 @@ impl UiState {
                 self.name_of(MsgKey::NoticeCrashBody),
                 self.name_of(MsgKey::NoticeCrashButton),
             ),
+            NoticeKind::ReceiveFolder => {
+                let folder = self
+                    .network
+                    .as_ref()
+                    .and_then(|n| {
+                        n.notices.iter().find_map(|x| match x {
+                            Notice::ReceiveFolderDenied(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_default();
+                (
+                    self.name_of(MsgKey::RecvFolderDeniedTitle),
+                    self.tm(&Msg::new(MsgKey::RecvFolderDeniedBody).with(folder)),
+                    self.name_of(MsgKey::RecvFolderDeniedOpen),
+                )
+            }
             NoticeKind::MacPerms => {
                 let missing: Vec<OsPermission> = self
                     .network
@@ -1119,6 +1136,7 @@ impl UiState {
             ApiCode::Locked => MsgKey::ErrLocked,
             ApiCode::Invalid => MsgKey::ErrInvalid,
             ApiCode::Internal => MsgKey::ErrInternal,
+            ApiCode::NoSpace => MsgKey::TransferNoSpace, // never an elevation failure; the text is still true
         };
         Some(self.name_of(key))
     }
@@ -1688,6 +1706,10 @@ impl UiState {
                     a.commands.push(Command::OpenSystemSettings { target: SettingsTarget::LoginItems })
                 }
                 NoticeKind::MacPerms => a.commands.push(Command::RequestOsPermissions),
+                NoticeKind::ReceiveFolder => {
+                    self.web_page = Some(crate::state::MAC_FILES_AND_FOLDERS_SETTINGS.to_owned());
+                    a.effect = Some(Effect::OpenWebPage);
+                }
                 NoticeKind::Crash => {
                     self.crash_notice = false;
                     a.effect = Some(Effect::OpenLogs);

@@ -799,3 +799,44 @@ fn the_hosted_sessions_ui_hears_each_transfer_with_its_direction() {
     });
     p.finish();
 }
+
+#[test]
+fn a_refused_receiving_folder_shows_in_the_network_status_and_goes_when_access_works() {
+    // F-FILE-03: the platform names the folder it refuses; the status carries it with the folder's display name,
+    // the UIs hear of a change once, and it goes when the probe says access works again.
+    let m = Machine::with_interfaces("sala", swapdesk_fakes::FakeNetInterfaces::windows_typical());
+    let refused: Arc<std::sync::Mutex<Option<PathBuf>>> = Arc::default();
+    let probe = Arc::clone(&refused);
+    m.hub.set_receive_folder_probe(Arc::new(move || probe.lock().unwrap().clone()));
+    let mut ui = m.client(info(false));
+    let notices = |ui: &mut Client| match ui.call(UiOp::GetNetwork).unwrap() {
+        ReplyBody::Network(n) => n.notices,
+        other => panic!("not a network: {other:?}"),
+    };
+    assert!(notices(&mut ui).is_empty(), "no refusal yet");
+
+    *refused.lock().unwrap() = Some(PathBuf::from("/Users/ana/Downloads"));
+    assert_eq!(notices(&mut ui), vec![swapdesk_ipc::Notice::ReceiveFolderDenied("Downloads".into())]);
+    m.hub.hub.receive_access_changed();
+    ui.notify("the notice pushed", |n| match n {
+        Notify::NetworkChanged(s)
+            if s.notices == vec![swapdesk_ipc::Notice::ReceiveFolderDenied("Downloads".into())] =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+
+    *refused.lock().unwrap() = None;
+    m.hub.hub.receive_access_changed();
+    ui.notify("the notice gone", |n| match n {
+        Notify::NetworkChanged(s) if s.notices.is_empty() => Some(()),
+        _ => None,
+    });
+}
+
+#[test]
+fn a_no_space_refusal_reaches_the_ui_as_its_own_code() {
+    assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::NoSpace), ApiCode::NoSpace);
+    assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::IoFailed), ApiCode::Internal);
+}

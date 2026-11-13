@@ -108,6 +108,16 @@ pub(crate) fn parse_device_id(text: &str) -> Option<DeviceId> {
     Some(id)
 }
 
+/// The folder's name as the notice says it: its last component (the whole path for a root), at most 64 bytes.
+pub(crate) fn folder_label(folder: &std::path::Path) -> String {
+    let name = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut end = name.len().min(64);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_string()
+}
+
 /// The `ApiCode` of a protocol error code.
 pub(crate) fn api_of(code: ErrorCode) -> ApiCode {
     match code {
@@ -123,6 +133,7 @@ pub(crate) fn api_of(code: ErrorCode) -> ApiCode {
         | ErrorCode::AlreadyPaired
         | ErrorCode::Unavailable => ApiCode::Refused,
         ErrorCode::InvalidName => ApiCode::Invalid,
+        ErrorCode::NoSpace => ApiCode::NoSpace,
         ErrorCode::NoError => ApiCode::Internal,
         _ => ApiCode::Internal,
     }
@@ -181,12 +192,36 @@ impl Hub {
         ThisDevice { name: self.settings().name, os: self.p.os, ready: ready_of(&self.interfaces()), legacy_note }
     }
 
+    /// The receiving folder macOS refuses, as a notice (F-FILE-03); `None` without a probe or without a refusal.
+    fn receive_notice(&self) -> Option<Notice> {
+        let probe = lock(&self.receive_probe).clone()?;
+        probe().map(|folder| Notice::ReceiveFolderDenied(folder_label(&folder)))
+    }
+
+    /// Tells the UIs the network status again when the refused receiving folder changed since it last did. Called
+    /// after a transfer ends: a refused receive turns the notice on, a working one turns it off.
+    pub(crate) fn receive_access_changed(&self) {
+        let now = self.receive_notice().map(|n| match n {
+            Notice::ReceiveFolderDenied(name) => name,
+            _ => String::new(),
+        });
+        let changed = std::mem::replace(&mut *lock(&self.receive_told), now.clone()) != now;
+        if changed {
+            self.notify(Notify::NetworkChanged(self.network_status()));
+        }
+    }
+
     /// The first approved interface that is up, its address and category; the notices the UI shows as banners.
     pub fn network_status(&self) -> NetworkStatus {
         let list = self.interfaces();
         let approved = approved_addrs(&list);
         let Some(first) = approved.first() else {
-            return NetworkStatus { label: String::new(), address: None, category: None, notices: Vec::new() };
+            return NetworkStatus {
+                label: String::new(),
+                address: None,
+                category: None,
+                notices: self.receive_notice().into_iter().collect(),
+            };
         };
         let iface = list.iter().find(|i| i.index == first.if_index);
         let category = iface.and_then(|i| i.category);
@@ -197,6 +232,7 @@ impl Hub {
         if iface.is_some_and(|i| i.inbound_blocked == Some(true)) {
             notices.push(Notice::FirewallBlocks);
         }
+        notices.extend(self.receive_notice());
         NetworkStatus {
             label: first.if_name.clone(),
             address: Some(first.addr.to_string()),

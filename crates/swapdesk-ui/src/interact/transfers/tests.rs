@@ -40,3 +40,16 @@ fn transfers_show_progress_resume_cancel_and_the_saved_as_outcome() {
     transfer(&mut s, 6, 1, "praia.jpg", false, TransferState::Failed { reason: ApiCode::NotPermitted });
     assert!(matches!(s.viewer_transfers()[0].state, TransferState::Failed { reason: ApiCode::NotPermitted }));
 }
+
+#[test]
+fn a_transfer_that_failed_for_lack_of_space_says_so_and_any_other_failure_says_it_did_not_finish() {
+    let mut s = Scenario::Visualizador.prepared_state();
+    transfer(&mut s, 1, 1, "filme.mkv", true, TransferState::Failed { reason: ApiCode::NoSpace });
+    transfer(&mut s, 2, 1, "foto.jpg", true, TransferState::Failed { reason: ApiCode::Internal });
+    let text = |s: &UiState, i: usize| match s.viewer_transfers()[i].state {
+        TransferState::Failed { reason } => s.transfer_failure_text(reason),
+        _ => unreachable!(),
+    };
+    assert_eq!(text(&s, 0), "Sem espaço livre no outro computador");
+    assert_eq!(text(&s, 1), "Não terminou");
+}

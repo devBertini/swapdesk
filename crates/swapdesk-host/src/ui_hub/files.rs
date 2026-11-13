@@ -512,6 +512,7 @@ impl Hub {
                     self.files_note(session_id, FilesNote::SavedAs { session_id, transfer_id: id, name: Text(saved) });
                 }
                 self.transfer_note(session_id, id, &name, outgoing, TransferWire::Done);
+                self.receive_access_changed();
             }
             Event::Sent { id } => {
                 let (name, outgoing) = {
@@ -539,7 +540,11 @@ impl Hub {
                     TransferWire::Paused { done, total, why: ApiCode::Timeout },
                 );
             }
-            Event::Failed { id, code } => self.finish_failed(session_id, id, api_of(code)),
+            Event::Failed { id, code } => {
+                self.finish_failed(session_id, id, api_of(code));
+                // A refused receive may be the missing macOS grant (F-FILE-03): ask the platform now.
+                self.receive_access_changed();
+            }
             Event::Cancelled { id } => {
                 // The user's own cancel removed the record already; this is the other side cancelling.
                 let known = lock(&self.files).recs.contains_key(&(session_id, id));

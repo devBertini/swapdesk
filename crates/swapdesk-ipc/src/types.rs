@@ -40,6 +40,8 @@ wire_enum! {
     ApiCode {
         ServiceDown = 0, NotFound = 1, NotPermitted = 2, NeedsAdmin = 3, Busy = 4,
         Timeout = 5, Refused = 6, Locked = 7, Invalid = 8, Internal = 9,
+        /// The receiving folder's volume has too little free space for the file (F-FILE-03); added after 1.0.
+        NoSpace = 10,
     }
 }
 
@@ -195,6 +197,8 @@ pub enum Notice {
     FirewallBlocks,
     ServiceNeedsApproval,
     MacPermissionsMissing(Vec<OsPermission>),
+    /// The Mac has no access to the receiving folder (F-FILE-03): the folder's display name. Tag 4, added after 1.0.
+    ReceiveFolderDenied(String),
 }
 
 impl Wire for Notice {
@@ -209,6 +213,10 @@ impl Wire for Notice {
                 w.put_u8(3);
                 list.put(w, OsPermission::ALL.len())?;
             }
+            Self::ReceiveFolderDenied(name) => {
+                w.put_u8(4);
+                w.put_str(name, MAX_NAME)?;
+            }
         }
         Ok(())
     }
@@ -219,6 +227,7 @@ impl Wire for Notice {
             1 => Ok(Self::FirewallBlocks),
             2 => Ok(Self::ServiceNeedsApproval),
             3 => Ok(Self::MacPermissionsMissing(<Vec<OsPermission> as Wire>::get(r, OsPermission::ALL.len())?)),
+            4 => Ok(Self::ReceiveFolderDenied(r.str(MAX_NAME)?)),
             t => Err(unknown_tag("Notice", t)),
         }
     }

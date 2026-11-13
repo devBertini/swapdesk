@@ -514,6 +514,7 @@ fn what_stands_alone_is_centred_with_its_text_and_its_buttons_on_one_axis() {
         (Scenario::EstadoRedePublica, Main, page, vec![ControlId::Notice(NoticeKind::Public)]),
         (Scenario::EstadoServicoMac, Main, page, vec![ControlId::Notice(NoticeKind::Service)]),
         (Scenario::EstadoPermissoesMac, Main, page, vec![ControlId::Notice(NoticeKind::MacPerms)]),
+        (Scenario::EstadoPastaRecebimentoMac, Main, page, vec![ControlId::Notice(NoticeKind::ReceiveFolder)]),
         (Scenario::EstadoFechouInesperado, Main, page, vec![ControlId::Notice(NoticeKind::Crash)]),
         (Scenario::EstadoNenhumComputador, Main, page, vec![ControlId::NoComputerAddress]),
         (Scenario::EstadoNaoPareado, Main, page, vec![]),
@@ -893,4 +894,28 @@ fn the_toolbar_draws_the_codec_in_its_session_line() {
     assert!(on.iter().any(|t| t.ends_with("18 ms, 60 qps, HEVC")), "{on:?}");
     let off = drawn_for(false);
     assert!(off.iter().any(|t| t.ends_with("18 ms, 60 qps, H.264")), "{off:?}");
+}
+
+#[test]
+fn the_explorers_transfer_row_says_no_space_for_that_failure_and_did_not_finish_for_the_rest() {
+    use swapdesk_ui::{ApiCode, TransferState, UiEvent};
+    let mut state = Scenario::Explorador.prepared_state();
+    let session_id = state.viewer_session().expect("a viewer session").id;
+    state.activate(ControlId::ExpTransfers);
+    assert!(state.explorer_transfers_open());
+    for (id, name, reason) in [(1, "filme.mkv", ApiCode::NoSpace), (2, "foto.jpg", ApiCode::Internal)] {
+        state.apply(UiEvent::Transfer {
+            transfer_id: id,
+            session_id,
+            name: name.into(),
+            outgoing: true,
+            state: TransferState::Failed { reason },
+        });
+    }
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let _ = paint(Frame::new(&p, &state, &ix, design_size(WindowKind::Viewer), true), WindowKind::Viewer);
+    let drawn = p.drawn.borrow().clone();
+    assert_eq!(drawn.iter().filter(|t| *t == "Sem espaço livre no outro computador").count(), 1, "{drawn:?}");
+    assert_eq!(drawn.iter().filter(|t| *t == "Não terminou").count(), 1, "{drawn:?}");
 }

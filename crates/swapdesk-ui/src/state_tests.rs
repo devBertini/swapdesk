@@ -546,6 +546,32 @@ fn network_notices_replace_the_content_with_their_card() {
 }
 
 #[test]
+fn a_refused_receiving_folder_shows_a_notice_with_its_name_and_the_button_opens_files_and_folders() {
+    let mut s = Scenario::EstadoPastaRecebimentoMac.prepared_state();
+    assert_eq!(s.notices(), vec![NoticeKind::ReceiveFolder]);
+    let (title, body, button) = s.notice_texts(NoticeKind::ReceiveFolder);
+    assert_eq!(title, "O Swapdesk não pode salvar na pasta de recebimento");
+    assert!(body.contains("Downloads") && !body.contains("{0}"), "{body}");
+    assert_eq!(button, "Abrir Arquivos e Pastas");
+    let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::Notice(NoticeKind::ReceiveFolder)));
+    let a = s.activate(ControlId::Notice(NoticeKind::ReceiveFolder));
+    assert!(a.commands.is_empty(), "{:?}", a.commands);
+    assert_eq!(a.effect, Some(Effect::OpenWebPage));
+    let page = s.take_web_page().expect("a page to open");
+    assert_eq!(page, "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders");
+    assert!(crate::state::openable_page(&page));
+    // Once access works, the status comes again without the notice.
+    s.apply(UiEvent::NetworkChanged(NetworkStatus {
+        label: "Wi-Fi Casa".into(),
+        address: None,
+        category: None,
+        notices: Vec::new(),
+    }));
+    assert!(s.notices().is_empty());
+}
+
+#[test]
 fn swap_dialogs_and_events() {
     let mut s = Scenario::Inverter.prepared_state();
     let a = s.activate(ControlId::DialogPrimary);

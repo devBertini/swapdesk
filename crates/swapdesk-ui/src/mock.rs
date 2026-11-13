@@ -233,6 +233,8 @@ pub enum Scenario {
     EstadoRedePublica,
     EstadoServicoMac,
     EstadoPermissoesMac,
+    /// The Mac cannot save into the receiving folder until the user grants it (F-FILE-03).
+    EstadoPastaRecebimentoMac,
     EstadoReconectando,
     EstadoAcordando,
     /// "Controlar" pressed: the card before the other computer has said anything.
@@ -324,7 +326,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 66] = [
+    pub const ALL: [Scenario; 67] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -341,6 +343,7 @@ impl Scenario {
         Scenario::EstadoRedePublica,
         Scenario::EstadoServicoMac,
         Scenario::EstadoPermissoesMac,
+        Scenario::EstadoPastaRecebimentoMac,
         Scenario::EstadoReconectando,
         Scenario::EstadoAcordando,
         Scenario::EstadoConectando,
@@ -412,6 +415,7 @@ impl Scenario {
             Scenario::EstadoRedePublica => "estado-rede-publica",
             Scenario::EstadoServicoMac => "estado-servico-mac",
             Scenario::EstadoPermissoesMac => "estado-permissoes-mac",
+            Scenario::EstadoPastaRecebimentoMac => "estado-pasta-recebimento-mac",
             Scenario::EstadoReconectando => "estado-reconectando",
             Scenario::EstadoAcordando => "estado-acordando",
             Scenario::EstadoConectando => "estado-conectando",
@@ -488,6 +492,7 @@ impl Scenario {
             Scenario::EstadoRedePublica => "11. Erros e estados: rede Pública",
             Scenario::EstadoServicoMac => "11. Erros e estados: serviço no Mac",
             Scenario::EstadoPermissoesMac => "11. Erros e estados: permissões no Mac",
+            Scenario::EstadoPastaRecebimentoMac => "11. Erros e estados: pasta de recebimento no Mac",
             Scenario::EstadoReconectando => "11. Erros e estados: Reconectando",
             Scenario::EstadoAcordando => "11. Erros e estados: Acordando",
             Scenario::EstadoConectando => "new: Conectando, before the other computer answers (R-UI-13)",
@@ -758,6 +763,13 @@ impl Scenario {
                         OsPermission::Accessibility,
                         OsPermission::InputMonitoring,
                     ])],
+                    NetCategoryView::Private,
+                ))),
+            ],
+            Scenario::EstadoPastaRecebimentoMac => vec![
+                mac(),
+                Event(UiEvent::NetworkChanged(network(
+                    vec![Notice::ReceiveFolderDenied("Downloads".into())],
                     NetCategoryView::Private,
                 ))),
             ],
@@ -1687,6 +1699,7 @@ mod tests {
             (Scenario::EstadoRedePublica, Screen::Devices, &[Main]),
             (Scenario::EstadoServicoMac, Screen::Devices, &[Main]),
             (Scenario::EstadoPermissoesMac, Screen::Devices, &[Main]),
+            (Scenario::EstadoPastaRecebimentoMac, Screen::Devices, &[Main]),
             (Scenario::EstadoReconectando, Screen::Devices, &[Main, Viewer]),
             (Scenario::EstadoAcordando, Screen::Devices, &[Main]),
             (Scenario::EstadoConectando, Screen::Devices, &[Main]),

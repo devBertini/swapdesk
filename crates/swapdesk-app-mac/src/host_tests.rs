@@ -187,3 +187,9 @@ fn the_shells_exit_code_arrives_after_its_output() {
     assert_eq!(svc.read_until(2, &mut text, "last=3"), None);
     assert_eq!(svc.read_until(2, &mut text, "never-appears"), Some(Some(5)));
 }
+
+#[test]
+fn the_ui_opens_the_same_settings_pane_the_mac_glue_names() {
+    assert_eq!(swapdesk_ui::state::MAC_FILES_AND_FOLDERS_SETTINGS, swapdesk_sys_mac::FILES_AND_FOLDERS_PANE);
+    assert!(swapdesk_ui::state::openable_page(swapdesk_sys_mac::FILES_AND_FOLDERS_PANE));
+}
