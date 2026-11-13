@@ -821,7 +821,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swapdesk-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-audio",
  "swapdesk-audio-win",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-app-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-audio"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "opus",
  "swapdesk-fakes",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-audio-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "objc2-audio-toolbox",
  "objc2-core-audio",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-audio-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-fakes",
  "swapdesk-platform",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-capture-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-capture-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-platform",
  "windows",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-codec-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "objc2-core-foundation",
  "objc2-core-media",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-codec-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-capture-win",
  "swapdesk-fakes",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-core-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-audio",
  "swapdesk-codec-mac",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-crossdrive"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ring",
  "swapdesk-fakes",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-extras"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "swapdesk-fakes",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-fakes"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-platform",
  "swapdesk-proto",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-files"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "ring",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-helper"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-audio-win",
  "swapdesk-capture-win",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-host"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "quinn",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-input-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "objc2",
  "objc2-app-kit",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-input-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-capture-win",
  "swapdesk-keys",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -1113,14 +1113,14 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-keys"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-proto",
 ]
 
 [[package]]
 name = "swapdesk-lan"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "mdns-sd",
  "swapdesk-fakes",
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-measure"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-app",
  "swapdesk-audio",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-net-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "libc",
  "objc2-core-foundation",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-net-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-platform",
  "windows",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-netsim"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "ring",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-paint"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-termview",
  "swapdesk-ui",
@@ -1190,21 +1190,21 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-platform"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-proto",
 ]
 
 [[package]]
 name = "swapdesk-proto"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "swapdesk-release-tools"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ring",
  "swapdesk-secret-win",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-render-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "objc2",
  "objc2-av-foundation",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-render-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-codec-win",
  "swapdesk-fakes",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-secret-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "libc",
  "objc2-core-foundation",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-secret-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-platform",
  "windows-sys 0.61.2",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-service"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-audio",
  "swapdesk-capture-win",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-session"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "ring",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-shell-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "accesskit",
  "dispatch2",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-shell-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-swap"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "swapdesk-fakes",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-sys-mac"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "block2",
  "libc",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-sys-win"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-platform",
  "swapdesk-proto",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-term"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "swapdesk-fakes",
  "swapdesk-platform",
@@ -1375,14 +1375,14 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-termview"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "vte",
 ]
 
 [[package]]
 name = "swapdesk-trust"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "quinn",
  "ring",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "accesskit",
  "swapdesk-files",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-update"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "proptest",
  "ring",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "swapdesk-video"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "quinn",
