@@ -676,3 +676,35 @@ fn a_collapsed_bar_is_a_small_handle_at_the_top_of_the_picture() {
     let video = out.video.expect("a video");
     assert!((handle.y - video.y).abs() < 1.0 || handle.y <= 60.0, "at the top edge: {handle:?} over {video:?}");
 }
+
+/// T1 (13/11): with a side panel open the picture's column is narrower than the full bar; the bar stays inside that
+/// column, every button kept (the collapse one too), "Inverter" down to its icon and the session segment shortened or
+/// left out.
+#[test]
+fn the_session_bar_stays_inside_the_pictures_column_when_a_side_panel_is_open() {
+    let state = Scenario::Terminal.prepared_state();
+    let (kind, size) = (WindowKind::Viewer, design_size(WindowKind::Viewer));
+    let painter = Fixed::default();
+    let out = paint(Frame::new(&painter, &state, &Interaction::default(), size, true), kind);
+    let panel_x = out
+        .widgets
+        .iter()
+        .filter(|w| matches!(w.id, ControlId::DrawerTab(_)))
+        .map(|w| w.rect.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!(panel_x < size.0, "the side panel is open");
+    let bar: Vec<_> = out.widgets.iter().filter(|w| format!("{:?}", w.id).starts_with("Tb")).collect();
+    for id in [ControlId::TbScreen, ControlId::TbSwap, ControlId::TbDisconnect, ControlId::TbCollapse] {
+        assert!(bar.iter().any(|w| w.id == id), "{id:?} is on the bar");
+    }
+    for w in &bar {
+        assert!(
+            w.rect.x >= 0.0 && w.rect.right() <= panel_x,
+            "{:?} at {:?} leaves the column (panel at {panel_x})",
+            w.id,
+            w.rect
+        );
+    }
+    let drawn = painter.drawn.borrow();
+    assert!(!drawn.iter().any(|t| t == "Inverter"), "Inverter keeps only its icon: {drawn:?}");
+}

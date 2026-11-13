@@ -236,43 +236,62 @@ fn toolbar(f: &mut Frame, col: Rect, peer: &str, line: &str) {
 
     // Measure: button = padding 10 + content + 10, min 40; content = icon 18 / label / chevron 14, gap 8.
     let style = |t: &Tool| if t.weight_bold { text::BTN_PRIMARY } else { text::BTN };
-    let widths: Vec<f32> = tools
-        .iter()
-        .map(|t| {
-            let mut parts: Vec<f32> = Vec::new();
-            if t.icon.is_some() {
-                parts.push(18.0);
-            }
-            if let Some(l) = &t.label {
-                parts.push(p.label(l, style(t)).w);
-            }
-            if t.chevron {
-                parts.push(14.0);
-            }
-            let content: f32 = parts.iter().sum::<f32>() + 8.0 * (parts.len().saturating_sub(1)) as f32;
-            (content + 20.0).max(40.0)
-        })
-        .collect();
+    let measure = |t: &Tool| {
+        let mut parts: Vec<f32> = Vec::new();
+        if t.icon.is_some() {
+            parts.push(18.0);
+        }
+        if let Some(l) = &t.label {
+            parts.push(p.label(l, style(t)).w);
+        }
+        if t.chevron {
+            parts.push(14.0);
+        }
+        let content: f32 = parts.iter().sum::<f32>() + 8.0 * (parts.len().saturating_sub(1)) as f32;
+        (content + 20.0).max(40.0)
+    };
+    let mut widths: Vec<f32> = tools.iter().map(measure).collect();
+    // The buttons alone, with their gaps and separators, and the bar's padding.
+    let seps = tools.iter().filter(|t| t.sep_before).count() as f32;
+    let buttons_w =
+        |widths: &[f32]| 12.0 + widths.iter().sum::<f32>() + 2.0 * (widths.len() as f32 - 1.0) + seps * 13.0;
     // The session segment at the leading edge: the connection dot, the peer's name and the session line, discreet,
-    // then a separator (owner, 12/11: the line that was the window's top bar).
-    let name = p.label(peer, SEG_NAME);
-    let sub = p.label(line, SEG_LINE);
-    let seg_w = 10.0 + 8.0 + 8.0 + name.w.max(sub.w) + 10.0;
-    let seps = tools.iter().filter(|t| t.sep_before).count() as f32 + 1.0;
-    let total = 12.0 + seg_w + widths.iter().sum::<f32>() + 2.0 * (tools.len() as f32 - 1.0) + seps * (1.0 + 12.0);
+    // then a separator (owner, 12/11: the line that was the window's top bar). Its frame around the text, and the
+    // separator after it.
+    const SEG_FRAME: f32 = 10.0 + 8.0 + 8.0 + 10.0;
+    const SEG_SEP: f32 = 13.0;
+    let text_w = p.label(peer, SEG_NAME).w.max(p.label(line, SEG_LINE).w);
+    // The bar stays inside the picture's column (narrow with a side panel open): it gives up, in turn, the label of
+    // "Inverter" (its icon stays), then the end of the name and of the session line, then the whole segment.
+    let room = col.w - 24.0;
+    if buttons_w(&widths) + SEG_FRAME + text_w + SEG_SEP > room
+        && let Some(n) = tools.iter().position(|t| t.id == ControlId::TbSwap)
+    {
+        tools[n].label = None;
+        widths[n] = measure(&tools[n]);
+    }
+    const SEG_TEXT_MIN: f32 = 72.0;
+    let seg_text = text_w.min(room - buttons_w(&widths) - SEG_FRAME - SEG_SEP);
+    let segment = (seg_text >= SEG_TEXT_MIN.min(text_w))
+        .then(|| (p.label_ellipsis(peer, SEG_NAME, seg_text), p.label_ellipsis(line, SEG_LINE, seg_text)));
+    let seg_w = segment.as_ref().map_or(0.0, |(n, s)| SEG_FRAME + n.w.max(s.w));
+    let total = buttons_w(&widths) + if segment.is_some() { seg_w + SEG_SEP } else { 0.0 };
     let bar = Rect::new(p.snap(col.x + (col.w - total) / 2.0), col.y + 14.0, total, 52.0);
     p.shadow(bar, 12.0, 10.0, 30.0, f.fx.shadow_dialog);
     p.fill_rrect(bar, 12.0, f.fx.toolbar);
     let seg_x = bar.x + 6.0;
-    p.fill_circle((seg_x + 10.0 + 4.0, bar.y + 26.0), 4.0, f.pal.ok);
-    let text_x = seg_x + 10.0 + 8.0 + 8.0;
-    let gap = 2.0;
-    let top = bar.y + (52.0 - name.h - gap - sub.h) / 2.0;
-    p.draw(&name, text_x, top, f.fx.toolbar_ink);
-    p.draw(&sub, text_x, top + name.h + gap, f.fx.toolbar_soft);
-    let mut x = seg_x + seg_w;
-    p.fill_rect(Rect::new(x + 6.0, bar.y + 14.0, 1.0, 24.0), f.fx.toolbar_sep);
-    x += 13.0;
+    let mut x = seg_x;
+    if let Some((name, sub)) = &segment {
+        p.fill_circle((seg_x + 10.0 + 4.0, bar.y + 26.0), 4.0, f.pal.ok);
+        let text_x = seg_x + 10.0 + 8.0 + 8.0;
+        let gap = 2.0;
+        let top = bar.y + (52.0 - name.h - gap - sub.h) / 2.0;
+        p.draw(name, text_x, top, f.fx.toolbar_ink);
+        p.draw(sub, text_x, top + name.h + gap, f.fx.toolbar_soft);
+        x += seg_w;
+        p.fill_rect(Rect::new(x + 6.0, bar.y + 14.0, 1.0, 24.0), f.fx.toolbar_sep);
+        x += SEG_SEP;
+    }
     let mut pointed = None;
     for (n, (t, w)) in tools.iter().zip(&widths).enumerate() {
         if n > 0 {
