@@ -1317,6 +1317,7 @@ dependencies = [
  "swapdesk-termview",
  "swapdesk-ui",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -26,6 +26,8 @@ swapdesk-termview = { path = "../swapdesk-termview" }
 swapdesk-sys-win = { path = "../swapdesk-sys-win" }
 accesskit.workspace = true
 accesskit_windows.workspace = true
+# `#[implement]` for the OLE drag and drop objects (IDropTarget, IDataObject, IDropSource, IStream).
+windows-core.workspace = true
 
 [dependencies.windows]
 workspace = true
