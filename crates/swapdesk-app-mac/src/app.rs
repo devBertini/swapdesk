@@ -317,6 +317,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         input: Some(Arc::new(viewer.input())),
         note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
         logs_dir: Some(store.dir().to_path_buf()),
+        request_os_permissions: Some({
+            let grants_trace = Arc::clone(&trace);
+            Arc::new(move |missing: &[swapdesk_ui::OsPermission]| crate::host::request_grants(missing, &*grants_trace))
+        }),
     };
     // The host drive owns the backend's events: the window gets a backend that says nothing.
     let observing: Arc<dyn UiBackend> = match &options.drive_host {

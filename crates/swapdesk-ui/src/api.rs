@@ -724,15 +724,6 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsTarget {
-    NetworkCategory,
-    Accessibility,
-    InputMonitoring,
-    ScreenRecording,
-    LoginItems,
-}
-
 /// A string key with its arguments; `strings::text(Language, &Msg)` translates it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msg {
@@ -1020,10 +1011,6 @@ pub enum Command {
     SetSettings {
         settings: Settings,
     },
-    OpenSystemSettings {
-        target: SettingsTarget,
-    },
-    RequestOsPermissions,
     /// The machine's updater (UPDATES.md 10, ops 51 to 56).
     GetUpdate,
     UpdateCheckNow,
@@ -1129,8 +1116,6 @@ impl core::fmt::Debug for Command {
             Self::ListBlocked => f.write_str("ListBlocked"),
             Self::GetSettings => f.write_str("GetSettings"),
             Self::SetSettings { settings } => dbg_fields!("SetSettings", settings),
-            Self::OpenSystemSettings { target } => dbg_fields!("OpenSystemSettings", target),
-            Self::RequestOsPermissions => f.write_str("RequestOsPermissions"),
             Self::GetUpdate => f.write_str("GetUpdate"),
             Self::UpdateCheckNow => f.write_str("UpdateCheckNow"),
             Self::UpdateInstall { version, end_sessions } => dbg_fields!("UpdateInstall", version, end_sessions),
@@ -1406,7 +1391,6 @@ impl Command {
                 | Command::SetReleaseKey { .. }
                 | Command::SetViewOnly { .. }
                 | Command::SetClipboardSync { .. }
-                | Command::OpenSystemSettings { .. }
         )
     }
 

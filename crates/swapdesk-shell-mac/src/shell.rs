@@ -44,6 +44,9 @@ use crate::viewer_window::ViewerWindow;
 /// Receives a line the shell wants in the trace log.
 pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// What the app does to ask macOS for the permissions the notice lists.
+pub type OsPermissionRequest = Arc<dyn Fn(&[swapdesk_ui::OsPermission]) + Send + Sync>;
+
 /// What the other lanes plug into the viewer window.
 #[derive(Default, Clone)]
 pub struct ViewerHooks {
@@ -55,6 +58,9 @@ pub struct ViewerHooks {
     pub note: Option<LaunchNote>,
     /// The folder of the app's logs, which "open the logs" shows in the Finder; none in a mock run.
     pub logs_dir: Option<std::path::PathBuf>,
+    /// Asks macOS for these permissions (the system's own prompts) for the "Conceder permissões" button: the app owns
+    /// the grants (D32), so the app does it; none in a mock run.
+    pub request_os_permissions: Option<OsPermissionRequest>,
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -823,6 +829,22 @@ impl Shell {
             Handling::OpenWebPage => {
                 let page = self.state.borrow_mut().take_web_page();
                 if let Some(url) = page.filter(|u| swapdesk_ui::state::openable_page(u)) {
+                    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                }
+            }
+            Handling::OpenLoginItems => {
+                if !crate::system::open_login_items_settings() {
+                    self.note("System Settings could not be opened at Login Items (SMAppService needs macOS 13)");
+                }
+            }
+            Handling::RequestOsPermissions => {
+                let missing = self.state.borrow_mut().take_os_permission_request();
+                if let Some(request) = &self.hooks.request_os_permissions {
+                    request(&missing);
+                }
+                if let Some(url) =
+                    crate::effects::permission_request(&missing).filter(|u| swapdesk_ui::state::openable_page(u))
+                {
                     let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
                 }
             }

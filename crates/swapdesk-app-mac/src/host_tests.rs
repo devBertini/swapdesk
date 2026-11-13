@@ -193,3 +193,12 @@ fn the_ui_opens_the_same_settings_pane_the_mac_glue_names() {
     assert_eq!(swapdesk_ui::state::MAC_FILES_AND_FOLDERS_SETTINGS, swapdesk_sys_mac::FILES_AND_FOLDERS_PANE);
     assert!(swapdesk_ui::state::openable_page(swapdesk_sys_mac::FILES_AND_FOLDERS_PANE));
 }
+
+#[test]
+fn the_permission_button_asks_for_screen_recording_and_for_input_once() {
+    use swapdesk_ui::OsPermission::{Accessibility, InputMonitoring, ScreenRecording};
+    assert_eq!(crate::host::grant_requests(&[]), (false, false));
+    assert_eq!(crate::host::grant_requests(&[ScreenRecording]), (true, false));
+    assert_eq!(crate::host::grant_requests(&[Accessibility, InputMonitoring]), (false, true));
+    assert_eq!(crate::host::grant_requests(&[InputMonitoring, ScreenRecording]), (true, true));
+}

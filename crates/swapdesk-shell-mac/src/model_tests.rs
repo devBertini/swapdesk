@@ -105,6 +105,8 @@ fn every_effect() -> Vec<Effect> {
         Effect::SaveLog,
         Effect::OpenLogs,
         Effect::OpenWebPage,
+        Effect::OpenLoginItems,
+        Effect::RequestOsPermissions,
         Effect::OpenLocal,
         Effect::ContextMenu,
         Effect::RevealLocal,
@@ -119,6 +121,8 @@ fn every_effect() -> Vec<Effect> {
             | Effect::SaveLog
             | Effect::OpenLogs
             | Effect::OpenWebPage
+            | Effect::OpenLoginItems
+            | Effect::RequestOsPermissions
             | Effect::OpenLocal
             | Effect::ContextMenu
             | Effect::RevealLocal
@@ -190,4 +194,24 @@ fn a_pointer_that_leaves_a_control_takes_the_shape_of_where_it_is_now() {
     assert_eq!(pointer_shape(Some(ControlId::Edit(swapdesk_ui::EditId::Address)), false), PointerShape::Text);
     // A control drawn over the picture (the toolbar) is a control first.
     assert_eq!(pointer_shape(Some(ControlId::TbChat), true), PointerShape::Hand);
+}
+
+#[test]
+fn the_permission_button_opens_the_pane_of_the_first_missing_permission() {
+    use crate::effects::permission_request;
+    use swapdesk_ui::OsPermission;
+    use swapdesk_ui::state::openable_page;
+    assert_eq!(permission_request(&[]), None);
+    let page = permission_request(&[OsPermission::InputMonitoring, OsPermission::Accessibility]).unwrap();
+    assert!(page.ends_with("Privacy_ListenEvent"), "{page}");
+    assert!(openable_page(page), "the shell opens only the listed pages");
+    assert!(permission_request(&[OsPermission::ScreenRecording]).unwrap().ends_with("Privacy_ScreenCapture"));
+}
+
+#[test]
+fn the_mac_notice_effects_are_handled_by_their_own_handlers_and_never_wait_for_a_person() {
+    assert_eq!(handling(Effect::OpenLoginItems), Handling::OpenLoginItems);
+    assert_eq!(handling(Effect::RequestOsPermissions), Handling::RequestOsPermissions);
+    assert!(!Handling::OpenLoginItems.waits_for_a_person());
+    assert!(!Handling::RequestOsPermissions.waits_for_a_person());
 }

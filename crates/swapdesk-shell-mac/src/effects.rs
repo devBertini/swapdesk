@@ -2,7 +2,8 @@
 //! the shell (`shell.rs`) runs each [`Handling`] with AppKit. Neither match has a catch-all, so an effect without a
 //! handler does not build.
 
-use swapdesk_ui::{ControlId, EditId, Effect, SelectId};
+use swapdesk_ui::state::os_permission_page;
+use swapdesk_ui::{ControlId, EditId, Effect, OsPermission, SelectId};
 
 /// The shell's answer to an effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,11 @@ pub enum Handling {
     OpenLogsFolder,
     /// The page of `UiState::take_web_page` opens in the browser.
     OpenWebPage,
+    /// System Settings opens at Login Items (`SMAppService.openSystemSettingsLoginItems()`, macOS 13).
+    OpenLoginItems,
+    /// The permissions of `UiState::take_os_permission_request` are asked of macOS by the app (the hook of
+    /// `ViewerHooks`), then the pane of the first opens (see [`permission_request`]).
+    RequestOsPermissions,
     /// The explorer's local file, with the app macOS has for it (`/usr/bin/open`).
     OpenLocalFile,
     /// The explorer's context menu, at the pointer, from `UiState::context_items`; the choice goes back through
@@ -43,6 +49,8 @@ impl Handling {
             | Handling::Submit(_)
             | Handling::OpenLogsFolder
             | Handling::OpenWebPage
+            | Handling::OpenLoginItems
+            | Handling::RequestOsPermissions
             | Handling::OpenLocalFile
             | Handling::RevealInFinder
             | Handling::SystemDrag => false,
@@ -60,9 +68,18 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::SaveLog => Handling::SaveLogPanel,
         Effect::OpenLogs => Handling::OpenLogsFolder,
         Effect::OpenWebPage => Handling::OpenWebPage,
+        Effect::OpenLoginItems => Handling::OpenLoginItems,
+        Effect::RequestOsPermissions => Handling::RequestOsPermissions,
         Effect::OpenLocal => Handling::OpenLocalFile,
         Effect::ContextMenu => Handling::ContextMenu,
         Effect::RevealLocal => Handling::RevealInFinder,
         Effect::SystemDrag => Handling::SystemDrag,
     }
+}
+
+/// What "Conceder permissões" does for the permissions the notice listed: the page to open afterwards is the pane of
+/// the first one (the system's own prompt appears only the first time; after that the person switches the app on in
+/// that pane), and nothing happens when the list is empty.
+pub fn permission_request(missing: &[OsPermission]) -> Option<&'static str> {
+    missing.first().map(|p| os_permission_page(*p))
 }

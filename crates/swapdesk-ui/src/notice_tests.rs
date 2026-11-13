@@ -124,3 +124,17 @@ fn the_new_texts_are_exact_in_both_languages() {
     assert_eq!(t(MsgKey::NoComputerButton, Language::En), "Add by address");
     assert!(t(MsgKey::NoComputerBody, Language::En).ends_with("or the two are on different networks."));
 }
+
+/// The Mac notices' buttons must reach something that acts: the real backend answers a command it has no op for
+/// with `Internal` (`service_backend::convert::Route::Unsupported`), and the shells handle only effects.
+#[test]
+fn the_mac_notice_buttons_hand_the_shell_an_effect_not_a_command_the_backend_refuses() {
+    for (sc, kind) in
+        [(Scenario::EstadoServicoMac, NoticeKind::Service), (Scenario::EstadoPermissoesMac, NoticeKind::MacPerms)]
+    {
+        let mut s = sc.prepared_state();
+        let a = s.activate(ControlId::Notice(kind));
+        assert!(a.commands.is_empty(), "{kind:?}: a command the real backend answers with Internal: {:?}", a.commands);
+        assert!(a.effect.is_some(), "{kind:?}: the click has no effect a shell acts on");
+    }
+}

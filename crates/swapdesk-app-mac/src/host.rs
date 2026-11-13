@@ -21,6 +21,7 @@ use swapdesk_ipc::IpcRole;
 use swapdesk_platform::{Clock, Level, PtySpawner, TraceSink};
 use swapdesk_sys_mac::actions::MacActions;
 use swapdesk_sys_mac::pty::MacPtySpawner;
+use swapdesk_ui::OsPermission;
 
 use crate::service::HostHelper;
 
@@ -87,4 +88,26 @@ pub fn ask_for_grants(trace: &dyn TraceSink) {
     let screen = swapdesk_capture_mac::screen_access() || swapdesk_capture_mac::request_screen_access();
     let input = swapdesk_input_mac::can_post() || swapdesk_input_mac::request_access().complete();
     trace.log(Level::Info, "app", format_args!("hosting grants: screen recording {screen}, input {input}"));
+}
+
+/// Which requests "Conceder permissões" makes for the permissions the notice lists: Screen Recording, and the one call
+/// of Accessibility and Input Monitoring (`request_access` asks for each of the two that is missing).
+pub fn grant_requests(missing: &[OsPermission]) -> (bool, bool) {
+    let screen = missing.contains(&OsPermission::ScreenRecording);
+    let input = missing.iter().any(|p| matches!(p, OsPermission::Accessibility | OsPermission::InputMonitoring));
+    (screen, input)
+}
+
+/// The "Conceder permissões" button: asks macOS for what the notice lists, in this process (the app owns the grants,
+/// D32: the capture, the event posting and the shortcut grab all run in it). The system's prompt appears only the
+/// first time; the shell then opens the pane of the first one, where the person switches the app on.
+pub fn request_grants(missing: &[OsPermission], trace: &dyn TraceSink) {
+    let (screen, input) = grant_requests(missing);
+    let screen_now = screen.then(swapdesk_capture_mac::request_screen_access);
+    let input_now = input.then(|| swapdesk_input_mac::request_access().complete());
+    trace.log(
+        Level::Info,
+        "app",
+        format_args!("grants asked for: screen recording {screen_now:?}, input {input_now:?} (answers come later)"),
+    );
 }

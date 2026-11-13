@@ -554,6 +554,19 @@ impl UiState {
         d.wakeable && matches!(d.status, DeviceStatus::Asleep)
     }
 
+    /// The macOS permissions the service says are missing (the list of the Mac permissions notice).
+    fn missing_os_permissions(&self) -> Vec<OsPermission> {
+        self.network
+            .as_ref()
+            .and_then(|n| {
+                n.notices.iter().find_map(|x| match x {
+                    Notice::MacPermissionsMissing(v) => Some(v.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default()
+    }
+
     /// Title, body and button of a notice card.
     pub fn notice_texts(&self, kind: NoticeKind) -> (String, String, String) {
         let label = self.network.as_ref().map(|n| n.label.clone()).unwrap_or_default();
@@ -596,16 +609,7 @@ impl UiState {
                 )
             }
             NoticeKind::MacPerms => {
-                let missing: Vec<OsPermission> = self
-                    .network
-                    .as_ref()
-                    .and_then(|n| {
-                        n.notices.iter().find_map(|x| match x {
-                            Notice::MacPermissionsMissing(v) => Some(v.clone()),
-                            _ => None,
-                        })
-                    })
-                    .unwrap_or_default();
+                let missing = self.missing_os_permissions();
                 let title = if missing.len() == 1 {
                     self.name_of(MsgKey::NoticeMacPermsOne)
                 } else {
@@ -1702,10 +1706,13 @@ impl UiState {
                     self.web_page = Some(crate::state::WINDOWS_NETWORK_SETTINGS.to_owned());
                     a.effect = Some(Effect::OpenWebPage);
                 }
-                NoticeKind::Service => {
-                    a.commands.push(Command::OpenSystemSettings { target: SettingsTarget::LoginItems })
+                // Both are the Mac app's own doing, not the service's: the real backend has no op for them, so
+                // the shell acts (the same way as the pages above).
+                NoticeKind::Service => a.effect = Some(Effect::OpenLoginItems),
+                NoticeKind::MacPerms => {
+                    self.os_request = self.missing_os_permissions();
+                    a.effect = Some(Effect::RequestOsPermissions);
                 }
-                NoticeKind::MacPerms => a.commands.push(Command::RequestOsPermissions),
                 NoticeKind::ReceiveFolder => {
                     self.web_page = Some(crate::state::MAC_FILES_AND_FOLDERS_SETTINGS.to_owned());
                     a.effect = Some(Effect::OpenWebPage);

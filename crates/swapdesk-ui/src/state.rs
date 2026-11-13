@@ -561,6 +561,13 @@ pub enum Effect {
     /// Open the web page of [`UiState::take_web_page`] in the system's browser (the release page of an update,
     /// UPDATES.md 10).
     OpenWebPage,
+    /// Open System Settings at Login Items (the Mac's "service waits for approval" notice): the shell calls
+    /// `SMAppService.openSystemSettingsLoginItems()` (macOS 13, ServiceManagement).
+    OpenLoginItems,
+    /// Ask macOS for the permissions of [`UiState::take_os_permission_request`] (the Mac's "missing permissions"
+    /// notice): the shell has the app request each one (the system's own prompt, shown the first time) and then opens
+    /// the Privacy & Security pane of the first, [`os_permission_page`], where it is switched on.
+    RequestOsPermissions,
     /// Open the local file of [`UiState::take_local_target`] with the system's app for it (the explorer's left pane).
     OpenLocal,
     /// Show the context menu of [`UiState::context_items`] at the pointer (a right click, Control+click on the Mac,
@@ -727,6 +734,8 @@ pub struct UiState {
     pub(crate) quit_request: bool,
     /// The page [`Effect::OpenWebPage`] opens: a release page (`https://`), or one of [`SYSTEM_PAGES`].
     pub(crate) web_page: Option<String>,
+    /// The permissions [`Effect::RequestOsPermissions`] asks for (what the notice listed at the click).
+    pub(crate) os_request: Vec<OsPermission>,
 }
 
 /// Windows Settings > Network & internet ("ms-settings:network-status", Microsoft's ms-settings reference, read
@@ -739,8 +748,35 @@ pub const WINDOWS_NETWORK_SETTINGS: &str = "ms-settings:network-status";
 pub const MAC_FILES_AND_FOLDERS_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
+/// macOS System Settings > Privacy & Security > Accessibility (the anchor `Privacy_Accessibility`).
+pub const MAC_ACCESSIBILITY_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+/// macOS System Settings > Privacy & Security > Input Monitoring (the anchor `Privacy_ListenEvent`).
+pub const MAC_INPUT_MONITORING_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
+
+/// macOS System Settings > Privacy & Security > Screen & System Audio Recording (the anchor `Privacy_ScreenCapture`).
+pub const MAC_SCREEN_RECORDING_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
 /// The system pages [`Effect::OpenWebPage`] may open besides an `https://` page. Nothing else is handed to the system.
-pub const SYSTEM_PAGES: &[&str] = &[WINDOWS_NETWORK_SETTINGS, MAC_FILES_AND_FOLDERS_SETTINGS];
+pub const SYSTEM_PAGES: &[&str] = &[
+    WINDOWS_NETWORK_SETTINGS,
+    MAC_FILES_AND_FOLDERS_SETTINGS,
+    MAC_ACCESSIBILITY_SETTINGS,
+    MAC_INPUT_MONITORING_SETTINGS,
+    MAC_SCREEN_RECORDING_SETTINGS,
+];
+
+/// The System Settings page where `permission` is switched on, one of [`SYSTEM_PAGES`].
+pub fn os_permission_page(permission: OsPermission) -> &'static str {
+    match permission {
+        OsPermission::Accessibility => MAC_ACCESSIBILITY_SETTINGS,
+        OsPermission::InputMonitoring => MAC_INPUT_MONITORING_SETTINGS,
+        OsPermission::ScreenRecording => MAC_SCREEN_RECORDING_SETTINGS,
+    }
+}
 
 /// Whether a shell may hand `page` to the system: an `https://` page or one of [`SYSTEM_PAGES`].
 pub fn openable_page(page: &str) -> bool {
@@ -834,6 +870,7 @@ impl UiState {
             update_size: 0,
             quit_request: false,
             web_page: None,
+            os_request: Vec::new(),
             empty_s: 0,
             rename: None,
         }
@@ -2183,6 +2220,11 @@ impl UiState {
     /// The page an [`Effect::OpenWebPage`] opens (once).
     pub fn take_web_page(&mut self) -> Option<String> {
         self.web_page.take()
+    }
+
+    /// The permissions an [`Effect::RequestOsPermissions`] asks macOS for (once), in the order the notice lists them.
+    pub fn take_os_permission_request(&mut self) -> Vec<OsPermission> {
+        std::mem::take(&mut self.os_request)
     }
 
     /// The shell asks after each batch of events whether to close for an update (once).

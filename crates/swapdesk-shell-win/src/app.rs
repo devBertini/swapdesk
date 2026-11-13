@@ -458,6 +458,11 @@ impl Shared {
                     crate::system::reveal_local_item(&path);
                 }
             }
+            // The Mac's notices (Login Items, macOS permissions): no Windows service raises them, so nothing is done here.
+            Some(Effect::OpenLoginItems) => {}
+            Some(Effect::RequestOsPermissions) => {
+                self.state.borrow_mut().take_os_permission_request();
+            }
             // Menus and dialogs wait for a person: queued, run after the message that asked (see `run_modal`).
             Some(effect @ (Effect::Menu(_) | Effect::ContextMenu | Effect::SaveLog | Effect::SystemDrag)) => {
                 debug_assert_eq!(handling(&effect), Handling::Modal);
@@ -797,6 +802,8 @@ pub(crate) fn handling(effect: &Effect) -> Handling {
         | Effect::SubmitEdit(_)
         | Effect::OpenLogs
         | Effect::OpenWebPage
+        | Effect::OpenLoginItems
+        | Effect::RequestOsPermissions
         | Effect::OpenLocal
         | Effect::RevealLocal => Handling::Immediate,
     }
@@ -817,6 +824,8 @@ mod effect_tests {
             Effect::OpenLogs,
             Effect::Focus(ControlId::ConnectCancel),
             Effect::OpenWebPage,
+            Effect::OpenLoginItems,
+            Effect::RequestOsPermissions,
             Effect::OpenLocal,
             Effect::ContextMenu,
             Effect::RevealLocal,
@@ -831,6 +840,8 @@ mod effect_tests {
                 | Effect::SaveLog
                 | Effect::OpenLogs
                 | Effect::OpenWebPage
+                | Effect::OpenLoginItems
+                | Effect::RequestOsPermissions
                 | Effect::OpenLocal
                 | Effect::ContextMenu
                 | Effect::RevealLocal
@@ -843,7 +854,7 @@ mod effect_tests {
     #[test]
     fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
         let all = every_effect();
-        assert_eq!(all.len(), 11);
+        assert_eq!(all.len(), 13);
         for e in &all {
             // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
             let _ = handling(e);

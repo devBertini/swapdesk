@@ -1647,7 +1647,6 @@ impl World {
                 let csv = crate::format::activity_csv(language, &activity(), utc_offset_min);
                 std::fs::write(&path, csv).map(|()| Reply::Done).map_err(|_| ApiError::new(ApiCode::Internal))
             }
-            Command::RequestOsPermissions => Ok(Reply::MissingPermissions(Vec::new())),
             Command::ListDisplays { .. } => Ok(Reply::Displays(vec![DisplayView {
                 id: 1,
                 name: "Tela 1".into(),

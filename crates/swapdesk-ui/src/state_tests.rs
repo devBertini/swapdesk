@@ -517,21 +517,42 @@ fn network_notices_replace_the_content_with_their_card() {
     assert!(crate::state::openable_page("ms-settings:network-status"));
     assert!(!crate::state::openable_page("ms-settings:windowsupdate"), "only the listed system pages");
     assert!(!crate::state::openable_page("file:///C:/Windows/System32/cmd.exe"));
-    for (sc, kind, button) in [
-        (
-            Scenario::EstadoServicoMac,
-            NoticeKind::Service,
-            Command::OpenSystemSettings { target: SettingsTarget::LoginItems },
-        ),
-        (Scenario::EstadoPermissoesMac, NoticeKind::MacPerms, Command::RequestOsPermissions),
+    // The Mac notices are the app's own doing: each click is an effect the shell acts on, never a backend command
+    // (the real backend has no op for one).
+    for (sc, kind, effect) in [
+        (Scenario::EstadoServicoMac, NoticeKind::Service, Effect::OpenLoginItems),
+        (Scenario::EstadoPermissoesMac, NoticeKind::MacPerms, Effect::RequestOsPermissions),
     ] {
         let mut s = sc.prepared_state();
         assert_eq!(s.notices(), vec![kind], "{}", sc.name());
         let ids: Vec<_> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
         assert!(ids.contains(&ControlId::Notice(kind)));
-        assert!(!ids.contains(&ControlId::Tab(DeviceTab::Overview)) || true);
-        assert_eq!(s.activate(ControlId::Notice(kind)).commands, vec![button], "{}", sc.name());
+        let a = s.activate(ControlId::Notice(kind));
+        assert!(a.commands.is_empty(), "{}: {:?}", sc.name(), a.commands);
+        assert_eq!(a.effect, Some(effect), "{}", sc.name());
     }
+    // "Conceder permissões" asks for what the notice lists, in its order, and the first one's pane is a page the
+    // shells may open.
+    let mut s = Scenario::EstadoPermissoesMac.prepared_state();
+    s.activate(ControlId::Notice(NoticeKind::MacPerms));
+    let asked = s.take_os_permission_request();
+    assert_eq!(asked, vec![OsPermission::Accessibility, OsPermission::InputMonitoring]);
+    assert!(s.take_os_permission_request().is_empty(), "taken once");
+    for p in [OsPermission::Accessibility, OsPermission::InputMonitoring, OsPermission::ScreenRecording] {
+        assert!(crate::state::openable_page(crate::state::os_permission_page(p)), "{p:?}");
+    }
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::Accessibility),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    );
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::InputMonitoring),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+    );
+    assert_eq!(
+        crate::state::os_permission_page(OsPermission::ScreenRecording),
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    );
     let s = Scenario::EstadoPermissoesMac.prepared_state();
     let (title, body, _) = s.notice_texts(NoticeKind::MacPerms);
     assert_eq!(title, "Faltam 2 permissões no Mac");

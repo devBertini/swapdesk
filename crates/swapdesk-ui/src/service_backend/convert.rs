@@ -731,9 +731,7 @@ pub fn route(c: &a::Command) -> Route {
         C::CancelSwap { .. }
         // `FilesSend` and `FilesGet` need the backend's tokens: `files::route_files` makes their ops.
         | C::FilesSend { .. }
-        | C::FilesGet { .. }
-        | C::OpenSystemSettings { .. }
-        | C::RequestOsPermissions => return Route::Unsupported,
+        | C::FilesGet { .. } => return Route::Unsupported,
         C::BlockAddress { ipv4 } => O::BlockDevice { ipv4: ipv4.clone(), name: String::new() },
         C::UnblockDevice { mac } => O::UnblockDevice { mac: mac.clone() },
         C::ListBlocked => O::ListBlocked,
@@ -968,7 +966,6 @@ mod tests {
             Route::Unsupported,
             "the swap library has no cancel and the UI no control for it"
         );
-        assert_eq!(route(&C::RequestOsPermissions), Route::Unsupported);
         assert_eq!(route(&C::ListDisplays { session_id: 4 }), Route::Op(w::UiOp::ListDisplays { session_id: 4 }));
         assert_eq!(
             route(&C::SetClipboardSync { session_id: 4, on: false }),
