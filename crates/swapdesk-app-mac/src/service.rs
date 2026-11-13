@@ -34,16 +34,16 @@ use std::time::{Duration, Instant};
 
 use crate::elevate::{AdminConfirm, MacElevator};
 use swapdesk_core_mac::{MacServiceParams, MacServiceSetup, mac_service_config};
-use swapdesk_host::service::ServiceCore;
+use swapdesk_host::service::{ServiceCore, TerminalEnv};
 use swapdesk_host::ui_hub::{
     ConnInfo, DnsSdPresence, FileAuditLog, HubParams, NoHooks, NoPresence, Presence, SystemHooks, UiHub,
 };
 use swapdesk_ipc::{FrameReader, FrameWriter, Handshake, IpcRole};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
-use swapdesk_platform::{Clock, Level, NetInterfaces, SecretStore, TraceSink};
+use swapdesk_platform::{Clock, Level, NetInterfaces, PtySpawner, SecretStore, TraceSink};
 use swapdesk_proto::Os;
-use swapdesk_session::{ConsentRequest, HostUi, PromptAnswer, PromptRequest};
+use swapdesk_session::{ConsentRequest, ConsoleOwner, HostUi, PromptAnswer, PromptRequest};
 use swapdesk_trust::{SystemWallClock, UserRef, WallClock};
 use swapdesk_ui::UiWaker;
 use swapdesk_ui::service_backend::{ServiceBackend, ViewerSink};
@@ -142,6 +142,26 @@ pub(crate) fn own_user_id() -> String {
 pub(crate) fn app_connection() -> ConnInfo {
     let user = UserRef { id: own_user_id(), name: std::env::var("USER").unwrap_or_default() };
     ConnInfo { session_id: UI_SESSION, user, admin: false, can_elevate: true }
+}
+
+/// What this Mac tells the core about terminals (F-TERM-01, F-XTERM-01), as the Windows service does with the SCM's
+/// facts: the app runs as the logged-in user, so the console user is this app's user (the uid, the id the hub's
+/// accounts use) while its session is the active one, and nobody once another user's session is (ACCOUNTS.md 12.2,
+/// `UiHub::set_session_active`). The shell itself is started by the host helper as this process's user
+/// (`host::host_helper`); there is no administrator spawner here, so an administrator terminal is `Unavailable`.
+struct MacTerminalEnv {
+    hub: UiHub,
+    user: String,
+}
+
+impl TerminalEnv for MacTerminalEnv {
+    fn console_user(&self) -> Option<String> {
+        (self.hub.console_owner() == ConsoleOwner::This).then(|| self.user.clone())
+    }
+
+    fn admin_spawner(&self) -> Option<Arc<dyn PtySpawner>> {
+        None
+    }
 }
 
 /// The `HostUi` the config is built with; the hub's replaces it before the core starts.
@@ -281,6 +301,7 @@ impl InProcessService {
         hub.set_neighbors(Arc::clone(&config.neighbors));
         let core = Arc::new(ServiceCore::start(config).map_err(|e| format!("the service core did not start: {e:?}"))?);
         hub.bind_core(&core);
+        core.set_terminal_env(Arc::new(MacTerminalEnv { hub: hub.clone(), user: own_user_id() }));
         hub.set_console_session(Some(UI_SESSION));
         trace.log(Level::Info, "app", format_args!("service core up on {:?}", core.local_addrs()));
         let net_watch = match network_notices {
@@ -548,6 +569,26 @@ mod tests {
                 .map(|_| ())
                 .map_err(|e| format!("{e:?}"))
         })
+    }
+
+    /// F-XTERM-01: a terminal toward this Mac is refused `NOBODY_PRESENT` for as long as the core's terminal
+    /// environment names nobody at the console. The app's user is the console user while its session is active.
+    #[test]
+    fn the_core_sees_the_apps_user_at_the_console_while_its_session_is_active() {
+        let (p, dir) = params("termenv");
+        let waker = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let mut svc = InProcessService::start(p, waker, None).expect("the service starts");
+        let core = Arc::clone(svc.core.as_ref().expect("the core"));
+        let user = own_user_id();
+        svc.hub().set_session_active(&user, true);
+        assert_eq!(core.terminal_console_user(), Some(user.clone()), "the app's user is at the console");
+        svc.hub().set_session_active(&user, false);
+        assert_eq!(core.terminal_console_user(), None, "another user's session is active: nobody for this account");
+        svc.hub().set_session_active(&user, true);
+        assert_eq!(core.terminal_console_user(), Some(user), "and back");
+        drop(core);
+        svc.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

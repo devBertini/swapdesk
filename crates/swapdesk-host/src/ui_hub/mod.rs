@@ -567,6 +567,11 @@ impl UiHub {
         self.hub.live_sessions.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Who owns the console, seen from this hub's account (ACCOUNTS.md 5.1).
+    pub fn console_owner(&self) -> swapdesk_session::ConsoleOwner {
+        self.hub.console_owner()
+    }
+
     /// The user at the console changed (`None`: the sign-in screen). Sessions of this account pause while another
     /// account owns the console and end after a minute; they go on when it comes back.
     pub fn set_console_user(&self, sid: Option<String>) {

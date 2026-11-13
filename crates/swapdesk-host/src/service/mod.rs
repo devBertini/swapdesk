@@ -1044,6 +1044,12 @@ impl ServiceCore {
         self.term_env.set(env)
     }
 
+    /// The account the terminals see at the console right now (what a `TermOpen` is checked against); `None` while
+    /// nobody is, or before [`ServiceCore::set_terminal_env`] is called.
+    pub fn terminal_console_user(&self) -> Option<String> {
+        self.term_env.console_user()
+    }
+
     // ---------- swap, chat (stage 41) ----------
 
     /// Gives the core the interface it reports swap questions and chat to (the UI hub does it in `bind_core`). Once:
