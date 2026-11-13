@@ -66,6 +66,9 @@ fn wait_end(pump: &mut Pump<'_>, name: &str, outgoing: bool, timeout: Duration) 
     })
 }
 
+/// How long a cancelled transfer is watched for an end it must not reach.
+const CANCEL_QUIET: Duration = Duration::from_secs(3);
+
 /// Runs the three steps; `Err` names the first that failed.
 pub fn files_round(
     pump: &mut Pump<'_>,
@@ -132,8 +135,13 @@ pub fn files_round(
         _ => None,
     })?;
     pump.ask(Command::TransferCancel { transfer_id }, REPLY)?;
-    let (_, done) = wait_end(pump, &big, true, timeout)?;
-    if done {
+    // The person's own cancel ends the transfer with no event (the interface drops its row at the click); what must
+    // not come is its end as done.
+    let ended = pump.wait("a cancelled transfer to end anyway", CANCEL_QUIET, |e| match e {
+        UiEvent::Transfer { transfer_id: t, state: TransferState::Done, .. } if *t == transfer_id => Some(()),
+        _ => None,
+    });
+    if ended.is_ok() {
         return Err(format!("{big} finished although it was cancelled"));
     }
     std::fs::write(dir.join("files-cancelled"), &big).map_err(|e| e.to_string())?;
