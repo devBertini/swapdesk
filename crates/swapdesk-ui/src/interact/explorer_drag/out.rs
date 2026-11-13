@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use super::{Activation, Changed, Command, UiState, join};
 use crate::api::{Permission, TransferState};
+use crate::local_disk::safe_join;
 use crate::state::Effect;
 
 /// Longest file name a `FILEDESCRIPTORW` holds (`MAX_PATH` of 260 UTF-16 units, one of them the terminator). A
@@ -116,8 +117,11 @@ impl std::fmt::Debug for DragOut {
 }
 
 impl DragOut {
-    /// A drag of `files` of `folder` on the other computer, downloading into `dir` (not created yet).
+    /// A drag of `files` of `folder` on the other computer, downloading into `dir` (not created yet). A file whose
+    /// name is not one plain component this computer can hold (a path, `..`, a drive, a reserved name) is left out:
+    /// its name would otherwise build a path outside `dir` (and a failed transfer removes what that path names).
     pub fn new(session_id: u64, folder: String, files: Vec<DragOutFile>, dir: PathBuf) -> Arc<Self> {
+        let files: Vec<DragOutFile> = files.into_iter().filter(|f| safe_join(&dir, &f.name).is_some()).collect();
         let slots = files
             .iter()
             .map(|_| Slot { pull: Pull::Idle, transfer: None, saved_as: None, paused_since: None })
@@ -204,7 +208,8 @@ impl DragOut {
             let name = g.slots[i].saved_as.clone().unwrap_or_else(|| self.files[i].name.clone());
             match g.slots[i].pull {
                 Pull::Failed => return Err(PullError::Failed),
-                Pull::Done => return Ok(Avail::Whole(self.dir.join(name))),
+                // A name the engine saved the file as is checked like the offered one: it never leaves `dir`.
+                Pull::Done => return safe_join(&self.dir, &name).map(Avail::Whole).ok_or(PullError::Failed),
                 _ if g.released => return Err(PullError::Released),
                 Pull::Running { done, total } => {
                     let limit = done.min(total.saturating_sub(1));
@@ -435,7 +440,9 @@ impl UiState {
             .items
             .iter()
             .zip(&drag.meta)
-            .filter(|((name, is_dir), _)| !*is_dir && name.encode_utf16().count() <= MAX_NAME_UNITS)
+            .filter(|((name, is_dir), _)| {
+                !*is_dir && name.encode_utf16().count() <= MAX_NAME_UNITS && crate::local_disk::name_ok(name)
+            })
             .map(|((name, _), (size, mtime_ms))| DragOutFile { name: name.clone(), size: *size, mtime_ms: *mtime_ms })
             .collect();
         if files.is_empty() {

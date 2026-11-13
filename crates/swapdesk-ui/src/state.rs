@@ -2544,8 +2544,9 @@ impl UiState {
             Reply::LocalProps(p) => self.props_counted(p),
             Reply::LocalPlaces(p) => self.places_listed(p),
             Reply::LocalKinds(k) => self.drop_resolved(k),
-            Reply::Listing(l) => {
+            Reply::Listing(mut l) => {
                 self.consent_answered(Feature::Files);
+                self.clean_listing(&mut l);
                 // A 1.1 peer lists through pages (slice 2b); a late FilesList answer is not the pane's any more.
                 if self.there_v11() {
                     return Changed::NONE;
@@ -2603,6 +2604,7 @@ impl UiState {
             }
             Reply::TransferIds(_) | Reply::TransferId(_) => Changed::NONE,
             Reply::RemotePage(page) => {
+                let page = self.clean_page(page);
                 let asked = match pending.map(|p| p.command) {
                     Some(Command::FilesListPage { path, start, .. }) => Some((path, start)),
                     _ => None,

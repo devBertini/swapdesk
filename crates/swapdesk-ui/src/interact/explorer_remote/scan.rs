@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use super::{MAX_DEPTH, MAX_JOB_FILES};
 use crate::api::{ApiCode, Command, Feature, Msg, RemoteKind, RemotePage};
 use crate::interact::explorer::{human_size, join};
+use crate::local_disk::safe_join;
 use crate::state::{Changed, UiState};
 use crate::strings::MsgKey;
 
@@ -33,6 +34,21 @@ pub(crate) struct ScanCur {
     pub next: u32,
     /// Name, kind and size of every entry.
     pub entries: Vec<(String, RemoteKind, u64)>,
+    /// Pages taken so far: a host that never ends a folder is stopped (see [`MAX_PAGES`]).
+    pub pages: u32,
+}
+
+/// Most pages one folder may take. A page holds at least one entry unless the names on it were all refused, so
+/// this lets through every folder the limits allow and ends the endless one.
+const MAX_PAGES: u32 = MAX_JOB_FILES as u32;
+
+/// Why a scan stopped on a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Past the limit of files (and folders) of a job.
+    TooBig,
+    /// The host's pages do not move forward (`next` is not past `start`) or never end.
+    Endless,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,20 +65,36 @@ enum Fed {
     More(String, u32),
     /// The folder is complete.
     Folder(ScanCur),
+    /// The scan ends here, before the folder is complete.
+    Stop(Stop),
 }
 
 impl Scan {
     pub(crate) fn begin(&mut self) -> Option<(String, u32)> {
         let dir = self.queue.pop_front()?;
         let path = dir.remote.clone();
-        self.cur = Some(ScanCur { dir, next: 0, entries: Vec::new() });
+        self.cur = Some(ScanCur { dir, next: 0, entries: Vec::new(), pages: 0 });
         Some((path, 0))
     }
 
-    fn feed(&mut self, path: &str, start: u32, page: &RemotePage) -> Fed {
+    /// `already` is what the job holds before this folder (files or folders, whichever is more): the limit of a job
+    /// is checked here, page by page, so a host cannot grow the viewer's memory by never ending a folder.
+    fn feed(&mut self, path: &str, start: u32, page: &RemotePage, already: usize) -> Fed {
         let Some(cur) = &mut self.cur else { return Fed::Foreign };
         if cur.dir.remote != path || cur.next != start || page.start != start {
             return Fed::Foreign;
+        }
+        cur.pages += 1;
+        let stop = if page.next.is_some_and(|n| n <= start) || cur.pages > MAX_PAGES {
+            Some(Stop::Endless)
+        } else if already.saturating_add(cur.entries.len()).saturating_add(page.entries.len()) > MAX_JOB_FILES {
+            Some(Stop::TooBig)
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            self.cur = None;
+            return Fed::Stop(stop);
         }
         cur.entries.extend(page.entries.iter().map(|e| (e.name.clone(), e.kind, e.size)));
         match page.next {
@@ -142,19 +174,37 @@ impl UiState {
         start: (Option<Command>, Vec<Command>),
     ) -> Option<Command> {
         let session_id = self.session_id()?;
-        let dl = self.explorer.there.download.get_or_insert_with(Download::default);
+        let t = &mut self.explorer.there;
+        let dl = t.download.get_or_insert_with(Download::default);
         let idle = dl.scan.cur.is_none();
         dl.starts.push(start);
+        let mut refused = false;
         for name in folders {
-            let local = local_dir.join(&name);
+            // The one checked join: a name that is not one plain component is never a folder of ours.
+            let Some(local) = safe_join(local_dir, &name) else {
+                refused = true;
+                continue;
+            };
             dl.folders.push(local.clone());
             dl.scan.queue.push_back(ScanDir { remote: join(remote_dir, &name), local, depth: 1 });
         }
-        if !idle {
-            return None;
+        let first = if idle { dl.scan.begin() } else { None };
+        if first.is_none() && idle {
+            // Every folder was refused: only the files of the copy are left, and they go now.
+            dl.made = Some(0);
         }
-        let (path, start) = dl.scan.begin()?;
-        Some(Command::FilesListPage { session_id, path, start })
+        if refused {
+            t.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
+        }
+        match first {
+            Some((path, start)) => Some(Command::FilesListPage { session_id, path, start }),
+            None => {
+                if idle {
+                    self.download_make();
+                }
+                None
+            }
+        }
     }
 
     fn download_abort(&mut self, notice: Msg) {
@@ -194,10 +244,17 @@ impl UiState {
             self.download_abort(self.too_big());
             return;
         }
+        let mut refused = false;
         for name in dirs {
-            let local = cur.dir.local.join(&name);
+            let Some(local) = safe_join(&cur.dir.local, &name) else {
+                refused = true;
+                continue;
+            };
             dl.folders.push(local.clone());
             dl.scan.queue.push_back(ScanDir { remote: join(&cur.dir.remote, &name), local, depth: cur.dir.depth + 1 });
+        }
+        if refused {
+            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
         }
         self.download_next();
     }
@@ -267,10 +324,12 @@ impl UiState {
         let t = &mut self.explorer.there;
         let fed = match (&mut t.download, &mut t.props) {
             (Some(dl), _) if dl.made.is_none() && dl.scan.waits_for(path, *start) => {
-                (true, dl.scan.feed(path, *start, &page))
+                let held = dl.files.len().max(dl.folders.len());
+                (true, dl.scan.feed(path, *start, &page, held))
             }
-            (_, Some(ThereProps { scan: Some(scan), .. })) if scan.waits_for(path, *start) => {
-                (false, scan.feed(path, *start, &page))
+            (_, Some(ThereProps { scan: Some(scan), counted, .. })) if scan.waits_for(path, *start) => {
+                let held = usize::try_from(counted.files + counted.folders).unwrap_or(usize::MAX);
+                (false, scan.feed(path, *start, &page, held))
             }
             _ => return Err(page),
         };
@@ -281,6 +340,20 @@ impl UiState {
             Fed::More(path, start) => self.followups.push(Command::FilesListPage { session_id, path, start }),
             Fed::Folder(cur) if download => self.download_folder(cur),
             Fed::Folder(cur) => self.props_folder(cur),
+            Fed::Stop(stop) if download => {
+                let notice = match stop {
+                    Stop::TooBig => self.too_big(),
+                    Stop::Endless => Msg::new(MsgKey::ExplorerOpFailed),
+                };
+                self.download_abort(notice);
+            }
+            Fed::Stop(_) => {
+                // The count ends with what it has.
+                if let Some(p) = &mut self.explorer.there.props {
+                    p.counted.truncated = true;
+                    p.scan = None;
+                }
+            }
         }
         Ok(Changed::VIEWER)
     }

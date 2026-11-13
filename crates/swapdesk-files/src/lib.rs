@@ -40,7 +40,7 @@ pub use local::{FreeSpaceFn, LocalFs};
 pub use name::validate_name;
 pub use proxy::{
     CALL_TIMEOUT, CallerSource, DEFAULT_RECEIVE, FsCaller, FsServer, MOVE_CALL_TIMEOUT, Pending, PipeCaller, PipeFs,
-    Roots, Tokens,
+    Roots, Tokens, is_plain_absolute,
 };
 pub use recv::{FinishError, Incoming};
 pub use send::{ChunkReader, Outgoing};

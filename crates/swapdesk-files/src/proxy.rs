@@ -465,10 +465,14 @@ impl Tokens {
         Some((token, name))
     }
 
-    /// Lets the service write into the folder `dir` (the folder the user chose); returns its token.
+    /// Lets the service write into the folder `dir` (the folder the user chose); returns its token. A folder that
+    /// is not an absolute path of plain components (a `..` or `.` in it can come only from a name a host chose) is
+    /// not let in: its token names nothing, so every write through it is refused.
     pub fn receive_into(&self, dir: PathBuf) -> u32 {
         let token = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.recvs).insert(token, dir);
+        if is_plain_absolute(&dir) {
+            lock(&self.recvs).insert(token, dir);
+        }
         token
     }
 
@@ -477,6 +481,13 @@ impl Tokens {
         lock(&self.picks).remove(&token);
         lock(&self.recvs).remove(&token);
     }
+}
+
+/// An absolute path made of a prefix, a root and normal components only: no `..`, no `.`, nothing to resolve.
+pub fn is_plain_absolute(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && path.components().all(|c| matches!(c, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
 }
 
 /// What a serving process lets the service reach.

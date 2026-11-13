@@ -207,8 +207,27 @@ pub fn next_free_name(base: &str, taken: &[&str]) -> String {
     (2..).map(|i| format!("{base} ({i})")).find(|n| free(n)).unwrap_or_else(|| base.to_owned())
 }
 
-/// Creates the folder `path`; `Refused` when something has its name already.
+/// `base` with the name of one entry of the other computer's folder, or `None` when the name is not exactly one
+/// plain component this computer can hold (a path, `..`, a drive, a reserved name). The one place a remote name
+/// becomes a local path: nothing else may `join` a name a host sent.
+pub fn safe_join(base: &Path, name: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    if !name_ok(name) {
+        return None;
+    }
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(only)), None) if only == std::ffi::OsStr::new(name) => Some(base.join(name)),
+        _ => None,
+    }
+}
+
+/// Creates the folder `path`; `Refused` when something has its name already. The whole path must be plain (see
+/// [`swapdesk_files::is_plain_absolute`]): a `..` anywhere in it is `Invalid`, not only in its last component.
 pub fn make_dir(path: &Path) -> Result<(), ApiCode> {
+    if !swapdesk_files::is_plain_absolute(path) {
+        return Err(ApiCode::Invalid);
+    }
     let name = path.file_name().and_then(|n| n.to_str()).ok_or(ApiCode::Invalid)?;
     if !name_ok(name) {
         return Err(ApiCode::Invalid);
@@ -432,5 +451,49 @@ mod tests {
             assert_eq!(p[0].kind, PlaceKind::Home);
         }
         assert!(p.iter().any(|x| x.kind == PlaceKind::Volume), "{p:?}");
+    }
+
+    #[test]
+    fn a_remote_name_joins_only_as_one_plain_component() {
+        let dir = scratch("safe-join");
+        for good in ["a.txt", "Relatório final.pdf", ".gitignore", "Pasta (2)"] {
+            assert_eq!(safe_join(&dir, good), Some(dir.join(good)), "{good}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../x",
+            "/etc",
+            "C:",
+            "nul",
+            "a:b",
+            "tail.",
+            "..\\..\\x",
+            "C:\\Windows\\Temp",
+            "\\Windows\\Temp",
+            "x.swapdesk-part",
+        ] {
+            assert_eq!(safe_join(&dir, bad), None, "{bad:?}");
+        }
+        // Characters only Windows refuses in a name: a Mac holds them.
+        for name in ["what?.txt", "a|b"] {
+            assert_eq!(safe_join(&dir, name).is_none(), cfg!(windows), "{name:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_is_made_only_at_a_plain_path_not_through_a_dot_dot() {
+        let dir = scratch("make-plain");
+        std::fs::create_dir_all(dir.join("picked").join("sub")).unwrap();
+        // The last component is fine; the climb earlier in the path is what the old check missed.
+        let climbing = dir.join("picked").join("sub").join("..").join("..").join("escaped");
+        assert_eq!(make_dir(&climbing), Err(ApiCode::Invalid));
+        assert!(!dir.join("escaped").exists());
+        assert_eq!(make_dir(Path::new("relative")), Err(ApiCode::Invalid));
+        assert_eq!(make_dir(&dir.join("picked").join("sub").join("fine")), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

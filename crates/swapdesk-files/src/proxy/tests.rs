@@ -421,3 +421,28 @@ fn a_move_outlasts_the_generic_call_timeout_and_gets_its_true_answer() {
         "every other call keeps the generic limit"
     );
 }
+
+#[test]
+fn a_receive_folder_that_climbs_out_or_is_relative_names_nothing() {
+    let base = temp("recv-climb");
+    let recv = base.join("recv");
+    std::fs::create_dir_all(&recv).unwrap();
+    std::fs::create_dir_all(base.join("outside")).unwrap();
+    let tokens = Arc::new(Tokens::new());
+    let good = tokens.receive_into(recv.clone());
+    let climbing = tokens.receive_into(recv.join("..").join("outside"));
+    let relative = tokens.receive_into(PathBuf::from("recv"));
+    let link = Link::start(FsServer::new(Roots::Tokens(Arc::clone(&tokens))));
+    let fs = link.fs();
+    assert!(fs.part_create(Path::new(&format!("r{good}")), "ok.txt").is_ok(), "a plain folder still works");
+    for (what, token) in [("climbing", climbing), ("relative", relative)] {
+        assert_eq!(
+            fs.part_create(Path::new(&format!("r{token}")), "x.txt").err(),
+            Some(ErrorCode::InvalidName),
+            "{what}"
+        );
+    }
+    assert!(!base.join("outside").join("x.txt.swapdesk-part").exists());
+    drop(link);
+    let _ = std::fs::remove_dir_all(&base);
+}

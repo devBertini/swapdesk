@@ -1030,6 +1030,215 @@ fn properties_are_enabled_on_the_right_pane_for_one_selection_or_none_only() {
     assert!(s.explorer_manage().props.is_none());
 }
 
+// ----- names a host sends (security review 13/11, items 1, 6, 10a) -----
+
+fn hostile_dirs() -> Vec<&'static str> {
+    vec![
+        r"..\..\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
+        r"C:\Users\ana\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
+        r"\Windows\Temp",
+        "../../Library/LaunchAgents",
+        "..",
+        "C:",
+    ]
+}
+
+/// Whether `p` lies under `root` by plain components (no `..` in it).
+fn inside(root: &std::path::Path, p: &std::path::Path) -> bool {
+    p.starts_with(root) && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// Answers every command of a download as a malicious host and a full disk would: each folder listed holds one
+/// `payload.exe`, each local folder "already exists" (the merge). Returns every command that was sent.
+fn drain_download(s: &mut UiState, first: Vec<Command>) -> Vec<Command> {
+    let mut todo: std::collections::VecDeque<Command> = first.into();
+    let mut sent = Vec::new();
+    for _ in 0..500 {
+        todo.extend(s.take_followups());
+        let Some(c) = todo.pop_front() else { return sent };
+        match &c {
+            Command::FilesListPage { path, start, .. } => {
+                let p = page(path, *start, vec![remote("payload.exe", RemoteKind::File, 1)], None);
+                answer(s, &c, Ok(Reply::RemotePage(p)));
+            }
+            Command::LocalMakeDir { .. } => answer(s, &c, Err(ApiError::new(ApiCode::Refused))),
+            _ => {}
+        }
+        sent.push(c);
+    }
+    panic!("the download never ended: {} commands so far", sent.len());
+}
+
+#[test]
+fn a_hostile_host_cannot_steer_a_folder_download_out_of_the_chosen_folder() {
+    let mut s = opened_11();
+    let a = copy_folder_down(&mut s, "Contratos");
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)]);
+    let mut entries: Vec<RemoteEntry> = hostile_dirs().into_iter().map(|n| remote(n, RemoteKind::Dir, 0)).collect();
+    entries.push(remote("Fine", RemoteKind::Dir, 0));
+    entries.push(remote("payload.exe", RemoteKind::File, 1));
+    page_of(&mut s, "Contratos", 0, entries, None);
+    let sent = drain_download(&mut s, Vec::new());
+    let root = PathBuf::from("C:/u/Downloads").join("Contratos");
+    let mut made = Vec::new();
+    for c in &sent {
+        match c {
+            Command::LocalMakeDir { path } => {
+                assert!(inside(&root, path), "a folder outside the chosen one: {path:?}");
+                made.push(path.clone());
+            }
+            Command::FilesGet { local_dir, remote_path, .. } => {
+                assert!(inside(&root, local_dir), "a file into {local_dir:?}");
+                assert!(
+                    remote_path.split('/').all(|p| p != ".." && !p.contains('\\') && !p.contains(':')),
+                    "{remote_path}"
+                );
+            }
+            Command::FilesListPage { path, .. } => {
+                assert!(
+                    path.split('/').all(|p| p != ".." && !p.contains('\\') && !p.contains(':')),
+                    "asked for {path}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(made, vec![root.clone(), root.join("Fine")], "only the honest folder is made, under the picked one");
+    assert!(
+        sent.iter().any(|c| matches!(c, Command::FilesGet { local_dir, remote_path, .. }
+            if *local_dir == root.join("Fine") && remote_path == "Contratos/Fine/payload.exe")),
+        "the honest files still come: {sent:?}"
+    );
+    assert!(s.explorer.there.notice.is_some(), "the person is told that names were left out");
+}
+
+#[test]
+fn the_right_pane_never_lists_a_name_that_is_not_one_valid_component() {
+    let mut s = opened_11();
+    let mut entries: Vec<RemoteEntry> = hostile_dirs().into_iter().map(|n| remote(n, RemoteKind::Dir, 0)).collect();
+    entries.push(remote(r"..\..\thesis.docx", RemoteKind::File, 5));
+    entries.push(remote("ok.txt", RemoteKind::File, 5));
+    let c = list_cmd(&s, "", 0);
+    s.explorer.there.want = Some(String::new());
+    answer(&mut s, &c, Ok(Reply::RemotePage(page("", 0, entries, None))));
+    assert_eq!(there_rows(&s), ["ok.txt"]);
+    assert!(s.explorer.there.notice.is_some());
+}
+
+#[test]
+fn a_1_0_listing_is_cleaned_of_such_names_too() {
+    let mut s = opened_10();
+    reply(
+        &mut s,
+        Reply::Listing(Listing {
+            path: String::new(),
+            entries: vec![entry(r"..\..\x", true, 0), entry("../y", false, 1), entry("Documents", true, 0)],
+            truncated: false,
+        }),
+    );
+    assert_eq!(there_rows(&s), ["Documents"]);
+}
+
+#[test]
+fn a_page_that_asks_for_itself_again_or_overruns_the_limit_stops_the_scan_at_once() {
+    // next == start would ask the same page forever.
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    page_of(&mut s, "Contratos", 0, vec![remote("a.txt", RemoteKind::File, 1)], Some(0));
+    assert!(s.take_followups().is_empty(), "no page is asked again");
+    assert!(s.explorer.there.download.is_none());
+    assert!(s.explorer.there.notice.is_some());
+    // A step backwards is the same.
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    page_of(&mut s, "Contratos", 0, vec![remote("a.txt", RemoteKind::File, 1)], Some(1));
+    assert_eq!(s.take_followups(), vec![list_cmd(&s, "Contratos", 1)]);
+    page_of(&mut s, "Contratos", 1, vec![remote("b.txt", RemoteKind::File, 1)], Some(1));
+    assert!(s.take_followups().is_empty() && s.explorer.there.download.is_none());
+    // The limit holds inside one folder, before its last page: nothing past it is kept or asked.
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    let many: Vec<RemoteEntry> = (0..10_001).map(|i| remote(&format!("f{i}"), RemoteKind::File, 1)).collect();
+    page_of(&mut s, "Contratos", 0, many, Some(10_001));
+    assert!(s.take_followups().is_empty(), "the next page is not asked");
+    assert!(s.explorer.there.download.is_none());
+    assert!(s.explorer.there.notice.as_ref().is_some_and(|n| s.tm(n).contains("limite")));
+    // The properties count stops the same way, with what it has.
+    let mut s = opened_11();
+    s.explorer.focus_there = true;
+    let a = s.activate(ControlId::ExpProps);
+    assert_eq!(a.commands, vec![list_cmd(&s, "", 0)]);
+    page_of(&mut s, "", 0, vec![remote("a.txt", RemoteKind::File, 1)], Some(0));
+    assert!(s.take_followups().is_empty(), "no page is asked again");
+    assert!(s.explorer.there.props.as_ref().is_some_and(|p| p.scan.is_none()), "the count is over");
+}
+
+#[test]
+fn a_name_this_computer_cannot_hold_is_not_made_even_when_the_hosts_rule_lets_it_through() {
+    // `what?` passes the shared rule (a Mac may name a folder so) but Windows refuses it: the one checked join
+    // leaves it out of the folders made, on a Windows viewer.
+    if !cfg!(windows) {
+        return;
+    }
+    let mut s = opened_11();
+    copy_folder_down(&mut s, "Contratos");
+    page_of(&mut s, "Contratos", 0, vec![remote("what?", RemoteKind::Dir, 0), remote("ok", RemoteKind::Dir, 0)], None);
+    let sent = drain_download(&mut s, Vec::new());
+    let root = PathBuf::from("C:/u/Downloads").join("Contratos");
+    let made: Vec<PathBuf> = sent
+        .iter()
+        .filter_map(|c| if let Command::LocalMakeDir { path } = c { Some(path.clone()) } else { None })
+        .collect();
+    assert_eq!(made, vec![root.clone(), root.join("ok")]);
+    assert!(s.explorer.there.notice.is_some());
+}
+
+fn local_with_folder(s: &mut UiState, name: &str) {
+    reply(
+        s,
+        Reply::LocalListing(LocalListing {
+            path: PathBuf::from("C:/u/Downloads"),
+            entries: vec![entry(name, true, 0), entry("foto.jpg", false, 10)],
+            truncated: false,
+            hidden: Vec::new(),
+        }),
+    );
+}
+
+#[test]
+fn a_downloaded_folder_that_exists_here_asks_before_it_merges() {
+    let mut s = opened_11();
+    local_with_folder(&mut s, "Contratos");
+    let a = copy_folder_down(&mut s, "Contratos");
+    assert!(a.commands.is_empty(), "nothing is scanned or made before the answer");
+    let card = s.explorer_manage().conflict.expect("the card asks about the folder");
+    assert_eq!(card.title, "“Contratos” já existe em Downloads");
+    let replace = card.buttons.iter().find(|b| b.id == ControlId::ExpConflictReplace).unwrap();
+    assert!(!replace.enabled, "a folder is merged or skipped, never replaced");
+    assert!(s.activate(ControlId::ExpConflictReplace).commands.is_empty());
+    assert!(s.explorer_manage().conflict.is_some(), "the card stays");
+    // Cancelar: nothing happens.
+    let a = s.activate(ControlId::ExpConflictCancel);
+    assert!(a.commands.is_empty() && s.explorer.there.download.is_none());
+    // Pular: the folder is left out.
+    copy_folder_down(&mut s, "Contratos");
+    let a = s.activate(ControlId::ExpConflictSkip);
+    assert!(a.commands.is_empty() && s.explorer.there.download.is_none(), "{:?}", a.commands);
+    // The primary answer merges: the scan starts, as it did before the card.
+    copy_folder_down(&mut s, "Contratos");
+    let a = s.activate(ControlId::ExpConflictKeepBoth);
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)]);
+}
+
+#[test]
+fn a_folder_that_does_not_exist_here_still_downloads_without_asking() {
+    let mut s = opened_11();
+    local_with_folder(&mut s, "Outra");
+    let a = copy_folder_down(&mut s, "Contratos");
+    assert_eq!(a.commands, vec![list_cmd(&s, "Contratos", 0)]);
+    assert!(s.explorer_manage().conflict.is_none());
+}
+
 // ----- the scenarios -----
 
 #[test]

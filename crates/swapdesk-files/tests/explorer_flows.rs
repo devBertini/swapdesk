@@ -312,3 +312,64 @@ fn a_viewer_engine_does_not_serve_changes_and_a_busy_answer_names_every_name() {
     assert_eq!(res.results.iter().map(|i| i.code).collect::<Vec<_>>(), [ErrorCode::Busy, ErrorCode::Busy]);
     let _ = std::fs::remove_dir_all(&r.root);
 }
+
+// ---------- names a host sends (security review 13/11, item 1) ----------
+
+fn hostile_names() -> Vec<&'static str> {
+    vec![
+        r"..\..\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup",
+        r"C:\Users\x\Startup",
+        r"\Windows\Temp",
+        "../../Library/LaunchAgents",
+        "..",
+        ".",
+        "",
+        "C:",
+        "nul",
+        "a:b",
+        "tail.",
+    ]
+}
+
+fn entry2(name: &str, kind: swapdesk_proto::EntryKind) -> swapdesk_proto::DirEntry2 {
+    swapdesk_proto::DirEntry2 { name: name.to_string(), kind, size: 1, mtime_ms: 0, flags: 0 }
+}
+
+#[test]
+fn the_viewer_drops_every_page_entry_whose_name_is_not_one_valid_component() {
+    let mut r = rig("hostile-page");
+    let _ = r.viewer.request_page(9, String::new(), 0, 100);
+    let mut entries: Vec<_> = hostile_names().into_iter().map(|n| entry2(n, swapdesk_proto::EntryKind::Dir)).collect();
+    entries.push(entry2("Fine", swapdesk_proto::EntryKind::Dir));
+    entries.push(entry2("ok.txt", swapdesk_proto::EntryKind::File));
+    let outs = r.viewer.on_message(Message::DirPageListing(swapdesk_proto::DirPageListing {
+        req_id: 9,
+        path: String::new(),
+        start: 0,
+        entries,
+        next: None,
+        free_bytes: None,
+    }));
+    let [Out::Event(Event::PageListing { entries, .. })] = outs.as_slice() else { panic!("{outs:?}") };
+    assert_eq!(names(entries), ["Fine", "ok.txt"]);
+}
+
+#[test]
+fn the_viewer_drops_every_1_0_listing_entry_whose_name_is_not_one_valid_component() {
+    let mut r = rig("hostile-list");
+    let _ = r.viewer.request_dir(4, None);
+    let mut entries: Vec<_> = hostile_names()
+        .into_iter()
+        .map(|n| swapdesk_proto::DirEntry { name: n.to_string(), is_dir: true, size: 0, mtime_ms: 0 })
+        .collect();
+    entries.push(swapdesk_proto::DirEntry { name: "Fine".into(), is_dir: true, size: 0, mtime_ms: 0 });
+    let outs = r.viewer.on_message(Message::DirListing(swapdesk_proto::DirListing {
+        req_id: 4,
+        path: String::new(),
+        entries,
+        truncated: false,
+    }));
+    let [Out::Event(Event::Listing { entries, .. })] = outs.as_slice() else { panic!("{outs:?}") };
+    let got: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(got, ["Fine"]);
+}

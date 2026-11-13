@@ -52,6 +52,11 @@ pub(crate) enum ThereError {
     VolumeGone(String),
 }
 
+/// Whether a name the other computer listed is one component this computer may meet: the rule both sides share.
+pub(crate) fn remote_name_ok(name: &str) -> bool {
+    swapdesk_files::validate_name(name).is_ok()
+}
+
 /// A copy the person asked for, split into what goes now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyJob {
@@ -73,6 +78,15 @@ pub(crate) struct Conflict {
     pub apply_all: bool,
     pub skip: BTreeSet<String>,
     pub replace: Vec<String>,
+}
+
+impl Conflict {
+    /// Whether `Substituir` would reach a folder: the names it answers now (the first, or all when applied to all)
+    /// include one. A folder is merged or skipped; replacing one would put its whole contents in the bin.
+    fn replaces_a_folder(&self) -> bool {
+        let take = if self.apply_all { self.names.len() } else { 1 };
+        self.names.iter().take(take).any(|n| self.job.folders.contains(n))
+    }
 }
 
 /// A copy that waits for the bin to take the files it replaces.
@@ -346,6 +360,30 @@ impl UiState {
     }
 
     // ----- the listing -----
+
+    /// Drops the entries of a page whose name is not one valid component (`swapdesk_files::validate_name`): a
+    /// name that is a path (`..\x`, `C:\x`) must not reach a row, a drag, a scan or this computer's disk. The
+    /// person is told that names were left out.
+    pub(crate) fn clean_page(&mut self, mut page: RemotePage) -> RemotePage {
+        let before = page.entries.len();
+        page.entries.retain(|e| remote_name_ok(&e.name));
+        self.note_names_left_out(before - page.entries.len());
+        page
+    }
+
+    /// The same for a 1.0 peer's listing.
+    pub(crate) fn clean_listing(&mut self, l: &mut crate::api::Listing) {
+        let before = l.entries.len();
+        l.entries.retain(|e| remote_name_ok(&e.name));
+        self.note_names_left_out(before - l.entries.len());
+    }
+
+    fn note_names_left_out(&mut self, count: usize) {
+        if count > 0 {
+            // Closest existing text; a text of its own is proposed in LANE-STATUS.md.
+            self.explorer.there.notice = Some(Msg::new(MsgKey::ExplorerNameInvalid));
+        }
+    }
 
     /// Asks the first page of `path` (the pane shows what it has meanwhile when `quiet`).
     fn relist_there(&mut self, path: String, show_placeholder: bool) {
@@ -999,7 +1037,11 @@ impl UiState {
             self.here_names()
         };
         let lower: BTreeSet<String> = known.iter().map(|n| n.to_lowercase()).collect();
-        let names: Vec<String> = job.files.iter().filter(|n| lower.contains(&n.to_lowercase())).cloned().collect();
+        // A folder coming here is asked about too: it is merged into the one of its name, never silently. (Folders
+        // going there keep merging at once: the other computer's own rules guard its disk.)
+        let down_folders = job.folders.iter().filter(|_| !to_there);
+        let names: Vec<String> =
+            job.files.iter().chain(down_folders).filter(|n| lower.contains(&n.to_lowercase())).cloned().collect();
         if names.is_empty() {
             self.run_job(job, &BTreeSet::new(), Vec::new(), a);
         } else {
@@ -1030,6 +1072,10 @@ impl UiState {
             self.explorer.there.conflict = Some(c);
             return;
         }
+        if answer == Answer::Replace && c.replaces_a_folder() {
+            self.explorer.there.conflict = Some(c);
+            return;
+        }
         let take = if c.apply_all { c.names.len() } else { 1 };
         let decided: Vec<String> = c.names.drain(..take.min(c.names.len())).collect();
         match answer {
@@ -1047,8 +1093,9 @@ impl UiState {
     }
 
     /// Sends the job: files now (after the bin took the ones replaced), folders by the walk.
-    fn run_job(&mut self, job: CopyJob, skip: &BTreeSet<String>, replace: Vec<String>, a: &mut Activation) {
+    fn run_job(&mut self, mut job: CopyJob, skip: &BTreeSet<String>, replace: Vec<String>, a: &mut Activation) {
         let Some(session_id) = self.session_id() else { return };
+        job.folders.retain(|n| !skip.contains(n));
         let files: Vec<String> = job.files.iter().filter(|n| !skip.contains(*n)).cloned().collect();
         let mut copy = Vec::new();
         if job.to_there {
@@ -1273,6 +1320,7 @@ impl UiState {
         let mut lines: Vec<String> = c.names.iter().take(3).cloned().collect();
         lines.push(self.t(MsgKey::ExplorerConflictReplaceNote));
         let block = self.replace_block(c.job.to_there).map(|m| self.tm(&m));
+        let folder_named = c.replaces_a_folder();
         let btn = |id, key, style, enabled, why| CardButton { id, label: self.t(key), style, enabled, why };
         Some(CardView {
             title,
@@ -1286,7 +1334,7 @@ impl UiState {
                     ControlId::ExpConflictReplace,
                     MsgKey::ExplorerConflictReplace,
                     CardStyle::Danger,
-                    block.is_none(),
+                    block.is_none() && !folder_named,
                     block,
                 ),
                 btn(ControlId::ExpConflictKeepBoth, MsgKey::ExplorerConflictKeepBoth, CardStyle::Primary, true, None),

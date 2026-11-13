@@ -91,6 +91,8 @@ pub enum Event {
         path: String,
         entries: Vec<swapdesk_proto::DirEntry>,
         truncated: bool,
+        /// Entries left out because their name is not one valid component (see [`keep_valid_names`]).
+        dropped: u32,
     },
     /// Viewer: a page of the host's folder (the answer to a `DirPage`).
     PageListing {
@@ -100,6 +102,8 @@ pub enum Event {
         entries: Vec<DirEntry2>,
         next: Option<u32>,
         free_bytes: Option<u64>,
+        /// Entries left out because their name is not one valid component (see [`keep_valid_names`]).
+        dropped: u32,
     },
     /// Viewer: the host's home, places and volumes; `req_id` 0 when the host pushed it because the set changed.
     Volumes(VolumesList),
@@ -228,6 +232,15 @@ pub struct Engine {
     reach: u8,
     /// Host: the volumes as the disk last said, to tell the kind of a volume path.
     kinds: Vec<(u32, VolumeKind)>,
+}
+
+/// The entries of a host's listing whose name is one valid component, and how many were left out. A name that is
+/// a path (`..\x`, `C:\x`, `/x`) must never reach a viewer's disk, so it never reaches the viewer's interface.
+pub(crate) fn keep_valid_names<T>(entries: Vec<T>, name: impl Fn(&T) -> &str) -> (Vec<T>, u32) {
+    let total = entries.len();
+    let kept: Vec<T> = entries.into_iter().filter(|e| validate_name(name(e)).is_ok()).collect();
+    let dropped = u32::try_from(total - kept.len()).unwrap_or(u32::MAX);
+    (kept, dropped)
 }
 
 fn error_msg(code: ErrorCode, about_type: u16, about_id: u32) -> Out {
@@ -695,11 +708,13 @@ impl Engine {
 
     fn on_listing(&mut self, m: DirListing) -> Vec<Out> {
         if self.cfg.side == Side::Viewer && self.dir_reqs.remove(&m.req_id) {
+            let (entries, dropped) = keep_valid_names(m.entries, |e| &e.name);
             vec![Out::Event(Event::Listing {
                 req_id: m.req_id,
                 path: m.path,
-                entries: m.entries,
+                entries,
                 truncated: m.truncated,
+                dropped,
             })]
         } else {
             Vec::new()
@@ -821,13 +836,15 @@ impl Engine {
 
     fn on_page_listing(&mut self, m: DirPageListing) -> Vec<Out> {
         if self.cfg.side == Side::Viewer && self.page_reqs.remove(&m.req_id) {
+            let (entries, dropped) = keep_valid_names(m.entries, |e| &e.name);
             vec![Out::Event(Event::PageListing {
                 req_id: m.req_id,
                 path: m.path,
                 start: m.start,
-                entries: m.entries,
+                entries,
                 next: m.next,
                 free_bytes: m.free_bytes,
+                dropped,
             })]
         } else {
             Vec::new()

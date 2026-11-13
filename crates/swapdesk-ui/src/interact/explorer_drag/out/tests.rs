@@ -196,3 +196,45 @@ fn files_and_folders_mixed_leaving_the_window_drag_the_files_and_leave_the_folde
     assert_eq!(out.files().iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["foto.jpg"]);
     assert!(!s.drag_active() && s.explorer_drag().is_none(), "no refusal is shown: the drag became the system's");
 }
+
+#[test]
+fn a_drag_out_keeps_only_names_that_are_one_valid_component_and_never_removes_outside_staging() {
+    let root = temp_root("hostile");
+    std::fs::create_dir_all(&root).unwrap();
+    let staging = root.join("1");
+    let victim = root.join("victim.txt");
+    std::fs::write(&victim, b"the user's thesis").unwrap();
+    let file = |name: &str| DragOutFile { name: name.into(), size: 1, mtime_ms: 0 };
+    let out = DragOut::new(
+        1,
+        String::new(),
+        vec![
+            file("../victim.txt"),
+            file(r"..\victim.txt"),
+            file(r"C:\victim.txt"),
+            file("/victim.txt"),
+            file("fine.bin"),
+        ],
+        staging.clone(),
+    );
+    let names: Vec<&str> = out.files().iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["fine.bin"], "a name that is a path is not promised");
+    // The slot of the honest file never reaches the victim: a failed transfer removes only inside staging.
+    out.request(0).unwrap();
+    wait_until(|| staging.is_dir());
+    assert_eq!(
+        out.on_transfer(5, 1, "../victim.txt", false, &TransferState::Failed { reason: ApiCode::Invalid }),
+        None
+    );
+    assert!(victim.exists(), "the file outside staging stays");
+    // A name the engine saved it as that climbs out fails the read instead of handing out a path outside.
+    assert_eq!(
+        out.on_transfer(7, 1, "fine.bin", false, &TransferState::Running { done: 1, total: 2, bytes_per_s: 1 }),
+        None
+    );
+    out.on_saved_as(7, "../victim.txt");
+    out.on_transfer(7, 1, "fine.bin", false, &TransferState::Done);
+    assert_eq!(out.wait_bytes(0, 0), Err(PullError::Failed));
+    assert!(victim.exists());
+    let _ = std::fs::remove_dir_all(root);
+}

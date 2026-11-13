@@ -112,8 +112,10 @@ pub(crate) struct FilesTable {
     lists: HashMap<u32, ListWait>,
 }
 
+/// The last component of a host path. Both separators split it: the name of a file is never a path, and a name
+/// with a `\` in it is a host's trick, not a file (`validate_name` refuses it too).
 fn last_component(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
 impl Hub {
@@ -552,7 +554,7 @@ impl Hub {
                     self.finish_failed(session_id, id, ApiCode::Refused);
                 }
             }
-            Event::Listing { req_id, path, entries, truncated } => {
+            Event::Listing { req_id, path, entries, truncated, .. } => {
                 let Some(w) = self.take_wait(req_id, Waits::Dir) else { return };
                 let listing = FileListing {
                     path: Text(path),
@@ -564,7 +566,7 @@ impl Hub {
                 };
                 reply(&w.conn, w.req, Ok(ReplyBody::Listing(listing)));
             }
-            Event::PageListing { req_id, path, start, entries, next, free_bytes } => {
+            Event::PageListing { req_id, path, start, entries, next, free_bytes, .. } => {
                 let Some(w) = self.take_wait(req_id, Waits::Page) else { return };
                 let page = FsPage {
                     entries: entries
@@ -708,5 +710,22 @@ mod wait_tests {
         assert!(op_wait(&trash) > swapdesk_files::CALL_TIMEOUT * 3);
         let dir = FsOpKind::MakeDir { parent: String::new(), name: "x".into() };
         assert!(op_wait(&dir) > swapdesk_files::CALL_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::last_component;
+
+    #[test]
+    fn the_name_of_a_path_is_what_follows_either_separator() {
+        assert_eq!(last_component("Docs/a.txt"), "a.txt");
+        assert_eq!(last_component("a.txt"), "a.txt");
+        assert_eq!(last_component(""), "");
+        // A host path that smuggles a backslash is split there too: the drag-out slots and the removal of a failed
+        // file match by this name, so `..\..\thesis.docx` must be `thesis.docx`, never a path.
+        assert_eq!(last_component(r"Docs/..\..\..\thesis.docx"), "thesis.docx");
+        assert_eq!(last_component(r"C:\Users\x\thesis.docx"), "thesis.docx");
+        assert_eq!(last_component("Docs/"), "");
     }
 }
