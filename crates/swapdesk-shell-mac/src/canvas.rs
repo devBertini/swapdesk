@@ -330,17 +330,20 @@ define_class!(
         // The explorer's Command shortcuts reach the session window before the menu's Cut and Paste do.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            if self.ivars().kind == WindowKind::Viewer
+            let mine = (self.ivars().kind == WindowKind::Viewer
                 && self.editing().is_none()
-                && crate::shell::explorer_open()
-                && let Some(k) = explorer_key_of(event.keyCode(), event.modifierFlags())
-                && !matches!(k, swapdesk_ui::ExplorerKey::Rename | swapdesk_ui::ExplorerKey::Escape)
-            {
+                && crate::shell::explorer_open())
+            .then(|| explorer_key_of(event.keyCode(), event.modifierFlags()))
+            .flatten()
+            .filter(|k| !matches!(k, swapdesk_ui::ExplorerKey::Rename | swapdesk_ui::ExplorerKey::Escape));
+            if let Some(k) = mine {
                 crate::shell::explorer_key(k);
-                return true;
+                true
+            } else {
+                // SAFETY: forwards the same event to NSView's implementation.
+                let handled: bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
+                handled
             }
-            // SAFETY: forwards the same event to NSView's implementation.
-            unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
         #[unsafe(method(keyDown:))]
