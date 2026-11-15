@@ -32,7 +32,7 @@ mdns-sd = { version = "0.21.7", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 # The `windows` crate's own core, already in the lock through it: `#[implement]` emits `::windows_core` paths, so a
 # crate that implements a COM interface (OLE drag and drop) names it directly.
-windows-core = { version = "0.62.2", default-features = false }
+windows-core = { version = "0.100.0", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 accesskit = "0.25.2"
 accesskit_windows = "0.35.2"
