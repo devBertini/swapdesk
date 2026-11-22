@@ -205,6 +205,8 @@ struct HostRelay {
     audio_on: bool,
     audio: Option<Arc<HelperLink>>,
     last_grants: PermissionSet,
+    /// Whether the session was paused at the last look (a lock, a protected desktop, another account).
+    last_paused: bool,
 }
 
 impl HostRelay {
@@ -234,6 +236,7 @@ impl HostRelay {
         Self {
             displays: shared.media_displays(),
             last_grants: ctx.granted(),
+            last_paused: ctx.is_paused(),
             shared,
             ctx,
             ended,
@@ -423,10 +426,16 @@ impl HostRelay {
         if let Some(s) = &self.sender {
             s.set_paused(self.ctx.is_paused() || !view);
         }
-        if self.last_grants.contains(PermissionSet::CONTROL) && !granted.contains(PermissionSet::CONTROL) {
+        // `CONTROL` went, or the session was paused: the key-ups that would follow are dropped from here on, so
+        // whatever the viewer held is let go now, not when the pause ends.
+        let paused = self.ctx.is_paused();
+        let lost_control =
+            self.last_grants.contains(PermissionSet::CONTROL) && !granted.contains(PermissionSet::CONTROL);
+        if lost_control || (paused && !self.last_paused) {
             self.release_all().await;
         }
         self.last_grants = granted;
+        self.last_paused = paused;
 
         let media = self.shared.media().map(|(_, h)| h);
         self.reconcile_video(view, media.as_ref()).await;

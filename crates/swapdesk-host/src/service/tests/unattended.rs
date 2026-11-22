@@ -174,3 +174,20 @@ fn input_on_a_protected_desktop_goes_to_the_system_helper_for_an_elevated_sessio
     drop(prompted);
     t.rig.finish();
 }
+
+/// Review of 22/11/2026, D4: a prompted session is paused when the host locks or shows a protected desktop. A key
+/// or a button the viewer held at that moment stayed down at the host until the pause ended, because its key-up
+/// is dropped while paused. The pause itself now lets go of everything.
+#[test]
+fn a_pause_lets_go_of_the_keys_the_viewer_was_holding() {
+    let t = Unattended::new();
+    let (prompted, _seen) = t.rig.connect();
+    let held = swapdesk_proto::InputEvent::Key { usage_page: 0x07, usage: 0x04, down: true, modifiers: 0, locks: 0 };
+    prompted.send_input(vec![held]).expect("accepted");
+    wait_for("the key to be down at the host", || (super::keys_down(&t.rig.user.sink) == vec![0x04]).then_some(()));
+    t.rig.host.core.host().set_desktop(Desktop::Secure);
+    wait_for("the prompted session to be paused", || prompted.ctx().is_paused().then_some(()));
+    wait_for("the pause to let go of the key", || super::keys_down(&t.rig.user.sink).is_empty().then_some(()));
+    drop(prompted);
+    t.rig.finish();
+}
