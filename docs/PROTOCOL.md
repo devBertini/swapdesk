@@ -282,7 +282,7 @@ Each record is `tag: u8` and fixed fields. The host applies them in order: in a 
 - Shape stream (kind 0x03): `shape_id: u32`, `width: u16`, `height: u16` (each ≤ 256), `hot_x: u16`, `hot_y: u16`, then `width × height × 4` bytes of straight RGBA. The viewer caches up to 64 shapes per session (GUESS).
 
 ### 7.5 Clipboard item (stream kind 0x04)
-`seq: u32`, `kind: u8` (1 UTF-8 text, 2 PNG), `len: u32` (text ≤ 1 MiB, PNG ≤ 16 MiB; GUESS; checked before reading), then `len` bytes. The newest `seq` wins.
+`seq: u32`, `kind: u8` (1 UTF-8 text, 2 PNG), `len: u32` (text ≤ 1 MiB, PNG ≤ 16 MiB; GUESS; checked before reading), then `len` bytes. The newest `seq` wins. A side never sends back the item it just received, and for 3 s does not send again an item equal to the last one it sent or received when its clipboard changes to it (something else wrote it back: a second session between the same two machines, or another program that shares the clipboard); a read of the clipboard that fails is made again for 2 s before that copy is given up.
 
 ## 8. Error codes (`ErrorCode`, `u16`; also QUIC application close codes)
 | Code | Name | Meaning |

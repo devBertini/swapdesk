@@ -32,6 +32,13 @@ pub const HOST_START_WAIT: u32 = 8;
 /// one may hold it open at the moment of a copy, and a read that failed used to consume the copy, which then never
 /// reached the other computer and left no trace (review of 22/11/2026).
 pub const READ_RETRIES: u32 = 8;
+/// Polls (3 s) in which the clipboard holding again exactly what this session last sent or received is not a new
+/// copy. Something else wrote it back: a second session between the same two computers (each direction can be
+/// live at once), or another program that shares the clipboard. Each of them hands the item on to the clipboard it
+/// came from, whose change this session would send again, for ever (seen on 22/11/2026: the same image crossed
+/// four times a second for as long as two sessions were live). The other computer already holds it, so nothing is
+/// lost; a person who copies the same thing again later than this sends it again.
+pub const ECHO_POLLS: u32 = 12;
 /// A clipboard stream that does not finish in this time is dropped.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// The most a clipboard item's buffer reserves ahead of the bytes that have arrived (PROTOCOL.md 1: nothing is
@@ -63,6 +70,10 @@ pub struct ClipEngine<P> {
     wait_left: u32,
     /// Reads that failed in a row for the copy now waiting to be read.
     read_fails: u32,
+    /// What this session last sent or wrote (kind, length and a hash of it), and the polls since then.
+    last_item: Option<(Mark, u32)>,
+    /// The echo now being held back was already told to the trace.
+    echo_told: bool,
     /// What the last poll has to say to the trace.
     note: Option<String>,
 }
@@ -83,6 +94,8 @@ impl<P: ClipboardProvider> ClipEngine<P> {
             start_wait: 0,
             wait_left: 0,
             read_fails: 0,
+            last_item: None,
+            echo_told: false,
             note: None,
         }
     }
@@ -141,6 +154,7 @@ impl<P: ClipboardProvider> ClipEngine<P> {
     /// A new session: the peer's `seq` starts over. What is on the clipboard now is offered once sync is on at both
     /// sides (the peer's `ClipboardSync` arrives after this).
     pub fn new_session(&mut self) {
+        self.last_item = None;
         self.in_seq = None;
         self.peer_on = false;
         self.offer_pending = false;
@@ -152,6 +166,9 @@ impl<P: ClipboardProvider> ClipEngine<P> {
     /// start wait is over), except that a type that is never synced says nothing. A copy made during the wait goes at
     /// once, as any copy does, and takes the offer's place.
     pub fn poll(&mut self) -> Option<Outgoing> {
+        if let Some((_, polls)) = self.last_item.as_mut() {
+            *polls = polls.saturating_add(1);
+        }
         let count = self.provider.change_count().ok()?;
         let mut offer = self.offer_pending && self.active();
         if offer && self.wait_left > 0 {
@@ -212,6 +229,23 @@ impl<P: ClipboardProvider> ClipEngine<P> {
                     ClipContent::Text(t) => ClipboardPayload::Text(t),
                     ClipContent::Png(p) => ClipboardPayload::Png(p),
                 };
+                // Not a copy: what this session just sent or received was written back by something else. The offer
+                // made when sync is turned on is no echo: it is made once, on purpose, whatever went before.
+                let mark = Mark::of(&payload);
+                if !offer && self.last_item.is_some_and(|(last, polls)| last == mark && polls <= ECHO_POLLS) {
+                    if !self.echo_told {
+                        self.echo_told = true;
+                        self.note = Some(
+                            "the clipboard holds again what this session just sent or received (another session or \
+                             program wrote it back): not sent again"
+                                .to_owned(),
+                        );
+                    }
+                    self.last_item = Some((mark, 0));
+                    return None;
+                }
+                self.echo_told = false;
+                self.last_item = Some((mark, 0));
                 self.out_seq = self.out_seq.wrapping_add(1);
                 Some(Outgoing::Item(ClipboardItem { seq: self.out_seq, payload }))
             }
@@ -234,17 +268,42 @@ impl<P: ClipboardProvider> ClipEngine<P> {
             return Ok(false);
         }
         let seq = item.seq;
+        let mark = Mark::of(&item.payload);
         let content = match item.payload {
             ClipboardPayload::Text(t) => ClipContent::Text(t),
             ClipboardPayload::Png(p) => ClipContent::Png(p),
         };
         self.provider.write(&content)?;
         self.in_seq = Some(seq);
+        self.last_item = Some((mark, 0));
         // The clipboard now holds the peer's item: offering it back would be an echo.
         self.offer_pending = false;
         // What we just wrote is not a local copy: do not send it back.
         self.last_count = self.provider.change_count().ok();
         Ok(true)
+    }
+}
+
+/// What tells one clipboard item from another without keeping it: its kind, its length and a hash of its bytes
+/// (equality only; nothing is decided on it that an attacker gains from, since a forged match only keeps a copy of
+/// this machine's own clipboard from being sent twice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    png: bool,
+    len: usize,
+    hash: u64,
+}
+
+impl Mark {
+    fn of(payload: &ClipboardPayload) -> Self {
+        use std::hash::{Hash, Hasher};
+        let (png, bytes) = match payload {
+            ClipboardPayload::Text(t) => (false, t.as_bytes()),
+            ClipboardPayload::Png(p) => (true, p.as_slice()),
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        Self { png, len: bytes.len(), hash: h.finish() }
     }
 }
 
@@ -560,6 +619,46 @@ mod tests {
         fake.fail_reads(1);
         assert_eq!(e.poll(), None);
         assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 1, .. }))), "the offer was not lost");
+    }
+
+    /// Review of 22/11/2026: two sessions between the same two computers (or another program that shares the
+    /// clipboard) each wrote the item back to the clipboard it came from, and this session took that for a new copy:
+    /// the same image crossed four times a second for as long as both were live.
+    #[test]
+    fn what_this_session_just_sent_or_received_written_back_by_something_else_is_not_a_new_copy() {
+        let fake = FakeClipboard::new();
+        let mut e = engine(&fake);
+        fake.copy_externally(text("a"), false);
+        assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 1, .. }))), "the person's copy goes");
+        // Something else writes the same text back, again and again.
+        for _ in 0..40 {
+            fake.copy_externally(text("a"), false);
+            assert_eq!(e.poll(), None, "an echo is not sent");
+        }
+        assert!(e.take_note().is_some_and(|n| n.contains("not sent again")), "and the trace is told, once");
+        // The same for an item this session received.
+        e.apply(&ClipboardItem { seq: 1, payload: ClipboardPayload::Png(vec![7, 7, 7]) }).unwrap();
+        fake.copy_externally(ClipContent::Png(vec![7, 7, 7]), false);
+        assert_eq!(e.poll(), None, "what the other computer sent is not sent back to it");
+        // Another copy is a copy.
+        fake.copy_externally(text("b"), false);
+        assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 2, .. }))));
+    }
+
+    #[test]
+    fn the_same_thing_copied_again_later_is_sent_again() {
+        let fake = FakeClipboard::new();
+        let mut e = engine(&fake);
+        fake.copy_externally(text("a"), false);
+        assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 1, .. }))));
+        for _ in 0..ECHO_POLLS {
+            assert_eq!(e.poll(), None);
+        }
+        fake.copy_externally(text("a"), false);
+        assert!(
+            matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 2, .. }))),
+            "past the echo window the person copied it again, and the other computer may hold something else by now"
+        );
     }
 
     #[test]
