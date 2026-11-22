@@ -12,9 +12,41 @@ pub const MAX_LOCK_MS: u64 = 24 * 60 * 60 * 1000;
 pub const STREAK_MEMORY_MS: u64 = 24 * 60 * 60 * 1000;
 
 impl Lockout {
-    /// Milliseconds of lockout left, if locked at `now`.
+    /// Milliseconds of lockout left, if locked at `now`. Never more than the running lockout's own length: the end is
+    /// a wall-clock time, and a clock set back would otherwise add the whole jump to it (review of 22/11/2026, A10).
     pub fn remaining_ms(&self, now: u64) -> Option<u64> {
-        (self.locked_until_ms > now).then(|| self.locked_until_ms - now)
+        (self.locked_until_ms > now).then(|| (self.locked_until_ms - now).min(self.lock_length_ms()))
+    }
+
+    /// How long the lockout now running (or the last one) lasts: the length `push_failure` gave it.
+    fn lock_length_ms(&self) -> u64 {
+        let shift = u32::from(self.lockouts_24h.saturating_sub(1)).min(16);
+        BASE_LOCK_MS.saturating_mul(1u64 << shift).min(MAX_LOCK_MS)
+    }
+
+    /// Whether the record holds times past `now` that only a clock set back explains: a lockout ending later than
+    /// its length from now, a failure or a provisional attempt in the future.
+    pub fn needs_rebase(&self, now: u64) -> bool {
+        self.locked_until_ms > now.saturating_add(self.lock_length_ms())
+            || self.failures.iter().any(|&t| t > now)
+            || self.provisional.is_some_and(|t| t > now)
+    }
+
+    /// Brings the times a clock set back left in the future to `now`: a running lockout then ends one length from
+    /// now (never sooner than it would have: what was left is at most that), and a failure counts for the window from
+    /// now instead of from a time that may be a year away. Returns whether anything changed, for the caller to write.
+    pub fn rebase(&mut self, now: u64) -> bool {
+        if !self.needs_rebase(now) {
+            return false;
+        }
+        self.locked_until_ms = self.locked_until_ms.min(now.saturating_add(self.lock_length_ms()));
+        for t in &mut self.failures {
+            *t = (*t).min(now);
+        }
+        if let Some(t) = self.provisional.as_mut() {
+            *t = (*t).min(now);
+        }
+        true
     }
 
     fn prune(&mut self, now: u64) {
@@ -56,6 +88,7 @@ impl Lockout {
     /// Starts an attempt: the stale provisional failure (if any) is counted, a running lockout refuses it with
     /// the time left, otherwise a provisional failure is set. The caller persists before sending `PairNonce`.
     pub fn begin(&mut self, now: u64) -> Result<(), u64> {
+        self.rebase(now);
         self.settle_provisional(now);
         self.prune(now);
         if let Some(left) = self.remaining_ms(now) {
@@ -72,6 +105,7 @@ impl Lockout {
 
     /// The attempt ended without pinning: the provisional failure becomes a counted one.
     pub fn fail(&mut self, now: u64) {
+        self.rebase(now);
         self.provisional = None;
         self.push_failure(now, now);
     }
@@ -161,6 +195,55 @@ mod tests {
             assert!(l.locked_until_ms - t <= MAX_LOCK_MS);
             t = l.locked_until_ms + 1;
         }
+    }
+
+    const DAY: u64 = 24 * 60 * MIN;
+
+    /// Review of 22/11/2026, A10: the lockout ends at a wall-clock time, so a clock set back (a dead CMOS battery, a
+    /// manual change, a wrong NTP answer) added the whole jump to it: a year back locked pairing for a year and 15
+    /// minutes. No lockout may outlast its own length, whatever the clock did.
+    #[test]
+    fn a_clock_set_back_never_stretches_the_lockout_past_its_length() {
+        let mut l = Lockout::default();
+        let t = 400 * DAY;
+        for i in 0..3 {
+            failed_attempt(&mut l, t + i * MIN);
+        }
+        let back = t - 365 * DAY;
+        let left = l.remaining_ms(back);
+        assert!(left.is_some_and(|ms| ms <= BASE_LOCK_MS), "a year back: {left:?} ms left");
+        let refused = l.begin(back);
+        assert!(refused.is_err_and(|ms| ms <= BASE_LOCK_MS), "{refused:?}");
+    }
+
+    /// Review of 22/11/2026, A10: bounded is not enough, the time left must also run out. Rebased at the jump, the
+    /// lockout counts down from there and ends one length later; the failures stamped before the jump count for the
+    /// window from the jump, not for a year.
+    #[test]
+    fn a_rebased_lockout_counts_down_from_the_jump_and_old_failures_leave_the_window() {
+        let mut l = Lockout::default();
+        let t = 400 * DAY;
+        for i in 0..3 {
+            failed_attempt(&mut l, t + i * MIN);
+        }
+        let back = t - 365 * DAY;
+        assert!(l.needs_rebase(back));
+        assert!(l.rebase(back));
+        assert!(!l.needs_rebase(back) && !l.rebase(back), "a second rebase changes nothing");
+        assert_eq!(l.remaining_ms(back + BASE_LOCK_MS / 2), Some(BASE_LOCK_MS / 2));
+        assert!(l.begin(back + BASE_LOCK_MS).is_ok(), "over one lockout length after the jump");
+        l.succeed();
+
+        // Two failures, then the clock goes back a year: they count from the jump, so a third one after the window
+        // locks nothing.
+        let mut l = Lockout::default();
+        failed_attempt(&mut l, t);
+        failed_attempt(&mut l, t + MIN);
+        assert!(l.rebase(back));
+        failed_attempt(&mut l, back + FAILURE_WINDOW_MS + MIN);
+        assert!(l.remaining_ms(back + FAILURE_WINDOW_MS + 2 * MIN).is_none(), "{l:?}");
+        // A clock that only moves forward is never rebased.
+        assert!(!l.rebase(back + FAILURE_WINDOW_MS + 3 * MIN));
     }
 
     #[test]

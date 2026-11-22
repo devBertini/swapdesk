@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use quinn::Endpoint;
 use swapdesk_ipc::{ApiCode, Notify, PairingState, Text};
-use swapdesk_lan::guard::{check_incoming, find_on_link};
+use swapdesk_lan::guard::{approved_addrs, check_incoming, find_on_link};
 use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
 use swapdesk_platform::{Level, NetInterface};
-use swapdesk_proto::Sas;
+use swapdesk_proto::{ErrorCode, Sas};
 use swapdesk_trust::{
     Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
     PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_pairing, device_id_hex, endpoint_from_socket,
@@ -57,6 +57,9 @@ pub(crate) struct PairState {
     /// at every network change, so the filter (which runs on a runtime task for every incoming connection, however
     /// many a peer sends) never enumerates adapters itself.
     nets: Arc<Mutex<Vec<NetInterface>>>,
+    /// The service of the endpoints in `Inner::endpoints`, so an address that appears while the mode is open gets an
+    /// endpoint served the same way (under the same cap). Locked after `inner` when both are.
+    service: Mutex<Option<Arc<PairingService>>>,
 }
 
 /// The screen side of a ceremony: what the trust crate shows becomes a `Pairing` notification.
@@ -226,32 +229,42 @@ impl Hub {
         if sockets.is_empty() {
             return Err(ApiCode::Refused);
         }
-        let _enter = rt.enter();
         let service = PairingService::with_options(
             Arc::clone(ctx),
             ServeOptions {
                 filter: Some(self.pairing_filter()),
                 admitted: Some(self.pairing_admitted()),
+                crossed: Some(self.pairing_crossed()),
                 ..ServeOptions::default()
             },
         );
         let mut endpoints = Vec::new();
         for socket in sockets {
-            let endpoint =
-                open_pairing_endpoint_filtered(socket, &self.p.identity, self.pairing_datagrams()).map_err(|e| {
-                    self.log(Level::Warn, format_args!("pairing endpoint: {e}"));
-                    ApiCode::Internal
-                })?;
-            let serving = Arc::clone(&self.pairing.serving);
-            serving.fetch_add(1, Ordering::SeqCst);
-            let (service, e2) = (Arc::clone(&service), endpoint.clone());
-            rt.spawn(async move {
-                service.serve(e2).await;
-                serving.fetch_sub(1, Ordering::SeqCst);
-            });
-            endpoints.push(endpoint);
+            endpoints.push(self.serve_pair_socket(rt, &service, socket).ok_or(ApiCode::Internal)?);
         }
+        lock(&self.pairing.service).replace(service);
         Ok(endpoints)
+    }
+
+    /// The pairing endpoint on `socket`, served by `service` until the mode ends and nothing runs on it.
+    fn serve_pair_socket(
+        &self,
+        rt: &tokio::runtime::Handle,
+        service: &Arc<PairingService>,
+        socket: std::net::UdpSocket,
+    ) -> Option<Endpoint> {
+        let _enter = rt.enter();
+        let endpoint = open_pairing_endpoint_filtered(socket, &self.p.identity, self.pairing_datagrams())
+            .map_err(|e| self.log(Level::Warn, format_args!("pairing endpoint: {e}")))
+            .ok()?;
+        let serving = Arc::clone(&self.pairing.serving);
+        serving.fetch_add(1, Ordering::SeqCst);
+        let (service, e2) = (Arc::clone(service), endpoint.clone());
+        rt.spawn(async move {
+            service.serve(e2).await;
+            serving.fetch_sub(1, Ordering::SeqCst);
+        });
+        Some(endpoint)
     }
 
     /// What quinn may see on the pairing sockets (F5): a blocked source, or one off the approved links, gets no answer.
@@ -301,13 +314,21 @@ impl Hub {
         Arc::new(move |incoming| rate.note(incoming))
     }
 
+    /// Where a source address gets its 30 s turn back: its attempt was refused `BUSY` only because this machine's own
+    /// "Parear" dials that same device (both users pressed at once and this side kept its ceremony), so the other
+    /// person's next try is answered instead of ignored (review of 22/11/2026, A3 and A11).
+    fn pairing_crossed(&self) -> swapdesk_trust::CrossedHook {
+        let rate = Arc::clone(&self.pairing.rate);
+        Arc::new(move |from| rate.forgive(from.ip()))
+    }
+
     /// `PairOpen`: pairing mode for 2 minutes (D12), the endpoints, the `pair=1` announcement, the screen's id.
     pub fn pair_open(self: &Arc<Self>, conn: &Conn, device_id: Option<String>) -> Result<u32, ApiCode> {
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if self.p.trust.pairing_in_progress() {
             return Err(ApiCode::Busy);
         }
-        if self.p.trust.read(|s| s.lockout.remaining_ms(self.p.wall.unix_ms())).is_some() {
+        if self.p.trust.pairing_locked_for(self.p.wall.unix_ms()).is_some() {
             return Err(ApiCode::Locked);
         }
         let expect = match device_id.as_deref() {
@@ -353,12 +374,48 @@ impl Hub {
         Ok(id)
     }
 
-    /// The network changed: the filter of the open pairing endpoints judges by the new list from now on.
+    /// The network changed: the filter of the open pairing endpoints judges by the new list from now on, and while the
+    /// mode is open the endpoints follow the approved addresses (review of 22/11/2026, A7), as the session endpoint
+    /// does: an address the machine got gets its endpoint, and the endpoint of an address it lost is closed. The
+    /// development addresses are left as they are.
     pub(crate) fn refresh_pair_nets(&self) {
-        if self.pairing.serving.load(Ordering::SeqCst) > 0
-            && let Ok(list) = self.p.interfaces.list()
-        {
-            *lock(&self.pairing.nets) = list;
+        if self.pairing.serving.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let Ok(list) = self.p.interfaces.list() else { return };
+        *lock(&self.pairing.nets) = list.clone();
+        let Some(rt) = self.rt() else { return };
+        let port = self.settings().pair_port;
+        let approved: Vec<Ipv4Addr> = approved_addrs(&list).iter().map(|a| a.addr).collect();
+        let dev: Vec<Ipv4Addr> = self.p.dev.iter().flat_map(|d| d.pair_listen.iter().map(|a| *a.ip())).collect();
+        let mut s = lock(&self.pairing.inner);
+        let Some(service) = lock(&self.pairing.service).clone() else { return };
+        if s.id.is_none() || !self.mode.is_open() {
+            // A ceremony that outlasts the mode keeps the endpoint it runs on; nothing new opens for a closed mode.
+            return;
+        }
+        let ip_of = |e: &Endpoint| match e.local_addr() {
+            Ok(SocketAddr::V4(a)) => Some(*a.ip()),
+            _ => None,
+        };
+        s.endpoints.retain(|e| match ip_of(e) {
+            Some(ip) if !approved.contains(&ip) && !dev.contains(&ip) => {
+                e.close(quinn::VarInt::from_u32(0), b"address gone");
+                false
+            }
+            _ => true,
+        });
+        let bound: Vec<Ipv4Addr> = s.endpoints.iter().filter_map(ip_of).collect();
+        for addr in approved.into_iter().filter(|a| !bound.contains(a)) {
+            match bind_quic_socket(SocketAddrV4::new(addr, port)) {
+                Ok(socket) => {
+                    if let Some(endpoint) = self.serve_pair_socket(rt, &service, socket) {
+                        self.log(Level::Info, format_args!("pairing endpoint on {addr}:{port}"));
+                        s.endpoints.push(endpoint);
+                    }
+                }
+                Err(e) => self.log(Level::Warn, format_args!("cannot open the pairing endpoint on {addr}: {e}")),
+            }
         }
     }
 
@@ -404,6 +461,7 @@ impl Hub {
             s.task = None;
             s.peer_name = None;
             s.endpoints.clear();
+            lock(&self.pairing.service).take();
             s.owner.take()
         };
         self.mode.close();
@@ -439,6 +497,8 @@ impl Hub {
         let ctx = self.pairing_context();
         let me = Arc::clone(self);
         let task = rt.spawn(async move {
+            // This screen, not just pairing mode: a later screen of this machine is not this task's to drive.
+            let still_open = || me.mode.is_open() && lock(&me.pairing.inner).id == Some(pairing_id);
             let result = async {
                 let socket =
                     bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(|e| TrustError::Tls(e.to_string()))?;
@@ -448,16 +508,29 @@ impl Hub {
                 // may press "Parear" after this one did: while nothing answers there the dial is made again, for
                 // as long as this side's pairing is open (the two minutes both screens promise). The order of the
                 // two presses does not matter.
-                let conn = loop {
-                    match connect_pairing(&endpoint, &ctx, addr, PAIR_DIAL_LIMIT).await {
-                        Ok(conn) => break conn,
-                        Err(TrustError::Timeout(_) | TrustError::Tls(_)) if me.mode.is_open() => {
+                //
+                // `BUSY` from this machine's own slot means its responder holds it: the other person's "Parear"
+                // reached this machine first, or this initiator gave way to it (both pressed at once, review of
+                // 22/11/2026, A3). That ceremony drives the screen and ends it; this task only waits, and dials again
+                // should the responder's attempt end without a ceremony while the screen is still open.
+                loop {
+                    let conn = match connect_pairing(&endpoint, &ctx, addr, PAIR_DIAL_LIMIT).await {
+                        Ok(conn) => conn,
+                        Err(TrustError::Timeout(_) | TrustError::Tls(_) | TrustError::Protocol(ErrorCode::Busy))
+                            if still_open() =>
+                        {
                             tokio::time::sleep(PAIR_REDIAL).await;
+                            continue;
                         }
                         Err(e) => return Err(e),
+                    };
+                    match initiate(&ctx, &conn, InitiateOptions { expect, replaces: None }).await {
+                        Err(TrustError::Protocol(ErrorCode::Busy)) if still_open() => {
+                            tokio::time::sleep(PAIR_REDIAL).await;
+                        }
+                        result => return result,
                     }
-                };
-                initiate(&ctx, &conn, InitiateOptions { expect, replaces: None }).await
+                }
             }
             .await;
             match result {
@@ -528,6 +601,7 @@ impl Hub {
             s.cancelled = had;
             s.confirm = None;
             s.peer_name = None;
+            lock(&self.pairing.service).take();
             (s.task.take(), std::mem::take(&mut s.endpoints))
         };
         if let Some(t) = task {

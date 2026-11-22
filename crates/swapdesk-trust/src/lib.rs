@@ -30,7 +30,7 @@ pub use blocklist::{BLOCKED_NAME, BlockList, BlockedDevice, mac_text, parse_mac}
 pub use clock::{ClockWall, SystemWallClock, WallClock};
 pub use datagram_filter::{DatagramFilter, endpoint_from_socket_filtered};
 pub use endpoint::{
-    ACCEPT_HANDSHAKE_LIMIT, AdmittedHook, DEFAULT_MAX_IN_FLIGHT, Decision, IncomingFilter, PairingService,
+    ACCEPT_HANDSHAKE_LIMIT, AdmittedHook, CrossedHook, DEFAULT_MAX_IN_FLIGHT, Decision, IncomingFilter, PairingService,
     ServeOptions, accept_session, connect_and_initiate, connect_pairing, connect_session, endpoint_from_socket,
     open_pairing_endpoint, open_pairing_endpoint_filtered, open_session_endpoint, open_session_endpoint_filtered,
 };
@@ -45,4 +45,4 @@ pub use pairing::{
     initiate, respond,
 };
 pub use records::{Lockout, PairedDevice, TrustStore, UserRef};
-pub use store::{PairingGuard, PinLookup, TrustHandle};
+pub use store::{Crossing, PairingGuard, PinLookup, TrustHandle};

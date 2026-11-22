@@ -1,10 +1,10 @@
 //! The trust store in memory, persisted through a `SecretStore` (`trust.bin`, C5.2) on every change.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use swapdesk_platform::{ErrorKind, PlatformError, SecretStore};
 use swapdesk_proto::Wire;
+use tokio::sync::Notify;
 
 use crate::blocklist::{BLOCKED_NAME, BlockList, BlockedDevice};
 use crate::error::{Result, TrustError};
@@ -25,20 +25,96 @@ pub struct TrustHandle {
     store: Mutex<TrustStore>,
     writer: Mutex<()>,
     secrets: Arc<dyn SecretStore>,
-    pairing: AtomicBool,
+    pairing: Mutex<Slot>,
     /// The devices blocked by MAC (D65), persisted in `blocked.bin`; changes are written under `writer` too.
     blocks: Mutex<BlockList>,
 }
 
+/// The machine's one pairing slot: which attempt holds it, and whether that attempt is an initiator that would give
+/// the slot to its own peer's crossing attempt.
+#[derive(Default)]
+struct Slot {
+    /// The ticket of the guard that holds the slot.
+    holder: Option<u64>,
+    next_ticket: u64,
+    offer: Option<Offer>,
+}
+
+/// An initiator holding the slot has sent its `PairHello` to `peer` and has no answer yet. Both users pressed
+/// "Parear" on each other's card at once when that same device's own `PairHello` reaches this machine's responder:
+/// one of the two ceremonies must give way, or both fail `BUSY` (review of 22/11/2026, A3).
+struct Offer {
+    peer: DeviceId,
+    /// The peer already refused this initiator `BUSY`: it is not giving way, so this side does, whatever the IDs.
+    refused: bool,
+    /// Fired when the responder took the slot over.
+    gave_way: Arc<Notify>,
+}
+
+/// What the responder may do with a `PairHello` from `peer` while the slot is taken.
+pub enum Crossing {
+    /// The responder holds the slot now: it was free after all, or this machine's initiator dialling `peer` gave way.
+    Held(PairingGuard),
+    /// This machine's initiator is dialling `peer` and keeps the slot: the peer is the one to give way.
+    Kept,
+    /// Another attempt holds the slot.
+    Busy,
+}
+
 /// The one "pairing in progress" slot of this machine, shared by the initiator and the responder role. Held for
-/// the whole attempt; dropping it frees the slot.
+/// the whole attempt; dropping it frees the slot, unless the slot was taken over from it.
 pub struct PairingGuard {
     handle: Arc<TrustHandle>,
+    ticket: u64,
 }
 
 impl Drop for PairingGuard {
     fn drop(&mut self) {
-        self.handle.pairing.store(false, Ordering::SeqCst);
+        let mut slot = guard(&self.handle.pairing);
+        if slot.holder == Some(self.ticket) {
+            slot.holder = None;
+            slot.offer = None;
+        }
+    }
+}
+
+impl PairingGuard {
+    /// Whether this guard still holds the slot (an initiator's slot can be taken over by its peer's crossing attempt).
+    pub fn holds(&self) -> bool {
+        guard(&self.handle.pairing).holder == Some(self.ticket)
+    }
+
+    /// This initiator is about to send its `PairHello` to `peer`: until [`Self::withdraw_offer`], that same device's
+    /// crossing attempt may take the slot over ([`TrustHandle::cross_pairing`]). The returned notification fires
+    /// when it did.
+    pub fn offer_to(&self, peer: DeviceId) -> Arc<Notify> {
+        let gave_way = Arc::new(Notify::new());
+        let mut slot = guard(&self.handle.pairing);
+        if slot.holder == Some(self.ticket) {
+            slot.offer = Some(Offer { peer, refused: false, gave_way: Arc::clone(&gave_way) });
+        }
+        gave_way
+    }
+
+    /// The peer refused this initiator `BUSY`: if its own attempt arrives now, this side gives way whatever the IDs.
+    pub fn refused_by_peer(&self) {
+        let mut slot = guard(&self.handle.pairing);
+        if slot.holder == Some(self.ticket)
+            && let Some(offer) = slot.offer.as_mut()
+        {
+            offer.refused = true;
+        }
+    }
+
+    /// The peer committed to a nonce: from here the ceremony is this initiator's and cannot be taken over. False when
+    /// it was taken over first.
+    pub fn withdraw_offer(&self) -> bool {
+        let mut slot = guard(&self.handle.pairing);
+        if slot.holder != Some(self.ticket) {
+            return false;
+        }
+        slot.offer = None;
+        true
     }
 }
 
@@ -62,7 +138,7 @@ impl TrustHandle {
             store: Mutex::new(store),
             writer: Mutex::new(()),
             secrets,
-            pairing: AtomicBool::new(false),
+            pairing: Mutex::new(Slot::default()),
             blocks: Mutex::new(blocks),
         }))
     }
@@ -155,13 +231,65 @@ impl TrustHandle {
 
     /// Takes the machine's pairing slot, or `None` when an attempt (either role) already holds it.
     pub fn try_begin_pairing(self: &Arc<Self>) -> Option<PairingGuard> {
-        self.pairing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok()?;
-        Some(PairingGuard { handle: Arc::clone(self) })
+        let mut slot = guard(&self.pairing);
+        if slot.holder.is_some() {
+            return None;
+        }
+        Some(self.hand_slot(&mut slot))
+    }
+
+    fn hand_slot(self: &Arc<Self>, slot: &mut Slot) -> PairingGuard {
+        let ticket = slot.next_ticket;
+        slot.next_ticket = slot.next_ticket.wrapping_add(1);
+        slot.holder = Some(ticket);
+        slot.offer = None;
+        PairingGuard { handle: Arc::clone(self), ticket }
+    }
+
+    /// The responder's way to the slot, for a `PairHello` from `peer` (its key proven by the handshake). A free slot
+    /// is taken. When the slot is this machine's initiator's, dialling that same device and still without an answer,
+    /// both users pressed "Parear" at once: the side with the higher device ID gives way (both sides compare the same
+    /// two IDs, so exactly one does), and so does a side the peer already refused `BUSY` (a peer of 1.0 or 1.1.0 never
+    /// gives way). Nothing of the ceremony's checks is skipped: the responder that takes over runs every one of them.
+    pub fn cross_pairing(self: &Arc<Self>, peer: DeviceId, local: DeviceId) -> Crossing {
+        let mut slot = guard(&self.pairing);
+        if slot.holder.is_none() {
+            return Crossing::Held(self.hand_slot(&mut slot));
+        }
+        let Some(offer) = slot.offer.as_ref().filter(|o| o.peer == peer) else { return Crossing::Busy };
+        if !(local > peer || offer.refused) {
+            return Crossing::Kept;
+        }
+        let gave_way = Arc::clone(&offer.gave_way);
+        let taken = self.hand_slot(&mut slot);
+        drop(slot);
+        // A permit is stored when the initiator is not waiting yet: it is never lost.
+        gave_way.notify_one();
+        Crossing::Held(taken)
+    }
+
+    /// Milliseconds the pairing lockout has left at `now` (wall-clock), for a check that refuses while locked. A record
+    /// a clock set back left in the future is rebased and written first (`Lockout::rebase`), so what is left counts
+    /// down from here instead of staying at the lockout's length until the clock catches up (review of 22/11/2026,
+    /// A10). Should that write fail the answer is still bounded by the lockout's length.
+    pub fn pairing_locked_for(&self, now: u64) -> Option<u64> {
+        if self.read(|s| s.lockout.needs_rebase(now)) {
+            let _ = self.update(|s| s.lockout.rebase(now));
+        }
+        self.read(|s| s.lockout.remaining_ms(now))
+    }
+
+    /// [`Self::pairing_locked_for`] for an async caller: the write, when there is one, runs on a blocking thread.
+    pub async fn pairing_locked_for_async(self: &Arc<Self>, now: u64) -> Option<u64> {
+        if self.read(|s| s.lockout.needs_rebase(now)) {
+            let _ = self.update_blocking(move |s| s.lockout.rebase(now)).await;
+        }
+        self.read(|s| s.lockout.remaining_ms(now))
     }
 
     /// True while an attempt holds the slot.
     pub fn pairing_in_progress(&self) -> bool {
-        self.pairing.load(Ordering::SeqCst)
+        guard(&self.pairing).holder.is_some()
     }
 }
 
@@ -363,6 +491,29 @@ mod tests {
         assert_eq!(h.read(|s| s.devices.len()), 1, "a refused change leaves the store as it was");
         assert_eq!(secrets.load(TRUST_NAME).unwrap(), on_disk, "and writes nothing");
         assert_eq!(h.try_update(|s| Ok(s.devices.len())).unwrap(), 1);
+    }
+
+    /// Review of 22/11/2026, A10: the check that refuses a locked pairing writes the rebased lockout, so after a clock
+    /// set back the time left runs out one lockout length later instead of when the clock catches up.
+    #[test]
+    fn the_lockout_check_writes_a_record_the_clock_left_in_the_future() {
+        use crate::lockout::BASE_LOCK_MS;
+        let secrets = Arc::new(MemorySecretStore::new());
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        let t: u64 = 1_800_000_000_000;
+        h.update(|s| {
+            for i in 0..3 {
+                s.lockout.begin(t + i).unwrap();
+                s.lockout.fail(t + i);
+            }
+        })
+        .unwrap();
+        let back = t - 365 * 24 * 60 * 60 * 1000;
+        assert_eq!(h.pairing_locked_for(back), Some(BASE_LOCK_MS));
+        let on_disk = TrustHandle::open(secrets).unwrap().snapshot().lockout;
+        assert_eq!(on_disk.locked_until_ms, back + BASE_LOCK_MS, "the rebased end is on disk");
+        assert_eq!(h.pairing_locked_for(back + 1000), Some(BASE_LOCK_MS - 1000), "and counts down");
+        assert_eq!(h.pairing_locked_for(back + BASE_LOCK_MS), None);
     }
 
     #[test]

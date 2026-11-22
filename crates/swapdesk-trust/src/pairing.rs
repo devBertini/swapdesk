@@ -27,7 +27,7 @@ use crate::identity::Identity;
 use crate::ids::{DeviceId, Spki, device_id, device_id_hex, sha256};
 use crate::mode::PairingMode;
 use crate::records::{MAX_DEVICES, PairedDevice, TrustStore};
-use crate::store::{PairingGuard, PinLookup, TrustHandle};
+use crate::store::{Crossing, PairingGuard, PinLookup, TrustHandle};
 
 /// What this machine tells the peer about itself (`PairHello` / `PairNonce`).
 #[derive(Debug, Clone)]
@@ -147,6 +147,19 @@ fn export(conn: &quinn::Connection) -> Result<[u8; EXPORTER_LEN]> {
 
 async fn within<T>(deadline: Instant, what: &'static str, fut: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout_at(deadline, fut).await.map_err(|_| TrustError::Timeout(what))?
+}
+
+/// `fut`'s output, or `None` when `stop` fires first (a stored permit counts).
+async fn unless<T>(stop: &tokio::sync::Notify, fut: impl Future<Output = T>) -> Option<T> {
+    let mut stop = std::pin::pin!(stop.notified());
+    let mut fut = std::pin::pin!(fut);
+    std::future::poll_fn(|cx| {
+        if stop.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
+        fut.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 fn lost<E>(_: E) -> TrustError {
@@ -341,6 +354,19 @@ struct Attempt {
     peer: std::sync::Mutex<Option<DeviceId>>,
     began: std::sync::atomic::AtomicBool,
     owner: std::sync::Mutex<Option<PairingGuard>>,
+    /// A responder that answered `BUSY` only because this machine's own initiator is dialling that same device.
+    crossed: std::sync::atomic::AtomicBool,
+}
+
+/// How long an initiator refused `BUSY` by the very device it dials waits for that device's own crossing attempt to
+/// reach this machine's responder. The peer's `PairHello` left with or before its `BUSY` (the peer's initiator holds
+/// its slot only after its handshake with this machine ended), so on a LAN this is many round trips.
+const GIVE_WAY_GRACE: Duration = Duration::from_secs(2);
+
+/// What an initiator that gave way to its peer's crossing attempt ends with: this machine is busy with that attempt,
+/// whose ceremony this machine's screen follows.
+fn gave_way() -> TrustError {
+    TrustError::Protocol(ErrorCode::Busy)
 }
 
 impl Attempt {
@@ -348,20 +374,59 @@ impl Attempt {
         *self.peer.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
     }
 
+    fn owner(&self) -> std::sync::MutexGuard<'_, Option<PairingGuard>> {
+        self.owner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Takes the slot; `Busy` when another attempt of either role holds it.
     fn take_slot(&self, ctx: &PairingContext) -> Result<()> {
         let guard = ctx.trust.try_begin_pairing().ok_or(TrustError::Protocol(ErrorCode::Busy))?;
-        *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard);
+        *self.owner() = Some(guard);
+        Ok(())
+    }
+
+    /// The responder's [`Self::take_slot`] for a `PairHello` from `peer`: it may take the slot over from this
+    /// machine's initiator dialling that same device (both users pressed "Parear" at once, `TrustHandle::cross_pairing`).
+    fn take_slot_from(&self, ctx: &PairingContext, peer: DeviceId) -> Result<()> {
+        let guard = match ctx.trust.cross_pairing(peer, ctx.identity.device_id()) {
+            Crossing::Held(guard) => guard,
+            Crossing::Kept => {
+                self.crossed.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(TrustError::Protocol(ErrorCode::Busy));
+            }
+            Crossing::Busy => return Err(TrustError::Protocol(ErrorCode::Busy)),
+        };
+        *self.owner() = Some(guard);
         Ok(())
     }
 
     /// Gives the slot back before step 2 (a refusal that is not a ceremony).
     fn release_slot(&self) {
-        self.owner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.owner().take();
     }
 
     fn owns_slot(&self) -> bool {
-        self.owner.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.owner().as_ref().is_some_and(PairingGuard::holds)
+    }
+
+    /// The initiator's `PairHello` goes to `peer`: until the answer, that device's own crossing attempt may take the
+    /// slot over. The notification fires when it did.
+    fn offer_to(&self, peer: DeviceId) -> Arc<tokio::sync::Notify> {
+        match self.owner().as_ref() {
+            Some(guard) => guard.offer_to(peer),
+            None => Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn refused_by_peer(&self) {
+        if let Some(guard) = self.owner().as_ref() {
+            guard.refused_by_peer();
+        }
+    }
+
+    /// Ends the initiator's offer; false when the slot was taken over first (the attempt gave way).
+    fn withdraw_offer(&self) -> bool {
+        self.owner().as_ref().is_none_or(PairingGuard::withdraw_offer)
     }
 }
 
@@ -372,7 +437,16 @@ where
     F: Future<Output = Result<PairOutcome>>,
 {
     use std::sync::atomic::Ordering;
-    let result = body.await;
+    // An attempt that fails withdraws its offer first, so no crossing attempt takes its slot over from here on; one
+    // that was taken over before it could gave way, and the ceremony that took the slot reports to the screen.
+    let result = match body.await {
+        Err(_) if !attempt.withdraw_offer() => {
+            ctx.trace.log(Level::Info, "pair", format_args!("gave way to the peer's own pairing"));
+            conn.close(quinn::VarInt::from_u32(u32::from(ErrorCode::Busy.tag())), b"");
+            return Err(gave_way());
+        }
+        result => result,
+    };
     let now = ctx.wall.unix_ms();
     let peer_id = *attempt.peer.lock().unwrap_or_else(|e| e.into_inner());
     let device = match peer_id {
@@ -428,8 +502,15 @@ where
 /// The responder's side of section 3, after the handshake on the pairing endpoint. The machine has one pairing
 /// slot for both roles: a second attempt gets `PairResult { BUSY }` and changes nothing of the one that has it.
 pub async fn respond(ctx: &PairingContext, conn: &quinn::Connection) -> Result<PairOutcome> {
+    respond_crossing(ctx, conn).await.0
+}
+
+/// [`respond`], and whether the attempt was refused `BUSY` only because this machine's own initiator was dialling that
+/// same device (both users pressed "Parear" at once and this side kept its own ceremony).
+pub(crate) async fn respond_crossing(ctx: &PairingContext, conn: &quinn::Connection) -> (Result<PairOutcome>, bool) {
     let attempt = Attempt::default();
-    finish(ctx, conn, &attempt, respond_steps(ctx, conn, &attempt)).await
+    let result = finish(ctx, conn, &attempt, respond_steps(ctx, conn, &attempt)).await;
+    (result, attempt.crossed.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 async fn respond_steps(ctx: &PairingContext, conn: &quinn::Connection, attempt: &Attempt) -> Result<PairOutcome> {
@@ -448,12 +529,13 @@ async fn respond_steps(ctx: &PairingContext, conn: &quinn::Connection, attempt: 
         }
     };
 
-    // Step 0 answers, in the order of the table: busy, locked, already paired.
+    // Step 0 answers, in the order of the table: busy, locked, already paired. (The lockout is read first only
+    // because a record a clock set back left in the future is rewritten off the runtime's workers.)
+    let locked = ctx.trust.pairing_locked_for_async(ctx.wall.unix_ms()).await;
     let checks = (|| -> Result<Option<DeviceId>> {
-        attempt.take_slot(ctx)?;
+        attempt.take_slot_from(ctx, peer_id)?;
         let options = ctx.mode.current().ok_or(TrustError::NotInPairingMode)?;
-        let now = ctx.wall.unix_ms();
-        if let Some(left) = ctx.trust.read(|s| s.lockout.remaining_ms(now)) {
+        if let Some(left) = locked {
             return Err(TrustError::Locked { remaining_ms: left });
         }
         if ctx.trust.pinned(&spki_i).is_some() {
@@ -548,15 +630,16 @@ async fn initiate_steps(
     if expect.is_some_and(|e| e != peer_id) {
         return Err(TrustError::Protocol(ErrorCode::NotPermitted));
     }
-    let now = ctx.wall.unix_ms();
-    if let Some(left) = ctx.trust.read(|s| s.lockout.remaining_ms(now)) {
+    if let Some(left) = ctx.trust.pairing_locked_for_async(ctx.wall.unix_ms()).await {
         return Err(TrustError::Locked { remaining_ms: left });
     }
     if ctx.trust.pinned(&spki_r).is_some() {
         return Err(TrustError::Protocol(ErrorCode::AlreadyPaired));
     }
 
-    // Step 1.
+    // Step 1. Until the answer, the peer's own crossing attempt may take this machine's slot over (both users pressed
+    // "Parear" on each other's card at once): this initiator then stops at once and the responder's ceremony runs.
+    let taken_over = attempt.offer_to(peer_id);
     let spki_i = *ctx.identity.spki();
     let nonce_i = random_nonce()?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(lost)?;
@@ -564,8 +647,24 @@ async fn initiate_steps(
     write_msg(&mut send, PairHello { name, os, os_version, majors, commit: commitment(&spki_i, &nonce_i) }).await?;
 
     // Step 2 (or a refusal: locked, busy, already paired).
-    let nonce = match within(deadline, "PairNonce", read_msg(&mut recv)).await? {
-        Message::PairNonce(n) => n,
+    let Some(answer) = unless(&taken_over, within(deadline, "PairNonce", read_msg(&mut recv))).await else {
+        return Err(gave_way());
+    };
+    let nonce = match answer? {
+        // The peer committed to a nonce: the ceremony is this side's from here, unless it gave way just before.
+        Message::PairNonce(n) if attempt.withdraw_offer() => n,
+        Message::PairNonce(_) => {
+            refuse(&mut send, ErrorCode::Busy).await;
+            return Err(gave_way());
+        }
+        Message::PairResult(r) if !r.ok && r.code == ErrorCode::Busy => {
+            // The device this side dials is busy, perhaps with its own attempt toward this machine: a peer that
+            // does not give way (1.0 and 1.1.0 never do) sends its `PairHello` with or before this `BUSY`. Its
+            // arrival takes this slot over within the grace; otherwise the refusal stands.
+            attempt.refused_by_peer();
+            let _ = tokio::time::timeout(GIVE_WAY_GRACE, taken_over.notified()).await;
+            return Err(TrustError::Refused(r.code));
+        }
         Message::PairResult(r) if !r.ok => return Err(TrustError::Refused(r.code)),
         _ => {
             refuse(&mut send, ErrorCode::ProtocolViolation).await;

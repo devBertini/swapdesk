@@ -20,7 +20,7 @@ use crate::error::{Result, TrustError};
 use crate::gate::{gate_session_client, gate_session_server};
 use crate::identity::Identity;
 use crate::ids::{DeviceId, Spki};
-use crate::pairing::{InitiateOptions, PairOutcome, PairingContext, initiate, respond};
+use crate::pairing::{InitiateOptions, PairOutcome, PairingContext, initiate, respond_crossing};
 use crate::store::PinLookup;
 use crate::tls::{
     SERVER_NAME, pairing_client_config, pairing_server_config, session_client_config, session_server_config,
@@ -176,6 +176,12 @@ pub type IncomingFilter = Arc<dyn Fn(&Incoming) -> Decision + Send + Sync>;
 /// handshake runs: where a per-address turn is recorded (a turn dropped by the cap is not spent).
 pub type AdmittedHook = Arc<dyn Fn(&Incoming) + Send + Sync>;
 
+/// Called with the source of an attempt refused `BUSY` before step 2 only because this machine's own initiator was
+/// dialling that same device, its key proven by the handshake (both users pressed "Parear" on each other's card at
+/// once): where the source's per-address turn is given back, so its retry is not ignored for the next 30 s (review of
+/// 22/11/2026, A3 and A11). A `BUSY` for any other reason keeps the turn spent.
+pub type CrossedHook = Arc<dyn Fn(SocketAddr) + Send + Sync>;
+
 /// The load limit of PROTOCOL.md 1: at most 16 handshakes in flight per machine.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 
@@ -188,11 +194,13 @@ pub struct ServeOptions {
     pub filter: Option<IncomingFilter>,
     /// Runs on every `Incoming` that passed the filter and got a place under `max_in_flight`.
     pub admitted: Option<AdmittedHook>,
+    /// Runs when an admitted attempt ended refused `BUSY` by a crossing (see [`CrossedHook`]).
+    pub crossed: Option<CrossedHook>,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None, admitted: None }
+        Self { max_in_flight: DEFAULT_MAX_IN_FLIGHT, filter: None, admitted: None, crossed: None }
     }
 }
 
@@ -315,6 +323,7 @@ impl PairingService {
 
     async fn handle(&self, incoming: Incoming) {
         let ctx = &self.ctx;
+        let remote = incoming.remote_address();
         let conn = match incoming.accept() {
             Ok(connecting) => match tokio::time::timeout(HANDSHAKE_LIMIT, connecting).await {
                 Ok(Ok(conn)) => Some(conn),
@@ -324,7 +333,10 @@ impl PairingService {
         };
         match conn {
             Some(conn) => {
-                let _ = respond(ctx, &conn).await;
+                let (_, crossed) = respond_crossing(ctx, &conn).await;
+                if crossed && let Some(hook) = &self.options.crossed {
+                    hook(remote);
+                }
             }
             None => ctx.trace.log(Level::Debug, "pair", format_args!("a pairing handshake did not finish")),
         }

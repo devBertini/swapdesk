@@ -44,6 +44,7 @@ mod grants_sync;
 mod lock_end;
 mod presence;
 mod resume;
+mod review_pair;
 mod review_update;
 mod security;
 mod terminal;

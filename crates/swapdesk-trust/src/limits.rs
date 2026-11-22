@@ -167,6 +167,13 @@ impl PairingRate {
         }
     }
 
+    /// Gives `ip` its turn back: its admitted attempt was refused `BUSY` before step 2 only because this machine's own
+    /// initiator was dialling that same device (the `crossed` hook of a `PairingService`). Its next attempt is judged
+    /// as if that one had never been made.
+    pub fn forgive(&self, ip: IpAddr) {
+        guard(&self.last).remove(&ip);
+    }
+
     /// [`Self::decide`] for an `Incoming`, now: the `filter` of a `PairingService`.
     pub fn judge(&self, incoming: &Incoming) -> Decision {
         self.decide(incoming.remote_address().ip(), incoming.remote_address_validated(), Instant::now())

@@ -443,7 +443,13 @@ impl Hub {
     fn block_device(&self, ipv4: &str, name: &str) -> Result<(), ApiCode> {
         let ip: std::net::Ipv4Addr = ipv4.parse().map_err(|_| ApiCode::Invalid)?;
         let neighbors = self.neighbors.get().ok_or(ApiCode::NotFound)?;
-        let mac = neighbors.resolve_mac(std::net::IpAddr::V4(ip)).ok_or(ApiCode::NotFound)?;
+        // Asking the network sends a packet toward the address (ARP, or a probe datagram on the Mac): only for an
+        // address the LAN guard finds on an approved link. Any other is looked up in the table as it is, which sends
+        // nothing (review of 22/11/2026, A9).
+        let on_link = self.p.interfaces.list().is_ok_and(|list| swapdesk_lan::guard::find_on_link(&list, ip).is_ok());
+        let peer = std::net::IpAddr::V4(ip);
+        let mac = if on_link { neighbors.resolve_mac(peer) } else { neighbors.cached_mac(peer) };
+        let mac = mac.ok_or(ApiCode::NotFound)?;
         let device = swapdesk_trust::BlockedDevice {
             mac,
             last_ipv4: ip.octets(),
