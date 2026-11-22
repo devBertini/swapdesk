@@ -173,6 +173,7 @@ CNF
     fi
     rm -rf "$work"
     echo "created the development signing keychain $KEYCHAIN" >&2
+    identity_is_new=1
   else
     security unlock-keychain -p "$(cat "$PASSWORD_FILE")" "$KEYCHAIN" || return 1
   fi
@@ -259,4 +260,11 @@ if [ "$compare" = 1 ]; then
     echo "COMPARE_RESULT FAIL the designated requirement changed (signing: $mode)" >&2
     exit 1
   fi
+fi
+
+# A new identity is a new program to macOS: every permission given to the earlier development bundle (Screen
+# Recording, Accessibility, Files and Folders) is gone and is asked for again. Said last, so a caller that keeps only
+# the end of the output still sees it.
+if [ "${identity_is_new:-0}" = 1 ]; then
+  echo "NEW SIGNING IDENTITY: macOS holds no permission for this bundle yet. Grant them again in System Settings > Privacy & Security before a run that hosts on this Mac."
 fi
