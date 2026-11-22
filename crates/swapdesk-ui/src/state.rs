@@ -378,6 +378,9 @@ pub(crate) struct ConnectEnd {
     pub device_id: String,
     pub why: ConnectWhy,
     pub intent: Option<Intent>,
+    /// What this computer's own service answered, when it is the one that refused (`why` is then `Failed`): the
+    /// card says that, not "Erro interno." for every code.
+    pub error: Option<ApiError>,
 }
 
 /// The icon of the wait card.
@@ -1359,7 +1362,9 @@ impl UiState {
             ConnectWhy::Forgotten => titled(MsgKey::ConnectWhyForgotten),
             ConnectWhy::NotPermitted => titled(MsgKey::ConnectWhyNotPermitted),
             ConnectWhy::Unreachable => titled(MsgKey::ConnectWhyUnreachable),
-            ConnectWhy::Failed => self.t(MsgKey::ErrInternal),
+            ConnectWhy::Failed => {
+                end.error.as_ref().map_or_else(|| self.t(MsgKey::ErrInternal), |e| self.error_text(e))
+            }
         };
         Some(WaitCard {
             device_id: device_id.to_owned(),
@@ -2350,10 +2355,22 @@ impl UiState {
     /// A connect attempt ended without a session: its card says why, and the focus goes to "Fechar" when that card
     /// is the page on screen.
     fn end_connect(&mut self, entry: u64, device_id: String, why: ConnectWhy, intent: Option<Intent>) {
+        self.end_connect_with(entry, device_id, why, intent, None);
+    }
+
+    /// As [`end_connect`](Self::end_connect), with what this computer's own service answered.
+    fn end_connect_with(
+        &mut self,
+        entry: u64,
+        device_id: String,
+        why: ConnectWhy,
+        intent: Option<Intent>,
+        error: Option<ApiError>,
+    ) {
         if self.selected_device().is_some_and(|d| d.id == device_id) {
             self.focus_request = Some(ControlId::ConnectClose);
         }
-        self.connect_end = Some(ConnectEnd { entry, device_id, why, intent });
+        self.connect_end = Some(ConnectEnd { entry, device_id, why, intent, error });
     }
 
     /// Takes the entry a click made, which has no id until the service answers.
@@ -2384,7 +2401,7 @@ impl UiState {
                 && reason.is_some()
                 && !matches!(e.state, SessionState::Waking { .. })
             {
-                self.end_connect(id, e.device_id.clone(), ConnectWhy::Failed, e.intent);
+                self.end_connect_with(id, e.device_id.clone(), ConnectWhy::Failed, e.intent, reason.map(ApiError::new));
             }
             if self.viewer_session().is_none() {
                 self.view_only = false;
@@ -2779,7 +2796,8 @@ impl UiState {
             let entry = self.take_unanswered_entry(device_id);
             if !(*unattended && error.code == ApiCode::NeedsAdmin) {
                 let why = if error.code == ApiCode::NotFound { ConnectWhy::Unreachable } else { ConnectWhy::Failed };
-                self.end_connect(0, device_id.clone(), why, entry.and_then(|e| e.intent));
+                let said = (why == ConnectWhy::Failed).then(|| error.clone());
+                self.end_connect_with(0, device_id.clone(), why, entry.and_then(|e| e.intent), said);
                 return Changed::ALL;
             }
         }

@@ -3292,3 +3292,22 @@ fn the_home_page_shows_the_network_notices_when_no_device_page_is_open() {
     let ids: Vec<ControlId> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
     assert!(ids.contains(&ControlId::Notice(NoticeKind::Public)), "the notice and its button are on the home: {ids:?}");
 }
+
+/// Review of 22/11/2026, H8: a connect that this computer's own service refused read "Erro interno." whatever the
+/// service had said. The card now says what the service answered.
+#[test]
+fn a_connect_the_service_refuses_says_what_the_service_answered() {
+    for (code, key) in [
+        (ApiCode::ServiceDown, MsgKey::ErrServiceDown),
+        (ApiCode::Busy, MsgKey::ErrBusy),
+        (ApiCode::NotPermitted, MsgKey::ErrNotPermitted),
+        (ApiCode::Internal, MsgKey::ErrInternal),
+    ] {
+        let mut s = base();
+        let a = s.activate(ControlId::Control);
+        tracked_error(&mut s, &a.commands[0], code);
+        let card = s.wait_card(MAC).expect("the card of the connect that did not open");
+        assert_eq!(card.phase, WaitPhase::Ended);
+        assert_eq!(card.body, s.t(key), "{code:?}");
+    }
+}
