@@ -839,16 +839,26 @@ mod banner {
         let under = unsafe { WindowFromPoint(POINT { x: r.left + cx, y: r.top + cy }) };
         assert_ne!(under, banner, "a click at the banner's button goes to what lies under it");
 
-        // It is on the screen all the same: the red of "Desconectar" where the button is drawn.
-        let pixels = screen_pixels(r);
+        // It is on the screen all the same: the red of "Desconectar" where the button is drawn. The first paint of a
+        // new window comes when the system gets to it (seconds, with the whole suite running beside this test), so
+        // the screen is looked at until the button is there.
         let width = (r.right - r.left) as usize;
-        let red = (by..by + bh)
-            .flat_map(|y| (bx..bx + bw).map(move |x| (x, y)))
-            .filter(|(x, y)| {
-                let p = pixels[*y as usize * width + *x as usize];
-                close_to(p, tokens::LIGHT.danger) || close_to(p, tokens::DARK.danger)
-            })
-            .count();
+        let red_now = || {
+            let pixels = screen_pixels(r);
+            (by..by + bh)
+                .flat_map(|y| (bx..bx + bw).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    let p = pixels[*y as usize * width + *x as usize];
+                    close_to(p, tokens::LIGHT.danger) || close_to(p, tokens::DARK.danger)
+                })
+                .count()
+        };
+        let started = Instant::now();
+        let mut red = red_now();
+        while red * 4 < (bw * bh) as usize && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+            red = red_now();
+        }
         assert!(red * 4 >= (bw * bh) as usize, "the banner is drawn on the screen: {red} red pixels of {}", bw * bh);
 
         // A real click over the button, as the banner's hook tells it: the session is disconnected.
