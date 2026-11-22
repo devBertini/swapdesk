@@ -244,3 +244,21 @@ fn the_mac_notice_effects_are_handled_by_their_own_handlers_and_never_wait_for_a
     assert!(!Handling::OpenLoginItems.waits_for_a_person());
     assert!(!Handling::RequestOsPermissions.waits_for_a_person());
 }
+
+/// The owner's order of 22/11/2026 (the banner is for the controlled computer alone): the Mac's event tap locates
+/// the pointer from the top left of the main display, AppKit places the banner from its bottom left.
+#[test]
+fn the_banner_is_found_where_mouse_events_say_the_pointer_is() {
+    // A 540 x 56 banner 12 points under the top of the usable area of a 1512 x 982 display with a 38 point menu bar.
+    let frame = (486.0, 982.0 - 38.0 - 12.0 - 56.0, 540.0, 56.0);
+    let rect = banner_cg_rect(frame, 982.0);
+    assert_eq!(rect, [486.0, 50.0, 540.0, 56.0]);
+    assert!(banner_contains(rect, 486.0, 50.0), "its top left corner");
+    assert!(banner_contains(rect, 1025.9, 105.9));
+    assert!(!banner_contains(rect, 485.9, 60.0) && !banner_contains(rect, 1026.0, 60.0));
+    assert!(!banner_contains(rect, 600.0, 49.9) && !banner_contains(rect, 600.0, 106.0));
+    // On a display above the main one the events' y is negative, and so is the banner's.
+    let above = banner_cg_rect((100.0, 982.0 + 400.0, 540.0, 56.0), 982.0);
+    assert_eq!(above, [100.0, -456.0, 540.0, 56.0]);
+    assert!(banner_contains(above, 300.0, -430.0));
+}

@@ -47,6 +47,9 @@ pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
 /// What the app does to ask macOS for the permissions the notice lists.
 pub type OsPermissionRequest = Arc<dyn Fn(&[swapdesk_ui::OsPermission]) + Send + Sync>;
 
+/// Told the window number of the host banner while it is on the screen, and `None` when it went.
+pub type BannerWindowHook = Arc<dyn Fn(Option<u32>) + Send + Sync>;
+
 /// What the other lanes plug into the viewer window.
 #[derive(Default, Clone)]
 pub struct ViewerHooks {
@@ -61,6 +64,9 @@ pub struct ViewerHooks {
     /// Asks macOS for these permissions (the system's own prompts) for the "Conceder permissões" button: the app owns
     /// the grants (D32), so the app does it; none in a mock run.
     pub request_os_permissions: Option<OsPermissionRequest>,
+    /// The host lane: told which window the banner is, so that the picture of the screen it sends leaves the banner
+    /// out (it is for the person at this Mac alone); none in a mock run.
+    pub banner_window: Option<BannerWindowHook>,
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -130,6 +136,12 @@ define_class!(
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: &AnyObject) {
             with_shell(|s| s.quit());
+        }
+
+        // The menu bar item's "Desconectar": the same as the banner's own button.
+        #[unsafe(method(disconnectHost:))]
+        fn disconnect_host(&self, _sender: &AnyObject) {
+            with_shell(|s| s.activate_from(WindowKind::Banner, ControlId::BannerDisconnect));
         }
 
         #[unsafe(method(tick:))]
@@ -228,6 +240,9 @@ pub struct Shell {
     viewer: RefCell<Option<ViewerWindow>>,
     /// The host banner, while another computer watches or controls this Mac.
     banner: RefCell<Option<BannerWindow>>,
+    /// What keeps the banner for the person at this Mac (`banner_guard`), while the banner is there and the tap
+    /// could be made.
+    banner_guard: RefCell<Option<crate::banner_guard::BannerGuard>>,
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
     /// The banner's one-shot timer, and the moment (ms of the local clock) it is due.
     banner_timer: RefCell<Option<Retained<NSTimer>>>,
@@ -246,6 +261,9 @@ pub struct Shell {
     raised_for: RefCell<Option<(Option<u32>, Option<swapdesk_ui::DialogKind>)>>,
     /// The menu bar item: it keeps the app reachable while the main window is closed (D32).
     status_item: RefCell<Option<Retained<NSStatusItem>>>,
+    /// Its "Desconectar" entry, shown while this Mac is watched or controlled: a way to end that session that
+    /// needs neither the banner nor its guard.
+    status_disconnect: RefCell<Option<Retained<NSMenuItem>>>,
     /// The drawer's terminal: the model of the open shell, drawn by the viewer's canvas (F-XTERM-01).
     terminal: RefCell<TerminalPane>,
 }
@@ -293,6 +311,11 @@ pub(crate) fn set_pointer_mods(mods: swapdesk_ui::PointerMods) {
 /// A click on control `id` of the canvas of window `kind`.
 pub(crate) fn activate_from(kind: WindowKind, id: ControlId) {
     with_shell(|s| s.activate_from(kind, id));
+}
+
+/// The real pointer on the host banner, as its guard saw it (queued for the main thread by the tap).
+pub(crate) fn banner_pointer(pointer: crate::banner_guard::Pointer, at: (f32, f32)) {
+    with_shell(|s| s.banner_pointer(pointer, at));
 }
 
 /// A key of the explorer (slice 2a), as the viewer's canvas mapped it.
@@ -514,6 +537,7 @@ fn start_with(
         main: MainWindow { window, canvas },
         viewer: RefCell::new(None),
         banner: RefCell::new(None),
+        banner_guard: RefCell::new(None),
         tick_timer: RefCell::new(None),
         banner_timer: RefCell::new(None),
         banner_due_ms: Cell::new(0),
@@ -526,6 +550,7 @@ fn start_with(
         appearance: std::cell::Cell::new(Theme::System),
         raised_for: RefCell::new(None),
         status_item: RefCell::new(None),
+        status_disconnect: RefCell::new(None),
         terminal: RefCell::new(TerminalPane::default()),
     });
     swapdesk_paint::term::set_terminal_waker(shell.waker.clone());
@@ -1113,11 +1138,12 @@ impl Shell {
         }
     }
 
-    /// The menu bar item: a template symbol (a short text when the symbol is missing) and its two-entry menu.
+    /// The menu bar item: a template symbol (a short text when the symbol is missing) and its menu: "Abrir",
+    /// "Desconectar" (only while this Mac is watched or controlled) and "Encerrar".
     fn install_status_item(&self) {
-        let (open, quit) = {
+        let (open, disconnect, quit, hosted) = {
             let st = self.state.borrow();
-            (st.t(MsgKey::StatusOpen), st.t(MsgKey::StatusQuit))
+            (st.t(MsgKey::StatusOpen), st.t(MsgKey::Disconnect), st.t(MsgKey::StatusQuit), st.host_session().is_some())
         };
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(VARIABLE_STATUS_ITEM_LENGTH);
         if let Some(button) = item.button(self.mtm) {
@@ -1132,8 +1158,8 @@ impl Shell {
             }
         }
         let menu = NSMenu::new(self.mtm);
-        for (title, action) in [(open, sel!(openMain:)), (quit, sel!(quitApp:))] {
-            // SAFETY: the actions are the controller's `openMain:` and `quitApp:`.
+        for (title, action) in [(open, sel!(openMain:)), (disconnect, sel!(disconnectHost:)), (quit, sel!(quitApp:))] {
+            // SAFETY: the actions are the controller's `openMain:`, `disconnectHost:` and `quitApp:`.
             let entry = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(self.mtm),
@@ -1144,6 +1170,10 @@ impl Shell {
             };
             // SAFETY: the target is the controller, which lives as long as the shell; `setTarget` keeps it unretained.
             unsafe { entry.setTarget(Some(self.target())) };
+            if action == sel!(disconnectHost:) {
+                entry.setHidden(!hosted);
+                *self.status_disconnect.borrow_mut() = Some(entry.clone());
+            }
             menu.addItem(&entry);
         }
         item.setMenu(Some(&menu));
@@ -1256,6 +1286,9 @@ impl Shell {
     /// The banner follows the host session: created with it, painted again when its line changes, gone with it.
     fn sync_banner(&self) {
         let model = banner_model(&self.state.borrow());
+        if let Some(entry) = self.status_disconnect.borrow().as_ref() {
+            entry.setHidden(model.is_none());
+        }
         let mut slot = self.banner.borrow_mut();
         match model {
             Some(m) => {
@@ -1268,15 +1301,49 @@ impl Shell {
                     b
                 });
                 b.update(&m);
+                if first {
+                    // The banner is for the person at this Mac alone: out of the picture the other computer gets,
+                    // and out of the reach of its pointer.
+                    if let Some(hook) = &self.hooks.banner_window {
+                        hook(b.window_number());
+                    }
+                    let guard = crate::banner_guard::BannerGuard::start();
+                    if guard.is_some() {
+                        b.let_the_mouse_through();
+                    }
+                    if let Some(note) = &self.hooks.note {
+                        note(if guard.is_some() {
+                            "banner: guarded (it takes the real pointer only)"
+                        } else {
+                            "banner: not guarded (no event tap: the Accessibility grant is missing)"
+                        });
+                    }
+                    *self.banner_guard.borrow_mut() = guard;
+                }
+                if let Some(guard) = self.banner_guard.borrow().as_ref() {
+                    guard.set_rect(b.cg_rect());
+                }
                 if first && let Some(dir) = crate::banner_window::snapshot_dir() {
                     b.snapshot(dir);
                 }
             }
             None => {
                 if let Some(b) = slot.take() {
+                    *self.banner_guard.borrow_mut() = None;
+                    if let Some(hook) = &self.hooks.banner_window {
+                        hook(None);
+                    }
                     b.close();
                 }
             }
+        }
+    }
+
+    /// The real pointer on the banner, from its guard.
+    fn banner_pointer(&self, pointer: crate::banner_guard::Pointer, at: (f32, f32)) {
+        let canvas = self.banner.borrow().as_ref().map(|b| b.canvas.clone());
+        if let Some(canvas) = canvas {
+            canvas.guard_pointer(pointer, at);
         }
     }
 

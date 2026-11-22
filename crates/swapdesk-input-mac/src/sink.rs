@@ -57,6 +57,17 @@ pub fn posted_key_presses() -> u64 {
     KEY_PRESSES.load(Ordering::Relaxed)
 }
 
+/// The mark every event this sink posts carries in its `kCGEventSourceUserData` field ("Swapdesk" in ASCII): what
+/// tells the controller's input from the person at this Mac, for the host banner's guard (`swapdesk-shell-mac`'s
+/// `banner_guard`, which holds the same number as `swapdesk_paint::banner_guard::MAC_POSTED_MARK`).
+pub const POSTED_MARK: i64 = 0x5377_6170_6465_736B;
+
+/// Marks `ev` as posted by this sink, then posts it.
+fn post_marked(ev: &CGEvent) {
+    CGEvent::set_integer_value_field(Some(ev), CGEventField::EventSourceUserData, POSTED_MARK);
+    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(ev));
+}
+
 /// Whether this process may post events (`AXIsProcessTrusted`, read without a prompt).
 pub fn can_post() -> bool {
     crate::access().accessibility
@@ -124,7 +135,7 @@ impl MacInputSink {
                 if *repeat {
                     CGEvent::set_integer_value_field(Some(&ev), CGEventField::KeyboardEventAutorepeat, 1);
                 }
-                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+                post_marked(&ev);
                 if *down && !*modifier && !*repeat {
                     KEY_PRESSES.fetch_add(1, Ordering::Relaxed);
                 }
@@ -136,7 +147,7 @@ impl MacInputSink {
                     // SAFETY: `units` is a live slice of `units.len()` UTF-16 units (at most two); the call copies it.
                     unsafe { CGEvent::keyboard_set_unicode_string(Some(&ev), units.len() as u64, units.as_ptr()) };
                     CGEvent::set_flags(Some(&ev), CGEventFlags::empty());
-                    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+                    post_marked(&ev);
                 }
             }
             Planned::Mouse { kind, button, at, click_state, flags } => {
@@ -164,7 +175,7 @@ impl MacInputSink {
                     CGEvent::set_integer_value_field(Some(&ev), CGEventField::MouseEventDeltaY, (y - py) as i64);
                 }
                 self.last_at = Some((x, y));
-                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+                post_marked(&ev);
             }
             Planned::Scroll { vertical, horizontal, flags } => {
                 let ev = CGEvent::new_scroll_wheel_event2(
@@ -177,7 +188,7 @@ impl MacInputSink {
                 )
                 .ok_or_else(|| os_failure("CGEventCreateScrollWheelEvent2", "returned NULL"))?;
                 CGEvent::set_flags(Some(&ev), CGEventFlags::from_bits_retain(*flags));
-                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+                post_marked(&ev);
             }
         }
         Ok(())

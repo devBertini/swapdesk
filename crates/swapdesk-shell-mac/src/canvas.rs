@@ -587,6 +587,42 @@ impl CanvasView {
         self.ivars().picked.take()
     }
 
+    /// The real pointer on the host banner, as its guard reports it (the banner's panel takes no mouse events of
+    /// its own): `at` in this view's points from its top left. A press and a release on the same control are a
+    /// click, as in every window.
+    pub fn guard_pointer(&self, pointer: crate::banner_guard::Pointer, at: (f32, f32)) {
+        use crate::banner_guard::Pointer;
+        let hit = input::hit_test(&self.ivars().out.borrow().widgets, at.0, at.1);
+        match pointer {
+            Pointer::Hover => self.hover(hit, false),
+            Pointer::Leave => {
+                self.ivars().ix.borrow_mut().pressed = None;
+                self.hover(None, false);
+            }
+            Pointer::Press => {
+                {
+                    let mut ix = self.ivars().ix.borrow_mut();
+                    ix.pressed = hit;
+                    ix.hover = hit;
+                }
+                self.setNeedsDisplay(true);
+            }
+            Pointer::Release { inside } => {
+                let pressed = {
+                    let mut ix = self.ivars().ix.borrow_mut();
+                    ix.hover = if inside { hit } else { None };
+                    ix.pressed.take()
+                };
+                self.setNeedsDisplay(true);
+                if let (true, Some(p), Some(h)) = (inside, pressed, hit)
+                    && p == h
+                {
+                    crate::shell::activate_from(self.ivars().kind, p);
+                }
+            }
+        }
+    }
+
     fn hit(&self, event: &NSEvent) -> Option<ControlId> {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         input::hit_test(&self.ivars().out.borrow().widgets, p.x as f32, p.y as f32)

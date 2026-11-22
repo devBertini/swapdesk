@@ -99,6 +99,25 @@ impl BannerWindow {
         self.panel.orderOut(None);
     }
 
+    /// The panel takes no mouse events of its own any more: its guard hands it the real pointer, and what the
+    /// controller's pointer does here goes to what lies under the banner.
+    pub fn let_the_mouse_through(&self) {
+        self.panel.setIgnoresMouseEvents(true);
+    }
+
+    /// The window number of the panel, as the screen capture names windows.
+    pub fn window_number(&self) -> Option<u32> {
+        u32::try_from(self.panel.windowNumber()).ok().filter(|n| *n != 0)
+    }
+
+    /// Where the panel is, as mouse events locate the pointer (`model::banner_cg_rect`); `None` with no screen.
+    pub fn cg_rect(&self) -> Option<[f64; 4]> {
+        // The first screen is the main display: the origin of both coordinate systems is on it.
+        let main = NSScreen::screens(self.panel.mtm()).firstObject()?.frame();
+        let f = self.panel.frame();
+        Some(crate::model::banner_cg_rect((f.origin.x, f.origin.y, f.size.width, f.size.height), main.size.height))
+    }
+
     /// Development proof (`--drive-host`): writes where the panel is and how it floats to `<dir>/banner.log`, then,
     /// a second later, has `screencapture` take the panel alone (`banner-window.png`). Never the whole screen: that
     /// would be a picture of whatever the person has open. The app already holds the screen recording grant a host

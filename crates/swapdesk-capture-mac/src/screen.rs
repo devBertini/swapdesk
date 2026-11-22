@@ -66,6 +66,32 @@ pub const DEFAULT_REFRESH_MHZ: u32 = 60_000;
 /// `SCStreamErrorUserDeclined`.
 pub const SC_ERROR_USER_DECLINED: i64 = sck_error::USER_DECLINED;
 
+// ---------- windows kept out of the picture ----------
+
+/// The windows of this process that must never be in the picture it captures, by their window numbers, and how
+/// often the list changed.
+static HIDDEN: Mutex<(u64, Vec<u32>)> = Mutex::new((0, Vec::new()));
+
+/// Names the windows of this process that the picture of the screen leaves out: the host banner, which is for the
+/// person at this Mac alone (the computer that controls it must not see it). The capture that runs takes the new
+/// list at its next look (a quarter of a second) and every capture that starts later starts with it. An empty list
+/// hides nothing. Safe to call from any thread.
+pub fn set_hidden_windows(windows: &[u32]) {
+    let mut wanted = windows.to_vec();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut hidden = HIDDEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if hidden.1 != wanted {
+        hidden.0 += 1;
+        hidden.1 = wanted;
+    }
+}
+
+/// The list of [`set_hidden_windows`] and its generation (a number that changes with the list).
+pub fn hidden_windows() -> (u64, Vec<u32>) {
+    HIDDEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
 // ---------- pure parts ----------
 
 /// `scale_milli` from the mode's backing-store width in pixels and its width in points (2000 on a Retina panel).
@@ -414,6 +440,9 @@ mod mac {
     const STOP_TIMEOUT: Duration = Duration::from_secs(2);
     /// How often `next_frame` re-reads the display mode to notice a size change.
     const GEOMETRY_CHECK: Duration = Duration::from_millis(250);
+    /// How long after a list of hidden windows could not be applied (a window not listed yet, a refused update) it
+    /// is tried again.
+    const HIDDEN_RETRY: Duration = Duration::from_secs(1);
     /// Minimum time between two reads of the system cursor image.
     const SHAPE_POLL: Duration = Duration::from_millis(50);
     const QUEUE_DEPTH: isize = 4;
@@ -650,6 +679,77 @@ mod mac {
         mailbox: Arc<Mailbox<Buffer>>,
         geometry: Geometry,
         checked: Instant,
+        /// The generation of the hidden windows the stream's filter leaves out; `None` while it could not be
+        /// applied in full.
+        hidden: Option<u64>,
+        hidden_tried: Instant,
+    }
+
+    /// The windows of `content` whose numbers are in `ids`, for a filter that leaves them out, and whether every
+    /// one of them was found (a window made a moment ago may not be listed yet).
+    fn windows_to_hide(content: &SCShareableContent, ids: &[u32]) -> (Retained<NSArray<SCWindow>>, bool) {
+        // SAFETY: plain property reads on the content object and its windows, used on this thread only.
+        let all = unsafe { content.windows() };
+        let mut found: Vec<Retained<SCWindow>> = Vec::new();
+        for i in 0..all.count() {
+            let w = all.objectAtIndex(i);
+            // SAFETY: `windowID` is a plain property read.
+            if ids.contains(&unsafe { w.windowID() }) {
+                found.push(w);
+            }
+        }
+        let complete = found.len() == ids.len();
+        (NSArray::from_retained_slice(&found), complete)
+    }
+
+    /// Gives the running stream a filter that leaves out the hidden windows as they are now. `Ok(true)` when every
+    /// window of the list is left out; `Ok(false)` when one is not listed yet (the caller tries again).
+    fn apply_hidden(open: &mut OpenStream, generation: u64, ids: &[u32]) -> Result<bool> {
+        let content = shareable_content()?;
+        let cg = open.geometry.cg;
+        // SAFETY: plain property reads on the content object, used on this thread only.
+        let all = unsafe { content.0.displays() };
+        let sc_display = (0..all.count())
+            .map(|i| all.objectAtIndex(i))
+            // SAFETY: `displayID` is a plain property read.
+            .find(|d| unsafe { d.displayID() } == cg)
+            .ok_or_else(|| PlatformError {
+                kind: ErrorKind::Unavailable,
+                op: "SCShareableContent",
+                os_code: None,
+                detail: format!("display {cg} is not shareable"),
+            })?;
+        let (windows, complete) = windows_to_hide(&content.0, ids);
+        // SAFETY: initializer of SCContentFilter with a display and the windows to leave out.
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &sc_display, &windows)
+        };
+        let (tx, rx) = mpsc::channel::<Option<(i64, String)>>();
+        let block = RcBlock::new(move |err: *mut NSError| {
+            // SAFETY: when non-null the pointer is a live NSError for the duration of the callback.
+            let e = unsafe { err.as_ref() }.map(|e| (e.code() as i64, e.localizedDescription().to_string()));
+            let _ = tx.send(e);
+        });
+        // SAFETY: the block lives until the call returns; ScreenCaptureKit copies it.
+        unsafe { open.stream.updateContentFilter_completionHandler(&filter, Some(&block)) };
+        match rx.recv_timeout(STOP_TIMEOUT) {
+            Ok(None) => {
+                open.hidden = complete.then_some(generation);
+                Ok(complete)
+            }
+            Ok(Some((code, detail))) => Err(PlatformError {
+                kind: ErrorKind::Os,
+                op: "SCStream.updateContentFilter",
+                os_code: Some(code),
+                detail,
+            }),
+            Err(_) => Err(PlatformError {
+                kind: ErrorKind::Timeout,
+                op: "SCStream.updateContentFilter",
+                os_code: None,
+                detail: "no reply from ScreenCaptureKit".into(),
+            }),
+        }
     }
 
     struct Target {
@@ -747,10 +847,13 @@ mod mac {
                     os_code: None,
                     detail: format!("display {cg} is not shareable"),
                 })?;
-            let no_windows: Retained<NSArray<SCWindow>> = NSArray::new();
-            // SAFETY: initializer of SCContentFilter with a display and an empty exclusion list.
+            // The windows of this process that are for the person at this Mac alone (the host banner) are left out
+            // of the picture from its first frame. One that is not listed yet is left out as soon as it is.
+            let (generation, hidden_ids) = super::hidden_windows();
+            let (hidden, complete) = windows_to_hide(&content.0, &hidden_ids);
+            // SAFETY: initializer of SCContentFilter with a display and the windows to leave out.
             let filter = unsafe {
-                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &sc_display, &no_windows)
+                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &sc_display, &hidden)
             };
             // SAFETY: SCStreamConfiguration setters, all on the object just created.
             let conf = unsafe {
@@ -782,7 +885,16 @@ mod mac {
                 stream.addStreamOutput_type_sampleHandlerQueue_error(sink, SCStreamOutputType::Screen, Some(&queue))
             }
             .map_err(|e| sc_error("SCStream.addStreamOutput", &e))?;
-            let open = OpenStream { stream, output, _queue: queue, mailbox, geometry, checked: Instant::now() };
+            let open = OpenStream {
+                stream,
+                output,
+                _queue: queue,
+                mailbox,
+                geometry,
+                checked: Instant::now(),
+                hidden: complete.then_some(generation),
+                hidden_tried: Instant::now(),
+            };
             let (tx, rx) = mpsc::channel::<Option<(i64, String)>>();
             let block = RcBlock::new(move |err: *mut NSError| {
                 // SAFETY: when non-null the pointer is a live NSError for the duration of the callback.
@@ -923,6 +1035,17 @@ mod mac {
             };
             if open.checked.elapsed() >= GEOMETRY_CHECK {
                 open.checked = Instant::now();
+                // The list of hidden windows changed (the banner came, or went), or could not be applied before:
+                // the stream gets a new filter. A failure leaves the picture as it is and is tried again; it never
+                // ends the capture.
+                let (generation, hidden_ids) = super::hidden_windows();
+                let changed = open.hidden.is_none_or(|applied| applied != generation);
+                let first_try = open.hidden.is_some();
+                if changed && (first_try || open.hidden_tried.elapsed() >= HIDDEN_RETRY) {
+                    open.hidden_tried = Instant::now();
+                    open.hidden = None;
+                    let _ = autoreleasepool(|_| apply_hidden(open, generation, &hidden_ids));
+                }
                 match read_geometry(open.geometry.cg) {
                     Some(g) if g.size_px == open.geometry.size_px => open.geometry = g,
                     other => {
@@ -1054,6 +1177,23 @@ mod mac {
 mod tests {
     use super::*;
     use swapdesk_platform::OsGrant;
+
+    /// Review of 22/11/2026 (the owner's order: the banner is for the controlled computer alone): the list of
+    /// windows the picture leaves out changes its generation only when the list changes, whatever the order given.
+    #[test]
+    fn the_list_of_hidden_windows_changes_its_generation_only_when_it_changes() {
+        let (start, _) = hidden_windows();
+        set_hidden_windows(&[41, 7, 41]);
+        let (first, list) = hidden_windows();
+        assert_eq!(list, vec![7, 41]);
+        assert_ne!(first, start);
+        set_hidden_windows(&[7, 41]);
+        assert_eq!(hidden_windows().0, first, "the same windows: nothing for the capture to do");
+        set_hidden_windows(&[]);
+        let (after, list) = hidden_windows();
+        assert!(list.is_empty());
+        assert_ne!(after, first);
+    }
 
     #[test]
     fn scale_from_mode() {

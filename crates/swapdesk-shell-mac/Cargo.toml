@@ -49,7 +49,8 @@ features = [
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 workspace = true
-features = ["std", "CGContext", "CGImage", "CGEvent", "CGEventTypes"]
+# `CGRemoteOperation` and the run loop pieces below: the event tap of the host banner's guard (`banner_guard.rs`).
+features = ["std", "CGContext", "CGImage", "CGEvent", "CGEventTypes", "CGRemoteOperation"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 workspace = true
@@ -57,4 +58,4 @@ features = ["std", "CALayer", "objc2-core-foundation"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 workspace = true
-features = ["std", "CFCGTypes"]
+features = ["std", "CFBase", "CFCGTypes", "CFMachPort", "CFRunLoop", "CFString"]

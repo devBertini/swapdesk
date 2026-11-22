@@ -22,9 +22,14 @@ pub mod model;
 pub use input::{FocusLatch, KeyMsg, Modifiers, MouseKind, MouseMsg, PointerButton, ViewerInput};
 pub use locale::{language_from_tags, language_override, theme_override};
 pub use model::{BannerModel, VideoArea, appearance_name, banner_model, viewer_title};
+/// The mark the banner's guard looks for on the events the host's input sink posts (the Mac app's test keeps it
+/// equal to `swapdesk_input_mac::POSTED_MARK`).
+pub use swapdesk_paint::banner_guard::MAC_POSTED_MARK as BANNER_POSTED_MARK;
 
 #[cfg(target_os = "macos")]
 mod appkit;
+#[cfg(target_os = "macos")]
+mod banner_guard;
 #[cfg(target_os = "macos")]
 mod banner_window;
 #[cfg(target_os = "macos")]
@@ -55,7 +60,7 @@ pub use banner_window::set_snapshot_dir;
 #[cfg(target_os = "macos")]
 pub use shell::dev::{dev_click, dev_hover, dev_keys, dev_panel, dev_shot, dev_state, dev_video};
 #[cfg(target_os = "macos")]
-pub use shell::{OsPermissionRequest, ViewerHooks, run, run_with_host, selftest, set_shot};
+pub use shell::{BannerWindowHook, OsPermissionRequest, ViewerHooks, run, run_with_host, selftest, set_shot};
 #[cfg(target_os = "macos")]
 pub use shell::{close_main_window, main_window_visible, reopen_main_window, status_item_present};
 #[cfg(target_os = "macos")]

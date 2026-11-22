@@ -43,6 +43,19 @@ pub fn viewer_title(state: &UiState) -> Option<String> {
 
 // ---------- the host banner ----------
 
+/// The banner's rectangle as mouse events locate it (x, y, width, height in the global points of the displays, from
+/// the top left of the main display, y down), from its AppKit frame (x, y, width, height from the bottom left of
+/// the main display, y up) and the height of the main display.
+pub fn banner_cg_rect(frame: (f64, f64, f64, f64), main_height: f64) -> [f64; 4] {
+    let (x, y, w, h) = frame;
+    [x, main_height - (y + h), w, h]
+}
+
+/// Whether the point of a mouse event is on the banner (see [`banner_cg_rect`]).
+pub fn banner_contains(rect: [f64; 4], x: f64, y: f64) -> bool {
+    x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BannerModel {
     /// The panel's accessible title (it has no title bar): the name of the banner in the shared accessibility tree.

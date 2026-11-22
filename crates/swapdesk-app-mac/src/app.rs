@@ -343,6 +343,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         input: Some(Arc::new(viewer.input())),
         note: Some(Arc::new(move |text: &str| note_trace.log(Level::Info, "app", format_args!("{text}")))),
         logs_dir: Some(store.dir().to_path_buf()),
+        // The banner is for the person at this Mac alone: the picture of the screen leaves its window out.
+        banner_window: Some(Arc::new(|window: Option<u32>| {
+            swapdesk_capture_mac::screen::set_hidden_windows(window.as_slice());
+        })),
         request_os_permissions: Some({
             let grants_trace = Arc::clone(&trace);
             Arc::new(move |missing: &[swapdesk_ui::OsPermission]| crate::host::request_grants(missing, &*grants_trace))

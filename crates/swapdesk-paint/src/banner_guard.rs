@@ -3,6 +3,11 @@
 //! never the banner's and goes on to what lies under it. No system call here: the Windows shell feeds it from its
 //! low-level mouse hook, the Mac shell from its event tap, and both do what the [`Verdict`] says.
 
+/// The mark the Mac host's input sink puts in the `kCGEventSourceUserData` field of every event it posts
+/// ("Swapdesk" in ASCII; `swapdesk-input-mac`'s `POSTED_MARK` is the same number, and a test of the Mac app keeps
+/// the two equal): how the Mac's event tap knows an event came from the controller.
+pub const MAC_POSTED_MARK: i64 = 0x5377_6170_6465_736B;
+
 /// A mouse event as the banner cares about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEvent {
