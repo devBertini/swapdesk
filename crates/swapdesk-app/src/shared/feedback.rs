@@ -3,11 +3,14 @@
 //! - **Keyframes.** A decoder failure asks at once (but never twice within [`MIN_GAP`]); a decoder that is still
 //!   waiting for a keyframe asks again after [`RETRY`] (the host may have missed the first request). The service
 //!   limits requests itself (at most every 200 ms); this keeps the viewer from sending more than it can use.
-//! - **Report**, once per second ([`REPORT_EVERY`]): `frames_presented` and `frames_lost` are cumulative (the rate
-//!   controller takes the difference, `swapdesk-video`), the decode time and the present lag are the medians of the
-//!   last second, `audio_underruns` is cumulative. The present lag is the time from a frame's arrival in the
-//!   viewer to the end of its `present` call: both clocks are this machine's (the host's `capture_us` is on another
-//!   clock).
+//! - **Report**, once per second ([`REPORT_EVERY`]): `frames_presented` and `frames_lost` are cumulative, the decode
+//!   time and the present lag are the medians of the last second, `audio_underruns` is cumulative. The present lag is
+//!   the time from a frame's arrival in the viewer to the end of its `present` call: both clocks are this machine's
+//!   (the host's `capture_us` is on another clock). `frames_lost` here counts the frames that came whole and never
+//!   reached this screen (dropped by the mailbox, refused by a hidden window's presenter, failed in the decoder):
+//!   none of them is loss on the link, so the service puts its receiver's count of what the link lost in their
+//!   place before the report leaves for the host, whose rate control reads it as congestion (review of 22/11/2026,
+//!   C5).
 
 use std::time::{Duration, Instant};
 
@@ -60,7 +63,8 @@ impl Feedback {
         self.lag_us.push(lag_us);
     }
 
-    /// `n` frames never reached the screen (decoder failures, frames dropped for lack of time).
+    /// `n` frames never reached the screen (decoder failures, frames dropped for lack of time). They are this side's
+    /// own count: the service replaces it with the link's before the report reaches the host.
     pub fn on_lost(&mut self, n: u32) {
         self.lost = self.lost.wrapping_add(n);
     }

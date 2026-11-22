@@ -219,6 +219,28 @@ fn a_backlog_over_100_ms_resets_everything_wants_a_keyframe_and_cuts_the_bitrate
     });
 }
 
+/// Review of 22/11/2026, C8: a P-frame marked `discontinuity` passed the sender as a keyframe: it reset the streams
+/// in flight, ended the want of a keyframe and counted as one sent, so the keyframe the viewer needed was never made.
+#[test]
+fn a_p_frame_marked_discontinuity_is_no_keyframe_for_the_sender() {
+    run(async {
+        let pair = plain_pair().await;
+        let mut rig = rig(&pair, SenderConfig::default(), ReceiverConfig::default()).await;
+        let mut enc = TestEncoder::new(Arc::new(MonotonicClock::new()));
+        let f = enc.next(&rig.sender);
+        rig.sender.send(f).await;
+        next_frame(&mut rig, "the first frame").await;
+        rig.sender.on_keyframe_request(&KeyframeRequest { display: DISPLAY, last_good_frame: 1 });
+        let mut broken = header(2, false, 1000);
+        broken.discontinuity = true;
+        let p = swapdesk_video::Frame { header: broken, payload: payload_of(2, 1000).into() };
+        assert_eq!(rig.sender.send(p).await, SendOutcome::DroppedAwaitingKeyframe);
+        assert_eq!(rig.sender.stats().keyframes_sent, 1, "only the first frame was a keyframe");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(rig.sender.take_keyframe_request(DISPLAY), "the keyframe is still wanted");
+    });
+}
+
 #[test]
 fn a_paused_sender_sends_nothing_and_wants_a_keyframe_on_resume() {
     run(async {
@@ -316,6 +338,55 @@ fn the_viewer_stops_streams_of_frames_older_than_the_last_presented() {
         assert_eq!(within(Duration::from_secs(3), "the keyframe", frames.recv()).await.unwrap().header.frame_id, 14);
         let s = receiver.stats();
         assert_eq!((s.sequence.delivered, s.sequence.lost, s.refused), (2, 3, 2));
+    });
+}
+
+/// One whole frame stream of `id`, written by hand.
+async fn whole_frame(conn: &quinn::Connection, id: u32, key: bool) {
+    let body = payload_of(id, 1000);
+    raw_stream(conn, &header(id, key, body.len()).encode().unwrap(), &body, true).await;
+}
+
+/// Review of 22/11/2026, C5: the report's `frames_lost` is what the host's rate control reads as loss on the link,
+/// and it counted every frame id the sequence skipped, also the ids of frames the host never sent because it was
+/// preparing the keyframe the viewer had asked for (after a frame the viewer dropped itself, a window that attached
+/// late, a decoder made again). Only frames the link did not bring in time count.
+#[test]
+fn the_report_counts_the_frames_the_link_lost_and_not_the_ids_the_host_skipped_for_a_keyframe() {
+    run(async {
+        let pair = plain_pair().await;
+        let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        let (receiver, mut frames) = VideoReceiver::new(
+            ReceiverConfig::default(),
+            Arc::new(move |r: KeyframeRequest| {
+                let _ = requests.send(r);
+            }),
+        );
+        tokio::spawn({
+            let (r, c) = (receiver.clone(), pair.viewer.clone());
+            async move { r.serve(c).await }
+        });
+        let lost = || receiver.report(0, 0, 0).frames_lost;
+        for (id, key) in [(10, true), (11, false)] {
+            whole_frame(&pair.host, id, key).await;
+            assert_eq!(within(Duration::from_secs(3), "a frame", frames.recv()).await.unwrap().header.frame_id, id);
+        }
+        // The viewer asked for a keyframe; the host dropped frames 12 to 14 while the encoder made it.
+        whole_frame(&pair.host, 15, true).await;
+        assert_eq!(within(Duration::from_secs(3), "the keyframe", frames.recv()).await.unwrap().header.frame_id, 15);
+        assert_eq!(lost(), 0, "ids the host skipped to answer a request are no loss on the link");
+
+        // Frame 16 never comes: 17 waits for it, the hold ends and the viewer asks for a keyframe.
+        whole_frame(&pair.host, 17, false).await;
+        let req = within(Duration::from_secs(3), "the keyframe request", asked.recv()).await.unwrap();
+        assert_eq!(req.last_good_frame, 15);
+        assert_eq!(lost(), 1, "frame 16 is the one the link lost");
+        // P-frames refused while the keyframe is awaited, and the ids skipped up to it, add nothing.
+        let refused = raw_stream(&pair.host, &header(18, false, 5_000).encode().unwrap(), &[], false).await;
+        within(Duration::from_secs(3), "the stop of frame 18", refused.stopped()).await.unwrap();
+        whole_frame(&pair.host, 21, true).await;
+        assert_eq!(within(Duration::from_secs(3), "the keyframe", frames.recv()).await.unwrap().header.frame_id, 21);
+        assert_eq!(lost(), 1);
     });
 }
 

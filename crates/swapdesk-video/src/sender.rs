@@ -3,7 +3,8 @@
 //! `send` opens a stream, writes the kind, the 32-byte header and the payload, and finishes it, from a task of its
 //! own, so a frame stuck behind loss never blocks the next. Staleness (PROTOCOL.md 4):
 //!
-//! * a keyframe (or a discontinuity) resets every unfinished stream of its display before it is sent;
+//! * a keyframe resets every unfinished stream of its display before it is sent (a P-frame marked `discontinuity`
+//!   is no keyframe);
 //! * when the oldest unfinished P-frame is older than `backlog_limit`, every unfinished P-frame stream of the
 //!   display is reset, a keyframe is wanted and the bitrate is cut; the frame at hand is dropped, since its
 //!   reference is gone;
@@ -276,7 +277,9 @@ impl VideoSender {
             lock(&self.inner.state).stats.dropped_paused += 1;
             return SendOutcome::Paused;
         }
-        let key = h.keyframe || h.discontinuity;
+        // Only a keyframe starts the chain again: a P-frame marked `discontinuity` (an older helper sends one after it
+        // dropped a frame) refers to what never left, so it answers no want of a keyframe.
+        let key = h.keyframe;
         let backlog_cut = {
             let mut st = lock(&self.inner.state);
             let now = Instant::now();

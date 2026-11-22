@@ -169,8 +169,9 @@ impl VideoPath {
         if header.display_id != run.display {
             return None;
         }
-        let key = header.keyframe || header.discontinuity;
-        if key {
+        // A P-frame marked `discontinuity` (a helper of 1.1 sends one after it dropped a frame) is still a P-frame: its
+        // reference never left, so it ends no wait for a keyframe.
+        if header.keyframe {
             *lock(&self.awaiting) = None;
             return Some(Frame { header, payload });
         }
@@ -288,3 +289,50 @@ impl DirectOut {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod discontinuity_tests {
+    use super::*;
+    use swapdesk_proto::Codec;
+
+    fn header(id: u32, keyframe: bool, discontinuity: bool) -> VideoHeader {
+        VideoHeader {
+            keyframe,
+            config: keyframe,
+            discontinuity,
+            display_id: 0,
+            frame_id: id,
+            capture_us: 0,
+            encode_us: 0,
+            width: 64,
+            height: 48,
+            codec: Codec::H264,
+            payload_len: 0,
+        }
+    }
+
+    /// Review of 22/11/2026, C8: a P-frame marked `discontinuity` (a helper of 1.1 sends one after it dropped a frame)
+    /// passed as a keyframe: it ended the wait for the keyframe that was asked for, and the P-frames after it went to a
+    /// viewer that could not decode them.
+    #[test]
+    fn a_p_frame_marked_discontinuity_does_not_end_the_wait_for_a_keyframe() {
+        let path = VideoPath::new();
+        let asked = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&asked);
+        path.set_run(Some(VideoRun { display: 0, key: Arc::new(move || _ = counter.fetch_add(1, Ordering::SeqCst)) }));
+        let pass = |id: u32, keyframe: bool, discontinuity: bool| {
+            path.offer(header(id, keyframe, discontinuity), vec![1].into());
+            let (stamped, lost) = path.take().expect("offered");
+            path.admit(stamped, lost).map(|f| f.header.frame_id)
+        };
+        assert_eq!(pass(1, true, true), Some(1));
+        // The gap: frame 2 is replaced before it was taken.
+        path.offer(header(2, false, false), vec![2].into());
+        assert_eq!(pass(3, false, false), None, "after the gap");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(pass(4, false, true), None, "a P-frame, whatever its flag says");
+        assert_eq!(pass(5, false, false), None, "the keyframe is still awaited");
+        assert_eq!(pass(6, true, true), Some(6));
+        assert_eq!(pass(7, false, false), Some(7));
+    }
+}

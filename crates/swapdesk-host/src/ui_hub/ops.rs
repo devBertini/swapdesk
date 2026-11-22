@@ -815,8 +815,9 @@ impl Hub {
             match item {
                 ViewerOut::Message(m) => match &m {
                     Ipc::ViewerVideo { header, payload, .. } => {
-                        let (key, display, id) =
-                            (header.keyframe || header.discontinuity, header.display_id, header.frame_id);
+                        // Only a keyframe starts the chain again (review of 22/11/2026, C8): a P-frame, whatever its
+                        // flags say, cannot be shown after frames were skipped.
+                        let (key, display, id) = (header.keyframe, header.display_id, header.frame_id);
                         let is_hevc = header.codec == swapdesk_proto::Codec::Hevc;
                         let len = payload.0.len() as u64;
                         // The UI's pipe is behind: video is dropped, not waited for (a wait would hold back the audio

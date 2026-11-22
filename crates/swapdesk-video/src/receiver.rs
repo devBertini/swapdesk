@@ -219,12 +219,14 @@ impl VideoReceiver {
     }
 
     /// The once-a-second `ReceiverReport`. The frame counters are cumulative; the decoder's and presenter's own
-    /// figures come from the caller.
+    /// figures come from the caller. `frames_lost` is what the link lost (`SequencerStats::missed`): the host's rate
+    /// control reads it as congestion, so nothing this side or the host dropped on purpose is in it.
     pub fn report(&self, decode_us_p50: u32, present_lag_us_p50: u32, audio_underruns: u32) -> ReceiverReport {
         let s = lock(&self.inner.seq).stats();
         ReceiverReport {
             frames_presented: s.delivered as u32,
-            frames_lost: s.lost as u32,
+            // Cumulative and read as a difference, so the wrap of the cast is harmless.
+            frames_lost: s.missed as u32,
             decode_us_p50,
             present_lag_us_p50,
             audio_underruns,
@@ -467,7 +469,7 @@ impl Inner {
             t.next += 1;
             let open = Open {
                 display: header.display_id,
-                key: header.keyframe || header.discontinuity,
+                key: header.keyframe,
                 cancel: Arc::clone(&cancel),
                 reason: Arc::clone(&reason),
                 bytes: 0,

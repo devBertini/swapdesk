@@ -55,6 +55,11 @@ pub struct SequencerStats {
     pub delivered: u64,
     /// Frame ids that never reached the decoder (skipped ids when the sequence resumed).
     pub lost: u64,
+    /// Frames the link did not bring in time: the ids still missing when a later frame had waited the whole hold
+    /// for them. Unlike `lost` this leaves out the ids the host never sent (it skips frames while it prepares a
+    /// keyframe the viewer asked for) and what this side refused while it waited for a keyframe: it is the loss the
+    /// host's rate control hears (`ReceiverReport.frames_lost`).
+    pub missed: u64,
     /// Complete frames dropped because they could not be decoded (a gap, or older than the last delivered).
     pub dropped: u64,
     pub requests: u64,
@@ -121,7 +126,9 @@ impl<T> Sequencer<T> {
         if !self.admits(header.display_id) {
             return false;
         }
-        if header.keyframe || header.discontinuity {
+        // Only a keyframe starts a chain. `discontinuity` on a keyframe lets its id start over; on a P-frame it says the
+        // chain broke before it, and the frame is judged as a P-frame here and dropped when it completes.
+        if header.keyframe {
             return match self.displays.get(&header.display_id).and_then(|d| d.last) {
                 Some(last) if !header.discontinuity => ahead(header.frame_id, last) > 0,
                 _ => true,
@@ -137,7 +144,7 @@ impl<T> Sequencer<T> {
 
     /// The stream of `header` was accepted and is being read: a keyframe in progress lets the frames after it wait.
     pub fn started(&mut self, header: &VideoHeader) {
-        if (header.keyframe || header.discontinuity) && self.admits(header.display_id) {
+        if header.keyframe && self.admits(header.display_id) {
             self.displays.entry(header.display_id).or_default().key_started = Some(header.frame_id);
         }
     }
@@ -229,7 +236,7 @@ impl<T> Sequencer<T> {
             return actions;
         }
         let st = self.displays.entry(display).or_default();
-        if h.keyframe || h.discontinuity {
+        if h.keyframe {
             if let Some(last) = st.last
                 && !h.discontinuity
                 && ahead(id, last) <= 0
@@ -253,6 +260,15 @@ impl<T> Sequencer<T> {
             self.stats.delivered += 1;
             actions.push(Action::Deliver(frame));
             self.deliver_run(now, display, &mut actions);
+            return actions;
+        }
+        if h.discontinuity {
+            // A P-frame after a break at the host: its reference never came, so neither it nor what follows decodes
+            // until a keyframe, which is asked for (once: a wait already under way goes on).
+            self.stats.dropped += 1;
+            if !st.need_key {
+                self.begin_gap(now, display, &mut actions);
+            }
             return actions;
         }
         if st.need_key {
@@ -285,6 +301,15 @@ impl<T> Sequencer<T> {
             }
         }
         actions
+    }
+
+    /// The ids between the last delivered frame and the newest parked one that did not arrive: neither parked nor a
+    /// keyframe still being read. None before the first keyframe, whose absence says nothing about the link.
+    fn holes(st: &DisplayState<T>) -> u64 {
+        let Some(last) = st.last else { return 0 };
+        let Some(span) = st.pending.iter().map(|c| ahead(c.header.frame_id, last)).max() else { return 0 };
+        let on_its_way = st.key_started.is_some_and(|k| (1..span).contains(&ahead(k, last)));
+        u64::try_from(span).unwrap_or(0).saturating_sub(st.pending.len() as u64).saturating_sub(u64::from(on_its_way))
     }
 
     /// Gives up on what is missing: drop what waits, stop unfinished P-frames, ask for a keyframe.
@@ -336,6 +361,7 @@ impl<T> Sequencer<T> {
             let overdue =
                 !st.need_key && st.waiting_since.is_some_and(|t| now.saturating_duration_since(t) >= self.cfg.hold);
             if overdue {
+                self.stats.missed += Self::holes(st);
                 self.begin_gap(now, display, &mut actions);
             } else if st.need_key {
                 self.request(now, display, &mut actions);
@@ -664,6 +690,62 @@ mod tests {
         assert!(!s.accepts(&hdr_big(1, true, 16, 0)), "a 17th display");
         assert!(s.complete(t, Completed { header: hdr_big(1, true, 16, 0), body: () }).is_empty());
         assert_eq!(s.stats().delivered, 16);
+    }
+
+    /// Review of 22/11/2026, C8: a P-frame marked `discontinuity` (a host of 1.1 sends one after it dropped a frame
+    /// itself) was taken for a keyframe: it ended the wait for one and started a chain whose reference the decoder
+    /// never had. It says the chain is broken: it is dropped and a keyframe is asked for.
+    #[test]
+    fn a_p_frame_marked_discontinuity_breaks_the_chain_instead_of_starting_one() {
+        let t = Instant::now();
+        let mut s = Sequencer::new(SequencerConfig::default());
+        s.complete(t, frame(5, true));
+        s.complete(t, frame(6, false));
+        let mut broken = hdr(7, false);
+        broken.discontinuity = true;
+        s.started(&broken);
+        let acts = s.complete(t, Completed { header: broken, body: () });
+        assert_eq!(ids(&acts), Vec::<u32>::new(), "it is not delivered");
+        assert_eq!(requests(&acts), vec![KeyframeRequest { display: 0, last_good_frame: 6 }]);
+        assert!(!s.accepts(&hdr(8, false)), "what follows it waits for the keyframe");
+        assert_eq!(ids(&s.complete(t, frame(9, true))), vec![9]);
+        // While a keyframe is awaited it ends nothing either.
+        s.decode_failed(t, 0);
+        let mut late = hdr(10, false);
+        late.discontinuity = true;
+        assert!(ids(&s.complete(t, Completed { header: late, body: () })).is_empty());
+        assert!(!s.accepts(&hdr(11, false)));
+    }
+
+    /// Review of 22/11/2026, C5: the loss the host hears counted the ids skipped up to every keyframe, also those
+    /// the host never sent and those a local failure gave up. Only the holes a later frame waited the whole hold for
+    /// are missed.
+    #[test]
+    fn only_the_holes_a_later_frame_waited_the_hold_for_are_missed() {
+        let t = Instant::now();
+        let hold = Duration::from_millis(100);
+        let mut s = Sequencer::new(SequencerConfig::default());
+        // Before any keyframe nothing can be missing.
+        s.complete(t, frame(3, false));
+        s.tick(t + hold);
+        assert_eq!(s.stats().missed, 0);
+        s.complete(t + hold, frame(5, true));
+        // A local failure (the decoder's queue was full) gives up the chain: no loss on the link.
+        s.decode_failed(t + hold, 0);
+        assert_eq!(ids(&s.complete(t + hold, frame(9, true))), vec![9]);
+        assert_eq!(s.stats().missed, 0);
+        // 10 and 12 are missing; 11 and 13 waited the whole hold for them.
+        s.complete(t + hold, frame(11, false));
+        s.complete(t + hold, frame(13, false));
+        s.tick(t + hold * 2);
+        assert_eq!(s.stats().missed, 2);
+        // A keyframe whose stream is still being read is late, not missing.
+        assert_eq!(ids(&s.complete(t + hold * 2, frame(20, true))), vec![20]);
+        s.started(&hdr(22, true));
+        s.complete(t + hold * 2, frame(23, false));
+        assert_eq!(ids(&s.complete(t + hold * 2, frame(21, false))), vec![21]);
+        s.tick(t + hold * 3);
+        assert_eq!(s.stats().missed, 2, "22 is on its way: nothing is missing");
     }
 
     /// Finding 20c: the sequencer says when it next needs a tick, so the receiver need not wake every 10 ms.

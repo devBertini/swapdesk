@@ -317,6 +317,8 @@ pub(crate) struct Inner {
     clip: Arc<ClipboardHandler<PipeClipboard>>,
     actions: Arc<ActionWaiters>,
     files: Arc<ViewerFiles>,
+    /// The session's video receiver (it outlives a resume): what the link lost goes into the UI's report.
+    receiver: VideoReceiver,
     /// Keeps the endpoint (and its socket) alive as long as the session.
     _endpoint: Endpoint,
 }
@@ -400,6 +402,15 @@ impl ElevationWait {
 /// How long the viewer waits for the host's answer to `Elevate` (ACCOUNTS.md 9.3).
 pub const ELEVATE_WAIT: Duration = Duration::from_secs(10);
 
+/// What the host hears of the UI's once-a-second report. The UI counts in `frames_lost` every frame that did not
+/// reach its screen: frames its mailbox dropped while the decoder was behind, presents a minimised or occluded window
+/// refused, decoder failures. None of these is loss on the link, and the host's rate control cuts the bitrate for
+/// each, down to its floor for a viewer that is only minimised. The link's loss is the receiver's to tell; the rest of
+/// the report is the UI's.
+fn for_host(ui: ReceiverReport, receiver: &VideoReceiver) -> ReceiverReport {
+    ReceiverReport { frames_lost: receiver.report(0, 0, 0).frames_lost, ..ui }
+}
+
 /// A viewer session, as the UI drives it. Cheap to clone; the last clone dropped disconnects.
 #[derive(Clone)]
 pub struct ViewerHandle {
@@ -460,9 +471,9 @@ impl ViewerHandle {
         self.send_control(request)
     }
 
-    /// `ViewerReport`.
+    /// `ViewerReport`, with the loss of the link in it (see [`for_host`]).
     pub fn report(&self, report: ReceiverReport) -> Result<(), ApplyError> {
-        self.send_control(report)
+        self.send_control(for_host(report, &self.inner.receiver))
     }
 
     /// `SelectDisplay`.
@@ -1060,7 +1071,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         rt: rt.clone(),
         out: out_tx.clone(),
         cell: Arc::clone(&cell),
-        receiver,
+        receiver: receiver.clone(),
         session_id,
         device,
         since_ms,
@@ -1095,7 +1106,8 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         rt.spawn(async move {
             let (mut skipping, mut last_good, mut asked): (bool, u32, Option<Instant>) = (false, 0, None);
             while let Some(f) = frames.recv().await {
-                let key = f.header.keyframe || f.header.discontinuity;
+                // Only a keyframe ends the skipping: the receiver lets no P-frame marked `discontinuity` through.
+                let key = f.header.keyframe;
                 let display = f.header.display_id;
                 let ask = |asked: &mut Option<Instant>, last_good: u32| {
                     if asked.is_none_or(|t| t.elapsed() >= KEY_REASK) {
@@ -1267,10 +1279,35 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         clip,
         actions,
         files,
+        receiver,
         _endpoint: endpoint,
     };
     Ok(Opened {
         handle: ViewerHandle { inner: Arc::new(inner) },
         messages: ViewerMessages { rx: out_rx, rt, video: video_budget },
     })
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    /// Review of 22/11/2026, C5: the UI's `frames_lost` (its own mailbox drops, the presents a minimised window
+    /// refused) went to the host as it was, and the host cut the bitrate for frames the link had carried whole.
+    #[test]
+    fn the_host_hears_the_loss_of_the_link_and_not_the_frames_the_ui_dropped_itself() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let _in_rt = rt.enter();
+        let (receiver, _frames) = VideoReceiver::new(ReceiverConfig::default(), Arc::new(|_: KeyframeRequest| {}));
+        let ui = ReceiverReport {
+            frames_presented: 1_200,
+            frames_lost: 37,
+            decode_us_p50: 2_500,
+            present_lag_us_p50: 9_000,
+            audio_underruns: 4,
+        };
+        let sent = for_host(ui.clone(), &receiver);
+        assert_eq!(sent.frames_lost, receiver.report(0, 0, 0).frames_lost, "the link lost nothing");
+        assert_eq!(sent, ReceiverReport { frames_lost: 0, ..ui }, "the rest is the UI's own");
+    }
 }

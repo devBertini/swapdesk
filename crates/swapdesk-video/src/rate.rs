@@ -14,6 +14,7 @@
 //!   target returns to the rate that held, and the next try waits twice as long; if it holds, it is the new settled
 //!   rate.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use swapdesk_proto::ReceiverReport;
@@ -70,6 +71,10 @@ pub struct RateConfig {
     /// up to `try_max`, and returns to this after one that held.
     pub try_after: Duration,
     pub try_max: Duration,
+    /// How far back the base RTT looks: the least RTT of each tenth of it is kept, and the base is the least of those
+    /// (RFC 6817, LEDBAT, 2.4.2 and 2.5: one minimum per minute, BASE_HISTORY of 10). A route whose own round trip
+    /// fell is the base at once; one whose round trip rose and stayed is the base once this has passed.
+    pub base_window: Duration,
 }
 
 /// The start rate of a wired link: a local Ethernet carries it from the first frame.
@@ -97,6 +102,7 @@ impl Default for RateConfig {
             back_off: 0.95,
             try_after: Duration::from_secs(15),
             try_max: Duration::from_secs(120),
+            base_window: Duration::from_secs(600),
         }
     }
 }
@@ -124,12 +130,34 @@ pub enum RateReason {
     Cap,
 }
 
+/// The least RTT of each tenth of [`RateConfig::base_window`], newest last, each with the time its tenth began.
+#[derive(Debug, Default)]
+struct BaseRtt {
+    minima: VecDeque<(Instant, Duration)>,
+}
+
+impl BaseRtt {
+    /// Takes one RTT and returns the base: the least of the minima inside the window. A tenth with no report
+    /// (a paused stream) keeps no minimum, so after a whole window without reports the base starts over.
+    fn observe(&mut self, now: Instant, rtt: Duration, window: Duration) -> Duration {
+        let tenth = (window / 10).max(Duration::from_millis(1));
+        while self.minima.front().is_some_and(|(began, _)| now.saturating_duration_since(*began) >= window) {
+            self.minima.pop_front();
+        }
+        match self.minima.back_mut() {
+            Some((began, least)) if now.saturating_duration_since(*began) < tenth => *least = (*least).min(rtt),
+            _ => self.minima.push_back((now, rtt)),
+        }
+        self.minima.iter().map(|(_, least)| *least).min().unwrap_or(rtt)
+    }
+}
+
 #[derive(Debug)]
 pub struct RateController {
     cfg: RateConfig,
     target: u32,
     cap: u32,
-    base_rtt: Option<Duration>,
+    base_rtt: BaseRtt,
     last_decrease: Option<Instant>,
     prev_lost: Option<u32>,
     /// No congestion was seen yet.
@@ -160,7 +188,7 @@ impl RateController {
             cfg,
             target,
             cap,
-            base_rtt: None,
+            base_rtt: BaseRtt::default(),
             last_decrease: None,
             prev_lost: None,
             ramping: true,
@@ -267,8 +295,7 @@ impl RateController {
     ) -> Option<(u32, RateReason)> {
         let lost_now = report.frames_lost.wrapping_sub(self.prev_lost.unwrap_or(report.frames_lost));
         self.prev_lost = Some(report.frames_lost);
-        self.base_rtt = Some(self.base_rtt.map_or(rtt, |b| b.min(rtt)));
-        let base = self.base_rtt.unwrap_or(rtt);
+        let base = self.base_rtt.observe(now, rtt, self.cfg.base_window);
         let w = self.cfg.loss_weight.clamp(0.0, 1.0);
         let loss = self.loss.map_or(packet_loss, |old| w * packet_loss + (1.0 - w) * old);
         self.loss = Some(loss);
@@ -588,6 +615,50 @@ mod tests {
             let cuts = settled.windows(2).filter(|w| w[1] < w[0]).count();
             assert!(cuts <= 6, "seed {seed}: {cuts} cuts in {} s: {targets:?}", settled.len());
         }
+    }
+
+    /// Review of 22/11/2026, C6: the base RTT was the least RTT of the whole session and was never refreshed. After
+    /// the route's own round trip rose and stayed (a laptop that roamed to a farther access point, a wireless link in
+    /// power save), every report read as a queue building: the target was cut every two seconds down to the floor
+    /// and stayed there for the rest of the session, with nothing lost and the RTT flat.
+    #[test]
+    fn a_round_trip_that_rose_for_good_stops_reading_as_a_queue_within_the_base_window() {
+        let t0 = Instant::now();
+        let cfg = RateConfig::default();
+        let mut c = RateController::new(cfg.clone());
+        let mut now = t0;
+        for _ in 0..60 {
+            c.on_report(now, &report(0), ms(2), 0.0);
+            now += secs(1);
+        }
+        let changed = now;
+        // The route's round trip is 40 ms from now on, flat: no queue grows, nothing is lost. Until the old minimum
+        // leaves the window the target is cut down to the floor (a cut there moves nothing, so `on_report` says
+        // nothing); what tells a base that follows the route from one that never does is the climb after it.
+        let mut at_window_end = None;
+        while now < changed + cfg.base_window * 2 {
+            c.on_report(now, &report(0), ms(40), 0.0);
+            if now.duration_since(changed) >= cfg.base_window + cfg.base_window / 10 && at_window_end.is_none() {
+                at_window_end = Some(c.target_kbps());
+            }
+            now += secs(1);
+        }
+        let at_window_end = at_window_end.expect("the window ended");
+        assert!(c.target_kbps() > at_window_end, "the target climbs again: {at_window_end} -> {}", c.target_kbps());
+        // A queue that builds over the new round trip is still seen.
+        let moved = c.on_report(now + cfg.hold, &report(0), ms(150), 0.0);
+        assert_eq!(moved.map(|m| m.1), Some(RateReason::RttGrowth));
+    }
+
+    /// Review of 22/11/2026, C6: a round trip that falls is the new base at once.
+    #[test]
+    fn a_round_trip_that_fell_is_the_base_at_once() {
+        let t0 = Instant::now();
+        let mut c = RateController::new(RateConfig::default());
+        c.on_report(t0, &report(0), ms(30), 0.0);
+        c.on_report(t0 + secs(1), &report(0), ms(2), 0.0);
+        // 2 x 2 ms + 20 ms: 30 ms is a queue now.
+        assert_eq!(c.on_report(t0 + secs(2), &report(0), ms(30), 0.0).map(|m| m.1), Some(RateReason::RttGrowth));
     }
 
     #[test]

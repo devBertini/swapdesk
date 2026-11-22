@@ -849,6 +849,14 @@ fn emit_frames<S: ScreenSource, E: VideoEncoder>(
     force: &mut bool,
 ) {
     for e in out {
+        if *discontinuity && !e.keyframe {
+            // The chain is broken here (the first frame, a frame dropped, an encoder built again) and this P-frame
+            // refers to what never left: no viewer can decode it. Only a keyframe starts the chain again (an encoder
+            // that answers the forced keyframe a frame late gives one more P-frame first), so it waits for one and
+            // takes no frame id.
+            *force = true;
+            continue;
+        }
         let Ok(payload_len) = u32::try_from(e.annex_b.len()) else { continue };
         if payload_len > MAX_VIDEO_PAYLOAD {
             fault(&env.outbox, ErrorCode::TooLarge, format!("video {}: frame over limit", p.display));
@@ -1698,3 +1706,6 @@ mod rate_tests;
 
 #[cfg(test)]
 mod codec_tests;
+
+#[cfg(test)]
+mod chain_tests;
