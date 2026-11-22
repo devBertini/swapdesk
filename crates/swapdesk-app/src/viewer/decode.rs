@@ -90,11 +90,17 @@ pub struct Shared {
     pub device_lost: AtomicBool,
     /// Who is woken when `device_lost` is set (the shell's waker, the same as the shortcuts').
     pub waker: Mutex<Option<Arc<dyn swapdesk_ui::UiWaker>>>,
+    /// Times the renderer and the decoder were built again because frames arrived and no picture came out.
+    pub rebuilds: AtomicU64,
+    /// The pipeline's failures, on their way to the application's trace.
+    pub notes: crate::shared::watch::Notes,
 }
 
 impl Shared {
     fn error(&self, what: &str, e: impl std::fmt::Display) {
-        *self.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{what}: {e}"));
+        let detail = e.to_string();
+        self.notes.note(what, &detail);
+        *self.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{what}: {detail}"));
     }
 }
 
@@ -119,6 +125,8 @@ pub struct Worker {
     skips: u32,
     /// Tests only: each present takes at least this long.
     present_delay: Option<Duration>,
+    /// The net under the picture: frames that arrive and give no picture.
+    watch: crate::shared::watch::StallWatch,
 }
 
 /// Most pictures skipped in a row: a stream the decoder cannot keep up with still shows one picture in six.
@@ -155,6 +163,7 @@ pub fn spawn(
             owed: None,
             skips: 0,
             present_delay,
+            watch: crate::shared::watch::StallWatch::default(),
         };
         w.run();
     })
@@ -196,6 +205,12 @@ impl Worker {
                     }
                 }
                 Item::Closed => break,
+            }
+            // Frames have been arriving and no picture came out: whatever holds it (a renderer that could not be
+            // built, a present that keeps failing, a decoder that gives nothing), both are built again on the
+            // window's surface and a keyframe is asked for. Nobody has to notice and connect again.
+            if self.surface.is_some() && self.watch.stalled(Instant::now()) {
+                self.stalled();
             }
             let dropped = self.mailbox.take_dropped();
             if dropped > 0 {
@@ -246,14 +261,27 @@ impl Worker {
             }
             Cmd::Detach(ack) => {
                 self.surface = None;
+                self.watch.clear();
                 self.detach();
                 let _ = ack.send(());
             }
         }
     }
 
+    /// The answer to a stall (see `StallWatch`).
+    fn stalled(&mut self) {
+        self.shared.rebuilds.fetch_add(1, Ordering::Relaxed);
+        self.shared.error(
+            "stalled",
+            "frames arrive and no picture reaches the screen: the renderer and the decoder are built again",
+        );
+        self.owed = None;
+        self.device_gone();
+    }
+
     /// Builds the renderer on the window's surface and the decoder on the renderer's device.
     fn attach(&mut self) {
+        self.watch.clear();
         self.detach_renderer();
         let Some((surface, area)) = self.surface else { return };
         let mut renderer = WinRenderer::new(RendererOptions::default());
@@ -394,6 +422,7 @@ impl Worker {
                         Err(e) => self.shared.error("probe", e),
                     }
                 }
+                self.watch.picture();
                 self.feedback.on_presented(frame_id, decode_us, lag_us);
                 self.shared.presented.fetch_add(1, Ordering::Relaxed);
                 self.shared.last_frame_id.store(u64::from(frame_id), Ordering::Relaxed);
@@ -454,6 +483,9 @@ impl Worker {
     fn frame_in(&mut self, f: Frame) {
         self.session = f.session_id;
         self.display = f.header.display_id;
+        if self.surface.is_some() {
+            self.watch.frame(f.arrived);
+        }
         let (Some(decoder), true) = (self.decoder.as_mut(), self.renderer.is_some()) else {
             return; // no window yet: the first picture waits for the keyframe the attach asks for
         };

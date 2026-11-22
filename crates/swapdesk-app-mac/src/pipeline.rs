@@ -192,6 +192,13 @@ impl MacViewer {
         *lock(&self.out) = Some(out);
     }
 
+    /// Where the pipeline's own failures are written (a decode that failed, a picture that stalled and whose
+    /// decoder was built again): the application's trace. Without it they are only kept in memory, and a picture
+    /// that stopped leaves nothing to read afterwards.
+    pub fn set_note_hook(&self, hook: swapdesk_app::shared::watch::NoteHook) {
+        self.shared.notes.set_hook(hook);
+    }
+
     /// The viewer's input, to hand to the shell as its `ViewerInput` (a clone of the same input the grabber feeds).
     pub fn input(&self) -> MacInput {
         self.input.clone()

@@ -96,6 +96,16 @@ fn main() {
         Err(e) => return message_box(&format!("Swapdesk could not start the viewer: {e}")),
     };
     pipeline.set_waker(waker.clone());
+    // The viewer's own failures go to `viewer.log` in the person's log folder ("Abrir a pasta de logs"): what a
+    // picture that stopped leaves to read. Names, codes and counts only, never content.
+    if let Some(dir) = swapdesk_sys_win::user_log_dir()
+        && let Ok(log) = swapdesk_sys_win::FileTrace::open(&dir, "viewer.log", swapdesk_platform::Level::Info)
+    {
+        use swapdesk_platform::TraceSink;
+        pipeline.set_note_hook(Arc::new(move |line| {
+            log.log(swapdesk_platform::Level::Warn, "viewer", format_args!("{line}"));
+        }));
+    }
     // C5.1: the per-user settings (ui.bin under %APPDATA%/Swapdesk) are read before the first paint. A development
     // instance (`--instance`, `--service-pid`) keeps its own defaults and never touches the user's file.
     let mut follow_login: Option<bool> = None;

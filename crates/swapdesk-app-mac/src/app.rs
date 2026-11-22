@@ -191,6 +191,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let viewer =
         MacViewer::new(ViewerOptions::default()).map_err(|e| format!("the viewer pipeline did not start: {e}"))?;
+    {
+        // The viewer's own failures go to the trace: what a picture that stopped leaves to read.
+        let viewer_trace = Arc::clone(&trace);
+        viewer.set_note_hook(Arc::new(move |line| viewer_trace.log(Level::Warn, "viewer", format_args!("{line}"))));
+    }
     let secrets: Arc<dyn SecretStore> = store.clone();
     let mut params = ServiceParams::new(
         &computer_name(),

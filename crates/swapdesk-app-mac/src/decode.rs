@@ -16,6 +16,7 @@ use swapdesk_app::shared::cursor::CursorTracker;
 use swapdesk_app::shared::feedback::Feedback;
 use swapdesk_app::shared::mailbox::{Cmd, Frame, Item, Mailbox};
 use swapdesk_app::shared::out::OutSlot;
+use swapdesk_app::shared::watch::{Notes, StallWatch};
 use swapdesk_codec_mac::{DecoderOptions, DecoderOutput, VtH264Decoder};
 use swapdesk_platform::{CursorUpdate, VideoDecoder};
 
@@ -51,13 +52,24 @@ pub struct Shared {
     /// Development: where the renderer's layers are (`MacRenderer::geometry_note`), after the last picture.
     pub geometry_note: Mutex<Option<String>>,
     pub audio_underruns: Arc<AtomicU32>,
+    /// Times the decoder was built again: frames arrived and no picture came out, or it failed several times in a
+    /// row.
+    pub rebuilds: AtomicU64,
+    /// The pipeline's failures, on their way to the application's trace.
+    pub notes: Notes,
 }
 
 impl Shared {
     pub fn error(&self, what: &str, e: impl std::fmt::Display) {
-        *self.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{what}: {e}"));
+        let detail = e.to_string();
+        self.notes.note(what, &detail);
+        *self.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{what}: {detail}"));
     }
 }
+
+/// Decodes that failed in a row before the decoder is built again instead of reset: a VideoToolbox session the
+/// system invalidated (sleep, a restarted media server) fails every frame until it is replaced.
+const DECODE_FAILS: u32 = 3;
 
 /// Told on the decode thread when the display of the pictures changes.
 pub type DisplayWatch = Arc<dyn Fn(u16) + Send + Sync>;
@@ -74,6 +86,10 @@ struct Worker {
     session: u64,
     feedback: Feedback,
     cursor: CursorTracker,
+    /// The net under the picture: frames that arrive and give no picture.
+    watch: StallWatch,
+    /// Decodes that failed in a row.
+    fails: u32,
 }
 
 pub fn spawn(
@@ -96,6 +112,8 @@ pub fn spawn(
             session: 0,
             feedback: Feedback::new(Instant::now()),
             cursor: CursorTracker::new(),
+            watch: StallWatch::default(),
+            fails: 0,
         };
         w.run();
     })
@@ -135,6 +153,11 @@ impl Worker {
                 }
                 Item::Closed => break,
             }
+            // Frames have been arriving and no picture came out: the decoder is built again and a keyframe is
+            // asked for. Nobody has to notice and connect again.
+            if self.decoder.is_some() && self.watch.stalled(Instant::now()) {
+                self.rebuild("stalled", "frames arrive and no picture comes out: the decoder is built again");
+            }
             let dropped = self.mailbox.take_dropped();
             if dropped > 0 {
                 self.feedback.on_lost(u32::try_from(dropped).unwrap_or(u32::MAX));
@@ -155,6 +178,8 @@ impl Worker {
         match cmd {
             Cmd::Attach { .. } => {
                 self.decoder = Some(VtH264Decoder::new(DecoderOptions { output: DecoderOutput::Gpu }));
+                self.watch.clear();
+                self.fails = 0;
                 self.frame = None;
                 self.shared.attached.store(true, Ordering::SeqCst);
                 // The stream started before the window did: the first picture needs a keyframe.
@@ -169,8 +194,20 @@ impl Worker {
         }
     }
 
+    /// A new decoder in the place of one that gives nothing, and a keyframe for it.
+    fn rebuild(&mut self, what: &str, why: &str) {
+        self.shared.rebuilds.fetch_add(1, Ordering::Relaxed);
+        self.shared.error(what, why);
+        self.decoder = Some(VtH264Decoder::new(DecoderOptions { output: DecoderOutput::Gpu }));
+        self.fails = 0;
+        self.feedback.on_lost(1);
+        self.request_keyframe(true);
+    }
+
     fn detach(&mut self) {
         self.decoder = None;
+        self.watch.clear();
+        self.fails = 0;
         self.frame = None;
         self.shared.attached.store(false, Ordering::SeqCst);
         self.shared.cursor_drawn.store(false, Ordering::SeqCst);
@@ -201,8 +238,11 @@ impl Worker {
             self.display = f.header.display_id;
             return; // no window yet: the first picture waits for the keyframe the attach asks for
         };
+        self.watch.frame(f.arrived);
         match decoder.decode(&f.header, &f.payload) {
             Ok(Some(picture)) => {
+                self.watch.picture();
+                self.fails = 0;
                 let decode_us = decoder.last_decode_us();
                 let (width, height, frame_id, display) =
                     (picture.width, picture.height, picture.frame_id, picture.display.0);
@@ -235,7 +275,13 @@ impl Worker {
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
                 self.shared.decode_errors.fetch_add(1, Ordering::Relaxed);
                 self.shared.error("decode", e);
-                self.request_keyframe(true);
+                self.fails += 1;
+                if self.fails >= DECODE_FAILS {
+                    // A reset did not bring it back: the session under it is gone.
+                    self.rebuild("decoder", "it failed several times in a row: built again");
+                } else {
+                    self.request_keyframe(true);
+                }
             }
         }
     }

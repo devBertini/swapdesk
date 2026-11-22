@@ -10,3 +10,4 @@ pub mod down;
 pub mod feedback;
 pub mod mailbox;
 pub mod out;
+pub mod watch;

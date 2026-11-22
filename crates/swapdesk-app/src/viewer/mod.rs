@@ -92,6 +92,8 @@ pub struct PipelineStats {
     pub decode_errors: u64,
     pub keyframe_requests: u64,
     pub attached: bool,
+    /// Times the renderer and the decoder were built again because frames arrived and no picture came out.
+    pub rebuilds: u64,
 }
 
 struct Session {
@@ -227,6 +229,13 @@ impl ViewerPipeline {
         self.apply_key_config(&mut ui);
     }
 
+    /// Where the pipeline's own failures are written (a decode or a present that failed, a picture that stalled and
+    /// was built again): the application's trace. Without it they are only kept in memory, and a picture that
+    /// stopped leaves nothing to read afterwards.
+    pub fn set_note_hook(&self, hook: crate::shared::watch::NoteHook) {
+        self.shared.notes.set_hook(hook);
+    }
+
     /// Who to wake when a viewer shortcut was recognised on the hook thread (the shell's waker).
     pub fn set_waker(&self, waker: Arc<dyn UiWaker>) {
         *lock(&self.shared.waker) = Some(Arc::clone(&waker));
@@ -243,6 +252,7 @@ impl ViewerPipeline {
             lost: s.lost.load(Ordering::Relaxed),
             decode_errors: s.decode_errors.load(Ordering::Relaxed),
             keyframe_requests: s.keyframe_requests.load(Ordering::Relaxed),
+            rebuilds: s.rebuilds.load(Ordering::Relaxed),
             attached: s.attached.load(Ordering::SeqCst),
         }
     }

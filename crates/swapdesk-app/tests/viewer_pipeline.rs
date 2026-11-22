@@ -368,3 +368,36 @@ fn a_lost_graphics_device_is_built_again_and_the_picture_returns_without_ending_
     r.pipeline.closed();
     drop(fresh);
 }
+
+/// Review of 22/11/2026, the net under the picture: frames that keep arriving and give no picture (here: a stream
+/// whose keyframe never comes) used to leave the window as it was for as long as the session ran, and nothing was
+/// written anywhere. The renderer and the decoder are now built again, a keyframe is asked for, and the pipeline's
+/// trace says what happened; the keyframe that then comes brings the picture.
+#[test]
+fn frames_that_give_no_picture_rebuild_the_decoder_and_say_so_and_the_picture_returns() {
+    let r = rig();
+    let notes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let n = Arc::clone(&notes);
+    r.pipeline.set_note_hook(Arc::new(move |line| n.lock().unwrap().push(line.to_owned())));
+    let frames = encode(40);
+    // Only the frames after the keyframe, again and again for a little over three seconds.
+    let started = Instant::now();
+    let mut id = 1u32;
+    while started.elapsed() < Duration::from_millis(3600) {
+        let e = &frames[1 + (id as usize % (frames.len() - 1))];
+        let mut h = header(id, e);
+        h.keyframe = false;
+        r.pipeline.video(SESSION, h, e.annex_b.clone());
+        id += 1;
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    wait_until("the stall to be answered", Duration::from_secs(3), || r.pipeline.stats().rebuilds >= 1);
+    assert_eq!(r.pipeline.stats().presented, 0, "nothing could be shown");
+    assert!(
+        notes.lock().unwrap().iter().any(|l| l.starts_with("viewer stalled:")),
+        "the trace says the picture stalled: {:?}",
+        notes.lock().unwrap()
+    );
+    // The stream with its keyframe: the picture comes.
+    first_picture(&r, &frames);
+}
