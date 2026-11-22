@@ -92,6 +92,8 @@ pub(crate) struct Explorer {
     /// Slice 3: the drag in progress, and the context menu that is open.
     pub drag: super::explorer_drag::DragState,
     pub menu: Option<super::explorer_menu::Menu>,
+    /// The copies waiting for a free transfer slot, and the copy under way (FILES-UI.md 5).
+    pub copy: super::transfers::CopyQueue,
 }
 
 /// How long the line over the picture stays, in seconds.
@@ -117,6 +119,7 @@ impl Default for Explorer {
             there: super::explorer_remote::There::default(),
             drag: super::explorer_drag::DragState::default(),
             menu: None,
+            copy: super::transfers::CopyQueue::default(),
         }
     }
 }
@@ -908,11 +911,20 @@ impl UiState {
                 s.add(ControlId::ExpRow(there, i as u16), UiRole::Button, format!("{} {}", r.name, r.kind));
             }
         }
+        if let Some(bar) = self.transfers_bar() {
+            // The copy under way, read out as it changes: what is copied now and how much is done.
+            s.region(super::Region::Status);
+            s.text(UiRole::Text, format!("{}. {}", bar.headline, bar.detail));
+            s.region(super::Region::Content);
+            if bar.can_cancel {
+                s.button(ControlId::TransfersCancelAll, self.name_of(MsgKey::TransfersCancelAll));
+            }
+        }
         if !self.viewer_transfers().is_empty() {
             s.button(ControlId::ExpTransfers, self.name_of(MsgKey::ExplorerTransfers));
         }
         if self.explorer.transfers_open {
-            for t in self.viewer_transfers().into_iter().rev() {
+            for t in self.transfer_rows() {
                 if !matches!(t.state, crate::api::TransferState::Done) {
                     s.button(ControlId::TransferCancel(t.id), format!("{}: {}", self.name_of(MsgKey::Cancel), t.name));
                 }

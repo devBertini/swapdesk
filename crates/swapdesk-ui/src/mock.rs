@@ -257,6 +257,9 @@ pub enum Scenario {
     ExploradorExcluirParaSempre,
     /// Slice 2a: the properties card of a folder of this computer, counted.
     ExploradorPropriedades,
+    /// The transfers bar with a copy of several files under way and its panel open: one running, two done, one that
+    /// failed, one waiting for its turn (the owner's order of 22/11/2026).
+    ExploradorCopiando,
     /// Slice 2b: the other computer (Windows, 1.1) shown on a removable drive, its volumes in the navigation pane.
     ExploradorOutroDisco,
     /// Slice 2b: the notice after a delete there was answered "no bin".
@@ -326,7 +329,7 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 67] = [
+    pub const ALL: [Scenario; 68] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::Dispositivos,
@@ -358,6 +361,7 @@ impl Scenario {
         Scenario::ExploradorRenomear,
         Scenario::ExploradorExcluirParaSempre,
         Scenario::ExploradorPropriedades,
+        Scenario::ExploradorCopiando,
         Scenario::ExploradorOutroDisco,
         Scenario::ExploradorSemLixeira,
         Scenario::ExploradorLixeiraDeLa,
@@ -430,6 +434,7 @@ impl Scenario {
             Scenario::ExploradorRenomear => "explorador-renomear",
             Scenario::ExploradorExcluirParaSempre => "explorador-excluir-para-sempre",
             Scenario::ExploradorPropriedades => "explorador-propriedades",
+            Scenario::ExploradorCopiando => "explorador-copiando",
             Scenario::ExploradorOutroDisco => "explorador-outro-disco",
             Scenario::ExploradorSemLixeira => "explorador-sem-lixeira",
             Scenario::ExploradorLixeiraDeLa => "explorador-lixeira-de-la",
@@ -507,6 +512,7 @@ impl Scenario {
             Scenario::ExploradorRenomear => "new: Arquivos, renaming a row in place (slice 2a)",
             Scenario::ExploradorExcluirParaSempre => "new: Arquivos, the delete-for-good card (slice 2a)",
             Scenario::ExploradorPropriedades => "new: Arquivos, a folder's properties (slice 2a)",
+            Scenario::ExploradorCopiando => "new: Arquivos, a copy under way in the transfers bar and its panel",
             Scenario::ExploradorOutroDisco => "new: Arquivos, the other computer on a removable drive (slice 2b)",
             Scenario::ExploradorSemLixeira => "new: Arquivos, the notice of a delete there with no bin (slice 2b)",
             Scenario::ExploradorLixeiraDeLa => "new: Arquivos, the card before the other computer's bin (slice 2b)",
@@ -900,6 +906,32 @@ impl Scenario {
                         truncated: false,
                         free_bytes: Some(212_000_000_000),
                     })))),
+                ]);
+                v
+            }
+            Scenario::ExploradorCopiando => {
+                let step = |transfer_id: u32, name: &str, outgoing: bool, state: TransferState| {
+                    Event(UiEvent::Transfer { transfer_id, session_id: 1, name: name.into(), outgoing, state })
+                };
+                let running = |done: u64, total: u64| TransferState::Running { done, total, bytes_per_s: 61_000_000 };
+                let mut v = Scenario::Explorador.script();
+                v.extend([
+                    // Two small files that arrived, one that the other disk had no room for, a large one on its way.
+                    step(2, "relatório final.pdf", true, running(2_400_000, 2_400_000)),
+                    step(2, "relatório final.pdf", true, TransferState::Done),
+                    step(3, "orçamento-2026.xlsx", true, running(48_200, 48_200)),
+                    step(3, "orçamento-2026.xlsx", true, TransferState::Done),
+                    step(4, "backup-do-site.zip", true, running(40_000_000, 9_600_000_000)),
+                    step(4, "backup-do-site.zip", true, TransferState::Failed { reason: ApiCode::NoSpace }),
+                    step(5, "vídeo da reunião.mp4", true, running(310_000_000, 1_200_000_000)),
+                    // One second of the copy: its rate, and from it the time left.
+                    Ticks(1),
+                    step(5, "vídeo da reunião.mp4", true, running(371_000_000, 1_200_000_000)),
+                    step(1, "foto 2.heic", false, running(2_000_000, 3_100_000)),
+                    Ticks(1),
+                    // One more file picked and copied: it waits for its turn.
+                    Activate(ControlId::ExpRow(false, 1)),
+                    Activate(ControlId::ExpCopy),
                 ]);
                 v
             }
@@ -1713,6 +1745,7 @@ mod tests {
             (Scenario::ExploradorRenomear, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorExcluirParaSempre, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorPropriedades, Screen::Devices, &[Main, Viewer]),
+            (Scenario::ExploradorCopiando, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorOutroDisco, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorSemLixeira, Screen::Devices, &[Main, Viewer]),
             (Scenario::ExploradorLixeiraDeLa, Screen::Devices, &[Main, Viewer]),

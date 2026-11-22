@@ -121,6 +121,12 @@ impl CapTracker {
             Message::FileCancel(m) => {
                 self.transfers.remove(&m.transfer_id);
             }
+            // A `FileGet` or `FileOffer` answered with a non-fatal `Error` (the file cannot be opened, the other
+            // user said no, the receiver's disk failed) is over: its slot is free again, or eight such answers
+            // would shut the session out of transfers.
+            Message::Error(e) if !e.fatal && matches!(e.about_type, 0x0401 | 0x040B) => {
+                self.transfers.remove(&e.about_id);
+            }
             _ => {}
         }
     }
@@ -179,6 +185,35 @@ mod tests {
         // The offer that answers a request already counted does not take a second slot.
         t.on_outgoing(&caps, &Message::FileCancel(FileCancel { transfer_id: 1 }));
         assert_eq!(t.transfers(), 7);
+    }
+
+    #[test]
+    fn a_file_request_answered_with_an_error_gives_its_slot_back() {
+        // Review of 22/11, F1: a `FileGet` the host could not serve kept its slot, so eight of them shut the
+        // session out of transfers.
+        let caps = Caps::default();
+        let mut t = CapTracker::default();
+        let error = |about_type: u16, about_id: u32, fatal: bool| {
+            Message::Error(ErrorMessage { code: ErrorCode::NotFound, fatal, about_type, about_id })
+        };
+        for round in 0..3 {
+            for id in 1..=8 {
+                assert_eq!(t.on_incoming(&caps, &get(id)), CapVerdict::Ok, "round {round}, request {id}");
+            }
+            assert_eq!(t.on_incoming(&caps, &get(9)), CapVerdict::Busy);
+            for id in 1..=8 {
+                // The host's own answer on its way out.
+                assert_eq!(t.on_outgoing(&caps, &error(0x040B, id, false)), CapVerdict::Ok);
+            }
+            assert_eq!(t.transfers(), 0);
+        }
+        // An error about anything else frees nothing.
+        t.on_incoming(&caps, &get(1));
+        t.on_outgoing(&caps, &error(0x0501, 1, false));
+        assert_eq!(t.transfers(), 1);
+        // The refusal of an offer frees the offer's slot on the side that hears it.
+        t.on_incoming(&caps, &error(0x0401, 1, false));
+        assert_eq!(t.transfers(), 0);
     }
 
     #[test]

@@ -10,12 +10,14 @@
 //!   the painter still draws only the visible rows (R-UI-5). Past the cap the status says "Mostrando os primeiros".
 //! * Changes (new folder, rename, cut and paste, delete to the bin) are `FilesChange`, only with a 1.1 peer and `FILES`
 //!   with `CONTROL`; delete there always asks first and never deletes for good.
-//! * The conflict card before a copy, and the upload of a folder (`MakeDir` per folder, then `FilesSend` per folder).
+//! * The conflict card before a copy, and the upload of a folder (`MakeDir` per folder, then its files into the copy
+//!   queue of `interact/transfers.rs`, which starts them as the session's transfer slots free).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use super::explorer::{MAX_REMOTE_PLACES, REMOTE_PLACES, human_size, idx, join, parent};
+use super::transfers::CopyItem;
 use super::{ControlId, Specs, UiRole};
 use crate::api::{
     ApiCode, ChangeOutcome, Command, DirEntryView, Feature, LocalListing, Msg, Os, Permission, Permissions, PlaceName,
@@ -93,7 +95,7 @@ impl Conflict {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Held {
     pub trash: Command,
-    pub commands: Vec<Command>,
+    pub items: Vec<CopyItem>,
 }
 
 /// One folder of an upload: its local path, its parent there and its name.
@@ -150,7 +152,8 @@ pub(crate) struct There {
     pub trash: Option<(String, Vec<String>)>,
     pub notice: Option<Msg>,
     pub conflict: Option<Conflict>,
-    pub held: Option<Held>,
+    /// Copies waiting for the bin: each its own, so a second replace never drops the first one's files.
+    pub held: Vec<Held>,
     pub walk: Option<Walk>,
     /// A folder download (right to left) scanning or making its local folders, and the properties card of the pane.
     pub download: Option<Download>,
@@ -873,7 +876,7 @@ impl UiState {
         let Some(command) = command else { return Changed::NONE };
         let Command::FilesChange { change, .. } = command.clone() else { return Changed::NONE };
         let bad = results.iter().find(|(_, o)| *o != ChangeOutcome::Done).map(|(_, o)| *o);
-        if let Some(c) = self.walk_made(&command, bad) {
+        if let Some(c) = self.walk_made(&command, bad, false) {
             return c;
         }
         let label = self.folder_label();
@@ -925,7 +928,7 @@ impl UiState {
             _ => MsgKey::ExplorerOpFailed,
         };
         let msg = Msg::new(key).with(self.peer_name());
-        if self.walk_made(command, Some(ChangeOutcome::Failed)).is_some() {
+        if self.walk_made(command, Some(ChangeOutcome::Failed), true).is_some() {
             self.explorer.there.notice = Some(msg);
             return Changed::VIEWER;
         }
@@ -1091,29 +1094,41 @@ impl UiState {
         }
     }
 
-    /// Sends the job: files now (after the bin took the ones replaced), folders by the walk.
+    /// The size of `name` as the pane that shows `dir` lists it; `None` when the pane shows another folder.
+    fn listed_size(&self, there: bool, dir_is_shown: bool, name: &str) -> Option<u64> {
+        if !dir_is_shown {
+            return None;
+        }
+        self.entries(there).iter().find(|e| e.name == name && !e.is_dir).map(|e| e.size)
+    }
+
+    /// Queues the job: files now (after the bin took the ones replaced), folders by the walk. Every file goes
+    /// through the copy queue, which starts as many as the session's transfer slots allow.
     fn run_job(&mut self, mut job: CopyJob, skip: &BTreeSet<String>, replace: Vec<String>, a: &mut Activation) {
         let Some(session_id) = self.session_id() else { return };
         job.folders.retain(|n| !skip.contains(n));
         let files: Vec<String> = job.files.iter().filter(|n| !skip.contains(*n)).cloned().collect();
-        let mut copy = Vec::new();
-        if job.to_there {
-            if !files.is_empty() {
-                copy.push(Command::FilesSend {
-                    session_id,
-                    local_paths: files.iter().map(|n| job.local_dir.join(n)).collect(),
+        let copy: Vec<CopyItem> = if job.to_there {
+            let shown = self.explorer.here_dir.as_ref() == Some(&job.local_dir);
+            files
+                .iter()
+                .map(|n| CopyItem::Send {
+                    local: job.local_dir.join(n),
                     remote_dir: Some(job.remote_dir.clone()),
-                });
-            }
+                    size: self.listed_size(false, shown, n),
+                })
+                .collect()
         } else {
-            for n in &files {
-                copy.push(Command::FilesGet {
-                    session_id,
-                    remote_path: join(&job.remote_dir, n),
+            let shown = self.there_folder() == job.remote_dir;
+            files
+                .iter()
+                .map(|n| CopyItem::Get {
+                    remote: join(&job.remote_dir, n),
                     local_dir: job.local_dir.clone(),
-                });
-            }
-        }
+                    size: self.listed_size(true, shown, n),
+                })
+                .collect()
+        };
         let trash = (!replace.is_empty()).then(|| {
             if job.to_there {
                 Command::FilesChange {
@@ -1155,12 +1170,13 @@ impl UiState {
         a.changed = Changed::VIEWER;
     }
 
-    /// The commands of a copy's files: after the bin took the files they replace, when there are any.
-    fn release(&mut self, trash: Option<Command>, copy: Vec<Command>) -> Vec<Command> {
+    /// The commands of a copy's files: they join the copy queue now, or after the bin took the files they replace
+    /// (then the bin's command is the answer).
+    fn release(&mut self, trash: Option<Command>, copy: Vec<CopyItem>) -> Vec<Command> {
         match trash {
-            None => copy,
+            None => self.copy_enqueue(copy),
             Some(trash) => {
-                self.explorer.there.held = Some(Held { trash: trash.clone(), commands: copy });
+                self.explorer.there.held.push(Held { trash: trash.clone(), items: copy });
                 vec![trash]
             }
         }
@@ -1168,13 +1184,11 @@ impl UiState {
 
     /// The bin answered for a command a replace waits on: the copy goes on when it took everything.
     pub(crate) fn held_after(&mut self, command: &Command, done: bool) {
-        if self.explorer.there.held.as_ref().is_none_or(|h| h.trash != *command) {
-            return;
-        }
-        if let Some(h) = self.explorer.there.held.take()
-            && done
-        {
-            self.followups.extend(h.commands);
+        let Some(i) = self.explorer.there.held.iter().position(|h| h.trash == *command) else { return };
+        let h = self.explorer.there.held.remove(i);
+        if done {
+            let more = self.copy_enqueue(h.items);
+            self.followups.extend(more);
         }
     }
 
@@ -1198,8 +1212,11 @@ impl UiState {
         self.explorer.there.notice = Some(notice);
     }
 
-    /// A `MakeDir` answered: when it is the walk's, the folder is listed here next. `bad` is its failure, if any.
-    fn walk_made(&mut self, command: &Command, bad: Option<ChangeOutcome>) -> Option<Changed> {
+    /// A `MakeDir` answered: when it is the walk's, the folder is listed here next. `bad` is its failure, if any;
+    /// `whole` says the command failed as a whole (the other computer cannot or may not change files at all), which
+    /// ends the walk. A failure of that one folder (a name the other system refuses, a protected place) leaves the
+    /// folder out with what it holds, says so, and the walk goes on with the other folders of the copy.
+    fn walk_made(&mut self, command: &Command, bad: Option<ChangeOutcome>, whole: bool) -> Option<Changed> {
         let Command::FilesChange { change: RemoteChange::MakeDir { parent, name }, .. } = command else { return None };
         let step = self.explorer.there.walk.as_ref()?.step.clone();
         let Some(WalkStep::Making(item)) = step else { return None };
@@ -1218,7 +1235,17 @@ impl UiState {
                 let label = self.folder_label();
                 let msg =
                     self.notice_of(&RemoteChange::MakeDir { parent: parent.clone(), name: name.clone() }, o, label);
-                self.walk_abort(msg);
+                if whole {
+                    self.walk_abort(msg);
+                } else {
+                    self.explorer.there.notice = Some(msg);
+                    if let Some(w) = &mut self.explorer.there.walk {
+                        w.step = None;
+                    }
+                    if let Some(next) = self.walk_advance() {
+                        self.followups.push(next);
+                    }
+                }
             }
         }
         Some(Changed::VIEWER)
@@ -1235,10 +1262,20 @@ impl UiState {
         if !same {
             return Err(l);
         }
-        let Some(session_id) = self.session_id() else { return Err(l) };
+        if self.session_id().is_none() {
+            return Err(l);
+        }
         let remote = join(&item.parent, &item.name);
         let all: Vec<&DirEntryView> = l.entries.iter().chain(&l.hidden).collect();
-        let files: Vec<PathBuf> = all.iter().filter(|e| !e.is_dir).map(|e| item.local.join(&e.name)).collect();
+        let files: Vec<CopyItem> = all
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| CopyItem::Send {
+                local: item.local.join(&e.name),
+                remote_dir: Some(remote.clone()),
+                size: Some(e.size),
+            })
+            .collect();
         let dirs: Vec<&&DirEntryView> = all.iter().filter(|e| e.is_dir).collect();
         let Some(walk) = self.explorer.there.walk.as_mut() else { return Err(l) };
         walk.files += files.len();
@@ -1256,9 +1293,9 @@ impl UiState {
             });
         }
         walk.step = None;
-        if !files.is_empty() {
-            self.followups.push(Command::FilesSend { session_id, local_paths: files, remote_dir: Some(remote) });
-        }
+        // The folder exists there: its files join the copy queue, and start as the session's slots free.
+        let starts = self.copy_enqueue(files);
+        self.followups.extend(starts);
         if let Some(next) = self.walk_advance() {
             self.followups.push(next);
         }

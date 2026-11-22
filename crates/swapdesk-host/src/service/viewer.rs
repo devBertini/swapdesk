@@ -802,6 +802,8 @@ struct Drive {
     redial: Arc<Redial>,
     terms: Arc<ViewerTerms>,
     elevation: Arc<ElevationWait>,
+    /// The session's files: a request the host refuses is ended there.
+    files: Arc<ViewerFiles>,
 }
 
 fn active(ctx: &SessionCtx, since_ms: u64, w: &ElevationWait) -> SessionState {
@@ -904,6 +906,12 @@ impl Drive {
                     }
                     if e.about_type == 0x000C {
                         self.elevation.answer(Err(e.code));
+                    }
+                    // A refused `FileOffer` or `FileGet` (not permitted, busy, the file cannot be opened, the
+                    // receiver's disk failed): the transfer it named ends as failed with that reason. The protocol
+                    // has no other answer to a `FileGet` that cannot be served.
+                    if matches!(e.about_type, 0x0401 | 0x040B) && !e.fatal {
+                        self.files.command(swapdesk_files::Command::Refused { id: e.about_id, code: e.code });
                     }
                     None
                 }
@@ -1047,6 +1055,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         }),
         terms: Arc::clone(&terms),
         elevation: Arc::clone(&elevation),
+        files: Arc::clone(&files),
     };
     drive.emit(active(&ctx, since_ms, &elevation), None).await;
 

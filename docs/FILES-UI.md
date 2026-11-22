@@ -66,7 +66,8 @@ y=96   +---------------+--------------------------------------+-----------------
        |  Disco (C:)   |                                      |                             |
        | MACBOOK ...   | status line 28                       |                             |
        |  Macintosh HD +--------------------------------------+-----------------------------+
-y=H-44 | transfers bar (44): Transferências, 2 em andamento, 1,1 de 1,8 GB, 94 MB/s, falta 1 min  [Mostrar] |
+y=H-60 | transfers bar (60): Transferências  Copiando foto 2.heic e mais 1   [Cancelar tudo] [Mostrar] |
+       |   29% · 2 de 5 itens · 375,4 MB de 1,3 GB · 61,9 MB/s · falta 15 s · 1 na fila · 1 com falha      |
 y=H    +------------------------------------------------------------------------------------+
 ```
 
@@ -82,7 +83,7 @@ y=H    +------------------------------------------------------------------------
 - **Column header** (28, from y + 84): fill `sunken`, hairline at the bottom; labels in `text::TABLE_HEAD` (12/600) `soft`. Name from x + 40; Size 88 wide, right-aligned; Type 128; Modified 132. The sorted column shows a 12 px chevron after its label (up for ascending). Columns drop by pane width: Type below 560, Modified below 400; Name keeps at least 140.
 - **Rows** (30 each, from y + 112): a 16 px icon at x + 14 (centred), the name in `text::BODY` from x + 40, ellipsised; Size, Type and Modified in `text::CAPTION` `soft`. A folder's Size is empty (Explorer does the same). Selected rows: fill `link_tint`, radius 4, inset 4 horizontally. Hover: `ink` at 0.04. Rows marked by a pending "cut": icon and text at 50% alpha. A link or junction has the link badge on its icon. The focused row draws the existing focus ring only after keyboard navigation (`focus_visible`).
 - **Status line** (28, the pane's bottom, hairline above): `text::CAPTION` `soft` at x + 14: "48 itens" or "3 selecionados, 12,4 MB"; at the right, when a 1.0 peer cut the listing short, "Mostrando os primeiros 2000".
-- **Transfers bar**: `Rect(0, H - 44, W, 44)`, fill `surface`, hairline on top. At x + 16 a 16 px transfer icon, "Transferências" in `text::NAME`, the summary in `text::CAPTION` `soft` ("2 em andamento, 1,1 de 1,8 GB, 94 MB/s, falta 1 min"), an overall bar 160 x 6 (radius 3, the drawer's `bar` helper) after the summary; at the right a 32 high "Mostrar" / "Ocultar" button. Hidden when the session has no transfer. Expanded, it becomes a panel 264 high (bar included) that pushes the panes up (the layout reflows; nothing overlaps), listing the transfers in rows of 58 (`TRANSFER_H` of today), newest first, scrolling past four.
+- **Transfers bar**: `Rect(0, H - 60, W, 60)`, fill `surface`, hairline on top. A strip 3 high across its whole top edge shows how much of the copy under way is done (`track`, filled `link`; `danger` when the copy ended with files that did not arrive). Two lines at x + 16: "Transferências" in `text::NAME` followed by what the copy does now in `text::BODY` ("Copiando foto 2.heic e mais 1", "Lendo as pastas da cópia…", "Esperando a conexão voltar…", "Cópia concluída"), and under them its numbers in `text::CAPTION` `soft`, joined by " · ": the percent, items done of total, bytes done of total (when every size is known), the speed, the time left, how many wait and how many failed. At the right, 32 high, the negative button first: "Cancelar tudo" (while something is left to cancel), then "Mostrar" / "Ocultar". Hidden when the session has no transfer. Expanded, it becomes a panel 264 high (bar included) that pushes the panes up (the layout reflows; nothing overlaps), listing the transfers in rows of 58 (`TRANSFER_H` of today): what runs first, then what is paused, what failed, what waits and what is done, the newest first in each group, at most 40 rows (a copy of thousands of files is told by the summary, not row by row).
 
 **Icons** are the design's own 24-unit SVG paths, the same on both systems (never the OS's file icons, which differ): folder (exists, `icons::FOLDER`), file, image, video, audio, archive, document, code, application, link badge, drive, removable drive, network drive, home, desktop, download, back, forward, up, search, refresh, new folder, rename, trash, information, picture ("Tela"), transfer. The kind of a file comes from the extension through one table in `swapdesk-ui` (the same table names the Type column).
 
@@ -230,9 +231,9 @@ A later step can make every drag a system drag from the start (an OLE drag on Wi
 
 ## 5. Transfers
 
-- **Queue**: every copy becomes a job: a list of files (a folder is walked first: remote folders with listings, local ones on the worker thread), each with its destination folder. The engine runs at most 8 unfinished transfers per session (`Busy` beyond, C2.4); the rest wait in the UI's queue, in order, and start as slots free. Folders are created before their files (here by the UI, there with `MakeDir`). Limits per job: 10 000 files and 32 levels (GUESS values); beyond, the job does not start and says so.
-- **Progress**: per item (bytes, speed, state) from the existing `Transfer` notifications; overall in the transfers bar: items done of total, bytes done of total, speed (the sum), time left from the speed of the last 10 s (GUESS window).
-- **Pause, resume, cancel**: per item and for the whole job ("Pausar tudo", "Retomar tudo", "Cancelar tudo"); rows keep "Retomar" for an item paused by a lost link, as today. Button order follows the rule: "Cancelar" on the left, "Retomar" on the right (today's drawer has them the other way round).
+- **Queue** (built 22/11/2026, `swapdesk-ui/src/interact/transfers.rs`): every copy (the button, a paste, a drag between panes, a drop from the system, a drag out of the window) puts its files into one queue of the session; a folder is walked first (remote folders with listings, local ones on the worker thread), folders are created before their files (here by the UI, there with `MakeDir`). The service runs at most 8 unfinished transfers per session and answers `Busy` to a start beyond that, so the interface never sends more than the free slots hold: the rest wait in the queue, in order, and start as transfers end. A slot is held by a start sent and not yet answered and by every transfer that is neither done nor failed. A `Busy` all the same puts the files back at the head of the line and the next second tries again; nothing starts while the session reconnects. A folder the other computer refuses to make (a name that system cannot hold, a protected place) is left out with what it holds and said so, and the other folders of the copy go on. Limits per job: 10 000 files and 32 levels (GUESS values); beyond, a download does not start and says so (an upload stops at the folder that passes them).
+- **Progress**: per item (bytes, speed, state) from the existing `Transfer` notifications; overall in the transfers bar, for the copy under way (everything queued since the queue was last empty): the file copied now and how many others run beside it, the percent (by bytes when every size is known, by files otherwise), items done of total, bytes done of total, the speed and the time left from the bytes the copy moved in the last seconds (smoothed), how many files wait and how many failed.
+- **Pause, resume, cancel**: per item "Cancelar", and "Cancelar tudo" for everything (what waits is dropped, what runs is cancelled, what was sent and not yet named is cancelled as it is named; done and failed rows stay). Rows keep "Retomar" for an item paused by a lost link, as today. Button order follows the rule: "Cancelar" on the left, "Retomar" on the right. "Pausar tudo" and "Retomar tudo" are not built: the engine tells a pause by the person and a pause by a lost link apart only on the service's side.
 - **Lost link**: as today (C2.4 "Resume"): every unfinished transfer pauses and resumes from the verified length when F-NET-01 brings the session back, with no click; queued items wait.
 - **A volume that goes away mid-transfer**: the transfer whose source or destination lies on it fails at the next read or write with `VOLUME_GONE` (a 1.1 peer; `IO_FAILED` from a 1.0 peer, which cannot reach other volumes anyway); its row says "O disco {0} foi removido." with "Tentar de novo"; the queued items for that volume are held, not failed one by one, and the job says "Esperando o disco {0} voltar". When the same volume comes back (the same volume identity, section 8.1), "Tentar de novo" resumes from the verified length kept on the receiving side. A volume never comes back under another volume's token, so a retry cannot land on a different disk.
 - **Conflicts**: before a job starts, the UI compares its names with the destination's listing (it has it, or reads it) and, when some exist, asks once: card "3 itens já existem em Documentos", the first names listed, a check "Fazer o mesmo com os outros" (checked when more than one), and the buttons from the left: "Cancelar", "Pular", "Substituir" (danger style), "Manter os dois" (primary and the default answer, by default: it is today's behaviour and loses nothing). "Manter os dois" lets the engine save `name (1).ext` (the existing `SavedAs` line). "Pular" leaves the item out. "Substituir" sends the existing file to the bin first (here: the UI; there: `Trash`, so a 1.1 peer, `FILES` and `CONTROL` and a volume with a bin are needed, else the button is disabled with the reason) and then copies: a failed copy leaves the old file recoverable from the bin. A name that appears between the check and the write still never gets overwritten (the engine's rule).
@@ -487,11 +488,22 @@ Path 1024 bytes, name 255, 2000 entries per page, 32 volumes and 16 places per l
 | NamesWindowsTitle | {0} nomes não valem no Windows | {0} names are not valid on Windows |
 | NamesReplaceChars | Trocar os caracteres por _ | Replace the characters with _ |
 | NamesSkip | Pular esses | Skip these |
-| TransfersSummary | {0} em andamento, {1} de {2}, {3}/s, falta {4} | {0} in progress, {1} of {2}, {3}/s, {4} left |
+| TransfersCopying | Copiando {0} | Copying {0} |
+| TransfersCopyingMore | Copiando {0} e mais {1} | Copying {0} and {1} more |
+| TransfersPreparing | Preparando a cópia… | Preparing the copy… |
+| TransfersReading | Lendo as pastas da cópia… | Reading the folders of the copy… |
+| TransfersWaitingLink | Esperando a conexão voltar… | Waiting for the connection to come back… |
+| TransfersPaused | Cópia pausada | Copy paused |
+| TransfersFinished | Cópia concluída | Copy finished |
+| TransfersFinishedFailed | Cópia concluída com falhas | Copy finished with failures |
+| TransfersItems | {0} de {1} itens (1 item) | {0} of {1} items (1 item) |
+| TransfersBytes | {0} de {1} | {0} of {1} |
+| TransfersSpeed | {0}/s | {0}/s |
+| TransfersLeft | falta {0} | {0} left |
+| TransfersQueued | {0} na fila | {0} waiting |
+| TransfersFailedCount | {0} com falha | {0} failed |
 | TransfersShow | Mostrar | Show |
 | TransfersHide | Ocultar | Hide |
-| TransfersPauseAll | Pausar tudo | Pause all |
-| TransfersResumeAll | Retomar tudo | Resume all |
 | TransfersCancelAll | Cancelar tudo | Cancel all |
 | TransferPause | Pausar | Pause |
 | TransferWaiting | Na fila | Waiting |

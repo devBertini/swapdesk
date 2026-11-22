@@ -718,6 +718,24 @@ strings! {
     ExplorerHostNamesLeftOut => "O {0} mandou nomes que o Swapdesk não aceita; eles ficaram de fora.", "{0} sent names Swapdesk does not accept; they were left out.";
     ExplorerConflictMerge => "Mesclar", "Merge";
     ExplorerConflictFolderNoReplace => "Uma pasta é mesclada ou pulada, nunca substituída.", "A folder is merged or skipped, never replaced.";
+    // The transfers bar's summary of the copy under way (owner's order of 22/11/2026): what is copied now, how much
+    // is done, how fast and how long it still takes.
+    TransfersCopying => "Copiando {0}", "Copying {0}";
+    TransfersCopyingMore => "Copiando {0} e mais {1}", "Copying {0} and {1} more";
+    TransfersPreparing => "Preparando a cópia…", "Preparing the copy…";
+    TransfersReading => "Lendo as pastas da cópia…", "Reading the folders of the copy…";
+    TransfersWaitingLink => "Esperando a conexão voltar…", "Waiting for the connection to come back…";
+    TransfersPaused => "Cópia pausada", "Copy paused";
+    TransfersFinished => "Cópia concluída", "Copy finished";
+    TransfersFinishedFailed => "Cópia concluída com falhas", "Copy finished with failures";
+    TransfersItems => "{0} de {1} {1|item|itens}", "{0} of {1} {1|item|items}";
+    TransfersBytes => "{0} de {1}", "{0} of {1}";
+    TransfersSpeed => "{0}/s", "{0}/s";
+    TransfersLeft => "falta {0}", "{0} left";
+    TransfersQueued => "{0} na fila", "{0} waiting";
+    TransfersFailedCount => "{0} com falha", "{0} failed";
+    TransfersCancelAll => "Cancelar tudo", "Cancel all";
+    TransferWaiting => "Na fila", "Waiting";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

@@ -85,6 +85,7 @@ struct Rec {
     done: u64,
     /// The user paused it: a reconnect does not start it again.
     user_paused: bool,
+    /// Over: done, failed or cancelled. Nothing more is told about it, and it holds no slot.
     terminal: bool,
     last_sent: Option<Instant>,
     last_sent_done: u64,
@@ -146,7 +147,8 @@ impl Hub {
         Some((session_id, self.viewer_of(conn, session_id)?))
     }
 
-    fn active_in(&self, session_id: u64) -> usize {
+    /// The transfers of the session that are not over: each holds one of its slots.
+    pub(super) fn active_in(&self, session_id: u64) -> usize {
         lock(&self.files).recs.iter().filter(|((s, _), r)| *s == session_id && !r.terminal).count()
     }
 
@@ -429,7 +431,12 @@ impl Hub {
         let Some((session_id, handle)) = self.local_rec(conn, id) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
-        lock(&self.files).recs.remove(&(session_id, id));
+        // The record stays, marked over: the engine's last words about this transfer (a progress already on its
+        // way, its `Cancelled`) find it and are dropped, instead of making a new record with no name that would
+        // hold one of the session's slots for ever.
+        if let Some(r) = lock(&self.files).recs.get_mut(&(session_id, id)) {
+            r.terminal = true;
+        }
         if handle.files().knows(id) {
             handle.files().command(Command::Cancel(id));
         }
@@ -442,6 +449,10 @@ impl Hub {
         let (name, outgoing) = {
             let mut t = lock(&self.files);
             let Some(r) = t.recs.get_mut(&(session_id, id)) else { return };
+            // Over already (the user cancelled it, or it ended): nothing more is told about it.
+            if r.terminal {
+                return;
+            }
             r.terminal = true;
             (r.name.clone(), r.outgoing)
         };
@@ -525,6 +536,9 @@ impl Hub {
                 let (name, outgoing, renamed) = {
                     let mut t = lock(&self.files);
                     let Some(r) = t.recs.get_mut(&(session_id, id)) else { return };
+                    if r.terminal {
+                        return;
+                    }
                     r.terminal = true;
                     r.done = r.total;
                     (r.name.clone(), r.outgoing, saved.filter(|s| *s != r.name))
@@ -539,6 +553,9 @@ impl Hub {
                 let (name, outgoing) = {
                     let mut t = lock(&self.files);
                     let Some(r) = t.recs.get_mut(&(session_id, id)) else { return };
+                    if r.terminal {
+                        return;
+                    }
                     r.terminal = true;
                     (r.name.clone(), r.outgoing)
                 };
@@ -567,11 +584,9 @@ impl Hub {
                 self.receive_access_changed();
             }
             Event::Cancelled { id } => {
-                // The user's own cancel removed the record already; this is the other side cancelling.
-                let known = lock(&self.files).recs.contains_key(&(session_id, id));
-                if known {
-                    self.finish_failed(session_id, id, ApiCode::Refused);
-                }
+                // The user's own cancel marked the record over already (nothing is told); otherwise this is the
+                // other side cancelling.
+                self.finish_failed(session_id, id, ApiCode::Refused);
             }
             Event::Listing { req_id, path, entries, truncated, .. } => {
                 let Some(w) = self.take_wait(req_id, Waits::Dir) else { return };

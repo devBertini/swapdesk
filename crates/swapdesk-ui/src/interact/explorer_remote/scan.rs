@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use super::{MAX_DEPTH, MAX_JOB_FILES};
 use crate::api::{ApiCode, Command, Feature, Msg, RemoteKind, RemotePage};
 use crate::interact::explorer::{human_size, join};
+use crate::interact::transfers::CopyItem;
 use crate::local_disk::safe_join;
 use crate::state::{Changed, UiState};
 use crate::strings::MsgKey;
@@ -117,12 +118,12 @@ pub(crate) struct Download {
     pub scan: Scan,
     /// Local folders to make, parents first.
     pub folders: Vec<PathBuf>,
-    /// Files to fetch: their path there and the local folder they land in.
-    pub files: Vec<(String, PathBuf)>,
+    /// Files to fetch: their path there, the local folder they land in and their size.
+    pub files: Vec<(String, PathBuf, u64)>,
     /// The folders made so far; `Some` once the scan is over and the making began.
     pub made: Option<usize>,
-    /// What the copy's own files wait on: the bin command of a replace, and the commands that follow.
-    pub starts: Vec<(Option<Command>, Vec<Command>)>,
+    /// What the copy's own files wait on: the bin command of a replace, and the files that follow it.
+    pub starts: Vec<(Option<Command>, Vec<CopyItem>)>,
 }
 
 /// What a properties card counted so far.
@@ -171,7 +172,7 @@ impl UiState {
         folders: Vec<String>,
         local_dir: &std::path::Path,
         remote_dir: &str,
-        start: (Option<Command>, Vec<Command>),
+        start: (Option<Command>, Vec<CopyItem>),
     ) -> Option<Command> {
         let session_id = self.session_id()?;
         let peer = self.peer_name();
@@ -229,10 +230,15 @@ impl UiState {
     fn download_folder(&mut self, cur: ScanCur) {
         let Some(dl) = &mut self.explorer.there.download else { return };
         let mut dirs = Vec::new();
-        for (name, kind, _) in cur.entries {
+        let mut refused = false;
+        for (name, kind, size) in cur.entries {
             match kind {
+                // A file whose name this computer cannot hold is left out and said so, as a folder is.
+                RemoteKind::File if !partial_name(&name) && safe_join(&cur.dir.local, &name).is_none() => {
+                    refused = true;
+                }
                 RemoteKind::File if !partial_name(&name) => {
-                    dl.files.push((join(&cur.dir.remote, &name), cur.dir.local.clone()));
+                    dl.files.push((join(&cur.dir.remote, &name), cur.dir.local.clone(), size));
                 }
                 RemoteKind::Dir => dirs.push(name),
                 RemoteKind::File | RemoteKind::Link => {}
@@ -245,7 +251,6 @@ impl UiState {
             self.download_abort(self.too_big());
             return;
         }
-        let mut refused = false;
         for name in dirs {
             let Some(local) = safe_join(&cur.dir.local, &name) else {
                 refused = true;
@@ -281,14 +286,19 @@ impl UiState {
             return;
         }
         let Some(dl) = self.explorer.there.download.take() else { return };
-        if let Some(session_id) = self.session_id() {
+        if self.session_id().is_some() {
             for (trash, copy) in dl.starts {
                 let cmds = self.release(trash, copy);
                 self.followups.extend(cmds);
             }
-            for (remote_path, local_dir) in dl.files {
-                self.followups.push(Command::FilesGet { session_id, remote_path, local_dir });
-            }
+            // Every folder exists here: the files join the copy queue, and start as the session's slots free.
+            let items = dl
+                .files
+                .into_iter()
+                .map(|(remote, local_dir, size)| CopyItem::Get { remote, local_dir, size: Some(size) })
+                .collect();
+            let starts = self.copy_enqueue(items);
+            self.followups.extend(starts);
         }
         self.explorer.transfers_open = true;
         // The new folders show in the left pane.

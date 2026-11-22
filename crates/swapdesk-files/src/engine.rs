@@ -424,8 +424,16 @@ impl Engine {
     }
 
     pub fn cancel(&mut self, id: u32) -> Vec<Out> {
-        self.gets.remove(&id);
-        let Some(t) = self.transfers.remove(&id) else { return Vec::new() };
+        let asked = self.gets.remove(&id).is_some();
+        let Some(t) = self.transfers.remove(&id) else {
+            // A file asked for and not offered yet: the host is told, so the request stops holding one of the
+            // session's transfer slots there.
+            return if asked {
+                vec![Out::Msg(Message::FileCancel(FileCancel { transfer_id: id })), Out::Event(Event::Cancelled { id })]
+            } else {
+                Vec::new()
+            };
+        };
         if let Transfer::Rx(mut r) = t {
             r.inc.discard();
         }
@@ -434,6 +442,33 @@ impl Engine {
             Out::Msg(Message::FileCancel(FileCancel { transfer_id: id })),
             Out::Event(Event::Cancelled { id }),
         ]
+    }
+
+    /// The peer answered the request that named transfer `id` with a non-fatal `Error` (about our `FileGet` or our
+    /// `FileOffer`: not permitted, busy, the file cannot be opened, the receiver's disk failed): the transfer ends
+    /// here as failed, with the peer's reason. Without this the side that asked would wait for ever: the protocol
+    /// has no other answer to a `FileGet` that cannot be served. The `FileCancel` gives the session's transfer slot
+    /// back on a host of 1.1.0, which keeps it after such an answer.
+    pub fn refused(&mut self, id: u32, code: ErrorCode) -> Vec<Out> {
+        let asked = self.gets.remove(&id).is_some();
+        let held = match self.transfers.remove(&id) {
+            Some(Transfer::Rx(mut r)) => {
+                r.inc.suspend();
+                true
+            }
+            Some(Transfer::Tx(_)) => true,
+            None => false,
+        };
+        if !asked && !held {
+            return Vec::new();
+        }
+        let mut outs = Vec::new();
+        if held {
+            outs.push(Out::Stop { id });
+        }
+        outs.push(Out::Msg(Message::FileCancel(FileCancel { transfer_id: id })));
+        outs.push(failed(id, code));
+        outs
     }
 
     /// The link is gone: nothing continues until the file is offered again over a new one. Partial files stay on
@@ -651,17 +686,22 @@ impl Engine {
 
     fn on_offer(&mut self, m: FileOffer) -> Vec<Out> {
         let id = m.transfer_id;
-        let decline = |code| vec![Out::Msg(Message::FileDecline(FileDecline { transfer_id: id, code }))];
+        // A viewer that declines the file it asked for ends its own transfer too: the person is told why (a name
+        // this system cannot hold, no free space), and the request is over instead of waiting for ever.
+        let asked = self.cfg.side == Side::Viewer && self.gets.contains_key(&id);
+        let decline = move |code| {
+            let mut outs = vec![Out::Msg(Message::FileDecline(FileDecline { transfer_id: id, code }))];
+            if asked {
+                outs.push(failed(id, code));
+            }
+            outs
+        };
         // A viewer accepts a file only as the answer to its own `FileGet`; `dest` is ignored there.
         let dir = match self.cfg.side {
             Side::Viewer => match self.gets.remove(&id) {
                 // The file saved is the file asked for: a host that answers `a.pdf` with `a.pdf.exe` is refused, so the
                 // name the viewer's user chose is the name that lands on their disk.
-                Some(get) if get.wanted != m.name => {
-                    let mut outs = decline(ErrorCode::InvalidName);
-                    outs.push(failed(id, ErrorCode::InvalidName));
-                    return outs;
-                }
+                Some(get) if get.wanted != m.name => return decline(ErrorCode::InvalidName),
                 Some(get) => get.save_dir,
                 None => return decline(ErrorCode::NotPermitted),
             },

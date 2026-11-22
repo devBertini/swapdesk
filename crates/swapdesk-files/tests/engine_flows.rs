@@ -545,3 +545,63 @@ fn a_get_for_a_missing_file_answers_not_found() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Review of 22/11, F1: the host answers a `FileGet` it cannot serve with an `Error`, which is not a file message.
+/// The session hands it to the engine as a refusal, and the request ends there as failed.
+#[test]
+fn a_refused_request_ends_as_failed_with_the_peers_reason_and_tells_the_peer_to_forget_it() {
+    let home = temp("get-refused");
+    let mut w = World::new(None, &home);
+    let outs = w.viewer.request_get(3, home.join("missing").to_string_lossy().into_owned(), home.clone());
+    w.pump(true, outs, None);
+    assert!(w.viewer.has(3), "the engine alone still waits: the host's answer was an Error");
+    let outs = w.viewer.refused(3, ErrorCode::NotFound);
+    assert!(
+        outs.iter().any(|o| matches!(o, Out::Event(Event::Failed { id: 3, code: ErrorCode::NotFound }))),
+        "{outs:?}"
+    );
+    assert!(
+        outs.iter().any(|o| matches!(o, Out::Msg(Message::FileCancel(c)) if c.transfer_id == 3)),
+        "the host of 1.1.0 frees the request's slot on a cancel: {outs:?}"
+    );
+    assert!(!w.viewer.has(3));
+    assert!(w.viewer.refused(3, ErrorCode::NotFound).is_empty(), "a refusal of nothing known changes nothing");
+    // An upload the host refuses before it accepts ends the same way.
+    let src = home.join("up.bin");
+    std::fs::write(&src, data(10, 1)).unwrap();
+    let _ = w.viewer.send_file(4, &src, None);
+    assert!(w.viewer.has(4));
+    let outs = w.viewer.refused(4, ErrorCode::NotPermitted);
+    assert!(outs.iter().any(|o| matches!(o, Out::Event(Event::Failed { id: 4, code: ErrorCode::NotPermitted }))));
+    assert!(!w.viewer.has(4));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Review of 22/11, F2: a viewer that declined the file it had asked for (a name this system cannot hold, a file
+/// over the limit, no room) told the host and nobody else, so its own transfer waited for ever.
+#[test]
+fn a_viewer_that_declines_the_file_it_asked_for_ends_its_own_transfer_with_the_reason() {
+    let home = temp("get-declined");
+    let mut cfg = FilesConfig::new(Side::Viewer, PathBuf::new());
+    cfg.max_file_size = 1000;
+    let mut viewer = Engine::new(cfg);
+    let _ = viewer.request_get(7, "docs/big.bin".into(), home.clone());
+    let offer = FileOffer { transfer_id: 7, name: "big.bin".into(), size: 1001, mtime_ms: 1, dest: None };
+    let outs = viewer.on_message(Message::FileOffer(offer));
+    assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileDecline(d)) if d.code == ErrorCode::TooLarge)));
+    assert!(
+        outs.iter().any(|o| matches!(o, Out::Event(Event::Failed { id: 7, code: ErrorCode::TooLarge }))),
+        "the viewer's own transfer ends: {outs:?}"
+    );
+    assert!(!viewer.has(7));
+    // A file nobody asked for is declined and nothing is told here (there is no transfer of ours to end).
+    let stray = FileOffer { transfer_id: 8, name: "x.bin".into(), size: 1, mtime_ms: 1, dest: None };
+    let outs = viewer.on_message(Message::FileOffer(stray));
+    assert!(matches!(outs.as_slice(), [Out::Msg(Message::FileDecline(_))]), "{outs:?}");
+    // A request cancelled before the host offered the file tells the host, so its slot there is free again.
+    let _ = viewer.request_get(9, "docs/later.bin".into(), home.clone());
+    let outs = viewer.cancel(9);
+    assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileCancel(c)) if c.transfer_id == 9)), "{outs:?}");
+    assert!(outs.iter().any(|o| matches!(o, Out::Event(Event::Cancelled { id: 9 }))));
+    let _ = std::fs::remove_dir_all(&home);
+}

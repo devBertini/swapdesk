@@ -10,12 +10,14 @@ use swapdesk_ui::{
 };
 
 use crate::painter::{Align, Rect};
-use crate::screens_viewer::human_size;
 use crate::view::{Frame, Kind, icons};
 
 const CMD_H: f32 = 56.0;
 const NAV_W: f32 = 208.0;
-const TRANSFERS_H: f32 = 44.0;
+/// The transfers bar: two lines (what the copy does now, its numbers) under the strip that shows how much is done.
+const TRANSFERS_H: f32 = 60.0;
+const TRANSFERS_STRIP_H: f32 = 3.0;
+/// The bar with its panel open: the bar and three and a half rows, so a fourth row is seen to be there.
 const TRANSFERS_OPEN_H: f32 = 264.0;
 const ROW_H: f32 = 30.0;
 const PANE_HEADER_H: f32 = 44.0;
@@ -527,47 +529,64 @@ fn transfers(f: &mut Frame, r: Rect) {
     let (p, pal) = (f.p, f.pal);
     p.fill_rect(r, pal.surface);
     p.fill_rect(Rect::new(r.x, r.y, r.w, p.hairline()), pal.line);
-    let list = f.st.viewer_transfers().into_iter().cloned().collect::<Vec<_>>();
-    let running = list.iter().filter(|t| matches!(t.state, TransferState::Running { .. })).count();
-    let head = p.label(&f.t(MsgKey::ExplorerTransfers), text::NAME);
-    p.draw(&head, r.x + 16.0, r.y + (TRANSFERS_H - head.h) / 2.0, pal.ink);
-    let summary = f.st.tm(&swapdesk_ui::Msg::new(MsgKey::ExplorerTransfersRunning).with(running.to_string()));
-    let sl = p.label(&summary, text::CAPTION);
-    p.draw(&sl, r.x + 16.0 + head.w + 12.0, r.y + (TRANSFERS_H - sl.h) / 2.0, pal.soft);
+    let bar = f.st.transfers_bar();
+    // The copy under way across the whole top edge: how much of it is done, seen at a glance.
+    if let Some(b) = &bar {
+        let track = Rect::new(r.x, r.y, r.w, TRANSFERS_STRIP_H);
+        p.fill_rect(track, pal.track);
+        let ink = if b.failed { pal.danger } else { pal.link };
+        p.fill_rect(Rect::new(track.x, track.y, track.w * b.fraction.clamp(0.0, 1.0), track.h), ink);
+    }
+    // The buttons at the right, the negative one first (the rule of every screen): "Cancelar tudo", then the
+    // panel's own "Mostrar" / "Ocultar".
     let open = f.st.explorer_transfers_open();
     let label = f.t(if open { MsgKey::ExplorerHide } else { MsgKey::ExplorerShow });
     let bw = f.button_width(&label, Kind::Default);
-    f.button(
-        ControlId::ExpTransfers,
-        Rect::new(r.right() - 16.0 - bw, r.y + 6.0, bw, 32.0),
-        Kind::Default,
-        &label,
-        false,
-    );
+    let by = r.y + (TRANSFERS_H - 32.0) / 2.0;
+    let mut right = r.right() - 16.0 - bw;
+    f.button(ControlId::ExpTransfers, Rect::new(right, by, bw, 32.0), Kind::Default, &label, false);
+    if bar.as_ref().is_some_and(|b| b.can_cancel) {
+        let label = f.t(MsgKey::TransfersCancelAll);
+        let w = f.button_width(&label, Kind::Default);
+        right -= 8.0 + w;
+        f.button(ControlId::TransfersCancelAll, Rect::new(right, by, w, 32.0), Kind::Default, &label, false);
+    }
+    // Two lines at the left: the title with what the copy does now, and its numbers under it.
+    let room = (right - 16.0 - (r.x + 16.0)).max(0.0);
+    let head = p.label(&f.t(MsgKey::ExplorerTransfers), text::NAME);
+    match &bar {
+        Some(b) => {
+            let line = p.label_ellipsis(&b.headline, text::BODY, (room - head.w - 12.0).max(0.0));
+            let detail = p.label_ellipsis(&b.detail, text::CAPTION, room);
+            let top = r.y + (TRANSFERS_H - (head.h + 4.0 + detail.h)) / 2.0 + 1.0;
+            p.draw(&head, r.x + 16.0, top, pal.ink);
+            p.draw(&line, r.x + 16.0 + head.w + 12.0, top, pal.ink);
+            p.draw(&detail, r.x + 16.0, top + head.h + 4.0, pal.soft);
+        }
+        None => p.draw(&head, r.x + 16.0, r.y + (TRANSFERS_H - head.h) / 2.0, pal.ink),
+    }
     if !open {
         return;
     }
     let area = Rect::new(r.x, r.y + TRANSFERS_H, r.w, r.h - TRANSFERS_H);
+    p.fill_rect(Rect::new(area.x, area.y, area.w, p.hairline()), pal.line);
     p.push_clip(area);
-    for (i, t) in list.iter().rev().enumerate() {
+    let list = f.st.transfer_rows().into_iter().cloned().collect::<Vec<_>>();
+    for (i, t) in list.iter().enumerate() {
         let y = area.y + i as f32 * TRANSFER_ROW_H;
         if y > area.bottom() {
             break;
         }
         let name = p.label_ellipsis(&t.name, text::BODY, r.w * 0.5);
         p.draw(&name, r.x + 16.0, y + 8.0, pal.ink);
-        let (fraction, line) = match t.state {
-            TransferState::Running { done, total, .. } => {
-                (done as f32 / total.max(1) as f32, format!("{} / {}", human_size(done), human_size(total)))
+        let fraction = match t.state {
+            TransferState::Running { done, total, .. } | TransferState::Paused { done, total, .. } => {
+                done as f32 / total.max(1) as f32
             }
-            TransferState::Paused { done, total, .. } => {
-                (done as f32 / total.max(1) as f32, f.t(MsgKey::TransferPaused))
-            }
-            TransferState::Done => (1.0, f.t(MsgKey::TransferReceived)),
-            TransferState::Failed { reason } => (0.0, f.st.transfer_failure_text(reason)),
-            TransferState::Queued => (0.0, String::new()),
+            TransferState::Done => 1.0,
+            TransferState::Failed { .. } | TransferState::Queued => 0.0,
         };
-        let l = p.label(&line, text::CAPTION);
+        let l = p.label_ellipsis(&f.st.transfer_line(t), text::CAPTION, r.w * 0.5);
         p.draw(&l, r.x + 16.0, y + 8.0 + name.h + 4.0, pal.soft);
         // Buttons at the right (FILES-UI.md 5: "Cancelar" on the left, "Retomar" on the right), the bar before them.
         let mut bx = r.right() - 16.0;

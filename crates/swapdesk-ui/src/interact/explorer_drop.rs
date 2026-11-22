@@ -23,6 +23,7 @@
 use std::path::PathBuf;
 
 use super::explorer_drag::{DragView, SPRING_MS, Target};
+use super::transfers::CopyItem;
 use super::{Activation, ControlId};
 use crate::api::{Command, Msg, Permission};
 use crate::state::{Changed, UiState};
@@ -212,7 +213,9 @@ impl UiState {
     /// The worker said which dropped paths are folders: the copy starts.
     pub(crate) fn drop_resolved(&mut self, kinds: Vec<(PathBuf, bool)>) -> Changed {
         let Some(wait) = self.explorer.drag.drop_wait.take() else { return Changed::NONE };
-        let Some(session_id) = self.session_id() else { return Changed::NONE };
+        if self.session_id().is_none() {
+            return Changed::NONE;
+        }
         let mut a = Activation { changed: Changed::VIEWER, ..Activation::default() };
         if wait.picture {
             let local_paths: Vec<PathBuf> = kinds.iter().filter(|(_, d)| !d).map(|(p, _)| p.clone()).collect();
@@ -221,7 +224,11 @@ impl UiState {
                 // Nothing of the explorer is on screen here: the reason is a short line over the picture.
                 self.explorer.screen_note = Some((MsgKey::ExplorerFoldersLater, super::explorer::SCREEN_NOTE_S));
             } else {
-                a.commands.push(Command::FilesSend { session_id, local_paths, remote_dir: None });
+                let items = local_paths
+                    .into_iter()
+                    .map(|local| CopyItem::Send { local, remote_dir: None, size: None })
+                    .collect();
+                a.commands.extend(self.copy_enqueue(items));
             }
         } else {
             let Some(src) = kinds.first().and_then(|(p, _)| p.parent()).map(PathBuf::from) else {
@@ -243,7 +250,11 @@ impl UiState {
             self.copy_items(true, same, src, wait.dest.clone(), &mut a);
             if !other.is_empty() {
                 let remote_dir = Some(wait.dest.unwrap_or_else(|| self.there_folder()));
-                a.commands.push(Command::FilesSend { session_id, local_paths: other, remote_dir });
+                let items = other
+                    .into_iter()
+                    .map(|local| CopyItem::Send { local, remote_dir: remote_dir.clone(), size: None })
+                    .collect();
+                a.commands.extend(self.copy_enqueue(items));
             }
         }
         self.followups.extend(a.commands);

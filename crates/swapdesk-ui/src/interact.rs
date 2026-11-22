@@ -32,6 +32,7 @@ pub(crate) use explorer::Explorer;
 pub use explorer::{
     PaneView, PlaceView, PointerMods, RowView, SORT_MODIFIED, SORT_NAME, SORT_SIZE, SORT_TYPE, natural_cmp, type_of,
 };
+pub use transfers::{CopySummary, TRANSFER_ROWS, TransfersBar};
 
 /// Everything a window can focus or announce. `Static` ones are text the screen reader reads, never focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,6 +148,8 @@ pub enum ControlId {
     TransferResume(u32),
     /// "Cancelar" on the transfer with this number.
     TransferCancel(u32),
+    /// "Cancelar tudo" of the transfers bar: what waits is dropped, what runs is cancelled.
+    TransfersCancelAll,
     // The files explorer (FILES-UI.md): `true` names the other computer's pane.
     /// "Tela": back from the Arquivos view to the picture.
     ExpTela,
@@ -1900,7 +1903,13 @@ impl UiState {
             }
             ControlId::TransferCancel(transfer_id) => {
                 a.commands.push(Command::TransferCancel { transfer_id });
-                self.transfers.retain(|t| t.id != transfer_id);
+                self.copy_drop_rows(&[transfer_id]);
+                // Its slot is free: the next file of the copy queue starts.
+                a.commands.extend(self.copy_pump());
+                a.changed = Changed::VIEWER;
+            }
+            ControlId::TransfersCancelAll => {
+                a.commands.extend(self.copy_cancel_all());
                 a.changed = Changed::VIEWER;
             }
             ControlId::ExpTela

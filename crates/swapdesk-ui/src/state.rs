@@ -523,6 +523,10 @@ pub struct TransferView {
     pub state: TransferState,
     /// The name a received file was saved under when it is not `name`: that one was taken and files never overwrite.
     pub saved_as: Option<String>,
+    /// The file's size, once known: from the copy that queued it, or from its first progress.
+    pub size: Option<u64>,
+    /// The copy it belongs to (`CopyQueue::batch`): the transfers bar sums up the copy under way alone.
+    pub batch: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1612,8 +1616,26 @@ impl UiState {
         self.confirm.as_ref().and_then(|c| c.answer)
     }
 
+    /// Whether the shell keeps its one-second timer running: something on screen counts time or waits for the
+    /// next second. Everything [`Self::tick`] moves is named here, or it would stand still on an idle window.
     pub fn needs_tick(&self) -> bool {
         matches!(self.pairing.as_ref().map(|p| &p.state), Some(PairingState::Open { .. }))
+            // A copy under way: its rate and time left, and the retry of a start the service called busy.
+            || self.explorer.copy.retry
+            || !self.copy_idle()
+            // The line over the picture goes by itself.
+            || self.explorer.screen_note.is_some()
+            // The wait for the other computer's user counts down.
+            || self.consent_wait.is_some()
+            // An empty list becomes "Nenhum computador encontrado" after its seconds.
+            || (self.devices.is_empty()
+                && self.fetch(DataKind::Devices) == Fetch::Ready
+                && self.empty_s < Self::NO_COMPUTER_AFTER_S)
+            // The update's download: its rate and time left.
+            || matches!(
+                &self.update,
+                Some(crate::api::UpdateInfo { phase: crate::api::UpdatePhase::Downloading { .. }, .. })
+            )
             || self.confirm.as_ref().is_some_and(|c| c.answer.is_none())
             || self.incoming.is_some()
             || matches!(self.swap.as_ref().map(|s| &s.phase), Some(SwapPhase::Asked { .. }))
@@ -1899,7 +1921,7 @@ impl UiState {
             }
             self.update_prev_done = Some(*done);
         }
-        let mut changed = Changed::NONE;
+        let mut changed = self.copy_tick();
         if self.devices.is_empty()
             && self.fetch(DataKind::Devices) == Fetch::Ready
             && self.empty_s < Self::NO_COMPUTER_AFTER_S
@@ -2125,14 +2147,25 @@ impl UiState {
             }
             UiEvent::HostFilesChanged { session_id, op, count } => self.host_files_changed(session_id, op, count),
             UiEvent::HostFilesReach { session_id } => self.host_files_reach(session_id),
+            // A transfer this side cancelled: its row is gone and stays gone.
+            UiEvent::Transfer { transfer_id, .. } if self.explorer.copy.gone.contains(&transfer_id) => Changed::NONE,
             UiEvent::Transfer { transfer_id, session_id, name, outgoing, state } => {
                 self.system_drag_transfer(transfer_id, session_id, &name, outgoing, &state);
                 // A transfer that moves or ends was answered (a refusal fails it).
                 if !matches!(state, TransferState::Queued) {
                     self.consent_answered(Feature::Files);
                 }
+                let total = match state {
+                    TransferState::Running { total, .. } | TransferState::Paused { total, .. } if total > 0 => {
+                        Some(total)
+                    }
+                    _ => None,
+                };
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == transfer_id) {
                     t.state = state;
+                    if total.is_some() {
+                        t.size = total;
+                    }
                 } else {
                     self.transfers.push(TransferView {
                         id: transfer_id,
@@ -2141,8 +2174,13 @@ impl UiState {
                         outgoing,
                         state,
                         saved_as: None,
+                        size: total,
+                        batch: self.explorer.copy.batch,
                     });
                 }
+                // A transfer that ended freed its slot: the next files of the queue start.
+                let more = self.copy_pump();
+                self.followups.extend(more);
                 Changed::VIEWER
             }
             UiEvent::TransferSavedAs { transfer_id, name, .. } => {
@@ -2316,6 +2354,7 @@ impl UiState {
                 self.drawer = None;
                 self.chat.clear();
                 self.transfers.clear();
+                self.copy_reset();
                 self.listing = None;
                 self.fetch.remove(&DataKind::Listing);
                 self.term_account = None;
@@ -2378,6 +2417,9 @@ impl UiState {
         } else {
             self.sessions.push(SessionView::new(id, device_id, state));
         }
+        // A session that is active again (a reconnect, the end of a pause) goes on with the copies that waited.
+        let more = self.copy_pump();
+        self.followups.extend(more);
         Changed::ALL
     }
 
@@ -2602,7 +2644,8 @@ impl UiState {
                 self.term_id = Some(id);
                 Changed::VIEWER
             }
-            Reply::TransferIds(_) | Reply::TransferId(_) => Changed::NONE,
+            Reply::TransferIds(ids) => self.copy_started(pending.map(|p| p.command), &ids),
+            Reply::TransferId(id) => self.copy_started(pending.map(|p| p.command), &[id]),
             Reply::RemotePage(page) => {
                 let page = self.clean_page(page);
                 let asked = match pending.map(|p| p.command) {
@@ -2657,6 +2700,12 @@ impl UiState {
             c @ Command::FilesChange { .. } => return self.there_change_failed(c, error.code),
             Command::LocalPlaces => return Changed::NONE,
             Command::LocalKinds { .. } => return self.drop_failed(),
+            // A start the service called busy waits in the copy queue again: nothing was lost, nothing is told.
+            c @ (Command::FilesSend { .. } | Command::FilesGet { .. }) => {
+                if let Some(changed) = self.copy_refused(c, error.code) {
+                    return changed;
+                }
+            }
             c @ (Command::LocalMakeDir { .. }
             | Command::LocalRename { .. }
             | Command::LocalMove { .. }

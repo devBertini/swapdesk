@@ -53,3 +53,5 @@ fn a_transfer_that_failed_for_lack_of_space_says_so_and_any_other_failure_says_i
     assert_eq!(text(&s, 0), "Sem espaço livre no outro computador");
     assert_eq!(text(&s, 1), "Não terminou");
 }
+
+mod queue;

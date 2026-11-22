@@ -3130,3 +3130,33 @@ fn the_toolbar_session_line_names_the_codec_hevc_or_h264() {
     assert!(!hidden.settings().unwrap().show_stats);
     assert!(!line(&hidden).contains("HEVC") && !line(&hidden).contains("H.264"), "{}", line(&hidden));
 }
+
+/// Review of 22/11, H5: the shell stops its one-second timer when `needs_tick` says so, and three things the tick
+/// moves were not in it, so they stood still on an idle window.
+#[test]
+fn the_timer_runs_for_everything_the_tick_moves() {
+    // An empty list of devices turns into "Nenhum computador encontrado" after its seconds.
+    let mut s = UiState::default();
+    s.apply(UiEvent::Reply { ticket: Ticket(0), result: Ok(Reply::Devices(Vec::new())) });
+    assert!(!s.no_computer_card());
+    for second in 0..UiState::NO_COMPUTER_AFTER_S {
+        assert!(s.needs_tick(), "second {second}: the count to the card goes on");
+        s.tick();
+    }
+    assert!(s.no_computer_card(), "the card is there");
+    assert!(!s.needs_tick(), "and the timer stops");
+    // The update's download measures its rate each second.
+    let mut s = base();
+    assert!(!s.needs_tick());
+    s.apply(UiEvent::UpdateChanged(UpdateInfo {
+        running: "1.1.0".into(),
+        phase: UpdatePhase::Downloading { version: "1.1.1".into(), done: 1, total: 10 },
+        check_on: true,
+        last_check_ms: None,
+        dismissed: None,
+        last_failure: None,
+        rolled_back: None,
+        updated: false,
+    }));
+    assert!(s.needs_tick(), "a download under way keeps the timer");
+}

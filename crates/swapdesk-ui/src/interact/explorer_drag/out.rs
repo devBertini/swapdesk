@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use super::{Activation, Changed, Command, UiState, join};
 use crate::api::{Permission, TransferState};
+use crate::interact::transfers::CopyItem;
 use crate::local_disk::safe_join;
 use crate::state::Effect;
 
@@ -273,11 +274,16 @@ impl DragOut {
                 }
             }
         }
-        let cancels = if released {
-            g.slots.iter().filter(|s| !s.pull.settled()).filter_map(|s| s.transfer).collect()
-        } else {
-            Vec::new()
-        };
+        // The system let go: what still ran is cancelled, and it is over here too. Nobody tells of one's own cancel,
+        // so a slot left as it was would never settle: the staging folder would stay, no later drag could leave
+        // the window, and its transfer would hold a slot of the session for ever.
+        let mut cancels = Vec::new();
+        if released {
+            for s in g.slots.iter_mut().filter(|s| !s.pull.settled()) {
+                cancels.extend(s.transfer);
+                s.pull = Pull::Failed;
+            }
+        }
         (asks, cancels, released)
     }
 
@@ -485,14 +491,24 @@ impl UiState {
         let mut a = Activation::default();
         let Some(out) = self.explorer.drag.out.current.clone() else { return a };
         let (asks, cancels, released) = out.drain();
-        for i in asks {
-            a.commands.push(Command::FilesGet {
-                session_id: out.session_id,
-                remote_path: join(&out.folder, &out.files[i].name),
+        // Through the copy queue, ahead of what waits there: the system reads each file from a stream that waits.
+        let items: Vec<CopyItem> = asks
+            .into_iter()
+            .map(|i| CopyItem::Get {
+                remote: join(&out.folder, &out.files[i].name),
                 local_dir: out.dir.clone(),
-            });
+                size: None,
+            })
+            .collect();
+        a.commands.extend(self.copy_enqueue_first(items));
+        if released {
+            // Its files that still wait for a slot never start; the ones sent and not yet named are cancelled then.
+            self.copy_forget_dir(&out.dir);
         }
+        self.copy_drop_rows(&cancels);
         a.commands.extend(cancels.into_iter().map(|transfer_id| Command::TransferCancel { transfer_id }));
+        // The slots it held are free: the next files of the copy queue start.
+        a.commands.extend(self.copy_pump());
         if released {
             self.system_drag_done_if_settled(&out);
         }

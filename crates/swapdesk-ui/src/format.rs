@@ -162,6 +162,19 @@ pub fn count(n: u64) -> String {
     out
 }
 
+/// The time a copy still needs, in the units both languages write the same way: "10 s" (in steps of 5 s, so it does
+/// not flicker), "3 min", "2 h 05 min".
+pub fn time_left(secs: u64) -> String {
+    if secs < 60 {
+        format!("{} s", secs.div_ceil(5).max(1) * 5)
+    } else if secs < 3600 {
+        format!("{} min", secs.div_ceil(60))
+    } else {
+        let minutes = secs.div_ceil(60);
+        format!("{} h {:02} min", minutes / 60, minutes % 60)
+    }
+}
+
 /// "1:42" for a countdown.
 pub fn countdown(secs: u16) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)

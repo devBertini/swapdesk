@@ -65,6 +65,11 @@ pub enum Command {
     Pause(u32),
     Resume(u32),
     Cancel(u32),
+    /// The peer answered our request about transfer `id` with a non-fatal `Error`: see [`Engine::refused`].
+    Refused {
+        id: u32,
+        code: ErrorCode,
+    },
 }
 
 /// Local work carries the place it holds in the local share of the queue, given back when the worker takes it.
@@ -495,6 +500,7 @@ async fn worker(
                         Command::Pause(id) => e.pause(id),
                         Command::Resume(id) => e.resume(id),
                         Command::Cancel(id) => e.cancel(id),
+                        Command::Refused { id, code } => e.refused(id, code),
                     }
                 })
                 .await

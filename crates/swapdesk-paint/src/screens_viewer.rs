@@ -657,21 +657,6 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
     }
 }
 
-pub(crate) fn human_size(bytes: u64) -> String {
-    const KB: f64 = 1000.0;
-    let b = bytes as f64;
-    let s = if b >= KB * KB * KB {
-        format!("{:.1} GB", b / (KB * KB * KB))
-    } else if b >= KB * KB {
-        format!("{:.0} MB", b / (KB * KB))
-    } else if b >= KB {
-        format!("{:.0} KB", b / KB)
-    } else {
-        format!("{bytes} B")
-    };
-    s.replace('.', ",")
-}
-
 fn drawer_chat(f: &mut Frame, b: Rect) {
     let (p, pal) = (f.p, f.pal);
     let bw = p.hairline();

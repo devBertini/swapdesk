@@ -52,8 +52,8 @@ pub use interact::explorer_drop::{DropEffect, DropReply, SystemDragData};
 pub use interact::explorer_manage::{ExplorerKey, ManageView};
 pub use interact::explorer_remote::{CardButton, CardStyle, CardView};
 pub use interact::{
-    ControlId, ControlSpec, DialogTexts, PaneView, PlaceView, PointerMods, Region, RowView, SORT_MODIFIED, SORT_NAME,
-    SORT_SIZE, SORT_TYPE, UiRole,
+    ControlId, ControlSpec, CopySummary, DialogTexts, PaneView, PlaceView, PointerMods, Region, RowView, SORT_MODIFIED,
+    SORT_NAME, SORT_SIZE, SORT_TYPE, TRANSFER_ROWS, TransfersBar, UiRole,
 };
 pub use shortcuts::{ReleaseKey, ViewerAction, ViewerOs};
 pub use state::{

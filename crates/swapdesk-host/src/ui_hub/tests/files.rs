@@ -895,3 +895,52 @@ fn a_no_space_refusal_reaches_the_ui_as_its_own_code() {
     assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::NoSpace), ApiCode::NoSpace);
     assert_eq!(crate::ui_hub::views::api_of(swapdesk_proto::ErrorCode::IoFailed), ApiCode::Internal);
 }
+
+/// Review of 22/11, F1: the host answers a `FileGet` it cannot serve with a non-fatal `Error`. The viewer dropped it:
+/// the transfer stayed queued for ever, and the host kept one of the session's eight transfer slots, so eight such
+/// requests shut the session out of transfers.
+#[test]
+fn a_download_the_host_cannot_serve_fails_with_its_reason_and_keeps_no_slot() {
+    let mut p = Pair::new("refused-get", false);
+    std::fs::create_dir_all(p.home.join("docs")).unwrap();
+    let down = data(50_000);
+    std::fs::write(p.home.join("docs").join("ok.bin"), &down).unwrap();
+    // Ten in a row, more than the session's slots: a slot kept by one would refuse a later one as busy.
+    for n in 0..10 {
+        let id = one_id(p.get(&format!("docs/missing-{n}.bin")));
+        let end = state_of(&mut p.viewer_ui, id, "the failure", |s| matches!(s, TransferWire::Failed { .. }));
+        assert!(matches!(end, TransferWire::Failed { reason: ApiCode::NotFound }), "request {n}: {end:?}");
+    }
+    assert_eq!(p.viewer.hub.hub.active_in(p.session), 0, "nothing is left running on the viewer");
+    // The session still transfers.
+    let id = one_id(p.get("docs/ok.bin"));
+    finished(&mut p.viewer_ui, id, "a download after the refusals");
+    assert!(same(&std::fs::read(p.recv.join("ok.bin")).unwrap(), &down));
+    p.finish();
+}
+
+/// Review of 22/11, F3: the cancel removed the transfer's record, and a progress of it that was already on its way
+/// made a new record with no name, which the interface showed as a running row nobody could end and which held one
+/// of the session's slots for ever.
+#[test]
+fn a_cancelled_transfer_stays_over_whatever_the_engine_says_about_it_afterwards() {
+    let mut p = Pair::new("cancel-ghost", false);
+    std::fs::create_dir_all(p.home.join("incoming")).unwrap();
+    let pick = p.pick("big.bin", &data(8_000_000));
+    let id = one_id(p.send(vec![pick], Some("incoming")));
+    state_of(&mut p.viewer_ui, id, "running", |s| matches!(s, TransferWire::Running { .. }));
+    assert!(p.viewer_ui.call(UiOp::Files(FilesOp::Cancel { transfer_id: id })).is_ok());
+    p.viewer_ui.clear();
+    // The engine's last words about it, after the cancel: a progress that was on its way, then its end.
+    let hub = Arc::clone(&p.viewer.hub.hub);
+    hub.files_event(p.session, swapdesk_files::Event::Progress { id, done: 4_000_000, total: 8_000_000 });
+    hub.files_event(p.session, swapdesk_files::Event::Cancelled { id });
+    hub.files_event(p.session, swapdesk_files::Event::Failed { id, code: swapdesk_proto::ErrorCode::IoFailed });
+    assert_eq!(hub.active_in(p.session), 0, "a cancelled transfer holds no slot");
+    let quiet = p.viewer_ui.nothing_within(
+        Duration::from_millis(400),
+        |m| matches!(m, Ipc::UiNotify(Notify::Files(FilesNote::Transfer { transfer_id, .. })) if *transfer_id == id),
+    );
+    assert!(quiet, "nothing more is told about a transfer the user cancelled");
+    p.finish();
+}
