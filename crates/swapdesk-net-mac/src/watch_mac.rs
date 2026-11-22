@@ -15,8 +15,10 @@ use crate::watch::Shared;
 
 /// The primary IPv4 service changed (the default route moved to another interface or went away).
 const GLOBAL_IPV4: &str = "State:/Network/Global/IPv4";
-/// The IPv4 state (addresses) of any interface changed.
-const INTERFACE_IPV4: &str = "State:/Network/Interface/[^/]+/IPv4";
+/// The IPv4 state (addresses) of an `en<N>` interface changed. Only those can be approved (`classify`): the notices of
+/// `utun`, `awdl`, `llw`, `bridge` and the other software interfaces only made the service read the list again for
+/// nothing (review of 22/11/2026, I1). Written so it means the same as a basic or an extended regex(3) pattern (no `+`).
+const INTERFACE_IPV4: &str = "State:/Network/Interface/en[0-9][0-9]*/IPv4";
 
 /// A run loop handle that may be stopped from the owner's thread.
 struct RunLoop(CFRetained<CFRunLoop>);
@@ -126,5 +128,44 @@ impl Drop for StoreThread {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keys of this Mac's dynamic store that `pattern` matches, by the store's own pattern matcher.
+    fn keys(pattern: &str) -> Vec<String> {
+        let name = CFString::from_static_str("Swapdesk network watcher test");
+        // SAFETY: no callout and no context: the session is only read.
+        let store = unsafe { SCDynamicStore::new(None, &name, None, std::ptr::null_mut()) }.expect("store");
+        let Some(list) = SCDynamicStore::key_list(Some(&store), &CFString::from_str(pattern)) else {
+            return Vec::new();
+        };
+        // SAFETY: `SCDynamicStoreCopyKeyList` documents an array of CFStrings.
+        let list = unsafe { CFRetained::cast_unchecked::<CFArray<CFString>>(list) };
+        list.iter().map(|k| k.to_string()).collect()
+    }
+
+    /// Review of 22/11/2026, I1: the watched pattern matched the IPv4 key of every interface (utun, awdl, llw, bridge),
+    /// each notice a read of the whole list for nothing. The narrowed one must match exactly the `en<N>` keys the broad
+    /// one matched, whatever flavour of regex(3) the store uses.
+    #[test]
+    fn the_watched_pattern_matches_the_en_interfaces_only() {
+        let broad = keys("State:/Network/Interface/[^/]+/IPv4");
+        let narrow = keys(INTERFACE_IPV4);
+        println!("broad: {broad:?}\nnarrow: {narrow:?}");
+        let is_en = |k: &String| {
+            k.strip_prefix("State:/Network/Interface/en")
+                .and_then(|rest| rest.strip_suffix("/IPv4"))
+                .is_some_and(|unit| !unit.is_empty() && unit.chars().all(|c| c.is_ascii_digit()))
+        };
+        assert!(narrow.iter().all(is_en), "{narrow:?}");
+        let mut expected: Vec<&String> = broad.iter().filter(|k| is_en(k)).collect();
+        let mut got: Vec<&String> = narrow.iter().collect();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected);
     }
 }

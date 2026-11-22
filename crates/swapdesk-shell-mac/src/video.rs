@@ -65,6 +65,8 @@ pub struct VideoIvars {
     cursor: RefCell<Option<Retained<NSCursor>>>,
     /// Mouse events this view received, and how many of them the input lane took (development: `dev_state`).
     mouse_seen: std::cell::Cell<(u64, u64)>,
+    /// The keys the input lane took down and has not seen go up (see [`HeldKeys`]).
+    held: RefCell<HeldKeys>,
 }
 
 /// What the pointer looks like over the video view.
@@ -196,7 +198,12 @@ define_class!(
 
         #[unsafe(method(flagsChanged:))]
         fn flags_changed(&self, event: &NSEvent) {
-            let taken = self.input().is_some_and(|i| i.modifiers_changed(modifiers_of(event.modifierFlags())));
+            let modifiers = modifiers_of(event.modifierFlags());
+            // The keys left down under Command go up before Command does, as they would from a keyboard.
+            if let Some(input) = self.input() {
+                self.release_held(&*input, modifiers);
+            }
+            let taken = self.input().is_some_and(|i| i.modifiers_changed(modifiers));
             if !taken {
                 // SAFETY: forwards the same event to NSView's implementation.
                 unsafe { msg_send![super(self), flagsChanged: event] }
@@ -298,6 +305,46 @@ define_class!(
     }
 );
 
+/// The keys the input lane took down and has not seen go up, kept so the ones whose key-up AppKit keeps back are
+/// released anyway. AppKit does not deliver the key-up of a key released while Command is held (the application does
+/// not send it to the key window; GLFW and SDL work around the same thing): Cmd+C left the C down on the host until the
+/// viewer lost the focus (review of 22/11/2026, J2). Pure, so the rule is tested without AppKit.
+#[derive(Debug, Default)]
+struct HeldKeys {
+    down: Vec<u16>,
+    command: bool,
+}
+
+impl HeldKeys {
+    /// The input lane took `code` down, with Command held or not. Returns the code to release first: the same key
+    /// pressed again (not a repeat) while Command is held, whose key-up never came.
+    fn pressed(&mut self, code: u16, repeat: bool, command: bool) -> Option<u16> {
+        self.command = command;
+        if !self.down.contains(&code) {
+            self.down.push(code);
+            return None;
+        }
+        (command && !repeat).then_some(code)
+    }
+
+    /// A key-up came.
+    fn released(&mut self, code: u16) {
+        self.down.retain(|c| *c != code);
+    }
+
+    /// The modifiers changed. When Command went up: every key still down, since any key released while it was held
+    /// gave no key-up (a key the person still holds is pressed again by its next repeat).
+    fn modifiers(&mut self, command: bool) -> Vec<u16> {
+        let was = std::mem::replace(&mut self.command, command);
+        if was && !command { std::mem::take(&mut self.down) } else { Vec::new() }
+    }
+
+    /// The input lane released everything itself (the focus went away).
+    fn clear(&mut self) {
+        self.down.clear();
+    }
+}
+
 fn other_button(event: &NSEvent) -> PointerButton {
     match event.buttonNumber() {
         2 => PointerButton::Middle,
@@ -340,6 +387,7 @@ impl VideoView {
         if let (Some(old), Some(focused)) = (self.input(), latch.detach()) {
             old.focus(focused);
         }
+        self.ivars().held.borrow_mut().clear();
         self.ivars().focus.set(latch);
         *self.ivars().input.borrow_mut() = input;
         self.sync_focus();
@@ -350,6 +398,10 @@ impl VideoView {
         let mut latch = self.ivars().focus.get();
         let change = latch.update(key_window, first_responder);
         self.ivars().focus.set(latch);
+        if change == Some(false) {
+            // The input lane releases every key on the host when the keyboard goes.
+            self.ivars().held.borrow_mut().clear();
+        }
         if let (Some(focused), Some(input)) = (change, self.input()) {
             input.focus(focused);
         }
@@ -415,14 +467,30 @@ impl VideoView {
     fn key(&self, event: &NSEvent, down: bool) -> bool {
         let Some(input) = self.input() else { return false };
         let text = if down { event.characters().map(|s| s.to_string()).filter(|s| !s.is_empty()) } else { None };
-        let msg = KeyMsg {
-            key_code: event.keyCode(),
-            down,
-            repeat: down && event.isARepeat(),
-            text,
-            modifiers: modifiers_of(event.modifierFlags()),
-        };
-        input.key(&msg)
+        let modifiers = modifiers_of(event.modifierFlags());
+        let (key_code, repeat) = (event.keyCode(), down && event.isARepeat());
+        if down {
+            let again =
+                self.ivars().held.borrow_mut().pressed(key_code, repeat, modifiers.contains(Modifiers::COMMAND));
+            // Pressed again under Command, whose key-up AppKit kept back: the host gets the key-up first.
+            if let Some(code) = again {
+                input.key(&KeyMsg { key_code: code, down: false, repeat: false, text: None, modifiers });
+            }
+        }
+        let took = input.key(&KeyMsg { key_code, down, repeat, text, modifiers });
+        if !down || !took {
+            self.ivars().held.borrow_mut().released(key_code);
+        }
+        took
+    }
+
+    /// Releases on the host the keys whose key-up AppKit kept back while Command was held (see [`HeldKeys`]), when
+    /// Command goes up.
+    fn release_held(&self, input: &dyn ViewerInput, modifiers: Modifiers) {
+        let codes = self.ivars().held.borrow_mut().modifiers(modifiers.contains(Modifiers::COMMAND));
+        for key_code in codes {
+            input.key(&KeyMsg { key_code, down: false, repeat: false, text: None, modifiers });
+        }
     }
 
     fn point(&self, event: &NSEvent) -> NSPoint {
@@ -455,5 +523,55 @@ impl VideoView {
         let b = self.bounds();
         let scale = self.window().map_or(1.0, |w| w.backingScaleFactor());
         VideoArea { x: b.origin.x, y: b.origin.y, w: b.size.width, h: b.size.height, scale }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeldKeys;
+
+    const C: u16 = 8;
+    const Z: u16 = 6;
+    const LEFT: u16 = 123;
+
+    /// Review of 22/11/2026, J2: a key pressed with Command held stayed down on the host, since AppKit never delivered
+    /// its key-up. When Command goes up, every key still down is released.
+    #[test]
+    fn the_keys_left_down_under_command_are_released_when_command_goes_up() {
+        let mut held = HeldKeys::default();
+        assert!(held.modifiers(true).is_empty(), "Command going down releases nothing");
+        assert_eq!(held.pressed(C, false, true), None);
+        // No key-up for C. Command goes up: C is released.
+        assert_eq!(held.modifiers(false), vec![C]);
+        // Released once only.
+        assert!(held.modifiers(true).is_empty());
+        assert!(held.modifiers(false).is_empty());
+    }
+
+    /// Review of 22/11/2026, J2: Cmd+Z, Cmd+Z with Command held between is two presses on the host, not one key held
+    /// down; a repeat of a held key stays a repeat.
+    #[test]
+    fn a_key_pressed_again_under_command_is_released_first_and_a_repeat_is_not() {
+        let mut held = HeldKeys::default();
+        assert_eq!(held.pressed(Z, false, true), None);
+        assert_eq!(held.pressed(Z, true, true), None, "AppKit's repeat of a key held down");
+        assert_eq!(held.pressed(Z, false, true), Some(Z), "pressed again: its key-up was kept back");
+        assert_eq!(held.modifiers(false), vec![Z]);
+    }
+
+    /// Review of 22/11/2026, J2: a key whose key-up came is not released again, nor is one pressed without Command
+    /// released when it is pressed again (AppKit gives its key-up), and a focus loss forgets them all (the input lane
+    /// released them).
+    #[test]
+    fn keys_whose_key_up_came_or_that_the_focus_released_are_left_alone() {
+        let mut held = HeldKeys::default();
+        assert_eq!(held.pressed(C, false, true), None);
+        held.released(C);
+        assert!(held.modifiers(false).is_empty());
+        assert_eq!(held.pressed(LEFT, false, false), None);
+        assert_eq!(held.pressed(LEFT, false, false), None, "no Command: nothing is kept back");
+        held.modifiers(true);
+        held.clear();
+        assert!(held.modifiers(false).is_empty());
     }
 }

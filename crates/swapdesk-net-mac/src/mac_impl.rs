@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
 use std::net::Ipv4Addr;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::Instant;
 
 use objc2_core_foundation::{CFArray, CFRetained};
 use objc2_system_configuration::{
@@ -13,6 +15,7 @@ use objc2_system_configuration::{
 use swapdesk_platform::{ErrorKind, NetInterface, NetInterfaces, PlatformError, Result};
 
 use crate::classify::{InterfaceFacts, ScKind, classify, is_up};
+use crate::memory::{ScMemory, Seen};
 
 /// One interface with the raw facts the classification used (printed by the tests and by diagnostics).
 #[derive(Debug, Clone)]
@@ -40,18 +43,23 @@ fn os_error(op: &'static str, code: i64, detail: &str) -> PlatformError {
     PlatformError { kind: ErrorKind::Os, op, os_code: Some(code), detail: detail.to_string() }
 }
 
+/// The SystemConfiguration types of earlier reads (see [`crate::memory`]): one for the process, so every reader of the
+/// interface list (the guard, the per-datagram filter, the listeners) gets the same answer.
+static SC_MEMORY: LazyLock<Mutex<ScMemory>> = LazyLock::new(Mutex::default);
+
 /// Every interface macOS lists, classified, with IPv4 addresses and MAC address.
 pub fn list_interfaces() -> Result<Vec<InterfaceReport>> {
     let sc = system_configuration_types();
     let mut raw = read_getifaddrs()?;
     raw.sort_by_key(|r| r.index);
+    let seen: Vec<Seen<'_>> =
+        raw.iter().map(|r| Seen { name: &r.name, mac: r.mac, listed: sc.get(&r.name).map(|(k, _)| *k) }).collect();
+    let settled = SC_MEMORY.lock().unwrap_or_else(PoisonError::into_inner).settle(&seen, Instant::now());
     Ok(raw
         .into_iter()
-        .map(|r| {
-            let (sc_kind, display_name) = match sc.get(&r.name) {
-                Some((k, d)) => (Some(*k), d.clone()),
-                None => (None, None),
-            };
+        .zip(settled)
+        .map(|(r, sc_kind)| {
+            let display_name = sc.get(&r.name).and_then(|(_, d)| d.clone());
             let kind = classify(&InterfaceFacts { name: &r.name, sc: sc_kind, flags: r.flags });
             let interface = NetInterface {
                 index: r.index,
@@ -166,7 +174,8 @@ fn link_address(sdl: *const libc::sockaddr_dl) -> Option<[u8; 6]> {
 }
 
 /// BSD name to SystemConfiguration's type and display name. Empty when SystemConfiguration cannot be read, which makes
-/// every `en` interface unlisted and therefore refused (fail closed).
+/// every `en` interface unlisted and therefore refused (fail closed), except one listed by an earlier read for less than
+/// [`crate::memory::MISSING_LIMIT`].
 fn system_configuration_types() -> HashMap<String, (ScKind, Option<String>)> {
     let mut map = HashMap::new();
     let all: CFRetained<CFArray> = SCNetworkInterface::all();

@@ -8,6 +8,8 @@
 //! * `mac_impl` reads the live facts and exists on macOS only: `getifaddrs(3)` for names, flags, IPv4 addresses and
 //!   link-layer addresses, and SystemConfiguration's `SCNetworkInterfaceCopyAll` for each interface's type, since the
 //!   BSD name alone cannot tell a physical `en` interface from a virtual one.
+//! * [`memory`] keeps each interface's SystemConfiguration type across reads, so one read that comes back without an
+//!   interface `getifaddrs` still lists does not refuse it for that moment (bounded, and only the type is kept).
 //!
 //! * [`watch`] says when the network changed (SystemConfiguration's dynamic store on macOS), once per burst, without a
 //!   timer.
@@ -21,6 +23,7 @@
 //! This crate holds the `unsafe` of the feature; `swapdesk-lan` forbids it.
 
 pub mod classify;
+pub mod memory;
 pub mod neighbor;
 pub mod watch;
 

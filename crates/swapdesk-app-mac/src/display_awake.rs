@@ -18,8 +18,9 @@
 //! developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridledisplaysleep,
 //! developer.apple.com/documentation/iokit/iopmlib_h.
 //!
-//! It does not depend on the "keep awake" setting of Ajustes (that one is about the system's idle sleep and is the
-//! hub's `keep_awake` hook): a host whose display is asleep must still deliver the session.
+//! It does not depend on the "keep awake" setting of Ajustes: a host whose display is asleep must still deliver the
+//! session. That setting is the hub's `keep_awake` hook, which this type also implements, with an assertion of its own
+//! (see [`SystemHooks::keep_awake`] below).
 //!
 //! The logic is generic over [`Power`], so it is tested with a fake; [`IoKitPower`] is the macOS one.
 
@@ -58,12 +59,15 @@ struct Hold {
     renewer: JoinHandle<()>,
 }
 
-/// The hook: holds the display on from the first hosted session to the end of the last.
+/// The hook: holds the display on from the first hosted session to the end of the last, and the Mac awake while the
+/// "keep awake" setting asks for it.
 pub struct DisplayAwake<P: Power> {
     power: Arc<P>,
     period: Duration,
     trace: Arc<dyn TraceSink>,
     hold: Mutex<Option<Hold>>,
+    /// The assertion of "keep awake", apart from the hosted sessions' hold.
+    kept: Mutex<Option<u32>>,
 }
 
 impl<P: Power> DisplayAwake<P> {
@@ -72,7 +76,7 @@ impl<P: Power> DisplayAwake<P> {
     }
 
     pub fn with_period(power: Arc<P>, trace: Arc<dyn TraceSink>, period: Duration) -> Self {
-        Self { power, period, trace, hold: Mutex::new(None) }
+        Self { power, period, trace, hold: Mutex::new(None), kept: Mutex::new(None) }
     }
 
     fn begin(&self) {
@@ -160,6 +164,34 @@ impl<P: Power> DisplayAwake<P> {
 }
 
 impl<P: Power> SystemHooks for DisplayAwake<P> {
+    /// "Keep awake" (a session is live in either role and the setting is on): a `PreventUserIdleDisplaySleep`
+    /// assertion while it is on. IOPMLib.h: "While the display is prevented from dimming, the system cannot go into
+    /// idle sleep", so it holds the display and the system as the Windows service does (`ES_SYSTEM_REQUIRED |
+    /// ES_DISPLAY_REQUIRED`). Without it a Mac that viewed a long job went to sleep and the session dropped (review of
+    /// 22/11/2026, I3).
+    fn keep_awake(&self, on: bool) {
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        match (on, *kept) {
+            (true, None) => match self.power.prevent_display_sleep() {
+                Ok(id) => {
+                    *kept = Some(id);
+                    self.trace.log(Level::Info, "app", format_args!("keep awake: on"));
+                }
+                Err(code) => self.trace.log(
+                    Level::Warn,
+                    "app",
+                    format_args!("keep awake: the assertion was refused ({code:#x})"),
+                ),
+            },
+            (false, Some(id)) => {
+                self.power.release(id);
+                *kept = None;
+                self.trace.log(Level::Info, "app", format_args!("keep awake: off"));
+            }
+            _ => {}
+        }
+    }
+
     fn hosted_sessions(&self, live: usize) {
         if live > 0 {
             self.begin();
@@ -172,6 +204,7 @@ impl<P: Power> SystemHooks for DisplayAwake<P> {
 impl<P: Power> Drop for DisplayAwake<P> {
     fn drop(&mut self) {
         self.end();
+        self.keep_awake(false);
     }
 }
 
@@ -362,6 +395,31 @@ mod tests {
         assert_eq!(power.count(|c| *c == Call::Prevent), 2);
         drop(awake);
         assert_eq!(power.count(|c| matches!(c, Call::Release(_))), 4, "dropping the hook lets go too");
+    }
+
+    /// Review of 22/11/2026, I3: "Manter acordado" did nothing on the Mac in either role (no hook implemented
+    /// `keep_awake`), so a Mac that viewed a long job went to sleep and the session dropped.
+    #[test]
+    fn keep_awake_holds_one_assertion_while_on_apart_from_the_hosted_sessions() {
+        let power = Arc::new(FakePower::default());
+        let awake = hook(&power);
+        awake.keep_awake(true);
+        assert_eq!(power.calls(), vec![Call::Prevent], "taken when it goes on");
+        awake.keep_awake(true);
+        assert_eq!(power.count(|c| *c == Call::Prevent), 1, "a second session does not take it twice");
+        awake.keep_awake(false);
+        assert_eq!(power.calls(), vec![Call::Prevent, Call::Release(100)]);
+        awake.keep_awake(false);
+        assert_eq!(power.count(|c| matches!(c, Call::Release(_))), 1, "released once");
+
+        // A hosted session's hold and this one are apart: the end of the session leaves keep-awake on.
+        awake.keep_awake(true);
+        let kept = 100 + 1;
+        awake.hosted_sessions(1);
+        awake.hosted_sessions(0);
+        assert!(!power.calls().contains(&Call::Release(kept)), "{:?}", power.calls());
+        drop(awake);
+        assert!(power.calls().contains(&Call::Release(kept)), "dropping the hook lets go: {:?}", power.calls());
     }
 
     #[test]

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use crate::elevate::{AdminConfirm, MacElevator};
 use swapdesk_core_mac::{MacServiceParams, MacServiceSetup, mac_service_config};
+use swapdesk_host::netcache::CachedInterfaces;
 use swapdesk_host::service::{ServiceCore, TerminalEnv};
 use swapdesk_host::ui_hub::{
     ConnInfo, DnsSdPresence, FileAuditLog, HubParams, NoHooks, NoPresence, Presence, SystemHooks, UiHub,
@@ -212,6 +213,11 @@ impl InProcessService {
             network_notices,
             admin_confirm,
         } = p;
+        // The interface list is read at most once a second, and again at once after a network notice (below): the LAN
+        // guard asks for it on every incoming connection, the per-datagram filter every second, pairing and presence
+        // on every event. The Windows service does the same (review of 22/11/2026, I4).
+        let cached = Arc::new(CachedInterfaces::new(interfaces));
+        let interfaces: Arc<dyn NetInterfaces> = cached.clone();
         let production_ports = ports.is_none();
         let MacServiceSetup { mut config, identity, trust, mut settings } = mac_service_config(MacServiceParams {
             default_name,
@@ -310,6 +316,8 @@ impl InProcessService {
                 Some(start(Box::new(move || {
                     trace.log(Level::Info, "app", format_args!("the network changed"));
                     let started = std::time::Instant::now();
+                    // The news is newer than any copy: the hub's reads go to the OS.
+                    cached.invalidate();
                     hub.network_changed();
                     trace.log(
                         Level::Info,

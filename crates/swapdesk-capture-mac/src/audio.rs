@@ -29,6 +29,7 @@
 //! macOS only.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use swapdesk_platform::ErrorKind;
 
@@ -186,6 +187,26 @@ pub fn kind_for_stream_code(code: i64) -> ErrorKind {
     sck_error::kind_for_code(code)
 }
 
+/// The pause before the first open of a stream the system stopped (the capture daemon may be restarting).
+pub const REOPEN_FIRST: Duration = Duration::from_millis(250);
+/// The pause between two failed opens of it.
+pub const REOPEN_EVERY: Duration = Duration::from_secs(1);
+/// Failed opens in a row after which the source gives up (about a minute) and reports the last failure.
+pub const REOPEN_TRIES: u32 = 60;
+
+/// When to open the stream again after it stopped with `kind` (`failures` = 0) or after `failures` opens in a row
+/// failed with `kind`; `None` to end the source with that error. The system stopping the stream (`AccessLost`),
+/// nothing to capture for a moment (`Unavailable`) and an open without an answer (`Timeout`) are tried again, as the
+/// Windows source opens its stream again after a device change. A stop on purpose (`Closed`), a grant taken back and
+/// any other failure end the source as before.
+pub fn reopen_after(kind: ErrorKind, failures: u32) -> Option<Duration> {
+    if !matches!(kind, ErrorKind::AccessLost | ErrorKind::Unavailable | ErrorKind::Timeout) || failures >= REOPEN_TRIES
+    {
+        return None;
+    }
+    Some(if failures == 0 { REOPEN_FIRST } else { REOPEN_EVERY })
+}
+
 #[cfg(target_os = "macos")]
 pub use mac::MacAudio;
 
@@ -213,7 +234,8 @@ mod mac {
     use swapdesk_platform::{AudioBlock, AudioSource, Clock, ErrorKind, MonoMicros, OsGrant, PlatformError, Result};
 
     use super::{
-        BlockRing, PcmBuffer, RING_VALUES, SampleKind, f32_from_i16, kind_for_stream_code, sample_kind, to_stereo,
+        BlockRing, PcmBuffer, RING_VALUES, SampleKind, f32_from_i16, kind_for_stream_code, reopen_after, sample_kind,
+        to_stereo,
     };
     use crate::sck_error;
 
@@ -538,10 +560,26 @@ mod mac {
         };
     }
 
+    /// How a stream is opened: [`open_live`], or a stand-in in the tests (`None`: opened, with no stream to stop).
+    type Opener = fn(&Arc<Shared>) -> Result<Option<Running>>;
+
+    fn open_live(shared: &Arc<Shared>) -> Result<Option<Running>> {
+        open_stream(shared).map(Some)
+    }
+
+    /// The stream is gone (the system stopped it) and is opened again at `at`; `failures` opens in a row failed so far.
+    #[derive(Debug, Clone, Copy)]
+    struct Reopen {
+        at: Instant,
+        failures: u32,
+    }
+
     /// `AudioSource` for the Mac host: system audio over ScreenCaptureKit. Needs the Screen Recording grant.
     pub struct MacAudio {
         shared: Arc<Shared>,
         running: Option<Running>,
+        reopen: Option<Reopen>,
+        open: Opener,
     }
 
     impl MacAudio {
@@ -551,12 +589,59 @@ mod mac {
                 state: Mutex::new(State { ring: BlockRing::new(RING_VALUES), error: None, running: false }),
                 wake: Condvar::new(),
             });
-            Ok(Self { shared, running: None })
+            Ok(Self { shared, running: None, reopen: None, open: open_live })
         }
 
         /// Values dropped so far because the ring was full (the reader fell behind by more than 200 ms).
         pub fn dropped_values(&self) -> u64 {
             lock(&self.shared.state).ring.dropped_values()
+        }
+
+        /// The system stopped the stream: it is stopped on this side too (its output detached), and opened again
+        /// after a pause. Never under the state lock: the stream's callbacks take it.
+        fn lost(&mut self, pause: Duration) {
+            if let Some(r) = self.running.take() {
+                autoreleasepool(|_| halt(r));
+            }
+            {
+                let mut st = lock(&self.shared.state);
+                st.running = false;
+                st.error = None;
+                st.ring.clear();
+            }
+            self.reopen = Some(Reopen { at: Instant::now() + pause, failures: 0 });
+        }
+
+        /// Opens the stream again. A failure that may pass is tried again after a pause; one that may not, or the last
+        /// of [`super::REOPEN_TRIES`], ends the source with that error.
+        fn reopen_now(&mut self, failures: u32) -> Result<()> {
+            {
+                let mut st = lock(&self.shared.state);
+                st.ring.clear();
+                st.error = None;
+                st.running = true;
+            }
+            match autoreleasepool(|_| (self.open)(&self.shared)) {
+                Ok(r) => {
+                    self.running = r;
+                    self.reopen = None;
+                    Ok(())
+                }
+                Err(e) => {
+                    lock(&self.shared.state).running = false;
+                    let failures = failures + 1;
+                    match reopen_after(e.kind, failures) {
+                        Some(pause) => {
+                            self.reopen = Some(Reopen { at: Instant::now() + pause, failures });
+                            Ok(())
+                        }
+                        None => {
+                            self.reopen = None;
+                            Err(e)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -585,9 +670,9 @@ mod mac {
                 st.running = true;
             }
             // The audio thread has no autorelease pool of its own.
-            match autoreleasepool(|_| open_stream(&self.shared)) {
+            match autoreleasepool(|_| (self.open)(&self.shared)) {
                 Ok(r) => {
-                    self.running = Some(r);
+                    self.running = r;
                     Ok(())
                 }
                 Err(e) => {
@@ -597,30 +682,50 @@ mod mac {
             }
         }
 
+        /// A stream the system stopped (display sleep, a display or configuration change, the capture daemon
+        /// restarting) is opened again here, paced by [`reopen_after`], and this returns `Ok(None)` meanwhile: the
+        /// host's sound comes back by itself, where it used to end for the rest of the session (review of 22/11/2026,
+        /// J1). An open may wait for SCK's answers (bounded, see the module documentation), so a call may take longer
+        /// than `timeout` then.
         fn next_block(&mut self, timeout: Duration) -> Result<Option<AudioBlock>> {
             let deadline = Instant::now() + timeout;
-            let mut st = lock(&self.shared.state);
             loop {
+                if let Some(r) = self.reopen
+                    && Instant::now() >= r.at
+                {
+                    self.reopen_now(r.failures)?;
+                }
+                let wake_at = self.reopen.map_or(deadline, |r| r.at.min(deadline));
+                let mut st = lock(&self.shared.state);
                 if let Some((at, samples)) = st.ring.pop_block() {
                     // The clock's time of the block's first sample.
                     return Ok(Some(AudioBlock { captured_at: MonoMicros(at), samples }));
                 }
                 if let Some(e) = st.error.take() {
                     st.running = false;
+                    if let Some(pause) = reopen_after(e.kind, 0) {
+                        drop(st);
+                        self.lost(pause);
+                        continue;
+                    }
                     return Err(e);
                 }
-                if !st.running {
+                if !st.running && self.reopen.is_none() {
                     return Err(failure(ErrorKind::Closed, "MacAudio.next_block", "not started"));
                 }
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
+                let now = Instant::now();
+                if now >= deadline {
                     return Ok(None);
                 }
-                st = self.shared.wake.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0;
+                let left = wake_at.saturating_duration_since(now);
+                if !left.is_zero() {
+                    drop(self.shared.wake.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0);
+                }
             }
         }
 
         fn stop(&mut self) {
+            self.reopen = None;
             lock(&self.shared.state).running = false;
             self.shared.wake.notify_all();
             if let Some(r) = self.running.take() {
@@ -633,6 +738,7 @@ mod mac {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct TestClock(Instant);
         impl Clock for TestClock {
@@ -643,6 +749,80 @@ mod mac {
 
         fn audio() -> MacAudio {
             MacAudio::new(Arc::new(TestClock(Instant::now()))).expect("new")
+        }
+
+        /// Review of 22/11/2026, J1: a stream the system stopped (display sleep, the capture daemon restarting) ended
+        /// the source: `next_block` handed out `AccessLost` and the helper turned the host's sound off for the rest of
+        /// the session.
+        #[test]
+        fn a_stream_the_system_stopped_is_opened_again_not_ended() {
+            static OPENS: AtomicUsize = AtomicUsize::new(0);
+            fn counted(_: &Arc<Shared>) -> Result<Option<Running>> {
+                OPENS.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+            let mut a = audio();
+            a.open = counted;
+            // As a start leaves it, without asking for the grant (nothing holds it over SSH).
+            lock(&a.shared.state).running = true;
+            a.shared.fail(stopped(-3821));
+            let r = a.next_block(Duration::from_millis(100));
+            assert!(!matches!(&r, Err(e) if e.kind == ErrorKind::AccessLost), "{:?}", r.err());
+            assert!(matches!(r, Ok(None)), "nothing to hand out while the stream is gone");
+            // The pause before the open, then the stream is open again and its sound flows.
+            let begin = Instant::now();
+            while OPENS.load(Ordering::SeqCst) == 0 {
+                assert!(matches!(a.next_block(Duration::from_millis(50)), Ok(None)));
+                // A wide bound: it guards "never", not how fast (a loaded machine may hold this thread for seconds).
+                assert!(begin.elapsed() < Duration::from_secs(30), "the stream was never opened again");
+            }
+            assert!(begin.elapsed() + Duration::from_millis(100) >= super::super::REOPEN_FIRST);
+            a.shared.push(&vec![0.25; super::super::BLOCK_VALUES]);
+            let block = a.next_block(Duration::from_millis(50)).expect("open again").expect("a block");
+            assert_eq!(block.samples.len(), super::super::BLOCK_VALUES);
+            // And a second stop is handled the same way.
+            a.shared.fail(stopped(-3805));
+            assert!(matches!(a.next_block(Duration::from_millis(10)), Ok(None)));
+            a.stop();
+            assert_eq!(a.next_block(Duration::from_millis(5)).unwrap_err().kind, ErrorKind::Closed);
+        }
+
+        /// Review of 22/11/2026, J1: the source opens the stream again only for a failure that may pass. A grant taken
+        /// back ends it with that error, and a stop on purpose ends it as before.
+        #[test]
+        fn a_grant_taken_back_while_opening_again_ends_the_source() {
+            fn denied(_: &Arc<Shared>) -> Result<Option<Running>> {
+                Err(failure(ErrorKind::PermissionDenied(OsGrant::ScreenRecording), "test", "declined"))
+            }
+            let mut a = audio();
+            a.open = denied;
+            lock(&a.shared.state).running = true;
+            a.shared.fail(stopped(-3821));
+            let begin = Instant::now();
+            let e = loop {
+                match a.next_block(Duration::from_millis(50)) {
+                    Ok(None) => assert!(begin.elapsed() < Duration::from_secs(2), "never opened again"),
+                    Ok(Some(_)) => panic!("no stream, no block"),
+                    Err(e) => break e,
+                }
+            };
+            assert_eq!(e.kind, ErrorKind::PermissionDenied(OsGrant::ScreenRecording));
+            assert_eq!(a.next_block(Duration::from_millis(5)).unwrap_err().kind, ErrorKind::Closed);
+            // Stopped on purpose (-3817): the error is handed out at once, nothing is opened.
+            let mut b = audio();
+            b.open = denied;
+            lock(&b.shared.state).running = true;
+            b.shared.fail(stopped(-3817));
+            assert_eq!(b.next_block(Duration::from_millis(5)).unwrap_err().kind, ErrorKind::Closed);
+        }
+
+        fn stopped(code: i64) -> PlatformError {
+            PlatformError {
+                kind: sck_error::stop_kind(code),
+                op: "SCStream.didStopWithError",
+                os_code: Some(code),
+                detail: "test".into(),
+            }
         }
 
         #[test]
@@ -834,6 +1014,22 @@ mod tests {
         assert_eq!(t0, 100_000 - 20_833);
         assert_eq!(t1 - t0, 10_000);
         assert!(ring.pop_block().is_none());
+    }
+
+    /// Review of 22/11/2026, J1: what the source does after its stream stopped, and how long it keeps trying.
+    #[test]
+    fn a_stopped_stream_is_opened_again_after_a_pause_and_given_up_after_the_last_try() {
+        assert_eq!(reopen_after(ErrorKind::AccessLost, 0), Some(REOPEN_FIRST));
+        assert_eq!(reopen_after(ErrorKind::AccessLost, 1), Some(REOPEN_EVERY));
+        assert_eq!(reopen_after(ErrorKind::Unavailable, 5), Some(REOPEN_EVERY));
+        assert_eq!(reopen_after(ErrorKind::Timeout, REOPEN_TRIES - 1), Some(REOPEN_EVERY));
+        assert_eq!(reopen_after(ErrorKind::Unavailable, REOPEN_TRIES), None);
+        for kind in [ErrorKind::Closed, ErrorKind::PermissionDenied(OsGrant::ScreenRecording), ErrorKind::Os] {
+            assert_eq!(reopen_after(kind, 0), None, "{kind:?}");
+        }
+        // About a minute of tries in all.
+        let total = REOPEN_FIRST + REOPEN_EVERY * (REOPEN_TRIES - 1);
+        assert!((Duration::from_secs(50)..=Duration::from_secs(70)).contains(&total), "{total:?}");
     }
 
     #[test]

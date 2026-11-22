@@ -29,8 +29,15 @@ const FALLBACK_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const HUP_GRACE: Duration = Duration::from_millis(400);
 /// How long `kill` waits for the reaped exit after `SIGKILL`.
 const KILL_WAIT: Duration = Duration::from_secs(2);
-/// Environment variables the shell inherits from this process, when set.
-const INHERITED: [&str; 6] = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "ZDOTDIR"];
+/// Environment variables the shell inherits from this process, when set: the search path, the locale, the temporary
+/// folder, zsh's start-up folder, the SSH agent's socket (`git push` over SSH) and CoreFoundation's text encoding of
+/// the user, which launchd gives a GUI app and Terminal passes on to its shells.
+const INHERITED: [&str; 8] =
+    ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "ZDOTDIR", "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING"];
+/// Where macOS keeps its locales (`pt_BR.UTF-8`, `UTF-8`, ...).
+const LOCALES: &str = "/usr/share/locale";
+/// The character type every Mac has, for a shell whose region has no locale of its own.
+const UTF8_CTYPE: &str = "UTF-8";
 
 fn error(kind: ErrorKind, op: &'static str, os_code: Option<i64>, detail: impl Into<String>) -> PlatformError {
     PlatformError { kind, op, os_code, detail: detail.into() }
@@ -177,7 +184,26 @@ fn cstring(s: &str) -> Result<CString> {
     CString::new(s).map_err(|_| error(ErrorKind::InvalidInput, "MacPtySpawner.spawn", None, "a string holds a NUL"))
 }
 
-fn env_block(account: &Account) -> Vec<String> {
+/// The UTF-8 locale of the user's region setting (`AppleLocale`: `pt_BR`, `en_US@rg=brzzzz`, `pt-BR`), when the system
+/// has it: `pt_BR.UTF-8`. Pure: `has_locale` says whether a locale of that name exists.
+pub fn region_locale(apple_locale: Option<&str>, has_locale: impl Fn(&str) -> bool) -> Option<String> {
+    let base = apple_locale?.trim().split('@').next()?.replace('-', "_");
+    if base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let name = format!("{base}.UTF-8");
+    has_locale(&name).then_some(name)
+}
+
+/// The shell's environment, from this process's variables (`get`). A shell with no locale at all (an app started from
+/// Finder or as a login item has no `LANG`) gets `LANG` from the user's region (`region`, asked only then), or a
+/// UTF-8 character type when the region has no locale: without one the shell shows names with accents as `??` and
+/// echoes a typed "ç" as `<00E7>` (review of 22/11/2026, J5).
+fn env_from(
+    account: &Account,
+    get: impl Fn(&str) -> Option<String>,
+    region: impl FnOnce() -> Option<String>,
+) -> Vec<String> {
     let mut env = vec![
         format!("HOME={}", account.home),
         format!("USER={}", account.name),
@@ -185,14 +211,42 @@ fn env_block(account: &Account) -> Vec<String> {
         format!("SHELL={}", account.shell),
         format!("TERM={TERM}"),
     ];
+    let set = |key: &str| get(key).filter(|v| !v.is_empty());
     for key in INHERITED {
-        match std::env::var(key) {
-            Ok(v) if !v.is_empty() => env.push(format!("{key}={v}")),
-            _ if key == "PATH" => env.push(format!("PATH={FALLBACK_PATH}")),
-            _ => {}
+        match set(key) {
+            Some(v) => env.push(format!("{key}={v}")),
+            None if key == "PATH" => env.push(format!("PATH={FALLBACK_PATH}")),
+            None => {}
+        }
+    }
+    if set("LANG").is_none() && set("LC_ALL").is_none() {
+        match region() {
+            Some(locale) => env.push(format!("LANG={locale}")),
+            None if set("LC_CTYPE").is_none() => env.push(format!("LC_CTYPE={UTF8_CTYPE}")),
+            None => {}
         }
     }
     env
+}
+
+/// The user's region setting, as System Settings keeps it (`defaults read -g AppleLocale`).
+fn apple_locale() -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn env_block(account: &Account) -> Vec<String> {
+    env_from(
+        account,
+        |key| std::env::var(key).ok(),
+        || region_locale(apple_locale().as_deref(), |name| std::path::Path::new(LOCALES).join(name).is_dir()),
+    )
 }
 
 fn winsize(cols: u16, rows: u16) -> libc::winsize {
@@ -550,6 +604,66 @@ mod tests {
 
     fn request(admin: bool) -> PtyRequest {
         PtyRequest { cols: 80, rows: 24, admin }
+    }
+
+    /// Review of 22/11/2026, J5: an app started from Finder or as a login item has no `LANG`, and the shell got no
+    /// locale (`ls` showed `Relat??rio.pdf`, a typed "ç" echoed as `<00E7>`) and no SSH agent (`git push` over SSH
+    /// could not reach it).
+    #[test]
+    fn the_shell_gets_the_ssh_agent_the_text_encoding_and_a_utf8_locale_without_lang() {
+        // SAFETY: nextest runs each test in a process of its own, and this one starts no thread before these calls.
+        unsafe {
+            std::env::remove_var("LANG");
+            std::env::remove_var("LC_ALL");
+            std::env::remove_var("LC_CTYPE");
+            std::env::set_var("SSH_AUTH_SOCK", "/private/tmp/com.apple.launchd.test/Listeners");
+            std::env::set_var("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0");
+        }
+        let account = Account { name: "test".into(), shell: "/bin/zsh".into(), home: "/Users/test".into() };
+        let env = env_block(&account);
+        assert!(env.contains(&"SSH_AUTH_SOCK=/private/tmp/com.apple.launchd.test/Listeners".to_string()), "{env:?}");
+        assert!(env.contains(&"__CF_USER_TEXT_ENCODING=0x1F5:0x0:0x0".to_string()), "{env:?}");
+        assert!(
+            env.iter().any(|e| (e.starts_with("LANG=") || e.starts_with("LC_CTYPE=")) && e.ends_with("UTF-8")),
+            "{env:?}"
+        );
+    }
+
+    /// Review of 22/11/2026, J5: the locale comes from the user's region only when the system has it, and a locale the
+    /// process already has is never replaced.
+    #[test]
+    fn the_region_gives_the_locale_only_when_the_system_has_it() {
+        let has = |name: &str| ["pt_BR.UTF-8", "en_US.UTF-8"].contains(&name);
+        assert_eq!(region_locale(Some("pt_BR"), has).as_deref(), Some("pt_BR.UTF-8"));
+        assert_eq!(region_locale(Some("pt-BR\n"), has).as_deref(), Some("pt_BR.UTF-8"));
+        assert_eq!(region_locale(Some("en_US@rg=brzzzz"), has).as_deref(), Some("en_US.UTF-8"));
+        assert_eq!(region_locale(Some("en_BR"), has), None, "no such locale on the system");
+        assert_eq!(region_locale(Some("../etc"), has), None);
+        assert_eq!(region_locale(Some(""), has), None);
+        assert_eq!(region_locale(None, has), None);
+
+        let account = Account { name: "a".into(), shell: "/bin/zsh".into(), home: "/Users/a".into() };
+        let with = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())
+        };
+        let region_asked = std::cell::Cell::new(false);
+        let region = || {
+            region_asked.set(true);
+            Some("pt_BR.UTF-8".to_string())
+        };
+        // A process with a locale keeps it, and the region is not even asked.
+        let env = env_from(&account, with(&[("LANG", "en_US.UTF-8")]), region);
+        assert!(env.contains(&"LANG=en_US.UTF-8".to_string()) && !region_asked.get(), "{env:?}");
+        let env = env_from(&account, with(&[("LC_ALL", "C")]), || Some("pt_BR.UTF-8".to_string()));
+        assert!(!env.iter().any(|e| e.starts_with("LANG=")), "{env:?}");
+        // None at all: the region's locale.
+        let env = env_from(&account, with(&[]), || Some("pt_BR.UTF-8".to_string()));
+        assert!(env.contains(&"LANG=pt_BR.UTF-8".to_string()), "{env:?}");
+        // No locale for the region: a UTF-8 character type, unless the process has one.
+        let env = env_from(&account, with(&[]), || None);
+        assert!(env.contains(&"LC_CTYPE=UTF-8".to_string()) && !env.iter().any(|e| e.starts_with("LANG=")), "{env:?}");
+        let env = env_from(&account, with(&[("LC_CTYPE", "pt_BR.UTF-8")]), || None);
+        assert_eq!(env.iter().filter(|e| e.starts_with("LC_CTYPE=")).count(), 1, "{env:?}");
     }
 
     #[test]
