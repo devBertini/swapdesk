@@ -1094,6 +1094,33 @@ fn a_panic_in_a_handler_ends_only_its_session_and_frees_the_host() {
     });
 }
 
+/// Review of 22/11/2026, B1: a handler's panic freed the host's table and nothing else. The interface never heard
+/// the end (the banner stayed, the machine was kept awake, no "session ended" in the activity) and the other
+/// handlers never heard it either (terminals stayed open). The end a panic leaves is now told like any other.
+#[test]
+fn a_panic_in_a_handler_still_tells_the_interface_and_the_other_handlers_that_the_session_ended() {
+    run_paused(async {
+        let ui = TestUi::accepting(PermissionSet::FILES);
+        let rec = Recorder::new(&[], &[]);
+        let handlers: [Arc<dyn ChannelHandler>; 2] = [Arc::new(Panics), rec.clone()];
+        let mem = Mem::new(ui, registry_of(&handlers));
+        let who = Who::new();
+        pin(&mem.trust, &who, PermissionSet::FILES);
+        let (mut s, task) = prompted(&mem, &who, PermissionSet::FILES).await;
+        let session_id = s.grant().session_id;
+        s.ctx().send(FileGet { transfer_id: 1, path: "x".into() }).await.unwrap();
+        assert!(task.await.unwrap_err().is_panic(), "the session task panicked");
+        let told = mem.ui.events().iter().any(|e| {
+            matches!(e, HostEvent::Ended { session_id: id, end, .. } if *id == session_id && end.kind == EndKind::Lost)
+        });
+        assert!(told, "the interface is told the session ended: {:?}", mem.ui.events());
+        assert_eq!(lock(&rec.ended).len(), 1, "the other handlers hear the end");
+        // (Over a real connection the guard also closes it; this in-memory link has none, and the viewer finds the
+        // end by its own liveness.)
+        wait_event(&mut s, Duration::from_secs(10), "the end", |e| matches!(e, ViewerEvent::Ended(_))).await;
+    });
+}
+
 #[test]
 fn handlers_hear_the_start_and_the_end_of_a_session() {
     run_paused(async {

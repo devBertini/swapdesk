@@ -377,7 +377,10 @@ pub(crate) fn app_code(code: ErrorCode) -> VarInt {
     VarInt::from_u32(u32::from(code.tag()))
 }
 
-/// Makes sure a session that stops without going through its normal end (a panic) is removed from the table.
+/// Makes sure a session that stops without going through its normal end (a panic in a handler) still ends as
+/// every session does: it leaves the table, the interface hears the end (the banner goes, the activity gets its
+/// line, the machine may sleep again), the handlers hear it (terminals and transfers stop) and the connection is
+/// closed, so the viewer is not left waiting for the link to be found dead.
 struct EndGuard {
     inner: Arc<HostInner>,
     ctx: SessionCtx,
@@ -385,11 +388,34 @@ struct EndGuard {
 
 impl Drop for EndGuard {
     fn drop(&mut self) {
-        if self.ctx.ended().is_none() {
-            let end = SessionEnd { kind: EndKind::Lost, code: ErrorCode::Internal };
-            self.ctx.inner.ended.send_replace(Some(end));
-            self.inner.session_ended(&self.ctx, &end);
-            self.ctx.abort_all();
+        if self.ctx.ended().is_some() {
+            return;
+        }
+        let end = SessionEnd { kind: EndKind::Lost, code: ErrorCode::Internal };
+        let why = "the session's task stopped without ending the session (a panic)";
+        *lock(&self.ctx.inner.end_why) = Some(why);
+        self.ctx.begin_close();
+        self.ctx.inner.ended.send_replace(Some(end));
+        let resumable = self.inner.session_ended(&self.ctx, &end);
+        self.ctx.abort_all();
+        let id = self.ctx.session_id();
+        // This runs while the panic unwinds: a second panic that left this function would end the whole process,
+        // so each call into code that is not this crate's is fenced.
+        if id != 0
+            && let Some(device) = self.ctx.device()
+        {
+            let ui = Arc::clone(&self.inner.ui);
+            let told = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ui.event(HostEvent::Ended { device, session_id: id, end, resumable, why: Some(why) });
+            }));
+            drop(told);
+        }
+        for h in self.inner.registry.handlers() {
+            let heard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.on_end(&self.ctx, &end)));
+            drop(heard);
+        }
+        if let Some(conn) = &self.ctx.inner.conn {
+            conn.close(app_code(ErrorCode::Internal), b"");
         }
     }
 }
