@@ -1020,3 +1020,89 @@ fn a_request_that_needs_an_answer_brings_back_a_window_closed_into_the_notificat
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+// ----- the keys of a captured session belong to the other computer (review of 22/11/2026, D1) -----
+
+/// A pipeline that takes every key of the viewer window, as the real one does while a session has the keyboard.
+struct KeysHost;
+
+impl crate::ViewerHost for KeysHost {
+    fn opened(&self, _surface: swapdesk_platform::NativeSurface, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn resized(&self, _area: swapdesk_platform::Rect, _scale: f32) {}
+    fn closed(&self) {}
+    fn focus(&self, _focused: bool) {}
+    fn mouse(&self, _msg: crate::MouseMsg) -> bool {
+        false
+    }
+    fn captures_keyboard(&self) -> bool {
+        true
+    }
+    fn key(&self, _msg: &crate::KeyMsg) -> bool {
+        true
+    }
+    fn pointer_shape(&self) -> Option<Arc<swapdesk_platform::CursorShape>> {
+        None
+    }
+}
+
+/// The viewer window of a running shell: the window of its thread that is neither the main one nor the banner.
+fn viewer_window(live: &Live) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, GWL_EXSTYLE, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOOLWINDOW,
+    };
+    use windows::core::BOOL;
+    struct Find {
+        main: HWND,
+        found: HWND,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, find: LPARAM) -> BOOL {
+        // SAFETY: `find` is the address of the `Find` the caller keeps for the whole enumeration.
+        unsafe {
+            let f = &mut *(find.0 as *mut Find);
+            let tool = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+            if hwnd != f.main && !tool && IsWindowVisible(hwnd).as_bool() {
+                f.found = hwnd;
+                return BOOL(0);
+            }
+        }
+        BOOL(1)
+    }
+    let mut find = Find { main: live.hwnd(), found: HWND::default() };
+    // SAFETY: enumerates the windows of the shell's thread; the callback writes into `find`.
+    unsafe {
+        let _ = EnumThreadWindows(live.thread_id, Some(each), LPARAM(std::ptr::from_mut(&mut find) as isize));
+    }
+    assert!(!find.found.0.is_null(), "a session has its viewer window");
+    find.found
+}
+
+/// With "Capturar atalhos do sistema" on, Alt+F4 is the other computer's: it closes the program there. It used to
+/// close this window too, which ends the session, and Alt+Space opened this window's own menu.
+#[test]
+fn alt_f4_in_a_captured_session_does_not_end_the_session() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F4, VK_SPACE};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_SYSKEYDOWN, WM_SYSKEYUP};
+    let backend = Arc::new(Recording::default());
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(KeysHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(Scenario::Visualizador.prepared_state(), backend, w, Vec::new(), Some(host))
+            .expect("shell");
+    });
+    let viewer = viewer_window(&live);
+    // lParam: repeat 1, the key's scan code, and bit 29 (Alt is down), as the system sends Alt+key.
+    let alt =
+        |scan: isize, up: bool| LPARAM(1 | (scan << 16) | (1 << 29) | if up { 0xC000_0000u32 as isize } else { 0 });
+    for (vk, scan) in [(VK_F4, 0x3E), (VK_SPACE, 0x39)] {
+        // SAFETY: sends to our window from another thread (it blocks until the window thread has answered).
+        unsafe {
+            SendMessageW(viewer, WM_SYSKEYDOWN, Some(WPARAM(usize::from(vk.0))), Some(alt(scan, false)));
+            SendMessageW(viewer, WM_SYSKEYUP, Some(WPARAM(usize::from(vk.0))), Some(alt(scan, true)));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(backend.disconnects(), 0, "the session goes on: the keys were the other computer's");
+    // SAFETY: a plain query of our window.
+    assert!(unsafe { IsWindow(Some(viewer)) }.as_bool(), "and its window is still there");
+}

@@ -197,6 +197,9 @@ impl Fonts {
         ellipsis: bool,
         bold_prefix: u32,
     ) -> Result<Label> {
+        // A window with no room left (the main window minimized under a session's viewer) asks for a width below
+        // zero, which DirectWrite refuses: such a text gets no width, and the paint goes on.
+        let max_w = if max_w.is_finite() { max_w.max(0.0) } else { 0.0 };
         let key: LayoutKey = (
             text.to_owned(),
             (st.size.to_bits(), st.weight, st.line.to_bits(), st.tracking.to_bits(), st.face_bits()),
@@ -740,6 +743,17 @@ mod tests {
         let fonts = Fonts::new().expect("fonts");
         let (a, d) = swapdesk_paint::face_metrics(INSTRUMENT_SANS).expect("metrics");
         assert_eq!((fonts.ascent, fonts.descent), (a, d));
+    }
+
+    /// A paint of a window with no room left asked for a text narrower than nothing, and DirectWrite's refusal
+    /// ended the paint in a panic (found 22/11/2026 by a live test of the viewer, the main window minimized).
+    #[test]
+    fn a_text_asked_for_in_no_room_at_all_is_laid_out_empty_instead_of_failing() {
+        let fonts = Fonts::new().expect("fonts");
+        for w in [-1.0, -300.0, f32::NAN, f32::NEG_INFINITY] {
+            let label = fonts.layout("Mac de Ana", tokens::text::BODY, 1.0, w, Align::Start, true, 0);
+            assert!(label.is_ok(), "width {w}: {:?}", label.err());
+        }
     }
 
     #[test]

@@ -710,9 +710,11 @@ impl Window {
         if !host.key(&key) {
             return None;
         }
-        // System keys still reach the default procedure (Alt+F4, Alt+Space act on this window: that is what leaving
-        // "Capturar atalhos do sistema" off means).
-        if sys { None } else { Some(LRESULT(0)) }
+        // With "Capturar atalhos do sistema" off, system keys still reach the default procedure: Alt+F4 and Alt+Space
+        // act on this window, which is what leaving it off means. With it on they are the other computer's alone:
+        // Alt+F4 closes the program there and must not close this window too (that ends the session), and
+        // Alt+Space must not open this window's own menu over the picture.
+        if sys && !self.shared.state.borrow().grab_on() { None } else { Some(LRESULT(0)) }
     }
 
     /// IME text: the shell has no IME UI and handles no `WM_IME_*` message (`handle` returns `None` for them, so they
