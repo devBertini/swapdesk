@@ -8,6 +8,14 @@
 /// the two equal): how the Mac's event tap knows an event came from the controller.
 pub const MAC_POSTED_MARK: i64 = 0x5377_6170_6465_736B;
 
+/// Whether a Mac event is the controller's input and not a device's at the Mac. The host's sink posts from the
+/// app's own process (`source_pid`, the event's `kCGEventSourceUnixProcessID`, is then `own_pid`) and marks what it
+/// posts (`user_data`, its `kCGEventSourceUserData`, is then [`MAC_POSTED_MARK`]); either says so. The banner's tap
+/// and the application object that keeps the controller out of Swapdesk's own windows both ask here.
+pub fn mac_posted_by_session(source_pid: i64, user_data: i64, own_pid: i64) -> bool {
+    source_pid == own_pid || user_data == MAC_POSTED_MARK
+}
+
 /// A mouse event as the banner cares about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEvent {
@@ -91,6 +99,17 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner, 22/11/2026: the controller's input never operates the Swapdesk of the computer it controls. On the Mac
+    /// an event is the controller's when the app's own process posted it or it carries the sink's mark.
+    #[test]
+    fn a_mac_event_is_the_sessions_by_its_process_or_by_its_mark() {
+        let own = 4242;
+        assert!(mac_posted_by_session(own, 0, own), "posted by this process");
+        assert!(mac_posted_by_session(77, MAC_POSTED_MARK, own), "marked by the sink");
+        assert!(!mac_posted_by_session(0, 0, own), "a device at the Mac: the system's pid 0 and no mark");
+        assert!(!mac_posted_by_session(77, 0x1234, own), "another program's event with its own data");
+    }
     use MouseEvent::{LeftDown, LeftUp, Move};
 
     const REAL: bool = false;

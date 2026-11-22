@@ -30,7 +30,7 @@ use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonM
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
-use swapdesk_paint::banner_guard::{Guard, MAC_POSTED_MARK, MouseEvent, Verdict};
+use swapdesk_paint::banner_guard::{Guard, MouseEvent, Verdict};
 
 /// What the banner is told of the real pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,8 +67,11 @@ struct Shared {
 /// Whether this process posted the event (the host's input sink): by the process the event came from, and by the
 /// mark the sink puts on what it posts. Either says so.
 fn posted_here(shared: &Shared, event: &CGEvent) -> bool {
-    CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUnixProcessID) == shared.pid
-        || CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData) == MAC_POSTED_MARK
+    swapdesk_paint::banner_guard::mac_posted_by_session(
+        CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUnixProcessID),
+        CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData),
+        shared.pid,
+    )
 }
 
 /// Callback of the tap, on the tap thread's run loop. It must answer fast (macOS disables a tap that does not): two

@@ -323,6 +323,8 @@ fn escape_and_focus_serve_the_connect_card(mtm: MainThreadMarker) -> Result<(), 
 /// Runs every window check; returns the first failure. Call on the main thread only.
 pub fn run_window_checks() -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("the window checks need the main thread")?;
+    // First: it makes the application object, whose class the first request for it decides.
+    crate::session_input::check(mtm)?;
     escape_and_focus_serve_the_connect_card(mtm)?;
     scenarios_build_their_windows(mtm)?;
     typing_survives_a_repaint_and_tab_moves_on(mtm)?;

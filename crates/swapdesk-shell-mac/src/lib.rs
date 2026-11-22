@@ -43,6 +43,8 @@ mod drop;
 #[cfg(target_os = "macos")]
 pub mod painter;
 #[cfg(target_os = "macos")]
+mod session_input;
+#[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
 mod system;

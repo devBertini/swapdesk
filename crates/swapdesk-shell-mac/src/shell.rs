@@ -491,7 +491,17 @@ pub fn run_with_host(
     hooks: ViewerHooks,
 ) {
     let mtm = MainThreadMarker::new().expect("the macOS shell runs on the main thread");
-    let app = NSApplication::sharedApplication(mtm);
+    // The application object is Swapdesk's own, which drops the controller's input before any window of Swapdesk
+    // gets it: asked for here, before anything else asks AppKit for the application.
+    let app = crate::session_input::shared(mtm);
+    if !crate::session_input::is_ours(&app)
+        && let Some(note) = &hooks.note
+    {
+        note(
+            "session input: the application object was made before the shell, so the controller's input is not \
+             kept out of Swapdesk's own windows",
+        );
+    }
     // The main window waits for `applicationDidFinishLaunching:`, which knows whether the system launched the app as a
     // login item (then the window stays hidden, D32).
     let shell = start_with(mtm, state, backend, waker, startup, hooks, false);
