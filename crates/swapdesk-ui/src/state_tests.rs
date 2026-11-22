@@ -3222,3 +3222,27 @@ fn a_declined_swap_card_goes_with_its_session() {
     s.apply(UiEvent::Session { session_id: 1, device_id: device, state: SessionState::Ended { reason: None } });
     assert!(s.swap().is_none(), "nothing of that session's swap is left for the next one");
 }
+
+/// Review of 22/11/2026, H7 and H9: with the service gone the viewer window and the banner of its sessions stayed
+/// on the screen with nothing that could close them, and the cards of its questions stayed open after it came back.
+#[test]
+fn a_lost_service_ends_its_sessions_and_closes_the_cards_of_its_questions() {
+    let mut s = viewer();
+    s.apply(UiEvent::Swap { session_id: 1, event: SwapEvent::Declined { why: SwapWhy::Declined } });
+    assert!(s.viewer_session().is_some() && s.swap().is_some());
+    s.take_followups();
+    s.apply(UiEvent::ServiceLost);
+    assert!(s.viewer_session().is_none(), "the session of the service that went away is over");
+    assert!(s.swap().is_none(), "and so is its swap card");
+    assert!(s.take_followups().is_empty(), "nothing is asked of a service that is not there");
+
+    let mut s = Scenario::PedidoConexao.prepared_state();
+    assert!(s.incoming_session_open(), "a request waits for an answer");
+    s.apply(UiEvent::ServiceLost);
+    assert!(!s.incoming_session_open(), "nobody is left to answer to");
+
+    let mut s = Scenario::Banner.prepared_state();
+    assert!(s.host_session().is_some());
+    s.apply(UiEvent::ServiceLost);
+    assert!(s.host_session().is_none(), "the banner goes with the session");
+}

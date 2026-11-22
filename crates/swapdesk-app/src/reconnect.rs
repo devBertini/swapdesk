@@ -164,6 +164,9 @@ impl Inner {
                 Phase::Up(link) if (link.is_down)() => {
                     // What the broken link still holds (its `ServiceDown` replies) goes out before the retries.
                     out.extend(Self::translate(tickets, link.backend.drain()));
+                    // Its sessions ended with it: the interface closes their windows now, not when (and if) the
+                    // service is back.
+                    out.push(UiEvent::ServiceLost);
                     *phase = Phase::Waiting { since: Instant::now(), queue: Vec::new(), broke: true };
                 }
                 Phase::Waiting { since, queue, broke } => {
@@ -400,7 +403,9 @@ mod tests {
         // While the service restarts, new commands wait; then they go to the new link.
         let waiting = b.send(Command::GetNetwork);
         std::thread::sleep(Duration::from_millis(60));
-        assert!(b.drain().is_empty(), "it waits, it is not refused");
+        // The interface is told at once that the service is gone (its sessions ended with it), and nothing else.
+        let got = b.drain();
+        assert!(matches!(got.as_slice(), [UiEvent::ServiceLost]), "it waits, it is not refused: {got:?}");
         service.up.store(true, Ordering::SeqCst);
         let got = wait_events(&b, 2);
         assert!(matches!(got[0], UiEvent::ServiceReconnected), "{got:?}");

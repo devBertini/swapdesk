@@ -1118,6 +1118,23 @@ impl UiState {
     /// The session in which this computer sees or controls `device_id`, if one is open (active, paused or
     /// reconnecting): its number. While it is, the device's page leads back to it instead of starting another:
     /// a second connect would meet this very session at the other computer and be refused as busy.
+    /// What the service that went away held is over: its sessions ended with it, and the questions it was waiting on
+    /// (a request to enter, a swap, a pairing under way) have nobody to answer to any more, so their cards go too.
+    fn service_gone(&mut self) {
+        let ended: Vec<(u64, String)> = self.sessions.iter().map(|s| (s.id, s.device_id.clone())).collect();
+        for (session_id, device_id) in ended {
+            self.apply(UiEvent::Session {
+                session_id,
+                device_id,
+                state: SessionState::Ended { reason: Some(ApiCode::ServiceDown) },
+            });
+        }
+        self.incoming = None;
+        self.swap = None;
+        self.pairing = None;
+        self.pair_confirming = false;
+    }
+
     pub fn open_session_with(&self, device_id: &str) -> Option<u64> {
         self.sessions.iter().find(|s| s.is_viewer() && s.device_id == device_id).map(|s| s.id)
     }
@@ -2201,16 +2218,12 @@ impl UiState {
                 Changed::VIEWER
             }
             UiEvent::RemoteVolumes { session_id, volumes } => self.there_volumes_event(session_id, volumes),
+            UiEvent::ServiceLost => {
+                self.service_gone();
+                Changed::ALL
+            }
             UiEvent::ServiceReconnected => {
-                // The sessions of the old service ended with it.
-                let ended: Vec<(u64, String)> = self.sessions.iter().map(|s| (s.id, s.device_id.clone())).collect();
-                for (session_id, device_id) in ended {
-                    self.apply(UiEvent::Session {
-                        session_id,
-                        device_id,
-                        state: SessionState::Ended { reason: Some(ApiCode::ServiceDown) },
-                    });
-                }
+                self.service_gone();
                 let again = self.startup_commands();
                 self.followups.extend(again);
                 Changed::ALL

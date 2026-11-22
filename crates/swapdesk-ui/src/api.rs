@@ -1340,6 +1340,10 @@ pub enum UiEvent {
     },
     ActivityAlert(AuditView),
     SettingsChanged(Settings),
+    /// The link to the service broke (the service ended, or an update is replacing it): the sessions it held ended
+    /// with it and the questions it was waiting on have nobody to answer to. Told at once, so that a viewer window
+    /// and a banner of a dead session never stay on the screen with no way to close them.
+    ServiceLost,
     /// The link to the service broke and is open again (a restarted service, WAITING.md 4 row 23): what the old
     /// service held is gone, and the interface asks for its data again.
     ServiceReconnected,
