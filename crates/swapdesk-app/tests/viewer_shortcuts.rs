@@ -179,3 +179,25 @@ fn nothing_is_sent_without_control() {
     assert!(!pipeline.key(&key(0x7A, 0x57, false, true)));
     assert!(pipeline.take_shortcuts().is_empty());
 }
+
+/// Review of 22/11/2026, D3: switching to "Assistir" (or losing the control) with keys held queued the release and
+/// closed the input thread's door in the same breath, so the release never left this PC and the other computer
+/// kept the keys down (Ctrl+Alt of the shortcut that made the switch, for one).
+#[test]
+fn switching_to_watch_only_lets_go_of_the_keys_the_other_computer_holds() {
+    let r = rig();
+    for m in [key(0xA2, 0x1D, false, true), key(0x41, 0x1E, false, true)] {
+        assert!(r.pipeline.key(&m));
+    }
+    wait_for("the held keys to reach the host", || {
+        r.recorder.inputs.lock().unwrap().iter().any(|e| matches!(e, InputEvent::Key { usage: 0x04, down: true, .. }))
+    });
+    r.pipeline.observe_command(&Command::SetViewOnly { session_id: SESSION, on: true });
+    wait_for("the host to let go of the held keys", || {
+        r.recorder.inputs.lock().unwrap().contains(&InputEvent::ReleaseAll)
+    });
+    // And nothing typed afterwards goes: watching only.
+    r.pipeline.key(&key(0x42, 0x30, false, true));
+    let events = sent(&r);
+    assert!(!events.iter().any(|e| matches!(e, InputEvent::Key { usage: 0x05, .. })), "{events:?}");
+}

@@ -291,12 +291,20 @@ impl ViewerPipeline {
             self.mailbox.push_cmd(Cmd::CursorMode);
         }
         if !allowed {
-            // Whatever the host still holds is let go while the session id is still the right one.
-            let mut released = ui.pointer.release_all();
-            released.extend(ui.window_keys.reset());
-            self.send_events(released);
+            // What this side counted as held is forgotten, and whatever the host still holds is let go: sent here
+            // and now to the session input was going to, not through the channel, which the input thread stops
+            // serving once the id is 0 (a release queued there never left this PC).
+            let _ = ui.pointer.release_all();
+            let _ = ui.window_keys.reset();
+            let was = self.input_session.swap(0, Ordering::SeqCst);
+            if was != 0
+                && let Some(out) = lock(&self.out).clone()
+            {
+                out.input(was, vec![InputEvent::ReleaseAll]);
+            }
+        } else {
+            self.input_session.store(id, Ordering::SeqCst);
         }
-        self.input_session.store(if allowed { id } else { 0 }, Ordering::SeqCst);
         self.update_grabber(ui);
     }
 
