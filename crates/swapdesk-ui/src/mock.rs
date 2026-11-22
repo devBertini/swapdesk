@@ -219,6 +219,8 @@ pub enum Scenario {
     /// "Início" (D35): the home screen.
     Inicio,
     InicioEscuro,
+    /// The home page with the notice of a Public network: with no device page open the home is where it shows.
+    InicioRedePublica,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -329,9 +331,10 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 68] = [
+    pub const ALL: [Scenario; 69] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
+        Scenario::InicioRedePublica,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -405,6 +408,7 @@ impl Scenario {
         match self {
             Scenario::Inicio => "inicio",
             Scenario::InicioEscuro => "inicio-escuro",
+            Scenario::InicioRedePublica => "inicio-rede-publica",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -483,6 +487,7 @@ impl Scenario {
         match self {
             Scenario::Inicio => "new: Início, the home screen (D35)",
             Scenario::InicioEscuro => "new: Início escuro (D35)",
+            Scenario::InicioRedePublica => "new: Início with the notice of a Public network (review of 22/11/2026, H6)",
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
             Scenario::Permissoes => "3. Permissões por direção",
@@ -713,6 +718,9 @@ impl Scenario {
         match self {
             Scenario::Inicio => vec![],
             Scenario::InicioEscuro => vec![Event(UiEvent::ThemeChanged { dark: true })],
+            Scenario::InicioRedePublica => {
+                vec![Event(UiEvent::NetworkChanged(network(vec![Notice::PublicNetwork], NetCategoryView::Public)))]
+            }
             Scenario::Dispositivos => vec![mac()],
             Scenario::DispositivosEscuro => vec![mac(), Event(UiEvent::ThemeChanged { dark: true })],
             Scenario::Permissoes => vec![mac(), Tab(DeviceTab::Permissions)],
@@ -1716,6 +1724,7 @@ mod tests {
         let expect: &[(Scenario, Screen, &[WindowKind])] = &[
             (Scenario::Inicio, Screen::Home, &[Main]),
             (Scenario::InicioEscuro, Screen::Home, &[Main]),
+            (Scenario::InicioRedePublica, Screen::Home, &[Main]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),
