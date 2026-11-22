@@ -780,6 +780,20 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         (Arc::clone(&live_sessions), Arc::clone(&ui_sessions)),
         Arc::clone(&trace),
     );
+    // The update schedule (UPDATES.md 2.2): the first check minutes after the start, then every day. On a thread of
+    // its own, looked at every minute: a check reads the network (up to minutes on a link that does not answer),
+    // and on the loop below it held back everything the loop does meanwhile (a console change, a helper to start
+    // again, Ctrl+Alt+Del, the stop request).
+    if let Some(u) = &updater {
+        let ticking = Arc::downgrade(u);
+        let _ = std::thread::Builder::new().name("swapdesk-update-tick".into()).spawn(move || {
+            while let Some(u) = ticking.upgrade() {
+                u.tick();
+                drop(u);
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        });
+    }
     let factory: AccountFactory = {
         let (root, trace, interfaces, clock, term_env) =
             (Arc::clone(&store), Arc::clone(&trace), Arc::clone(&interfaces), clock.clone(), term_env.clone());
@@ -1080,10 +1094,6 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             }
         }
         supervisor.tick();
-        // The update schedule (UPDATES.md 2.2): the first check minutes after the start, then every day.
-        if let Some(u) = &updater {
-            u.tick();
-        }
         let now = Instant::now();
         if now >= next_net {
             next_net = now + reconcile;
