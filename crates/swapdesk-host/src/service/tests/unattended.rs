@@ -191,3 +191,48 @@ fn a_pause_lets_go_of_the_keys_the_viewer_was_holding() {
     drop(prompted);
     t.rig.finish();
 }
+
+/// The owner's frozen picture of 15/11/2026 began two seconds after an elevation was confirmed (the host's activity
+/// log: `ElevateSession` at 17:19:24, the first `BUSY` of the redial at 17:19:26). Whatever the elevation changes on
+/// the host, the picture must go on: frames keep coming, and a keyframe asked for after it is answered.
+///
+/// This was written to follow that lead and was green at once: the host does not start its video again at an
+/// elevation (the helpers get no second `StartVideo`) and goes on sending. So the elevation is not what froze the
+/// picture. On a still screen the same holds by `helper::refine_tests`'
+/// `a_keyframe_asked_for_on_a_still_screen_is_answered_from_the_last_picture`. What the log's pattern does fit is a
+/// viewer that took its link for lost while the host still held the session as live (the redial then got `BUSY`
+/// until the host's own end): see D72 and the Mac's network read (I1), both fixed in the same review.
+#[test]
+fn after_an_elevation_the_viewer_still_gets_the_picture() {
+    let t = Unattended::new();
+    let (handle, mut seen) = t.enter();
+    let (first, _) = seen.video();
+    let starts_before = (
+        t.rig.system.count(|m| matches!(m, Ipc::StartVideo { .. })),
+        t.rig.user.count(|m| matches!(m, Ipc::StartVideo { .. })),
+    );
+    t.elevate(&handle);
+    seen.skip_pending();
+    let mut last = first.frame_id;
+    for _ in 0..10 {
+        let (h, _) = seen.video();
+        last = h.frame_id;
+    }
+    assert!(last != first.frame_id, "new pictures after the elevation");
+    let starts_after = (
+        t.rig.system.count(|m| matches!(m, Ipc::StartVideo { .. })),
+        t.rig.user.count(|m| matches!(m, Ipc::StartVideo { .. })),
+    );
+    assert_eq!(starts_after, starts_before, "the elevation does not start the video again");
+    // A viewer that asks for a keyframe after the elevation gets one.
+    handle
+        .request_keyframe(swapdesk_proto::KeyframeRequest { display: first.display_id, last_good_frame: last })
+        .expect("the request goes");
+    let key = seen.next("a keyframe after the elevation", |o| match o {
+        ViewerOut::Message(Ipc::ViewerVideo { header, .. }) if header.keyframe => Some(*header),
+        _ => None,
+    });
+    assert!(key.keyframe);
+    drop(handle);
+    t.rig.finish();
+}
