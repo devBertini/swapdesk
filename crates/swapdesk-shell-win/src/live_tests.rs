@@ -980,3 +980,43 @@ fn the_tray_menu_ends_the_session_this_computer_is_controlled_in() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(backend.disconnects(), 1, "the session is ended from the tray");
 }
+
+/// Review of 22/11/2026, H1: closed into the notification area the main window is hidden, and a request that needs
+/// an answer (another computer asks to control this one) was drawn in that hidden window: its 20 s ran out and it
+/// declined itself, with the person at the PC never knowing. The window now comes back for it.
+#[test]
+fn a_request_that_needs_an_answer_brings_back_a_window_closed_into_the_notification_area() {
+    use swapdesk_ui::UiWaker;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let backend = Arc::new(Scripted::default());
+    let b = Arc::clone(&backend);
+    let live = Live::start_with(move |w| {
+        let host: Arc<dyn crate::ViewerHost> = Arc::new(NoHost);
+        let backend: Arc<dyn UiBackend> = b;
+        crate::run_with_host(swapdesk_ui::UiState::default(), backend, w, Vec::new(), Some(host)).expect("shell");
+    });
+    let hwnd = live.hwnd();
+    // SAFETY: our window.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    // SAFETY: a plain query of our window.
+    assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "the close hides it into the notification area");
+
+    let device = Scenario::Dispositivos.prepared_state().devices()[0].clone();
+    backend.push(swapdesk_ui::UiEvent::IncomingRequest(swapdesk_ui::IncomingRequest {
+        request_id: 7,
+        device,
+        kind: swapdesk_ui::RequestKind::Session { intent: swapdesk_ui::Intent::Control },
+        preset: swapdesk_ui::Permissions::default(),
+        timeout_s: 20,
+    }));
+    live.waker.wake();
+    let started = Instant::now();
+    // SAFETY: a plain query of our window.
+    while !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        assert!(started.elapsed() < Duration::from_secs(5), "the request did not bring the window back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

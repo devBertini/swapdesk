@@ -707,7 +707,11 @@ impl Shared {
         }
         // SAFETY: our window.
         unsafe {
-            if IsIconic(h).as_bool() {
+            // Closed into the notification area, the window is hidden, not minimized: it is shown again, or the
+            // question would be drawn where nobody sees it and decline itself when its seconds run out.
+            if !IsWindowVisible(h).as_bool() {
+                let _ = ShowWindow(h, SW_SHOWNORMAL);
+            } else if IsIconic(h).as_bool() {
                 let _ = ShowWindow(h, SW_RESTORE);
             }
             if GetForegroundWindow() != h {
