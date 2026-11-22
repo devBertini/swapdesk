@@ -72,6 +72,9 @@ pub(crate) struct Control {
     pub bye: Option<ErrorCode>,
     /// A protocol violation found outside the control stream (a bad stream).
     pub violation: Option<ErrorCode>,
+    /// The device of this session opened a new connection to this host: this session's connection is stale and ends
+    /// as lost (so its token can still be resumed), without waiting for the transport to notice.
+    pub stale: bool,
 }
 
 /// How long a stream open may wait for the peer to allow another stream.
@@ -102,6 +105,8 @@ pub(crate) struct CtxInner {
     pub caps: Mutex<CapTracker>,
     pub active: watch::Sender<bool>,
     pub ended: watch::Sender<Option<SessionEnd>>,
+    /// What ended a lost session (see `actor::Finish::why`), set with `ended`.
+    pub end_why: Mutex<Option<&'static str>>,
     pub ev: mpsc::Sender<Ev>,
     pub clock: Arc<dyn Clock>,
     pub rtt_us: AtomicU64,
@@ -168,6 +173,7 @@ impl SessionCtx {
                 caps: Mutex::new(CapTracker::default()),
                 active,
                 ended,
+                end_why: Mutex::new(None),
                 ev: p.ev,
                 clock: p.clock,
                 rtt_us: AtomicU64::new(0),
@@ -492,6 +498,19 @@ impl SessionCtx {
     /// The end, if the session already ended.
     pub fn ended(&self) -> Option<SessionEnd> {
         *self.inner.ended.borrow()
+    }
+
+    /// What ended the session when it ended as lost: a fixed text for the log (the transport's reason, a silent
+    /// peer, a queue that stood still), `None` for any other end.
+    pub fn end_why(&self) -> Option<&'static str> {
+        *lock(&self.inner.end_why)
+    }
+
+    /// The device of this session opened a new connection: this session's own connection is stale. It ends as
+    /// lost, at once.
+    pub(crate) fn end_stale(&self) {
+        lock(&self.inner.control).stale = true;
+        self.inner.wake.notify_one();
     }
 
     /// Host only (D13): asks the host's user to allow `feature` for this session. Tells the viewer

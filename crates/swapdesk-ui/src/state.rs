@@ -583,6 +583,9 @@ pub enum Effect {
     RevealLocal,
     /// Slice 5: start the system's drag of [`UiState::take_system_drag`] (the pointer left the window mid-drag).
     SystemDrag,
+    /// Bring the session's window to the front, out of the taskbar or the Dock if it was minimized ("Voltar à
+    /// sessão" on the page of the device the session is with).
+    ShowViewer,
 }
 
 /// What to restore when an optimistic change is refused.
@@ -1110,6 +1113,13 @@ impl UiState {
     /// The session shown in the viewer window, if any.
     pub fn viewer_session(&self) -> Option<&SessionView> {
         self.sessions.iter().find(|s| s.is_viewer())
+    }
+
+    /// The session in which this computer sees or controls `device_id`, if one is open (active, paused or
+    /// reconnecting): its number. While it is, the device's page leads back to it instead of starting another:
+    /// a second connect would meet this very session at the other computer and be refused as busy.
+    pub fn open_session_with(&self, device_id: &str) -> Option<u64> {
+        self.sessions.iter().find(|s| s.is_viewer() && s.device_id == device_id).map(|s| s.id)
     }
 
     /// The card over the paused picture of the viewer's session (ACCOUNTS.md 5.1 and 9, D55): its text and whether it

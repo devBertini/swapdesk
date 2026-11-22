@@ -736,6 +736,9 @@ strings! {
     TransfersFailedCount => "{0} com falha", "{0} failed";
     TransfersCancelAll => "Cancelar tudo", "Cancel all";
     TransferWaiting => "Na fila", "Waiting";
+    // A session with the device is open already (owner's report of 22/11/2026: pressing "Controlar" then met the
+    // session itself and read "já está em outra sessão"): the device's page leads back to it.
+    SessionBack => "Voltar à sessão", "Back to the session";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

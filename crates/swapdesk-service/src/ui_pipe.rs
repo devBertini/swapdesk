@@ -446,7 +446,7 @@ impl UiPipes {
         };
         lock(&self.open).retain(|c| c.id != id);
         if let Err(e) = end {
-            self.log(Level::Debug, format_args!("{what} connection ended: {e}"));
+            self.log(Level::Info, format_args!("{what} connection ended: {e}"));
         }
     }
 

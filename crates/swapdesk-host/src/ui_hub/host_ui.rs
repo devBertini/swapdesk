@@ -407,7 +407,7 @@ impl HostUi for HubHostUi {
                     format_args!("a request from {} was refused: {code:?}", device_id_hex(&device)),
                 );
             }
-            HostEvent::Ended { device, session_id, end, resumable } => {
+            HostEvent::Ended { device, session_id, end, resumable, .. } => {
                 // A lost link the core keeps resumable stays the host's session: its time and grants wait for the
                 // resume, and the end the UI shows comes when the window does.
                 let since = {

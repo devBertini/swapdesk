@@ -479,10 +479,36 @@ fn capture_main<S: ScreenSource, E: VideoEncoder>(
     ctl: &VideoCtl,
     ids: &AtomicU32,
 ) {
-    if let Err(e) = capture_run(env, p, ctl, ids) {
-        platform_fault(&env.outbox, &format!("video {}", p.display), &e);
+    // A capture or an encoder that fails for good (a device the system reset, a driver replaced, a session the
+    // system took back) must not leave the viewer with a frozen picture for the rest of the session: the fault is
+    // reported and the whole capture starts again, source and encoder, after a pause that grows to a few seconds.
+    // It ends only when the video is stopped, the helper ends, or the display is gone (`Ok`: the service starts the
+    // video on a display that exists).
+    let mut failures = 0u32;
+    loop {
+        let Err(e) = capture_run(env, p, ctl, ids) else { return };
+        failures += 1;
+        // Every failure of the first few, then one in thirty: a capture that cannot start is not a log flood.
+        if failures <= 3 || failures.is_multiple_of(30) {
+            platform_fault(&env.outbox, &format!("video {} (start {failures})", p.display), &e);
+        }
+        let pause = CAPTURE_RESTART_PAUSE.saturating_mul(failures.min(CAPTURE_RESTART_STEPS));
+        // `sleep_unless` is false when the stop came during the pause.
+        if !retry::sleep_unless(pause, || ctl.stop.load(Ordering::Acquire) || env.outbox.is_closed()) {
+            return;
+        }
     }
 }
+
+/// The pause before a failed capture starts again: this much after the first failure, growing by as much with each
+/// one up to [`CAPTURE_RESTART_STEPS`] times it.
+const CAPTURE_RESTART_PAUSE: Duration = Duration::from_millis(500);
+const CAPTURE_RESTART_STEPS: u32 = 6;
+/// How many times in a row a failing encoder is built again before the capture itself starts over.
+const ENCODER_REBUILDS: u32 = 3;
+/// The least time between two encodes of the last picture while the screen stands still (a keyframe the viewer keeps
+/// asking for, a window that keeps changing size): four a second at most.
+const STILL_AGAIN_EVERY_US: u64 = 250_000;
 
 /// How often a helper that started with no display lists them again.
 const DISPLAY_WAIT: Duration = Duration::from_secs(1);
@@ -556,6 +582,7 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
     let mut faulted = false;
     let mut still = Still::default();
     let mut cursor = CursorState::default();
+    let mut encode_failures = 0u32;
 
     // F-VIEW-06: the size encoded at follows the viewer's window, at most once per `RESIZE_DEBOUNCE_US`.
     let mut sizing = SizeDebounce::default();
@@ -591,11 +618,44 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     dims = (frame.width, frame.height);
                 }
                 pump_cursor(env, source, p.display, dims, &mut cursor);
-                let Some(frame) = frame else {
-                    if let Some(enc) = encoder.as_mut() {
-                        refine_still(env, p, ids, enc, &mut still, &mut discontinuity, &mut force);
+                // A keyframe the viewer asked for is owed from now on, whether the screen changes or not.
+                if ctl.force_key.swap(false, Ordering::AcqRel) {
+                    force = true;
+                }
+                let frame = match frame {
+                    Some(frame) => frame,
+                    None => {
+                        // The screen stands still. Three things cannot wait for it to change, and each is served
+                        // from the last picture, encoded again: a keyframe that is owed (the viewer's picture must
+                        // start over: a lost frame, a decoder made again, a window that attached late; or this
+                        // side dropped a frame), an encoder that was lost and must be built again, and a new size
+                        // of the viewer's window. Without this the viewer keeps a frozen or black picture until
+                        // something moves on this screen, and moving the pointer is not something.
+                        let now_us = env.clock.now().0;
+                        let resized = native != (0, 0) && {
+                            let target = sizing.apply(wanted_size(native, *lock(&ctl.scale)), now_us);
+                            let target = if refused == Some(target) { native } else { target };
+                            config.is_some_and(|c| (c.width, c.height) != target)
+                        };
+                        let again = (force || resized || encoder.is_none())
+                            && still.frame.is_some()
+                            && now_us.saturating_sub(still.again_at) >= STILL_AGAIN_EVERY_US;
+                        let last = if again { still.frame.take() } else { None };
+                        match last {
+                            Some(last) => {
+                                still.again_at = now_us;
+                                last
+                            }
+                            None => {
+                                // Nothing is owed (or its turn has not come): the still-screen refinement, unless
+                                // a keyframe is on its way anyway.
+                                if !force && let Some(enc) = encoder.as_mut() {
+                                    refine_still(env, p, ids, enc, &mut still, &mut discontinuity, &mut force);
+                                }
+                                continue;
+                            }
+                        }
                     }
-                    continue;
                 };
                 // A display that changed size is followed at once; a new window size waits out the debounce. The
                 // encoder scales the captured frame to the configured size (the codec crates' contract).
@@ -636,7 +696,37 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                 let Some(enc) = encoder.as_mut() else { continue };
                 let wanted = force || ctl.force_key.swap(false, Ordering::AcqRel);
                 let started = env.clock.now();
-                let out = enc.encode(&frame, wanted)?;
+                let out = match enc.encode(&frame, wanted) {
+                    Ok(out) => {
+                        encode_failures = 0;
+                        out
+                    }
+                    Err(e) => {
+                        // The encoder is lost (its device was reset, the system took its session back, it stopped
+                        // answering): it is dropped and built again from this picture, on the device that holds
+                        // it, and the stream restarts with a keyframe. One that keeps failing ends this run of
+                        // the capture, which then starts over from the source.
+                        encode_failures += 1;
+                        if encode_failures > ENCODER_REBUILDS {
+                            return Err(e);
+                        }
+                        note(
+                            &env.outbox,
+                            format!(
+                                "video {}: the encoder failed ({e}); built again ({encode_failures} of {ENCODER_REBUILDS})",
+                                p.display
+                            ),
+                        );
+                        encoder = None;
+                        config = None;
+                        discontinuity = true;
+                        force = true;
+                        still.frame = Some(frame);
+                        still.since = env.clock.now().0;
+                        still.refined = false;
+                        continue;
+                    }
+                };
                 let spent = env.clock.now().0.saturating_sub(started.0);
                 let encode_us = u32::try_from(spent).unwrap_or(u32::MAX);
                 // Best effort force: ask again until a keyframe comes out.
@@ -765,6 +855,8 @@ struct Still {
     since: u64,
     /// The refinement frame of this picture was sent (or refused).
     refined: bool,
+    /// Clock reading when the last picture was last encoded again while the screen stood still.
+    again_at: u64,
     /// A refusal was reported (once per session).
     refuse_logged: bool,
 }

@@ -667,7 +667,17 @@ fn devices_main(f: &mut Frame) {
         (title.h, status)
     };
     if card.is_none() {
-        if d.paired && swapdesk_ui::UiState::can_wake(&d) {
+        if d.paired && f.st.open_session_with(&d.id).is_some() {
+            // A session with it is open: back to it (the positive action, right) or end it (left).
+            let back = f.t(MsgKey::SessionBack);
+            let end = f.t(MsgKey::Disconnect);
+            let bw = f.button_width(&back, Kind::Primary);
+            let ew = f.button_width(&end, Kind::Default);
+            let brect = Rect::new(a.x + a.cw - bw, y, bw, 40.0);
+            let erect = Rect::new(brect.x - 16.0 - ew, y, ew, 40.0);
+            f.button(ControlId::SessionEnd, erect, Kind::Default, &end, false);
+            f.button(ControlId::SessionShow, brect, Kind::Primary, &back, false);
+        } else if d.paired && swapdesk_ui::UiState::can_wake(&d) {
             // Asleep: "Acordar" replaces the connect buttons (F-WAKE-01).
             let label = f.t(MsgKey::Wake);
             let bw = f.button_width(&label, Kind::Primary);

@@ -458,6 +458,11 @@ impl Shared {
                     crate::system::reveal_local_item(&path);
                 }
             }
+            Some(Effect::ShowViewer) => {
+                if let Some(viewer) = self.window(WindowKind::Viewer) {
+                    viewer.bring_forward();
+                }
+            }
             // The Mac's notices (Login Items, macOS permissions): no Windows service raises them, so nothing is done here.
             Some(Effect::OpenLoginItems) => {}
             Some(Effect::RequestOsPermissions) => {
@@ -805,7 +810,8 @@ pub(crate) fn handling(effect: &Effect) -> Handling {
         | Effect::OpenLoginItems
         | Effect::RequestOsPermissions
         | Effect::OpenLocal
-        | Effect::RevealLocal => Handling::Immediate,
+        | Effect::RevealLocal
+        | Effect::ShowViewer => Handling::Immediate,
     }
 }
 
@@ -830,6 +836,7 @@ mod effect_tests {
             Effect::ContextMenu,
             Effect::RevealLocal,
             Effect::SystemDrag,
+            Effect::ShowViewer,
         ];
         for e in &all {
             match e {
@@ -845,7 +852,8 @@ mod effect_tests {
                 | Effect::OpenLocal
                 | Effect::ContextMenu
                 | Effect::RevealLocal
-                | Effect::SystemDrag => {}
+                | Effect::SystemDrag
+                | Effect::ShowViewer => {}
             }
         }
         all
@@ -854,7 +862,7 @@ mod effect_tests {
     #[test]
     fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
         let all = every_effect();
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), 14);
         for e in &all {
             // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
             let _ = handling(e);

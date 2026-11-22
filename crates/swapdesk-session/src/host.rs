@@ -29,6 +29,8 @@ use crate::util::{lock, random_session_id};
 /// How long after a lost link a hosted session may be resumed (`HostConfig::resume_window`'s default): what the
 /// host's interface shows as reconnecting before it calls the session ended.
 pub const RESUME_WINDOW: Duration = Duration::from_secs(60);
+/// How long a device's new connection waits for its own old session to leave this host.
+const REPLACE_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a session waits for the banner's window (`HostConfig::banner_wait`'s default).
 pub const BANNER_WAIT: Duration = Duration::from_secs(15);
@@ -171,6 +173,8 @@ pub enum HostEvent {
         session_id: u64,
         end: SessionEnd,
         resumable: bool,
+        /// What ended a lost session, for the log (`SessionCtx::end_why`).
+        why: Option<&'static str>,
     },
     GrantsChanged {
         device: DeviceId,
@@ -733,6 +737,11 @@ impl HostInner {
                         };
                     }
                     Err(ResumeError::NotLost) => {
+                        // The device holds this session's token and dials again: its end of the old connection
+                        // is gone (it redials only after a loss). This host may not have noticed yet (the idle
+                        // timeout runs for seconds), so the old connection is ended here, as lost, and the
+                        // resume goes on as soon as it is.
+                        self.end_stale(r.session_id, &device);
                         if tokio::time::timeout_at(deadline, notified).await.is_err() {
                             break;
                         }
@@ -745,6 +754,14 @@ impl HostInner {
                     Err(_) => break,
                 }
             }
+        }
+
+        // The same device asks again while this host still holds a session with it, and it may enter without a
+        // prompt: the session it had is over on its side (a viewer keeps one session per host), so this host lets
+        // it go and takes the new one, instead of answering that it is busy with that very device. A device that
+        // needs a prompt keeps getting `BUSY` until its old session is gone: nobody is asked to accept twice.
+        if policy::unattended_grant(stored_grants, hello.requested, hello.proto_minor).is_some() {
+            self.replace_own_sessions(&device).await;
         }
 
         // Another session is live, here or in another account's core: refused before anything is consumed or asked.
@@ -814,6 +831,39 @@ impl HostInner {
             Err(_) => {
                 guard.how = PromptEnd::TimedOut;
                 Decision::Refuse(ErrorCode::Timeout)
+            }
+        }
+    }
+
+    /// The live session `session_id` of `device` has a stale connection: it ends as lost.
+    fn end_stale(&self, session_id: u64, device: &DeviceId) {
+        let ctx = lock(&self.table).live.get(&session_id).filter(|c| c.device().as_ref() == Some(device)).cloned();
+        if let Some(ctx) = ctx {
+            ctx.end_stale();
+        }
+    }
+
+    /// Ends the live sessions of `device` (it opened a new connection) and waits, up to [`REPLACE_WAIT`], for them
+    /// to leave the table.
+    async fn replace_own_sessions(&self, device: &DeviceId) {
+        let own = |t: &Table| -> Vec<SessionCtx> {
+            t.live.values().filter(|c| c.device().as_ref() == Some(device)).cloned().collect()
+        };
+        let deadline = tokio::time::Instant::now() + REPLACE_WAIT;
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let live = own(&lock(&self.table));
+            if live.is_empty() {
+                return;
+            }
+            for ctx in live {
+                // A normal end: the old session's token dies with it, so its own redial cannot fight the new one.
+                ctx.bye(ErrorCode::NoError);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return;
             }
         }
     }

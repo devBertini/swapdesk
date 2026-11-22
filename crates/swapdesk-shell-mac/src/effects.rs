@@ -36,6 +36,8 @@ pub enum Handling {
     RevealInFinder,
     /// The system drag of `UiState::take_system_drag` starts on the canvas (slice 5; a promise per file).
     SystemDrag,
+    /// The session's window comes to the front, out of the Dock when it was minimized.
+    ShowViewer,
 }
 
 impl Handling {
@@ -53,7 +55,8 @@ impl Handling {
             | Handling::RequestOsPermissions
             | Handling::OpenLocalFile
             | Handling::RevealInFinder
-            | Handling::SystemDrag => false,
+            | Handling::SystemDrag
+            | Handling::ShowViewer => false,
         }
     }
 }
@@ -74,6 +77,7 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::ContextMenu => Handling::ContextMenu,
         Effect::RevealLocal => Handling::RevealInFinder,
         Effect::SystemDrag => Handling::SystemDrag,
+        Effect::ShowViewer => Handling::ShowViewer,
     }
 }
 

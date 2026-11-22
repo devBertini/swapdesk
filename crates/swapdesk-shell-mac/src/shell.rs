@@ -870,6 +870,16 @@ impl Shell {
                     crate::drag_out::begin(&canvas, out, self.mtm);
                 }
             }
+            Handling::ShowViewer => {
+                if let Some(v) = self.viewer.borrow().as_ref() {
+                    if v.window.isMiniaturized() {
+                        v.window.deminiaturize(None);
+                    }
+                    v.window.makeKeyAndOrderFront(None);
+                    #[allow(deprecated)]
+                    NSApplication::sharedApplication(self.mtm).activateIgnoringOtherApps(true);
+                }
+            }
             Handling::SaveLogPanel => self.save_log(),
         }
     }

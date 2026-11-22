@@ -3160,3 +3160,37 @@ fn the_timer_runs_for_everything_the_tick_moves() {
     }));
     assert!(s.needs_tick(), "a download under way keeps the timer");
 }
+
+/// The owner's report of 22/11/2026: the picture of a session froze, "Controlar" on the device's page was pressed
+/// again, and the other computer answered that it was already in a session: this very one, still open.
+#[test]
+fn the_page_of_a_device_in_session_leads_back_to_the_session_and_never_starts_another() {
+    let mut s = Scenario::Visualizador.prepared_state();
+    let device = s.viewer_session().expect("a session is open").device_id.clone();
+    let at = s.devices().iter().position(|d| d.id == device).expect("the device is listed");
+    s.activate(ControlId::Device(at as u16));
+    let ids = |s: &UiState| s.controls(WindowKind::Main).iter().map(|c| c.id).collect::<Vec<_>>();
+    let page = ids(&s);
+    assert!(page.contains(&ControlId::SessionShow) && page.contains(&ControlId::SessionEnd), "{page:?}");
+    assert!(!page.contains(&ControlId::Control) && !page.contains(&ControlId::ViewOnly), "no second connect");
+    // "Voltar à sessão" brings the session's window forward and sends nothing.
+    let a = s.activate(ControlId::SessionShow);
+    assert!(a.commands.is_empty() && matches!(a.effect, Some(Effect::ShowViewer)), "{:?}", a.effect);
+    // Asked all the same (a click that was already on its way): still no second connect.
+    let a = s.activate(ControlId::Control);
+    assert!(a.commands.is_empty(), "{:?}", a.commands);
+    assert!(matches!(a.effect, Some(Effect::ShowViewer)));
+    // The same while the session reconnects: it is still this computer's session with that device.
+    s.apply(UiEvent::Session {
+        session_id: 1,
+        device_id: device.clone(),
+        state: SessionState::Reconnecting { attempt: 2 },
+    });
+    assert!(ids(&s).contains(&ControlId::SessionShow));
+    // "Desconectar" ends that session, and then the page starts sessions again.
+    let a = s.activate(ControlId::SessionEnd);
+    assert_eq!(a.commands, vec![Command::Disconnect { session_id: 1 }]);
+    s.apply(UiEvent::Session { session_id: 1, device_id: device, state: SessionState::Ended { reason: None } });
+    let page = ids(&s);
+    assert!(page.contains(&ControlId::Control) && !page.contains(&ControlId::SessionShow), "{page:?}");
+}

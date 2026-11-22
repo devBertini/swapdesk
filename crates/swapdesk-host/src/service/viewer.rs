@@ -949,7 +949,19 @@ impl Drive {
             let redial = Arc::clone(&redial);
             async move { redial.dial(resume).await }
         };
+        let started = Instant::now();
         let result = race(reconnect(ReconnectPolicy::default(), token, dial, notify), self.stop.wait()).await;
+        // How the redial ended, once (each attempt is told at Debug by `Redial::dial`).
+        let how = match &result {
+            Either::Left(Ok(_)) => "resumed".to_string(),
+            Either::Left(Err(why)) => format!("gave up: {why:?}"),
+            Either::Right(()) => "stopped by this side".to_string(),
+        };
+        self.redial.trace.log(
+            Level::Info,
+            "service",
+            format_args!("viewer session {:#x}: {how} after {} ms", self.session_id, started.elapsed().as_millis()),
+        );
         match result {
             Either::Left(Ok(session)) => {
                 let ctx = session.ctx().clone();
@@ -1057,6 +1069,13 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         elevation: Arc::clone(&elevation),
         files: Arc::clone(&files),
     };
+    // The viewer's side of a session is traced like the host's: its start here, its end and any redial in the
+    // event task below. Without these lines a session that froze or dropped left nothing to read afterwards.
+    trace.log(
+        Level::Info,
+        "service",
+        format_args!("viewer session {session_id:#x} opened: grants {:#06x}", ctx.granted().bits()),
+    );
     drive.emit(active(&ctx, since_ms, &elevation), None).await;
 
     // Video: ordered, decodable frames to the UI. When the UI falls behind (its budget in frames or bytes is spent, or
@@ -1182,9 +1201,28 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
         rt.spawn(async move {
             let mut live = session_handle;
             loop {
-                let end = drive.events(&mut live).await;
-                let Some(end) = end else { break };
-                if should_reconnect(&end) && !drive.stop.is_set() {
+                let told = drive.events(&mut live).await;
+                // The session's events ended without its end being told (the event that carries it found the
+                // queue full, or the session's task died): the end is what the session itself recorded, and a
+                // session that recorded none was lost. Without this the interface kept showing a session that was
+                // gone, with a frozen picture, and nothing dialled again.
+                let end = told
+                    .or_else(|| live.ctx().ended())
+                    .unwrap_or(SessionEnd { kind: EndKind::Lost, code: ErrorCode::Internal });
+                let why = live.ctx().end_why().map(|w| format!(" ({w})")).unwrap_or_default();
+                let again = should_reconnect(&end) && !drive.stop.is_set();
+                drive.redial.trace.log(
+                    Level::Info,
+                    "service",
+                    format_args!(
+                        "viewer session {:#x} ended: {:?} {:?}{why}{}",
+                        drive.session_id,
+                        end.kind,
+                        end.code,
+                        if again { ", dialling again" } else { "" }
+                    ),
+                );
+                if again {
                     let token = live.grant().resume.clone();
                     drop(live);
                     match drive.resume(token).await {

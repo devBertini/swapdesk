@@ -467,7 +467,7 @@ impl HostRelay {
                     .send(Ipc::StartVideo { display, fps, kbps, quality: preset, backend: VideoBackend::Auto, codec })
                     .await;
                 self.shared.log(
-                    Level::Debug,
+                    Level::Info,
                     format_args!(
                         "session {:#x}: StartVideo display {display} fps {fps} codec {codec:?} sent: {started}",
                         self.ctx.session_id()
@@ -564,8 +564,10 @@ impl HostRelay {
         self.release_all().await;
         self.out.set(false, false);
         self.path.close();
+        // One line per session, kept at the installed service's level: what the picture's path did (counts only)
+        // is what tells a frozen picture from a dropped link afterwards.
         self.shared.log(
-            Level::Debug,
+            Level::Info,
             format_args!("session {:#x}: video path at its end: {:?}", self.ctx.session_id(), self.path.stats()),
         );
         if let Some(sender) = &self.sender {

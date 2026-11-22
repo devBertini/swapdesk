@@ -289,3 +289,204 @@ fn a_still_of_399_ms_sends_no_refinement_and_at_400_ms_exactly_one() {
     assert_eq!(counts.refines.load(Ordering::SeqCst), 1, "never again while the screen stays still");
     assert!(rx.try_iter().next().is_none());
 }
+
+// ----- a still screen must not hold back what the viewer needs (review of 22/11/2026, C1, C2, C7) -----
+
+fn params() -> StartParams {
+    StartParams {
+        display: 0,
+        fps: 60,
+        kbps: 5000,
+        preset: Preset::Auto,
+        backend: VideoBackend::Auto,
+        codec: swapdesk_platform::Codec::H264,
+    }
+}
+
+fn ctl() -> VideoCtl {
+    VideoCtl {
+        stop: AtomicBool::new(false),
+        force_key: AtomicBool::new(false),
+        rate: Mutex::new(None),
+        scale: Mutex::new((0, 0)),
+    }
+}
+
+/// Runs the capture loop over `schedule` on `env` while `during` acts on its controls; the video frames sent as
+/// (keyframe, width) and the notes and faults told.
+fn run_with<E: VideoEncoder + Send>(
+    env: &CaptureEnv<ScriptedScreen, E>,
+    rx: &crate::outbox::OutboxReader,
+    during: impl FnOnce(&VideoCtl),
+) -> (Vec<(bool, u16)>, Vec<String>) {
+    let (p, ctl, ids) = (params(), ctl(), AtomicU32::new(0));
+    std::thread::scope(|s| {
+        let h = s.spawn(|| {
+            let mut source = (env.screen)(DisplayId(0)).unwrap();
+            source.open(DisplayId(0), CaptureConfig { max_fps: 60 }).unwrap();
+            capture_loop(env, p, &ctl, &ids, &mut source)
+        });
+        during(&ctl);
+        ctl.stop.store(true, Ordering::Release);
+        h.join().unwrap().unwrap();
+    });
+    let (mut frames, mut told) = (Vec::new(), Vec::new());
+    for m in rx.try_iter() {
+        match m {
+            Message::VideoFrame { header, .. } => frames.push((header.keyframe, header.width)),
+            Message::HelperFault { what, .. } | Message::HelperNote { what } => told.push(what.0),
+            _ => {}
+        }
+    }
+    (frames, told)
+}
+
+/// C1: the viewer's picture must start over (a lost frame, a decoder made again, a window that attached late) while
+/// nothing moves on the host's screen. The request used to wait for the next change of the screen, so the viewer
+/// kept a frozen or black picture: what the owner met as "a conexão caiu".
+#[test]
+fn a_keyframe_asked_for_on_a_still_screen_is_answered_from_the_last_picture() {
+    let ms = Duration::from_millis;
+    let (outbox, rx) = Outbox::new(256);
+    let counts = Counts::default();
+    // One frame, then the screen stands still for the whole run.
+    let env = env_on(Arc::new(RealClock(Instant::now())), outbox, &counts, vec![ms(10)], true);
+    let (frames, _) = run_with(&env, &rx, |ctl| {
+        std::thread::sleep(ms(300));
+        ctl.force_key.store(true, Ordering::Release);
+        std::thread::sleep(ms(500));
+        // Asked again and again (a viewer that keeps failing): four a second at most, not one per look.
+        for _ in 0..40 {
+            ctl.force_key.store(true, Ordering::Release);
+            std::thread::sleep(ms(10));
+        }
+    });
+    assert!(frames.len() >= 2, "the request was answered without a change of the screen: {frames:?}");
+    assert!(frames.iter().all(|(key, _)| *key), "each answer is a keyframe: {frames:?}");
+    assert!(frames.len() <= 5, "and a flood of requests is not a flood of keyframes: {frames:?}");
+}
+
+/// An encoder that fails `fail` times, then works.
+struct FlakyEncoder {
+    fail: Arc<AtomicUsize>,
+}
+
+impl VideoEncoder for FlakyEncoder {
+    fn configure(&mut self, _config: &EncoderConfig) -> PResult<EncoderInfo> {
+        Ok(EncoderInfo {
+            name: "flaky".into(),
+            hardware: false,
+            profile: H264Profile::Main,
+            level: 40,
+            low_latency: true,
+        })
+    }
+    fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> PResult<Vec<EncodedFrame>> {
+        if self.fail.load(Ordering::SeqCst) > 0 {
+            self.fail.fetch_sub(1, Ordering::SeqCst);
+            return Err(PlatformError {
+                kind: ErrorKind::Os,
+                op: "encode",
+                os_code: None,
+                detail: "device removed".into(),
+            });
+        }
+        Ok(vec![out(frame, force_keyframe, 100)])
+    }
+    fn set_rate(&mut self, _kbps: u32, _fps: u16) -> PResult<()> {
+        Ok(())
+    }
+    fn refine(&mut self, _frame: &Frame) -> PResult<Vec<EncodedFrame>> {
+        Err(PlatformError { kind: ErrorKind::Unsupported, op: "refine", os_code: None, detail: "none".into() })
+    }
+    fn flush(&mut self) -> PResult<Vec<EncodedFrame>> {
+        Ok(Vec::new())
+    }
+}
+
+fn flaky_env(
+    outbox: Outbox,
+    schedule: Vec<Duration>,
+    made: &Arc<AtomicUsize>,
+    fail: &Arc<AtomicUsize>,
+) -> CaptureEnv<ScriptedScreen, FlakyEncoder> {
+    let sched = Mutex::new(Some(schedule));
+    let (made, fail) = (Arc::clone(made), Arc::clone(fail));
+    CaptureEnv {
+        screen: Arc::new(move |_| {
+            Ok(ScriptedScreen {
+                schedule: sched.lock().unwrap().take().unwrap_or_default(),
+                next: 0,
+                started: Instant::now(),
+            })
+        }),
+        encoder: Arc::new(move |_f, _c, _b| {
+            made.fetch_add(1, Ordering::SeqCst);
+            Ok(FlakyEncoder { fail: Arc::clone(&fail) })
+        }),
+        clock: Arc::new(RealClock(Instant::now())),
+        outbox,
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
+        desktop_epoch: Arc::default(),
+        fence: Arc::default(),
+        desktop_probe: None,
+        desktop_sent: Mutex::default(),
+    }
+}
+
+/// C2: an encoder error (a device the system reset, a driver replaced) used to end the capture thread for the rest
+/// of the session, and the viewer kept the last picture until it disconnected.
+#[test]
+fn an_encoder_that_fails_is_built_again_and_the_stream_restarts_with_a_keyframe() {
+    let ms = Duration::from_millis;
+    let (outbox, rx) = Outbox::new(256);
+    let (made, fail) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    // Two frames, the encoder breaks on the third, and the screen stands still after it.
+    let env = flaky_env(outbox, vec![ms(10), ms(30), ms(200)], &made, &fail);
+    let (frames, told) = run_with(&env, &rx, |_| {
+        std::thread::sleep(ms(120));
+        fail.store(1, Ordering::SeqCst);
+        std::thread::sleep(ms(900));
+    });
+    assert_eq!(made.load(Ordering::SeqCst), 2, "a new encoder was built: {told:?}");
+    assert_eq!(frames.len(), 3, "the picture the encoder failed on is sent by the new one: {frames:?}");
+    assert!(frames[2].0, "the stream restarts with a keyframe: {frames:?}");
+    assert!(told.iter().any(|t| t.contains("the encoder failed")), "the service's log says so: {told:?}");
+}
+
+/// C2: an encoder that keeps failing ends this run of the capture with its error, for `capture_main` to start the
+/// whole capture again; it never spins on a dead encoder.
+#[test]
+fn an_encoder_that_keeps_failing_ends_the_run_with_its_error() {
+    let ms = Duration::from_millis;
+    let (outbox, _rx) = Outbox::new(256);
+    let (made, fail) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(usize::MAX)));
+    let env = flaky_env(outbox, vec![ms(10)], &made, &fail);
+    let (p, ctl, ids) = (params(), ctl(), AtomicU32::new(0));
+    let mut source = (env.screen)(DisplayId(0)).unwrap();
+    source.open(DisplayId(0), CaptureConfig { max_fps: 60 }).unwrap();
+    let started = Instant::now();
+    let end = capture_loop(&env, p, &ctl, &ids, &mut source);
+    assert!(end.is_err(), "the run ends with the encoder's error");
+    assert_eq!(made.load(Ordering::SeqCst), super::ENCODER_REBUILDS as usize + 1, "after its rebuilds");
+    assert!(started.elapsed() < Duration::from_secs(5), "and soon");
+}
+
+/// C7: the viewer's window changed size while the host's screen stood still: the picture kept its old size (blurry
+/// when the window grew) until something moved on the host.
+#[test]
+fn a_new_window_size_on_a_still_screen_is_encoded_from_the_last_picture() {
+    let ms = Duration::from_millis;
+    let (outbox, rx) = Outbox::new(256);
+    let counts = Counts::default();
+    let env = env_on(Arc::new(RealClock(Instant::now())), outbox, &counts, vec![ms(10)], true);
+    let (frames, _) = run_with(&env, &rx, |ctl| {
+        std::thread::sleep(ms(300));
+        // The window now shows the 64x48 picture at 32x24.
+        *ctl.scale.lock().unwrap() = (32, 24);
+        std::thread::sleep(ms(1200));
+    });
+    assert!(frames.len() >= 2, "the last picture went out again at the new size: {frames:?}");
+    assert!(frames.last().unwrap().0, "as a keyframe: {frames:?}");
+}

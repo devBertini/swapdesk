@@ -92,24 +92,51 @@ pub(crate) struct Finish {
     end: SessionEnd,
     say: Option<Message>,
     close: ErrorCode,
+    /// What ended a lost session, for the log (never a secret: a fixed text of this file). A dropped connection, a
+    /// peer that went silent and a queue that stood still all end as `Lost` with no code; without this nobody can
+    /// tell them apart afterwards.
+    why: Option<&'static str>,
+}
+
+/// Why a connection the transport closed counts as lost.
+fn why_closed(why: &quinn::ConnectionError) -> &'static str {
+    match why {
+        quinn::ConnectionError::TimedOut => "no packet from the peer within the idle timeout",
+        quinn::ConnectionError::Reset => "the peer reset the connection",
+        quinn::ConnectionError::TransportError(_) => "transport error",
+        quinn::ConnectionError::ConnectionClosed(_) => "the peer's transport closed the connection",
+        quinn::ConnectionError::VersionMismatch => "version mismatch",
+        quinn::ConnectionError::CidsExhausted => "connection ids exhausted",
+        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::LocallyClosed => "closed",
+    }
 }
 
 impl Finish {
-    fn lost() -> Self {
-        Self { end: SessionEnd { kind: EndKind::Lost, code: ErrorCode::NoError }, say: None, close: ErrorCode::NoError }
+    fn lost(why: &'static str) -> Self {
+        Self {
+            end: SessionEnd { kind: EndKind::Lost, code: ErrorCode::NoError },
+            say: None,
+            close: ErrorCode::NoError,
+            why: Some(why),
+        }
     }
 
     fn local_bye(code: ErrorCode) -> Self {
-        Self { end: SessionEnd { kind: EndKind::LocalBye, code }, say: Some(Bye { code }.into()), close: code }
+        Self {
+            end: SessionEnd { kind: EndKind::LocalBye, code },
+            say: Some(Bye { code }.into()),
+            close: code,
+            why: None,
+        }
     }
 
     fn peer_bye(code: ErrorCode) -> Self {
-        Self { end: SessionEnd { kind: EndKind::PeerBye, code }, say: None, close: code }
+        Self { end: SessionEnd { kind: EndKind::PeerBye, code }, say: None, close: code, why: None }
     }
 
     fn violation(code: ErrorCode) -> Self {
         let say = ErrorMessage { code, fatal: true, about_type: 0, about_id: 0 };
-        Self { end: SessionEnd { kind: EndKind::Violation, code }, say: Some(say.into()), close: code }
+        Self { end: SessionEnd { kind: EndKind::Violation, code }, say: Some(say.into()), close: code, why: None }
     }
 
     fn timeout() -> Self {
@@ -117,6 +144,7 @@ impl Finish {
             end: SessionEnd { kind: EndKind::Timeout, code: ErrorCode::Timeout },
             say: None,
             close: ErrorCode::Timeout,
+            why: None,
         }
     }
 
@@ -126,6 +154,7 @@ impl Finish {
             end: SessionEnd { kind: EndKind::Timeout, code: ErrorCode::Timeout },
             say: Some(SessionRefused { code: ErrorCode::Timeout }.into()),
             close: ErrorCode::Timeout,
+            why: None,
         }
     }
 
@@ -135,15 +164,16 @@ impl Finish {
             end: SessionEnd { kind: EndKind::Refused, code },
             say: Some(SessionRefused { code }.into()),
             close: ErrorCode::NoError,
+            why: None,
         }
     }
 
     fn refused_for_viewer(code: ErrorCode) -> Self {
-        Self { end: SessionEnd { kind: EndKind::Refused, code }, say: None, close: ErrorCode::NoError }
+        Self { end: SessionEnd { kind: EndKind::Refused, code }, say: None, close: ErrorCode::NoError, why: None }
     }
 
     fn peer_closed(code: ErrorCode) -> Self {
-        Self { end: SessionEnd { kind: EndKind::PeerClosed, code }, say: None, close: ErrorCode::NoError }
+        Self { end: SessionEnd { kind: EndKind::PeerClosed, code }, say: None, close: ErrorCode::NoError, why: None }
     }
 }
 
@@ -296,7 +326,7 @@ impl Actor {
                         break f;
                     }
                 }
-                Either::Right(None) => break Finish::lost(),
+                Either::Right(None) => break Finish::lost("the session's own event channel closed"),
             }
         };
         self.finish(finish).await
@@ -311,7 +341,8 @@ impl Actor {
     fn lost(&self) -> Finish {
         match self.ctx.inner.conn.as_ref().and_then(|c| c.close_reason()) {
             Some(quinn::ConnectionError::LocallyClosed) => Finish::local_bye(ErrorCode::NoError),
-            _ => Finish::lost(),
+            Some(why) => Finish::lost(why_closed(&why)),
+            None => Finish::lost("the link to the peer is gone"),
         }
     }
 
@@ -337,7 +368,7 @@ impl Actor {
             Err(SendError::Closed) => return Some(self.lost()),
             Err(_) => self.note_sent(false),
         }
-        self.stalled().then(Finish::lost)
+        self.stalled().then(|| Finish::lost("nothing could be sent for five seconds (the peer is not reading)"))
     }
 
     /// A message that must arrive (the grant, `PermissionsChanged`, `HostState`): sent now, or kept in order and sent
@@ -357,11 +388,11 @@ impl Actor {
         if latest && let Some(slot) = self.pending.iter_mut().find(|m| m.type_id() == msg.type_id()) {
             *slot = msg;
         } else if self.pending.len() >= MAX_PENDING {
-            return Some(Finish::lost());
+            return Some(Finish::lost("more messages waited to be sent than a session keeps"));
         } else {
             self.pending.push_back(msg);
         }
-        self.stalled().then(Finish::lost)
+        self.stalled().then(|| Finish::lost("nothing could be sent for five seconds (the peer is not reading)"))
     }
 
     fn flush_pending(&mut self) -> Option<Finish> {
@@ -378,7 +409,7 @@ impl Actor {
                 }
             }
         }
-        self.stalled().then(Finish::lost)
+        self.stalled().then(|| Finish::lost("nothing could be sent for five seconds (the peer is not reading)"))
     }
 
     // ---------- what the service layer ordered ----------
@@ -395,6 +426,9 @@ impl Actor {
         }
         if let Some(code) = violation {
             return Some(Finish::violation(code));
+        }
+        if std::mem::take(&mut lock(&self.ctx.inner.control).stale) {
+            return Some(Finish::lost("the same device opened a new connection: this one is stale"));
         }
         if !self.pending.is_empty()
             && let Some(f) = self.flush_pending()
@@ -446,7 +480,7 @@ impl Actor {
                 // This side closed it on purpose.
                 quinn::ConnectionError::LocallyClosed => Finish::local_bye(ErrorCode::NoError),
                 // An idle timeout, a reset or a transport error: the connection is lost.
-                _ => Finish::lost(),
+                other => Finish::lost(why_closed(&other)),
             }),
             Ev::Tick => self.on_tick(),
             Ev::Decision(d) => self.on_decision(d),
@@ -491,7 +525,7 @@ impl Actor {
                         self.peer_offline();
                         None
                     }
-                    Verdict::Dead => Some(Finish::lost()),
+                    Verdict::Dead => Some(Finish::lost("the peer answered no ping within the liveness limit")),
                 }
             }
             _ => {
@@ -548,9 +582,12 @@ impl Actor {
                 None
             }
             Message::Bye(b) => Some(Finish::peer_bye(b.code)),
-            Message::Error(e) if e.fatal => {
-                Some(Finish { end: SessionEnd { kind: EndKind::Violation, code: e.code }, say: None, close: e.code })
-            }
+            Message::Error(e) if e.fatal => Some(Finish {
+                end: SessionEnd { kind: EndKind::Violation, code: e.code },
+                say: None,
+                close: e.code,
+                why: None,
+            }),
             // A non-fatal `Error` answers a request of ours (`NOT_PERMITTED`, `BUSY`): the host has nothing to do
             // about it, and the viewer's UI hears it once the session is live.
             Message::Error(_) if role == Role::Host || self.phase != Phase::Active => None,
@@ -1021,6 +1058,7 @@ impl Actor {
 
     async fn finish(mut self, f: Finish) -> SessionEnd {
         let end = f.end;
+        *lock(&self.ctx.inner.end_why) = f.why;
         // From here nothing is started for this session, and what runs for it stops.
         self.ctx.begin_close();
         for h in &self.helpers {
@@ -1033,7 +1071,7 @@ impl Actor {
             let id = self.ctx.session_id();
             if id != 0 {
                 let resumable = service.session_ended(&self.ctx, &end);
-                service.ui.event(HostEvent::Ended { device: *device, session_id: id, end, resumable });
+                service.ui.event(HostEvent::Ended { device: *device, session_id: id, end, resumable, why: f.why });
             }
         }
         // Hand the peer the last word (`Bye`, `Error`, `SessionRefused`) before the connection goes.

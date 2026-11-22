@@ -424,9 +424,19 @@ impl HostUi for CoreUi {
                     format_args!("session {session_id:#x} started: {mode:?}, grants {:#06x}", granted.bits()),
                 );
             }
-            HostEvent::Ended { session_id, end, .. } => {
-                self.shared
-                    .log(Level::Info, format_args!("session {session_id:#x} ended: {:?} {:?}", end.kind, end.code));
+            HostEvent::Ended { session_id, end, resumable, why, .. } => {
+                // The end with its cause: a lost session says what was lost (the transport's reason, a silent
+                // peer, a queue that stood still), and whether the viewer may take it back.
+                self.shared.log(
+                    Level::Info,
+                    format_args!(
+                        "session {session_id:#x} ended: {:?} {:?}{}{}",
+                        end.kind,
+                        end.code,
+                        why.map(|w| format!(" ({w})")).unwrap_or_default(),
+                        if *resumable { ", resumable" } else { "" }
+                    ),
+                );
             }
             _ => {}
         }

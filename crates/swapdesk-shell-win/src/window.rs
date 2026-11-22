@@ -254,6 +254,18 @@ impl Window {
         self.hwnd.get()
     }
 
+    /// Brings the window to the front: out of the taskbar when it was minimized, then the foreground.
+    pub fn bring_forward(&self) {
+        let hwnd = self.hwnd();
+        // SAFETY: plain Win32 calls on our own window.
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
     /// The control that has the keyboard focus, if any.
     pub fn focused_control(&self) -> Option<ControlId> {
         self.ix.borrow().focus

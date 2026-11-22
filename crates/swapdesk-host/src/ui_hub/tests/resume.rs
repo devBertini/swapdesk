@@ -22,7 +22,7 @@ fn started(other: &Machine) -> HostEvent {
 }
 
 fn ended_event(other: &Machine, end: SessionEnd, resumable: bool) -> HostEvent {
-    HostEvent::Ended { device: other.id(), session_id: SESSION, end, resumable }
+    HostEvent::Ended { device: other.id(), session_id: SESSION, end, resumable, why: None }
 }
 
 fn is_ended(m: &Ipc) -> bool {

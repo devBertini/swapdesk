@@ -223,37 +223,6 @@ fn a_token_is_bound_to_its_device_and_a_wrong_try_does_not_burn_it() {
 }
 
 #[test]
-fn a_token_does_not_work_while_the_old_connection_is_alive_but_waits_for_it_to_be_seen_lost() {
-    run_paused(async {
-        let f = fx(CF, CF);
-        let s = f.session(CF).await;
-        let info = s.grant().clone();
-        f.decline_from_now();
-        // The old connection answers its pings: it is alive. The resume waits for the loss, then gives up (the
-        // wait is 8 s) and the request goes the normal way.
-        let t0 = Instant::now();
-        let r = f.resume(&f.who, &info, CF).await;
-        // Another session (the old one) is still live, so the request is refused BUSY, not resumed.
-        assert_eq!(r.err(), Some(OpenError::Refused(ErrorCode::Busy)));
-        let waited = t0.elapsed();
-        assert!(waited >= Duration::from_secs(8) && waited < Duration::from_millis(8_500), "waited {waited:?}");
-        assert!(s.ctx().is_active(), "the live session was left alone");
-        // Now the old connection vanishes while a resume waits: the resume is granted as soon as the loss is seen.
-        *lock(&f.ui.script) = Script::Answer(PromptAnswer::Decline);
-        let vanish = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            s.abandon();
-        });
-        let t = Instant::now();
-        let r = f.resume(&f.who, &info, CF).await;
-        let took = t.elapsed();
-        vanish.await.unwrap();
-        assert_eq!(r.unwrap().grant().mode, GrantMode::Resumed);
-        assert!(took >= Duration::from_secs(2) && took < Duration::from_millis(2_600), "resumed {took:?} after asking");
-    });
-}
-
-#[test]
 fn a_bye_kills_the_token() {
     run_paused(async {
         let f = fx(CF, CF);
@@ -601,5 +570,80 @@ fn over_real_quic_a_dead_link_is_a_lost_connection_and_the_viewer_resumes_within
         assert!(took < Duration::from_secs(3), "resume took {took:?}");
         assert_eq!(ui.prompt_count(), 1, "no new prompt");
         q.stop();
+    });
+}
+
+/// Review of 22/11/2026 (the owner's "already in another session"): the viewer redials with its token while the host
+/// still counts the old connection as live (its idle timeout has not run out). The host used to wait for the
+/// timeout, up to `resume_wait`, and then answer `BUSY`. The device that holds the token redials only after its own
+/// end of the connection is gone, so the host ends the stale connection itself and resumes at once.
+#[test]
+fn a_redial_with_the_token_of_a_session_the_host_still_holds_ends_the_stale_connection_and_resumes_at_once() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let old = f.session(CF).await;
+        let info = old.grant().clone();
+        assert_eq!(f.mem.host.sessions().len(), 1, "the host holds the session as live");
+        let started = Instant::now();
+        let resumed = f.resume(&f.who, &info, CF).await.expect("resumed, not refused as busy");
+        assert_eq!(resumed.grant().mode, GrantMode::Resumed);
+        assert_eq!(resumed.grant().session_id, info.session_id, "the same session");
+        assert!(started.elapsed() < Duration::from_secs(1), "no wait for the idle timeout: {:?}", started.elapsed());
+        assert_eq!(f.ui.prompt_count(), 1, "no new prompt");
+        assert_eq!(f.mem.host.sessions().len(), 1, "one session, the resumed one");
+        // The stale connection ended as lost, with what ended it for the log.
+        let lost = f.ui.events().into_iter().find_map(|e| match e {
+            HostEvent::Ended { end, why, resumable: true, .. } if end.kind == EndKind::Lost => why,
+            _ => None,
+        });
+        assert_eq!(lost, Some("the same device opened a new connection: this one is stale"));
+        drop(old);
+    });
+}
+
+/// The same device connects again, with no token, while the host still holds its session, and it may enter without a
+/// prompt: the host lets the old session go and takes the new one instead of answering that it is busy with that
+/// very device. Another device still meets `BUSY`, and so does a device that would need a prompt.
+#[test]
+fn an_unattended_device_that_connects_again_takes_the_place_of_its_own_live_session() {
+    run_paused(async {
+        let all = PermissionSet::UNATTENDED | PermissionSet::CONTROL;
+        let ui = TestUi::new(Script::Hold);
+        let mem = Mem::new(ui.clone(), Registry::new());
+        let who = Who::new();
+        pin(&mem.trust, &who, all);
+        let (first, _t1) = mem.open(&who, viewer_config(all)).await;
+        let first = first.expect("the first session");
+        let (second, _t2) = mem.open(&who, viewer_config(all)).await;
+        let second = second.expect("the device's new connection is taken, not refused as busy");
+        assert_eq!(second.grant().mode, GrantMode::Unattended);
+        assert_ne!(second.grant().session_id, first.grant().session_id, "a new session");
+        assert_eq!(mem.host.sessions().len(), 1, "the old one is gone");
+        assert_eq!(ui.prompt_count(), 0);
+        // The old session ended with a normal end: its token is dead, so nothing of it dials again.
+        let ended = ui
+            .events()
+            .into_iter()
+            .any(|e| matches!(e, HostEvent::Ended { end, resumable: false, .. } if end.kind == EndKind::LocalBye));
+        assert!(ended, "{:?}", ui.events());
+        // Another device still finds the host busy.
+        let other = Who::new();
+        pin(&mem.trust, &other, all);
+        let (third, _t3) = mem.open(&other, viewer_config(all)).await;
+        assert!(matches!(third, Err(OpenError::Refused(ErrorCode::Busy))), "another device waits its turn");
+        drop((first, second));
+    });
+}
+
+#[test]
+fn a_device_that_needs_a_prompt_does_not_replace_its_live_session() {
+    run_paused(async {
+        let f = fx(CF, CF);
+        let old = f.session(CF).await;
+        let again = f.mem.open(&f.who, viewer_config(CF)).await.0;
+        assert!(matches!(again, Err(OpenError::Refused(ErrorCode::Busy))), "nobody is asked to accept twice");
+        assert_eq!(f.mem.host.sessions().len(), 1, "the session it has goes on");
+        assert_eq!(f.ui.prompt_count(), 1);
+        drop(old);
     });
 }

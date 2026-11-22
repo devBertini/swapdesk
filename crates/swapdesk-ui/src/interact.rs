@@ -150,6 +150,10 @@ pub enum ControlId {
     TransferCancel(u32),
     /// "Cancelar tudo" of the transfers bar: what waits is dropped, what runs is cancelled.
     TransfersCancelAll,
+    /// "Voltar à sessão" on the page of the device a session is open with: brings its window to the front.
+    SessionShow,
+    /// "Desconectar" on that page: ends that session.
+    SessionEnd,
     // The files explorer (FILES-UI.md): `true` names the other computer's pane.
     /// "Tela": back from the Arquivos view to the picture.
     ExpTela,
@@ -486,7 +490,11 @@ impl UiState {
             self.wait_card_controls(s, &card);
             return;
         }
-        if d.paired && Self::can_wake(d) {
+        if d.paired && self.open_session_with(&d.id).is_some() {
+            // A session with it is open: the page leads back to it, or ends it. Nothing here starts another.
+            s.button(ControlId::SessionEnd, self.name_of(MsgKey::Disconnect));
+            s.button(ControlId::SessionShow, self.name_of(MsgKey::SessionBack));
+        } else if d.paired && Self::can_wake(d) {
             s.button(ControlId::Wake, self.name_of(MsgKey::Wake));
         } else if d.paired {
             s.button(ControlId::ViewOnly, self.name_of(MsgKey::ViewOnly));
@@ -1573,6 +1581,17 @@ impl UiState {
                     self.start_connect(device_id, intent, &mut a);
                 }
             }
+            ControlId::SessionShow => {
+                a.effect = Some(Effect::ShowViewer);
+                a.changed = Changed::NONE;
+            }
+            ControlId::SessionEnd => {
+                let open = self.selected_device().and_then(|d| self.open_session_with(&d.id));
+                if let Some(session_id) = open {
+                    a.commands.push(Command::Disconnect { session_id });
+                }
+                a.changed = Changed::ALL;
+            }
             ControlId::Wake => {
                 if let Some(d) = self.selected_device().filter(|d| Self::can_wake(d)) {
                     a.commands.push(Command::Wake { device_id: d.id.clone() });
@@ -2220,6 +2239,13 @@ impl UiState {
     /// device with a card waiting sends nothing.
     fn start_connect(&mut self, device_id: String, intent: Intent, a: &mut Activation) {
         if self.sessions.iter().any(|s| s.device_id == device_id && s.is_waiting_entry()) {
+            a.changed = Changed::NONE;
+            return;
+        }
+        // A session with that computer is open already: its window comes to the front. A second connect would
+        // meet this session there and read "já está em outra sessão".
+        if self.open_session_with(&device_id).is_some() {
+            a.effect = Some(Effect::ShowViewer);
             a.changed = Changed::NONE;
             return;
         }
