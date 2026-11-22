@@ -59,6 +59,9 @@ struct Shared {
     /// proof on a live Mac reads them: a controller's pointer over the banner must count in the first only.
     posted_over: AtomicU64,
     real_over: AtomicU64,
+    /// Mouse events seen anywhere: the controller's and a real device's.
+    posted_seen: AtomicU64,
+    real_seen: AtomicU64,
 }
 
 /// Whether this process posted the event (the host's input sink): by the process the event came from, and by the
@@ -102,6 +105,8 @@ unsafe extern "C-unwind" fn tap_callback(
     let rect = *lock(&shared.rect);
     let inside = rect.is_some_and(|r| crate::model::banner_contains(r, at.x, at.y));
     let posted = posted_here(shared, ev);
+    let seen = if posted { &shared.posted_seen } else { &shared.real_seen };
+    seen.fetch_add(1, Ordering::Relaxed);
     if inside {
         let count = if posted { &shared.posted_over } else { &shared.real_over };
         count.fetch_add(1, Ordering::Relaxed);
@@ -190,6 +195,8 @@ impl BannerGuard {
             pid: i64::from(std::process::id()),
             posted_over: AtomicU64::new(0),
             real_over: AtomicU64::new(0),
+            posted_seen: AtomicU64::new(0),
+            real_seen: AtomicU64::new(0),
         });
         let (tx, rx) = sync_channel::<Option<RunLoopHandle>>(1);
         let on_thread = Arc::clone(&shared);
@@ -216,6 +223,11 @@ impl BannerGuard {
     /// Mouse events seen over the banner so far: the controller's, and a real device's.
     pub fn counts(&self) -> (u64, u64) {
         (self.shared.posted_over.load(Ordering::Relaxed), self.shared.real_over.load(Ordering::Relaxed))
+    }
+
+    /// Mouse events seen anywhere so far: the controller's, and a real device's.
+    pub fn seen(&self) -> (u64, u64) {
+        (self.shared.posted_seen.load(Ordering::Relaxed), self.shared.real_seen.load(Ordering::Relaxed))
     }
 }
 

@@ -47,8 +47,9 @@ pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
 /// What the app does to ask macOS for the permissions the notice lists.
 pub type OsPermissionRequest = Arc<dyn Fn(&[swapdesk_ui::OsPermission]) + Send + Sync>;
 
-/// Told the window number of the host banner while it is on the screen, and `None` when it went.
-pub type BannerWindowHook = Arc<dyn Fn(Option<u32>) + Send + Sync>;
+/// Told the window number of the host banner while it is on the screen, and `None` when it went. What it returns is
+/// a line for the trace and the proof log (what the host lane did with it).
+pub type BannerWindowHook = Arc<dyn Fn(Option<u32>) -> Option<String> + Send + Sync>;
 
 /// What the other lanes plug into the viewer window.
 #[derive(Default, Clone)]
@@ -1304,20 +1305,20 @@ impl Shell {
                 if first {
                     // The banner is for the person at this Mac alone: out of the picture the other computer gets,
                     // and out of the reach of its pointer.
-                    if let Some(hook) = &self.hooks.banner_window {
-                        hook(b.window_number());
+                    if let Some(hook) = &self.hooks.banner_window
+                        && let Some(line) = hook(b.window_number())
+                    {
+                        self.banner_note(&line);
                     }
                     let guard = crate::banner_guard::BannerGuard::start();
                     if guard.is_some() {
                         b.let_the_mouse_through();
                     }
-                    if let Some(note) = &self.hooks.note {
-                        note(if guard.is_some() {
-                            "banner: guarded (it takes the real pointer only)"
-                        } else {
-                            "banner: not guarded (no event tap: the Accessibility grant is missing)"
-                        });
-                    }
+                    self.banner_note(if guard.is_some() {
+                        "banner: guarded (it takes the real pointer only)"
+                    } else {
+                        "banner: not guarded (no event tap: the Accessibility grant is missing)"
+                    });
                     *self.banner_guard.borrow_mut() = guard;
                 }
                 if let Some(guard) = self.banner_guard.borrow().as_ref() {
@@ -1329,13 +1330,38 @@ impl Shell {
             }
             None => {
                 if let Some(b) = slot.take() {
-                    *self.banner_guard.borrow_mut() = None;
-                    if let Some(hook) = &self.hooks.banner_window {
-                        hook(None);
+                    // What the guard saw while the banner was there: the controller's mouse events and a real
+                    // device's, anywhere and over the banner (the proof on a live Mac reads this line).
+                    if let Some(guard) = self.banner_guard.borrow_mut().take() {
+                        let ((posted, real), (posted_over, real_over)) = (guard.seen(), guard.counts());
+                        self.banner_note(&format!(
+                            "banner: guard ended; mouse events seen: controller {posted} (over the banner \
+                             {posted_over}), real device {real} (over the banner {real_over}); hover {:?}",
+                            b.canvas.hovered()
+                        ));
+                    }
+                    if let Some(hook) = &self.hooks.banner_window
+                        && let Some(line) = hook(None)
+                    {
+                        self.banner_note(&line);
                     }
                     b.close();
                 }
             }
+        }
+    }
+
+    /// A line about the banner: to the app's trace, and to the proof log of a development run.
+    fn banner_note(&self, line: &str) {
+        if let Some(note) = &self.hooks.note {
+            note(line);
+        }
+        if let Some(dir) = crate::banner_window::snapshot_dir() {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("banner.log"))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
         }
     }
 

@@ -92,6 +92,20 @@ pub fn hidden_windows() -> (u64, Vec<u32>) {
     HIDDEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
+/// The generation of the last list a capture's filter left out in full (0: none yet).
+static HIDDEN_APPLIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The generation of the last list of [`set_hidden_windows`] that a capture really left out of its picture, every
+/// window of it (0: none yet). Equal to the generation of [`hidden_windows`] when the picture is as the list says.
+pub fn hidden_applied() -> u64 {
+    HIDDEN_APPLIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(target_os = "macos")]
+fn note_hidden_applied(generation: u64) {
+    HIDDEN_APPLIED.store(generation, std::sync::atomic::Ordering::Relaxed);
+}
+
 // ---------- pure parts ----------
 
 /// `scale_milli` from the mode's backing-store width in pixels and its width in points (2000 on a Retina panel).
@@ -735,6 +749,9 @@ mod mac {
         match rx.recv_timeout(STOP_TIMEOUT) {
             Ok(None) => {
                 open.hidden = complete.then_some(generation);
+                if complete {
+                    super::note_hidden_applied(generation);
+                }
                 Ok(complete)
             }
             Ok(Some((code, detail))) => Err(PlatformError {
@@ -926,6 +943,9 @@ mod mac {
                         detail: "no reply from ScreenCaptureKit".into(),
                     });
                 }
+            }
+            if let Some(generation) = open.hidden {
+                super::note_hidden_applied(generation);
             }
             self.open = Some(open);
             self.target = Some(Target { display, config });

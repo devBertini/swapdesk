@@ -101,6 +101,7 @@ pub fn start(dir: &Path, data_dir: &Path, backend: Tee, trace: Arc<dyn TraceSink
         reconnect: dir.join("reconnect").exists(),
         audit: term.then(|| AuditCheck { dir: data_dir.to_path_buf(), wait_action: true }),
     };
+    let banner_log = dir.join("banner.log");
     std::thread::Builder::new()
         .name("swapdesk-drive-host".into())
         .spawn(move || {
@@ -130,6 +131,15 @@ pub fn start(dir: &Path, data_dir: &Path, backend: Tee, trace: Arc<dyn TraceSink
                     1
                 }
             };
+            // The window writes its last words about the banner (what its guard saw, whether the picture left it
+            // out) when the session's end reaches the main thread: wait for them, two seconds at most.
+            for _ in 0..40 {
+                let said = std::fs::read_to_string(&banner_log).map(|t| t.contains("banner: gone"));
+                if !matches!(said, Ok(false)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             // `exit` runs the registered teardown (the scratch keychain, the service, the pipeline).
             std::process::exit(code);
         })

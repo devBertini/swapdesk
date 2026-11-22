@@ -345,7 +345,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
         logs_dir: Some(store.dir().to_path_buf()),
         // The banner is for the person at this Mac alone: the picture of the screen leaves its window out.
         banner_window: Some(Arc::new(|window: Option<u32>| {
-            swapdesk_capture_mac::screen::set_hidden_windows(window.as_slice());
+            use swapdesk_capture_mac::screen::{hidden_applied, hidden_windows, set_hidden_windows};
+            // When the banner goes: whether the picture really left it out while it was there.
+            let was = window.is_none().then(|| (hidden_windows().0, hidden_applied()));
+            set_hidden_windows(window.as_slice());
+            Some(match (window, was) {
+                (Some(n), _) => format!("banner: the picture leaves window {n} out"),
+                (None, Some((listed, applied))) if listed == applied => {
+                    "banner: gone; the picture left it out for as long as it was there".to_owned()
+                }
+                (None, Some((listed, applied))) => {
+                    format!("banner: gone; the picture did NOT leave it out (list {listed}, applied {applied})")
+                }
+                (None, None) => "banner: gone".to_owned(),
+            })
         })),
         request_os_permissions: Some({
             let grants_trace = Arc::clone(&trace);
