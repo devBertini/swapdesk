@@ -724,3 +724,244 @@ fn the_viewer_window_is_registered_as_a_drop_target_and_the_main_window_is_not()
     assert!(!registered(main), "the main window takes no drops");
     assert!(top.iter().any(|&h| h != main && registered(h)), "the viewer window is a drop target ({top:?})");
 }
+
+// ----- the host banner: for the person at this computer alone (owner's report of 22/11/2026) -----
+
+mod banner {
+    use std::sync::atomic::AtomicUsize;
+
+    use swapdesk_ui::tokens;
+    use windows::Win32::Foundation::{LRESULT, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
+    };
+    use windows::core::BOOL;
+
+    use super::*;
+    use crate::banner_guard::{POINTER_PRESS, POINTER_RELEASE, WM_BANNER_POINTER, pack};
+
+    /// The banner's window of a running shell: the tool window of its thread.
+    fn banner_window(live: &Live) -> HWND {
+        unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> BOOL {
+            // SAFETY: `found` is the address of the `HWND` the caller keeps on its stack for the whole enumeration.
+            unsafe {
+                if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
+                    *(found.0 as *mut HWND) = hwnd;
+                    return BOOL(0);
+                }
+            }
+            BOOL(1)
+        }
+        let mut found = HWND::default();
+        // SAFETY: enumerates the windows of the shell's thread; the callback writes into `found`.
+        unsafe {
+            let _ = EnumThreadWindows(live.thread_id, Some(each), LPARAM(std::ptr::from_mut(&mut found) as isize));
+        }
+        assert!(!found.0.is_null(), "the shell of a hosted session has a banner");
+        found
+    }
+
+    fn rect_of(hwnd: HWND) -> RECT {
+        let mut r = RECT::default();
+        // SAFETY: a plain read of a window's rectangle.
+        unsafe { GetWindowRect(hwnd, &mut r) }.expect("window rectangle");
+        r
+    }
+
+    /// The pixels of the screen under `r`, as 0xRRGGBB, row by row.
+    fn screen_pixels(r: RECT) -> Vec<u32> {
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        let mut out = vec![0u32; (w * h) as usize];
+        // SAFETY: GDI objects made and released here; the buffer holds w * h pixels of 32 bits.
+        unsafe {
+            let screen = GetDC(None);
+            let mem = CreateCompatibleDC(Some(screen));
+            let bitmap = CreateCompatibleBitmap(screen, w, h);
+            let old = SelectObject(mem, bitmap.into());
+            let _ = BitBlt(mem, 0, 0, w, h, Some(screen), r.left, r.top, SRCCOPY);
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            GetDIBits(mem, bitmap, 0, h as u32, Some(out.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+            SelectObject(mem, old);
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+        }
+        out.iter().map(|p| p & 0x00FF_FFFF).collect()
+    }
+
+    /// Where "Desconectar" is in the banner's client pixels (its centre), and its rectangle there.
+    fn disconnect_button(state: &swapdesk_ui::UiState, scale: f32) -> ((i32, i32), (i32, i32, i32, i32)) {
+        let size = swapdesk_paint::banner_size_for(state);
+        let shot = render(state, WindowKind::Banner, size, scale, &Interaction::default()).expect("render");
+        let w = shot.output.widgets.iter().find(|w| w.id == ControlId::BannerDisconnect).expect("Desconectar");
+        let (x, y, bw, bh) = (w.rect.x * scale, w.rect.y * scale, w.rect.w * scale, w.rect.h * scale);
+        (((x + bw / 2.0) as i32, (y + bh / 2.0) as i32), (x as i32, y as i32, bw as i32, bh as i32))
+    }
+
+    fn close_to(pixel: u32, color: tokens::Color) -> bool {
+        let near = |a: u32, b: u8| a.abs_diff(u32::from(b)) <= 24;
+        near(pixel >> 16 & 0xFF, color.r) && near(pixel >> 8 & 0xFF, color.g) && near(pixel & 0xFF, color.b)
+    }
+
+    #[test]
+    fn the_banner_lets_the_mouse_through_stays_on_the_screen_and_takes_a_real_click_from_its_hook() {
+        // This test looks at the banner's own pixels: it is kept in screen captures for the test's run.
+        crate::window::KEEP_BANNER_IN_CAPTURE.store(true, Ordering::Relaxed);
+        let state = Scenario::Banner.prepared_state();
+        let (live, backend) = start_recording(Scenario::Banner.prepared_state());
+        let banner = banner_window(&live);
+        // SAFETY: plain reads about our own window.
+        let (ex, scale) =
+            unsafe { (GetWindowLongPtrW(banner, GWL_EXSTYLE) as u32, GetDpiForWindow(banner) as f32 / 96.0) };
+        assert!(ex & WS_EX_LAYERED.0 != 0 && ex & WS_EX_TRANSPARENT.0 != 0, "transparent to the mouse: {ex:#x}");
+        assert!(ex & WS_EX_NOACTIVATE.0 != 0, "it never takes the keyboard: {ex:#x}");
+
+        // The system's own hit test: whatever is found at the banner's button is not the banner.
+        let r = rect_of(banner);
+        let ((cx, cy), (bx, by, bw, bh)) = disconnect_button(&state, scale);
+        // SAFETY: a plain query of the window at a screen point.
+        let under = unsafe { WindowFromPoint(POINT { x: r.left + cx, y: r.top + cy }) };
+        assert_ne!(under, banner, "a click at the banner's button goes to what lies under it");
+
+        // It is on the screen all the same: the red of "Desconectar" where the button is drawn.
+        let pixels = screen_pixels(r);
+        let width = (r.right - r.left) as usize;
+        let red = (by..by + bh)
+            .flat_map(|y| (bx..bx + bw).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let p = pixels[*y as usize * width + *x as usize];
+                close_to(p, tokens::LIGHT.danger) || close_to(p, tokens::DARK.danger)
+            })
+            .count();
+        assert!(red * 4 >= (bw * bh) as usize, "the banner is drawn on the screen: {red} red pixels of {}", bw * bh);
+
+        // A real click over the button, as the banner's hook tells it: the session is disconnected.
+        assert_eq!(backend.disconnects(), 0);
+        for kind in [POINTER_PRESS, POINTER_RELEASE] {
+            // SAFETY: posts to our window.
+            unsafe { PostMessageW(Some(banner), WM_BANNER_POINTER, WPARAM(kind), LPARAM(pack(cx, cy))) }.expect("post");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(backend.disconnects(), 1, "the person at this computer still ends the session with a click");
+        crate::window::KEEP_BANNER_IN_CAPTURE.store(false, Ordering::Relaxed);
+    }
+
+    static UNDER_CLICKS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A plain window of the test that counts the left clicks it gets, covering `r`.
+    fn window_under(r: RECT) -> HWND {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, RegisterClassW, SW_SHOWNOACTIVATE, ShowWindow, WM_LBUTTONDOWN, WNDCLASSW,
+            WS_POPUP,
+        };
+        use windows::core::w;
+        unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            if msg == WM_LBUTTONDOWN {
+                UNDER_CLICKS.fetch_add(1, Ordering::SeqCst);
+            }
+            // SAFETY: the default procedure with the arguments as they came.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        // SAFETY: a window class and a window of the test, on the calling thread.
+        unsafe {
+            let instance = GetModuleHandleW(None).expect("module");
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(proc),
+                hInstance: instance.into(),
+                lpszClassName: w!("SwapdeskTestUnderBanner"),
+                ..Default::default()
+            };
+            RegisterClassW(&class);
+            let hwnd = CreateWindowExW(
+                windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST,
+                w!("SwapdeskTestUnderBanner"),
+                w!("under the banner"),
+                WS_POPUP,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .expect("window under the banner");
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            hwnd
+        }
+    }
+
+    #[test]
+    #[ignore = "interactive: injects a real click over the banner and moves the pointer for a moment"]
+    fn interactive_an_injected_click_over_the_banner_reaches_the_window_under_it_and_never_the_banner() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DestroyWindow, DispatchMessageW, GetCursorPos, GetSystemMetrics, HWND_TOPMOST, MSG, PM_REMOVE,
+            PeekMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SetCursorPos, SetWindowPos,
+        };
+        let state = Scenario::Banner.prepared_state();
+        let (live, backend) = start_recording(Scenario::Banner.prepared_state());
+        let banner = banner_window(&live);
+        let r = rect_of(banner);
+        // SAFETY: plain Win32 calls: the test's own window, the pointer's place, one injected click.
+        unsafe {
+            let scale = GetDpiForWindow(banner) as f32 / 96.0;
+            let ((cx, cy), _) = disconnect_button(&state, scale);
+            let under = window_under(r);
+            // The banner stays above the test's window, as it stays above every window.
+            let _ = SetWindowPos(banner, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let mut was = POINT::default();
+            let _ = GetCursorPos(&mut was);
+            let (vx, vy, vw, vh) = (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            );
+            let abs = |v: i32, origin: i32, span: i32| ((v - origin) * 65_535 + span / 2) / (span - 1).max(1);
+            let mouse = |flags, dx, dy| INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+            };
+            let (x, y) = (abs(r.left + cx, vx, vw), abs(r.top + cy, vy, vh));
+            let moved = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+            let inputs = [mouse(moved, x, y), mouse(MOUSEEVENTF_LEFTDOWN, 0, 0), mouse(MOUSEEVENTF_LEFTUP, 0, 0)];
+            assert_eq!(SendInput(&inputs, size_of::<INPUT>() as i32), 3, "the click was injected");
+            // The test's window lives on this thread: its messages are pumped here.
+            let until = Instant::now() + Duration::from_millis(800);
+            let mut msg = MSG::default();
+            while Instant::now() < until {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = SetCursorPos(was.x, was.y);
+            let _ = DestroyWindow(under);
+        }
+        assert_eq!(UNDER_CLICKS.load(Ordering::SeqCst), 1, "the click reached the window under the banner");
+        assert_eq!(backend.disconnects(), 0, "and the banner did nothing with it");
+    }
+}

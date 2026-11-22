@@ -3,6 +3,7 @@
 //! `swapdesk_ui::UiState` through it and report where every control, text input, video area and terminal grid landed
 //! ([`Output`]), so both systems show the same layout, spacing, type and colours. No OS API lives here.
 
+pub mod banner_guard;
 mod card;
 mod font;
 pub mod grid;

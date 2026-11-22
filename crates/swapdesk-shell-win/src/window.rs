@@ -54,6 +54,9 @@ const EM_SETCUEBANNER: u32 = 0x1501;
 const EM_SETSEL: u32 = 0x00B1;
 const ES_AUTOHSCROLL_STYLE: u32 = 0x0080;
 
+/// Tests that look at the banner's own pixels on the screen keep it in screen captures; nothing else sets it.
+pub(crate) static KEEP_BANNER_IN_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The EDIT window procedure the inputs had before they were subclassed.
 pub(crate) static EDIT_ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
 
@@ -108,6 +111,9 @@ pub struct Window {
     fullscreen: RefCell<Option<crate::fullscreen::Saved>>,
     /// The high half of a surrogate pair typed through the IME, waiting for its low half.
     high_surrogate: Cell<Option<u16>>,
+    /// The banner only: the hook that hands it the real pointer while its window lets every mouse event through
+    /// (`banner_guard.rs`). `None` on any other window, and on a banner whose hook could not be installed.
+    banner_guard: RefCell<Option<crate::banner_guard::BannerGuard>>,
 }
 
 struct Bridge {
@@ -187,6 +193,7 @@ impl Window {
             address_wait: RefCell::new(Debouncer::new()),
             fullscreen: RefCell::new(None),
             high_surrogate: Cell::new(None),
+            banner_guard: RefCell::new(None),
         });
         let title = a11y::window_title(&shared.state.borrow(), kind);
         let (style, ex) = match kind {
@@ -222,9 +229,13 @@ impl Window {
                     // never sees its own "controla este computador" bar (Windows 10 2004 and later; older systems
                     // fail the call and keep showing it, which is harmless).
                     // SAFETY: our own window, just created.
-                    let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
+                    if !KEEP_BANNER_IN_CAPTURE.load(Ordering::Relaxed) {
+                        let _ = unsafe { SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) };
+                    }
+                    window.guard_banner();
                 }
                 window.place_and_show();
+                window.sync_banner_rect();
                 if kind == WindowKind::Viewer {
                     // Files dragged from Explorer (FILES-UI.md 4.2); revoked in WM_DESTROY.
                     crate::drop_target::register(h, Rc::downgrade(&window));
@@ -733,6 +744,80 @@ impl Window {
         // SAFETY: our window; repaints the whole client area on the next WM_PAINT.
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd()), None, false);
+        }
+    }
+
+    /// The banner is for the person at this computer alone (`banner_guard.rs`): once the hook that hands it the real
+    /// pointer is in place, its window is made layered and transparent to the mouse, so every click of the one who
+    /// controls this computer lands on what lies under it. Without the hook the window stays as it was made and
+    /// takes the mouse itself: the way to end a session is never given up.
+    fn guard_banner(&self) {
+        let hwnd = self.hwnd();
+        let Some(guard) = crate::banner_guard::BannerGuard::start(hwnd) else { return };
+        // SAFETY: plain Win32 calls on our own window, before it is shown.
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+            // "The layered window will not become visible until the SetLayeredWindowAttributes or
+            // UpdateLayeredWindow function has been called" (Microsoft Learn, Layered Windows).
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        }
+        *self.banner_guard.borrow_mut() = Some(guard);
+    }
+
+    /// Tells the banner's hook where the banner is now.
+    fn sync_banner_rect(&self) {
+        if let Some(guard) = self.banner_guard.borrow().as_ref() {
+            let mut rect = RECT::default();
+            // SAFETY: our own window's rectangle in screen pixels.
+            if unsafe { GetWindowRect(self.hwnd(), &mut rect) }.is_ok() {
+                guard.set_rect(rect);
+            }
+        }
+    }
+
+    /// The real pointer over the banner, told by the banner's hook (`WM_BANNER_POINTER`): the same hover, press and
+    /// click a window gets from the system's own mouse messages, which this window never receives.
+    fn banner_pointer(&self, kind: usize, x: i32, y: i32) {
+        use crate::banner_guard::{POINTER_HOVER, POINTER_LEAVE, POINTER_PRESS, POINTER_RELEASE};
+        match kind {
+            POINTER_HOVER => {
+                let hit = self.hit_test(x, y);
+                let previous = std::mem::replace(&mut self.ix.borrow_mut().hover, hit);
+                if previous != hit {
+                    self.invalidate_controls(&[previous, hit]);
+                }
+            }
+            POINTER_LEAVE => {
+                let left = self.ix.borrow_mut().hover.take();
+                if left.is_some() {
+                    self.invalidate_controls(&[left]);
+                }
+            }
+            POINTER_PRESS => {
+                let hit = self.hit_test(x, y);
+                let before = {
+                    let mut ix = self.ix.borrow_mut();
+                    let before = [ix.pressed, ix.hover];
+                    ix.pressed = hit;
+                    ix.hover = hit;
+                    ix.focus_visible = false;
+                    before
+                };
+                self.invalidate_changed(&[before[0], before[1], hit]);
+            }
+            // A release: a click when it comes over the control the press began on.
+            _ => {
+                let pressed = self.ix.borrow_mut().pressed.take();
+                let hit = if kind == POINTER_RELEASE { self.hit_test(x, y) } else { None };
+                let was_hover = std::mem::replace(&mut self.ix.borrow_mut().hover, hit);
+                self.invalidate_changed(&[pressed, was_hover, hit]);
+                if let (Some(p), Some(h)) = (pressed, hit)
+                    && p == h
+                {
+                    self.shared.activate(p, self);
+                }
+            }
         }
     }
 
@@ -1754,7 +1839,19 @@ impl Window {
                 }
                 None
             }
+            crate::banner_guard::WM_BANNER_POINTER if self.kind == WindowKind::Banner => {
+                let (x, y) = crate::banner_guard::unpack(lparam.0);
+                self.banner_pointer(wparam.0, x, y);
+                Some(LRESULT(0))
+            }
+            // The banner moved or changed size (a new line, another DPI): its hook follows it.
+            WM_WINDOWPOSCHANGED if self.kind == WindowKind::Banner => {
+                self.sync_banner_rect();
+                None
+            }
             WM_DESTROY => {
+                // The banner's hook goes with the banner.
+                self.banner_guard.borrow_mut().take();
                 if self.kind == WindowKind::Viewer {
                     crate::drop_target::revoke(self.hwnd());
                 }

@@ -7,6 +7,7 @@
 //! drawer draws a `swapdesk-termview` model fed by [`terminal_output`] (stage 43).
 
 mod app;
+mod banner_guard;
 mod cursor;
 mod dialogs;
 mod drag_out;
