@@ -51,7 +51,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// Waits for the transfer of `name` in the direction `outgoing` to end; `Ok(Done)` or the failure.
 fn wait_end(pump: &mut Pump<'_>, name: &str, outgoing: bool, timeout: Duration) -> Result<(u32, bool), String> {
-    pump.wait(&format!("the transfer of {name} to end"), timeout, |e| match e {
+    let end = pump.wait(&format!("the transfer of {name} to end"), timeout, |e| match e {
         UiEvent::Transfer { transfer_id, name: n, outgoing: o, state: TransferState::Done, .. }
             if n == name && *o == outgoing =>
         {
@@ -63,7 +63,27 @@ fn wait_end(pump: &mut Pump<'_>, name: &str, outgoing: bool, timeout: Duration) 
             Some((*transfer_id, false))
         }
         _ => None,
-    })
+    });
+    // A wait that ran out says what the transfers did meanwhile: the last state of each one that was told.
+    end.map_err(|e| format!("{e}; transfers told: {}", transfers_told(pump.seen())))
+}
+
+/// The last state of every transfer the interface was told of, as `id name out|in state`.
+fn transfers_told(seen: &[UiEvent]) -> String {
+    let mut last: Vec<(u32, String)> = Vec::new();
+    for e in seen {
+        if let UiEvent::Transfer { transfer_id, name, outgoing, state, .. } = e {
+            let line = format!("{transfer_id} {name} {} {state:?}", if *outgoing { "out" } else { "in" });
+            match last.iter_mut().find(|(id, _)| id == transfer_id) {
+                Some(slot) => slot.1 = line,
+                None => last.push((*transfer_id, line)),
+            }
+        }
+    }
+    if last.is_empty() {
+        return "none".to_owned();
+    }
+    last.into_iter().map(|(_, line)| line).collect::<Vec<_>>().join(" | ")
 }
 
 /// How long a cancelled transfer is watched for an end it must not reach.

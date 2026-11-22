@@ -22,6 +22,11 @@ impl<'a> Pump<'a> {
         self.seen.extend(self.backend.drain());
     }
 
+    /// Every event delivered so far, for a failure's report.
+    pub fn seen(&self) -> &[UiEvent] {
+        &self.seen
+    }
+
     /// The events delivered since `cursor` (which starts at 0 and is advanced), for a loop that reacts to each one.
     pub fn fresh(&mut self, cursor: &mut usize) -> Vec<UiEvent> {
         self.poll();

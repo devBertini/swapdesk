@@ -246,6 +246,27 @@ fn a_token_left_unused_by_a_cancelled_swap_reports_nothing_while_the_session_run
     host.finish();
 }
 
+/// Security review of 22/11/2026: a device that is off, with a record that names another place. What answers at
+/// that place is not the device (anyone on the network can announce a record); its failed key check used to
+/// replace "nothing answered", and a push that was owed was then never tried again.
+#[test]
+fn a_stranger_at_the_place_a_record_names_does_not_turn_no_answer_into_an_answer() {
+    let a = Machine::new("pc-a");
+    let b = Machine::new("pc-b");
+    let stranger = Machine::new("pc-c");
+    a.pin(&b, PermissionSet::CONTROL);
+    b.pin(&a, PermissionSet::VIEW);
+    let (b_id, b_addr, forged) = (b.id(), b.session_addr(), stranger.session_addr());
+    // B is off: nothing answers where it is listed.
+    b.finish();
+    let rt = a.core.runtime().clone();
+    let (at, result) = rt.block_on(super::super::sync_dial::sync_where_it_is(&a.core, b_addr, Some(forged), b_id));
+    assert!(matches!(result, Err(SyncError::Failed)), "nothing of B answered, so the push is still owed: {result:?}");
+    assert_eq!(at, b_addr, "and the stranger's place is not where B is");
+    a.finish();
+    stranger.finish();
+}
+
 /// Review of 22/11/2026, B6: the same for a push that got no answer (a lost packet, a peer busy for a moment).
 #[test]
 fn a_grants_push_that_got_no_answer_is_tried_again() {

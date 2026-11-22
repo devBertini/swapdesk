@@ -115,6 +115,30 @@ impl SyncState {
     }
 }
 
+/// One sync with `device`: at `addr`, where it is listed, and, when nothing answered there, once at `other`, the
+/// place its newest record names. Gives the address the result came from.
+///
+/// Only an answer of the device itself counts from `other`. A failure there says nothing of the device (anyone on
+/// the network can announce a record, and what answers at it fails the key check, `WrongPeer`), so the first result
+/// stands and a push that is owed is still tried again (security review of 22/11/2026).
+pub(super) async fn sync_where_it_is(
+    core: &crate::service::ServiceCore,
+    addr: SocketAddr,
+    other: Option<SocketAddr>,
+    device: DeviceId,
+) -> (SocketAddr, Result<swapdesk_proto::GrantsSync, SyncError>) {
+    let first = core.sync_grants_async(addr, device).await;
+    let reached_nothing =
+        matches!(first, Err(SyncError::Failed | SyncError::Guard(crate::service::ConnectError::Refused(_))));
+    if let (true, Some(other)) = (reached_nothing, other) {
+        let second = core.sync_grants_async(other, device).await;
+        if second.is_ok() {
+            return (other, second);
+        }
+    }
+    (addr, first)
+}
+
 impl Hub {
     /// This machine's user changed what `device` may do here: the push goes 1 s after the last change.
     pub(super) fn sync_after_change(self: &Arc<Self>, device: DeviceId) {
@@ -297,22 +321,7 @@ impl Hub {
         let me = Arc::clone(self);
         let other = self.p.presence.alternate(&device).map(SocketAddr::V4).filter(|other| *other != addr);
         rt.spawn(async move {
-            let mut addr = addr;
-            let mut result = core.sync_grants_async(addr, device).await;
-            // Nothing answered where the device is listed and its newest record names another place: asked there,
-            // once. A forged record fails the key check there (`WrongPeer`) and changes nothing.
-            if let (Err(SyncError::Failed | SyncError::Guard(crate::service::ConnectError::Refused(_))), Some(other)) =
-                (&result, other)
-            {
-                // Only an answer of the device itself counts from there. A failure at a record's address says
-                // nothing of the device (anyone on the network can announce a record), so the first result stands
-                // and a push that is owed is still tried again (security review of 22/11/2026).
-                let second = core.sync_grants_async(other, device).await;
-                if second.is_ok() {
-                    addr = other;
-                    result = second;
-                }
-            }
+            let (addr, result) = sync_where_it_is(&core, addr, other, device).await;
             // The answer came over a connection the device's pinned key authenticated: it answers at `addr`.
             if let (Ok(_), SocketAddr::V4(v4)) = (&result, addr) {
                 me.p.presence.authenticated(device, v4);
