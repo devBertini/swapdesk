@@ -47,6 +47,10 @@ pub type LaunchNote = Arc<dyn Fn(&str) + Send + Sync>;
 /// What the app does to ask macOS for the permissions the notice lists.
 pub type OsPermissionRequest = Arc<dyn Fn(&[swapdesk_ui::OsPermission]) + Send + Sync>;
 
+/// How often a new banner's wait looks whether the picture leaves it out, and the longest it waits unseen.
+const BANNER_REVEAL_EVERY: f64 = 0.05;
+const BANNER_REVEAL_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Told the window number of the host banner while it is on the screen, and `None` when it went. What it returns is
 /// a line for the trace and the proof log (what the host lane did with it).
 pub type BannerWindowHook = Arc<dyn Fn(Option<u32>) -> Option<String> + Send + Sync>;
@@ -68,6 +72,9 @@ pub struct ViewerHooks {
     /// The host lane: told which window the banner is, so that the picture of the screen it sends leaves the banner
     /// out (it is for the person at this Mac alone); none in a mock run.
     pub banner_window: Option<BannerWindowHook>,
+    /// The host lane: whether the picture of the screen leaves the banner's window out by now. The banner is
+    /// revealed when it says so; none in a mock run (the banner shows at once).
+    pub banner_out_of_picture: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 // ---------- the controller: the target of every control, the window and timer delegate ----------
@@ -148,6 +155,12 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _t: &AnyObject) {
             with_shell(|s| s.tick());
+        }
+
+        // The new banner waits, unseen, for the picture of the screen to leave it out.
+        #[unsafe(method(bannerReveal:))]
+        fn banner_reveal(&self, _t: &AnyObject) {
+            with_shell(|s| s.banner_reveal());
         }
 
         // The banner's line changes: the next minute of "há 12 min", or the end of a files note.
@@ -244,6 +257,10 @@ pub struct Shell {
     /// What keeps the banner for the person at this Mac (`banner_guard`), while the banner is there and the tap
     /// could be made.
     banner_guard: RefCell<Option<crate::banner_guard::BannerGuard>>,
+    /// While a new banner waits, unseen, for the picture to leave it out: the timer that looks, and when the wait
+    /// began.
+    banner_reveal_timer: RefCell<Option<Retained<NSTimer>>>,
+    banner_reveal_from: Cell<Option<std::time::Instant>>,
     tick_timer: RefCell<Option<Retained<NSTimer>>>,
     /// The banner's one-shot timer, and the moment (ms of the local clock) it is due.
     banner_timer: RefCell<Option<Retained<NSTimer>>>,
@@ -539,6 +556,8 @@ fn start_with(
         viewer: RefCell::new(None),
         banner: RefCell::new(None),
         banner_guard: RefCell::new(None),
+        banner_reveal_timer: RefCell::new(None),
+        banner_reveal_from: Cell::new(None),
         tick_timer: RefCell::new(None),
         banner_timer: RefCell::new(None),
         banner_due_ms: Cell::new(0),
@@ -1299,9 +1318,17 @@ impl Shell {
                     if let Some(shot) = SHOT.get() {
                         b.canvas.set_dump(shot.with_extension("banner.layout.txt"));
                     }
+                    // With a host lane the banner is not seen until the picture leaves its window out.
+                    if self.hooks.banner_out_of_picture.is_some() {
+                        b.set_seen(false);
+                    }
                     b
                 });
                 b.update(&m);
+                if first && self.hooks.banner_out_of_picture.is_some() {
+                    self.banner_reveal_from.set(Some(std::time::Instant::now()));
+                    self.set_timer(&self.banner_reveal_timer, BANNER_REVEAL_EVERY, true, sel!(bannerReveal:));
+                }
                 if first {
                     // The banner is for the person at this Mac alone: out of the picture the other computer gets,
                     // and out of the reach of its pointer.
@@ -1330,6 +1357,10 @@ impl Shell {
             }
             None => {
                 if let Some(b) = slot.take() {
+                    if let Some(t) = self.banner_reveal_timer.borrow_mut().take() {
+                        t.invalidate();
+                    }
+                    self.banner_reveal_from.set(None);
                     // What the guard saw while the banner was there: the controller's mouse events and a real
                     // device's, anywhere and over the banner (the proof on a live Mac reads this line).
                     if let Some(guard) = self.banner_guard.borrow_mut().take() {
@@ -1349,6 +1380,29 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// One look of a new banner's wait: it is revealed as soon as the picture of the screen leaves its window out,
+    /// or when the limit passes (the person at this Mac must see that the computer is being watched, whatever the
+    /// capture does). The line says which, with the time it took.
+    fn banner_reveal(&self) {
+        let Some(from) = self.banner_reveal_from.get() else { return };
+        let out = self.hooks.banner_out_of_picture.as_ref().is_some_and(|f| f());
+        let waited = from.elapsed();
+        if !out && waited < BANNER_REVEAL_LIMIT {
+            return;
+        }
+        if let Some(t) = self.banner_reveal_timer.borrow_mut().take() {
+            t.invalidate();
+        }
+        self.banner_reveal_from.set(None);
+        if let Some(b) = self.banner.borrow().as_ref() {
+            b.set_seen(true);
+        }
+        self.banner_note(&format!(
+            "banner: shown after {} ms; the picture left it out first: {out}",
+            waited.as_millis()
+        ));
     }
 
     /// A line about the banner: to the app's trace, and to the proof log of a development run.

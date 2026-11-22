@@ -99,6 +99,13 @@ impl BannerWindow {
         self.panel.orderOut(None);
     }
 
+    /// Whether the panel can be seen. A new banner is in front but not seen until the picture of the screen leaves
+    /// its window out (the shell reveals it then, or after a short limit): it never shows in the picture the other
+    /// computer gets, not even for its first moments.
+    pub fn set_seen(&self, seen: bool) {
+        self.panel.setAlphaValue(if seen { 1.0 } else { 0.0 });
+    }
+
     /// The panel takes no mouse events of its own any more: its guard hands it the real pointer, and what the
     /// controller's pointer does here goes to what lies under the banner.
     pub fn let_the_mouse_through(&self) {

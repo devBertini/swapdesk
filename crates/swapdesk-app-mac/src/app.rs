@@ -360,6 +360,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 (None, None) => "banner: gone".to_owned(),
             })
         })),
+        // The banner is shown only once the picture leaves its window out: the list it was put in is applied.
+        banner_out_of_picture: Some(Arc::new(|| {
+            use swapdesk_capture_mac::screen::{hidden_applied, hidden_windows};
+            let (listed, windows) = hidden_windows();
+            !windows.is_empty() && hidden_applied() == listed
+        })),
         request_os_permissions: Some({
             let grants_trace = Arc::clone(&trace);
             Arc::new(move |missing: &[swapdesk_ui::OsPermission]| crate::host::request_grants(missing, &*grants_trace))
