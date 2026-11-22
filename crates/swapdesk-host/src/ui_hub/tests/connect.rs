@@ -717,3 +717,61 @@ fn a_minor_0_host_session_with_unattended_is_held_until_this_machine_confirms() 
     assert!(p.viewer_ui.call(cad()).is_ok(), "Ctrl+Alt+Del goes now");
     p.finish();
 }
+
+/// Review of 22/11/2026, A1: after the router gave the host another address, "Controlar" dialled the address the
+/// list still held and ended in "could not reach". The dial that reaches nothing is now made once more where the
+/// device's newest record says; the key pinned for the device answers there, and that contact is what moves it.
+#[test]
+fn a_host_that_is_not_where_it_was_proven_is_dialled_where_its_newest_record_says() {
+    let stored = PermissionSet::UNATTENDED | PermissionSet::CONTROL | PermissionSet::AUDIO;
+    let mut p = Pair::build_with(stored, None);
+    let SocketAddr::V4(real) = p.host.session_addr() else { unreachable!() };
+    // The list holds the host at an address that is not on this network any more.
+    let old = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 9), real.port());
+    p.viewer.presence.set(vec![PresencePeer {
+        device_id: p.host.id(),
+        name: "host-pc".into(),
+        os: Os::Windows,
+        pairing_open: false,
+        addrs: vec![*old.ip()],
+        session_port: old.port(),
+        pair_port: 0,
+        proto_minor: swapdesk_proto::PROTO_MINOR,
+    }]);
+    p.viewer.presence.set_alternate(p.host.id(), Some(real));
+    let entry = p.press();
+    let session = active_as(&mut p.viewer_ui, Role::Viewer, &[entry]);
+    assert!(
+        p.viewer.presence.contacts().contains(&(p.host.id(), real)),
+        "the contact the host's key authenticated is told at the address it answered from: {:?}",
+        p.viewer.presence.contacts()
+    );
+    assert!(p.viewer_ui.call(UiOp::Disconnect { session_id: session }).is_ok());
+    p.finish();
+}
+
+/// Only a dial that reached nothing is made again elsewhere: a host that answered (it declined, it is busy) is where
+/// it is, and a second dial would only ask its person twice.
+#[test]
+fn only_a_dial_that_reached_nothing_is_made_again_elsewhere() {
+    use crate::service::ConnectError;
+    use swapdesk_proto::ErrorCode;
+    use swapdesk_session::OpenError;
+    let unreachable =
+        [ConnectError::Open(OpenError::Unreachable), ConnectError::Refused(swapdesk_lan::guard::Refusal::OffLink)];
+    for e in &unreachable {
+        assert!(super::super::ops::reached_nothing(e), "{e:?}");
+    }
+    let answered = [
+        ConnectError::Open(OpenError::Refused(ErrorCode::Declined)),
+        ConnectError::Open(OpenError::Refused(ErrorCode::Busy)),
+        ConnectError::Open(OpenError::Closed(ErrorCode::NoError)),
+        ConnectError::Open(OpenError::Timeout),
+        ConnectError::Open(OpenError::Lost),
+        ConnectError::Open(OpenError::Protocol(ErrorCode::ProtocolViolation)),
+        ConnectError::UnknownDevice,
+    ];
+    for e in &answered {
+        assert!(!super::super::ops::reached_nothing(e), "{e:?}");
+    }
+}

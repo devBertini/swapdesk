@@ -76,8 +76,16 @@ fn connect_why(e: &ConnectError) -> ConnectWhy {
             _ => ConnectWhy::NotPermitted,
         },
         ConnectError::Open(OpenError::Protocol(_)) => ConnectWhy::Failed,
-        ConnectError::Open(OpenError::Timeout | OpenError::Lost) => ConnectWhy::Unreachable,
+        ConnectError::Open(OpenError::Timeout | OpenError::Lost | OpenError::Unreachable) => ConnectWhy::Unreachable,
     }
+}
+
+/// Whether a dial reached nothing at all: the LAN guard turned the address away (it is not on this network any
+/// more), or no connection was made there. Only then is the device asked where its newest record says: a device
+/// that answered (it declined, it is busy, its person did not decide) is where it is, and a second dial would ask
+/// its person twice.
+pub(super) fn reached_nothing(e: &ConnectError) -> bool {
+    matches!(e, ConnectError::Refused(_) | ConnectError::Open(swapdesk_session::OpenError::Unreachable))
 }
 
 impl Hub {
@@ -695,13 +703,28 @@ impl Hub {
                 }
             })
         };
-        let (handle, messages) = core
-            .connect_asking_async(SocketAddr::V4(addr), id, intent, unattended, extra, Some(waiting))
-            .await
-            .map_err(|e| {
-                self.log(Level::Info, format_args!("connect to {device_hex}: {e}"));
-                connect_why(&e)
-            })?;
+        let mut addr = addr;
+        let mut opened = core
+            .connect_asking_async(SocketAddr::V4(addr), id, intent, unattended, extra, Some(Arc::clone(&waiting)))
+            .await;
+        // Nothing answered where the device is listed, and its newest record names another place (the router gave
+        // it another address): asked there, once. Its pinned key answering there is what moves it in the list.
+        if let Err(e) = &opened
+            && reached_nothing(e)
+            && let Some(other) = self.p.presence.alternate(&id).filter(|other| *other != addr)
+        {
+            self.log(
+                Level::Info,
+                format_args!("connect to {device_hex}: {e}; trying where its newest record says ({other})"),
+            );
+            addr = other;
+            opened =
+                core.connect_asking_async(SocketAddr::V4(addr), id, intent, unattended, extra, Some(waiting)).await;
+        }
+        let (handle, messages) = opened.map_err(|e| {
+            self.log(Level::Info, format_args!("connect to {device_hex}: {e}"));
+            connect_why(&e)
+        })?;
         drop(core);
         if conn.queue.is_closed() {
             // The UI went away while the host was deciding: nobody is left to decode this session.

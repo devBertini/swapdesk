@@ -50,6 +50,12 @@ pub trait Presence: Send + Sync {
     /// record of that device at another address does not move it away from there, and a record of another device
     /// does not evict it from there (a forged record cannot hide or redirect a paired device).
     fn authenticated(&self, _device: DeviceId, _at: SocketAddrV4) {}
+    /// Where the newest record of `device` says it is, when that is not where it is listed (it was proven
+    /// elsewhere): somewhere to ask once a dial to the listed address reached nothing. Only the device's pinned key
+    /// answering there (`authenticated`) moves it; the record alone never does.
+    fn alternate(&self, _device: &DeviceId) -> Option<SocketAddrV4> {
+        None
+    }
 }
 
 /// No discovery: nobody is ever seen.
@@ -96,10 +102,13 @@ impl DnsSdPresence {
                         let Some(event) = discovery.next_event(Duration::from_millis(500)) else { continue };
                         let changed = {
                             let mut book = lock(&peers);
-                            match event {
+                            let listed = match event {
                                 DiscoveryEvent::Found(p) => book.found(presence_peer(&p)),
                                 DiscoveryEvent::Lost { fingerprint } => book.lost(&fingerprint),
-                            }
+                            };
+                            // A record put aside changes nothing in the list, but it is somewhere new to ask.
+                            let aside = book.take_held_changed();
+                            listed || aside
                         };
                         if changed && let Some(f) = lock(&listener).clone() {
                             f();
@@ -139,6 +148,8 @@ pub(crate) struct PeerBook {
     /// The newest record of a proven device that does not say where it was proven: it takes the place when the proof
     /// ends (the device really moved), and shows nothing before.
     held: HashMap<DeviceId, PresencePeer>,
+    /// A record was put aside, or the one aside changed, since `take_held_changed` was last asked.
+    held_changed: bool,
 }
 
 impl PeerBook {
@@ -157,7 +168,9 @@ impl PeerBook {
         let id = peer.device_id;
         if let Some(at) = self.proven.get(&id) {
             if !(peer.addrs.contains(at.ip()) && peer.session_port == at.port()) {
-                self.held.insert(id, peer);
+                if self.held.insert(id, peer.clone()).as_ref() != Some(&peer) {
+                    self.held_changed = true;
+                }
                 return false;
             }
             self.held.remove(&id);
@@ -186,15 +199,36 @@ impl PeerBook {
         }
     }
 
-    /// A contact the pinned key of `id` authenticated came from `at`. Counts only for the record now listed for `id`
-    /// at that address and port. `true` when the order of its addresses changed (the proven one now comes first).
+    /// A contact the pinned key of `id` authenticated came from `at`. Counts only for a record of `id` at that
+    /// address and port: the one now listed, or the one that waits aside (the device moved: its key answered where
+    /// its newest record says, so it is listed there from now on and the proof is there). `true` when the list
+    /// changed (the order of its addresses, or where it is).
     pub(crate) fn authenticate(&mut self, id: DeviceId, at: SocketAddrV4) -> bool {
+        let names = |p: &PresencePeer| p.addrs.contains(at.ip()) && p.session_port == at.port();
+        if self.held.get(&id).is_some_and(names) {
+            self.proven.insert(id, at);
+            let moved = self.held.remove(&id).expect("checked");
+            self.found(moved);
+            return true;
+        }
         let Some(peer) = self.peers.get_mut(&id) else { return false };
-        if !(peer.addrs.contains(at.ip()) && peer.session_port == at.port()) {
+        if !names(peer) {
             return false;
         }
         self.proven.insert(id, at);
         put_first(&mut peer.addrs, *at.ip())
+    }
+
+    /// Where the record of `id` that waits aside says it is.
+    pub(crate) fn alternate(&self, id: &DeviceId) -> Option<SocketAddrV4> {
+        let p = self.held.get(id)?;
+        p.addrs.first().map(|ip| SocketAddrV4::new(*ip, p.session_port))
+    }
+
+    /// Whether a record was put aside (or the one aside changed) since the last call: the list did not change, but
+    /// there is somewhere new to ask.
+    pub(crate) fn take_held_changed(&mut self) -> bool {
+        std::mem::take(&mut self.held_changed)
     }
 }
 
@@ -240,6 +274,10 @@ impl Presence for DnsSdPresence {
             f();
         }
     }
+
+    fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
+        lock(&self.peers).alternate(device)
+    }
 }
 
 impl Drop for DnsSdPresence {
@@ -261,6 +299,8 @@ pub struct FakePresence {
     announced: Mutex<Option<bool>>,
     /// The authenticated contacts the hub reported.
     contacts: Mutex<Vec<(DeviceId, SocketAddrV4)>>,
+    /// Where each device's newest record says it is, when the test scripts one that waits aside.
+    alternates: Mutex<HashMap<DeviceId, SocketAddrV4>>,
 }
 
 impl FakePresence {
@@ -289,6 +329,17 @@ impl FakePresence {
     pub fn contacts(&self) -> Vec<(DeviceId, SocketAddrV4)> {
         lock(&self.contacts).clone()
     }
+
+    /// Scripts a record of `device` that waits aside at `at` (`None`: none), and calls the listener.
+    pub fn set_alternate(&self, device: DeviceId, at: Option<SocketAddrV4>) {
+        match at {
+            Some(at) => lock(&self.alternates).insert(device, at),
+            None => lock(&self.alternates).remove(&device),
+        };
+        if let Some(f) = lock(&self.listener).clone() {
+            f();
+        }
+    }
 }
 
 impl Presence for FakePresence {
@@ -307,6 +358,9 @@ impl Presence for FakePresence {
     }
     fn authenticated(&self, device: DeviceId, at: SocketAddrV4) {
         lock(&self.contacts).push((device, at));
+    }
+    fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
+        lock(&self.alternates).get(device).copied()
     }
 }
 
@@ -343,6 +397,9 @@ impl Presence for FilteredPresence {
     }
     fn authenticated(&self, device: DeviceId, at: SocketAddrV4) {
         self.inner.authenticated(device, at);
+    }
+    fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
+        self.inner.alternate(device)
     }
 }
 

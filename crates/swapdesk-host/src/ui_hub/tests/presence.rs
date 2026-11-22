@@ -340,3 +340,38 @@ fn a_contact_from_an_address_the_list_does_not_hold_proves_nothing() {
     book.found(record(66, [192, 168, 1, 3], 47820));
     assert_eq!(ids(&book), vec![66], "no proof was taken, the new record replaces");
 }
+
+/// Review of 22/11/2026, A1: the router gave a paired device another address. Its record at the new address waited
+/// aside for ever (the old record never goes away: the device announces the same name from the new address), so
+/// the list kept the dead address until the service started again. A contact its pinned key authenticated at the
+/// address of that newest record now moves it there; a record alone still moves nothing.
+#[test]
+fn an_authenticated_contact_where_its_newest_record_says_moves_a_proven_device() {
+    let mut book = super::super::presence::PeerBook::default();
+    book.found(record(1, [192, 168, 1, 3], 47820));
+    book.authenticate([1; 16], at([192, 168, 1, 3], 47820));
+    assert_eq!(book.alternate(&[1; 16]), None, "nothing waits aside yet");
+    assert!(!book.take_held_changed());
+
+    assert!(!book.found(record(1, [192, 168, 1, 77], 47820)), "the list does not change on a record's word");
+    assert_eq!(book.alternate(&[1; 16]), Some(at([192, 168, 1, 77], 47820)), "but it is somewhere to ask");
+    assert!(book.take_held_changed(), "and whoever dials is told there is one");
+    assert!(!book.take_held_changed(), "once");
+    assert_eq!(book.list()[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 3)]);
+
+    // A contact from somewhere no record names still proves nothing.
+    assert!(!book.authenticate([1; 16], at([192, 168, 1, 99], 47820)));
+    assert_eq!(book.list()[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 3)]);
+
+    // The device's key answered at the new address: it is listed there, and the proof is there now.
+    assert!(book.authenticate([1; 16], at([192, 168, 1, 77], 47820)));
+    assert_eq!(book.list()[0].addrs, vec![Ipv4Addr::new(192, 168, 1, 77)]);
+    assert_eq!(book.alternate(&[1; 16]), None);
+    // So a forged record elsewhere waits aside again, and one of another key at the new address does not evict it.
+    assert!(!book.found(record(1, [192, 168, 1, 66], 47820)));
+    book.found(record(66, [192, 168, 1, 77], 47820));
+    assert_eq!(
+        book.list().iter().find(|p| p.device_id == [1; 16]).map(|p| p.addrs.clone()),
+        Some(vec![Ipv4Addr::new(192, 168, 1, 77)])
+    );
+}

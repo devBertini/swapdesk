@@ -111,6 +111,9 @@ pub enum OpenError {
     Lost,
     /// The host ended the connection (with this code) before deciding.
     Closed(ErrorCode),
+    /// No connection was made at all: nothing answered at the address with the key expected there. The host never
+    /// saw this attempt, so asking somewhere else asks nobody twice.
+    Unreachable,
 }
 
 /// What the host granted.
@@ -230,8 +233,8 @@ impl ViewerSession {
     ) -> Result<Self, OpenError> {
         let conn = tokio::time::timeout(handshake, connect_session(endpoint, identity, addr, expected))
             .await
-            .map_err(|_| OpenError::Lost)?
-            .map_err(|_| OpenError::Lost)?;
+            .map_err(|_| OpenError::Unreachable)?
+            .map_err(|_| OpenError::Unreachable)?;
         Self::open(conn, Some(device_id(&expected)), cfg).await
     }
 

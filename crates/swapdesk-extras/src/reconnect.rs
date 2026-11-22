@@ -101,9 +101,13 @@ where
                 return Ok(session);
             }
             // The host is still unreachable, or has not noticed the loss yet: try again.
-            Err(OpenError::Lost | OpenError::Timeout | OpenError::Closed(_) | OpenError::Refused(ErrorCode::Busy)) => {
-                None
-            }
+            Err(
+                OpenError::Lost
+                | OpenError::Unreachable
+                | OpenError::Timeout
+                | OpenError::Closed(_)
+                | OpenError::Refused(ErrorCode::Busy),
+            ) => None,
             Err(OpenError::Refused(code)) => Some(GiveUp::Refused(code)),
             Err(OpenError::Protocol(code)) => Some(GiveUp::Protocol(code)),
         };

@@ -48,7 +48,7 @@ struct Slot {
     /// When op 39 last asked for a sync.
     refreshed_at: Option<Instant>,
     /// What discovery showed last (address, session port, minor); `None` while it is away.
-    seen: Option<(Option<SocketAddrV4>, u16)>,
+    seen: Option<(Option<SocketAddrV4>, u16, Option<SocketAddrV4>)>,
 }
 
 #[derive(Debug, Default)]
@@ -159,7 +159,13 @@ impl Hub {
                 }
                 // Its port, for the dials that come when it is out of discovery (ACCOUNTS.md 5.2).
                 self.note_peer_port(&p.device_id, p.session_port);
-                let now_seen = (p.addrs.first().map(|ip| SocketAddrV4::new(*ip, p.session_port)), p.proto_minor);
+                // Where its newest record says it is counts too: a device the router moved is asked there (below),
+                // which is what brings it back without anybody pressing a button.
+                let now_seen = (
+                    p.addrs.first().map(|ip| SocketAddrV4::new(*ip, p.session_port)),
+                    p.proto_minor,
+                    self.p.presence.alternate(&p.device_id),
+                );
                 let slot = st.per.entry(p.device_id).or_default();
                 if slot.seen == Some(now_seen) {
                     continue;
@@ -266,8 +272,18 @@ impl Hub {
             st.dialled += 1;
         }
         let me = Arc::clone(self);
+        let other = self.p.presence.alternate(&device).map(SocketAddr::V4).filter(|other| *other != addr);
         rt.spawn(async move {
-            let result = core.sync_grants_async(addr, device).await;
+            let mut addr = addr;
+            let mut result = core.sync_grants_async(addr, device).await;
+            // Nothing answered where the device is listed and its newest record names another place: asked there,
+            // once. A forged record fails the key check there (`WrongPeer`) and changes nothing.
+            if let (Err(SyncError::Failed | SyncError::Guard(crate::service::ConnectError::Refused(_))), Some(other)) =
+                (&result, other)
+            {
+                addr = other;
+                result = core.sync_grants_async(addr, device).await;
+            }
             // The answer came over a connection the device's pinned key authenticated: it answers at `addr`.
             if let (Ok(_), SocketAddr::V4(v4)) = (&result, addr) {
                 me.p.presence.authenticated(device, v4);
