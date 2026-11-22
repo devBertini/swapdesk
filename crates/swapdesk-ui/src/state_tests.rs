@@ -3246,3 +3246,29 @@ fn a_lost_service_ends_its_sessions_and_closes_the_cards_of_its_questions() {
     s.apply(UiEvent::ServiceLost);
     assert!(s.host_session().is_none(), "the banner goes with the session");
 }
+
+/// Review of 22/11/2026, E3: after a lost link came back each side numbered its chat messages from 1 again, and a
+/// new message took the place of the old one with that number. And F-CHAT-01: the newest 500 are kept.
+#[test]
+fn a_chat_message_numbered_again_after_a_reconnect_does_not_replace_what_was_said_before() {
+    let mut s = viewer();
+    let said = |id: u32, at: u64, text: &str, read: bool| UiEvent::Chat {
+        session_id: 1,
+        message: ChatView { msg_id: id, mine: false, text: text.into(), sent_at_ms: at, read },
+    };
+    s.apply(said(1, 1_000, "primeira", false));
+    s.apply(said(2, 2_000, "segunda", false));
+    // The same message again (its read state): no new line.
+    s.apply(said(2, 2_000, "segunda", true));
+    assert_eq!(s.chat().len(), 2);
+    // The link was lost and came back: the other side numbers from 1 again.
+    s.apply(said(1, 9_000, "depois da queda", false));
+    let texts: Vec<&str> = s.chat().iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, vec!["primeira", "segunda", "depois da queda"]);
+
+    for i in 0..600u32 {
+        s.apply(said(10 + i, 10_000 + u64::from(i), "x", false));
+    }
+    assert_eq!(s.chat().len(), 500, "the newest 500 are kept");
+    assert_eq!(s.chat().last().map(|m| m.msg_id), Some(609));
+}

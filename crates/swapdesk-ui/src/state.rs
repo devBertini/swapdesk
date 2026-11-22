@@ -501,6 +501,9 @@ pub enum SwapPhase {
     Declined(SwapWhy),
 }
 
+/// How many chat messages the interface keeps of a session (F-CHAT-01): the newest.
+pub(crate) const CHAT_KEPT: usize = 500;
+
 /// A paired device's name being edited on its page: which device, and why the last save did not go through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenameDraft {
@@ -2132,15 +2135,30 @@ impl UiState {
                     message.read = true;
                     self.followups.push(Command::ChatMarkRead { session_id, up_to: id });
                 }
-                if let Some(m) = self.chat.iter_mut().find(|m| m.msg_id == id && m.mine == message.mine) {
+                // The same number from the same side at the same time is the message again (its read state changed).
+                // The same number at another time is a new message: the numbering starts again when the link was
+                // lost and came back, and must not write over what was said before.
+                if let Some(m) = self
+                    .chat
+                    .iter_mut()
+                    .find(|m| m.msg_id == id && m.mine == message.mine && m.sent_at_ms == message.sent_at_ms)
+                {
                     *m = message;
                 } else {
                     self.chat.push(message);
+                    // F-CHAT-01: the newest 500 are kept.
+                    if self.chat.len() > CHAT_KEPT {
+                        let over = self.chat.len() - CHAT_KEPT;
+                        self.chat.drain(..over);
+                    }
                 }
                 Changed::ALL
             }
             UiEvent::ChatRead { up_to, .. } => {
-                for m in self.chat.iter_mut().filter(|m| m.mine && m.msg_id <= up_to) {
+                // Only this link's messages: the ones said before a lost link came back carry numbers of their own
+                // run, and those from the last message numbered 1 on are the current run.
+                let run = self.chat.iter().rposition(|m| m.mine && m.msg_id == 1).unwrap_or(0);
+                for m in self.chat.iter_mut().skip(run).filter(|m| m.mine && m.msg_id <= up_to) {
                     m.read = true;
                 }
                 Changed::VIEWER

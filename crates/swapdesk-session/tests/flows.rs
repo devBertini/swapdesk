@@ -862,28 +862,27 @@ fn the_caps_of_a_session_answer_busy_and_free_their_slots() {
     });
 }
 
+/// Review of 22/11/2026, E4: the session refused the 501st chat message, counted over both directions, and every
+/// one after it, so the chat of a long session stopped for good. The 500 of F-CHAT-01 is how many each side keeps
+/// (the chat's own ring, `swapdesk-extras/chat::tests::at_most_500_messages_are_kept`); the session carries them all.
 #[test]
-fn at_most_500_chat_messages_per_session_on_both_sides() {
+fn a_sessions_chat_goes_on_past_500_messages_on_both_sides() {
     run_paused(async {
         let rec = Recorder::new(&[0x0301], &[]);
         let ui = TestUi::accepting(PermissionSet::VIEW);
         let mem = Mem::new(ui, registry_one(rec.clone()));
         let who = Who::new();
         pin(&mem.trust, &who, PermissionSet::VIEW);
-        // A well-behaved viewer's own session stops at the cap.
+        // The viewer's own session sends them all.
         let (s, _task) = prompted(&mem, &who, PermissionSet::VIEW).await;
-        for id in 1..=500 {
+        for id in 1..=600 {
             s.ctx().send(ChatMessage { msg_id: id, text: "oi".into(), sent_at_ms: 0 }).await.unwrap();
         }
-        assert_eq!(
-            s.ctx().send(ChatMessage { msg_id: 501, text: "oi".into(), sent_at_ms: 0 }).await,
-            Err(swapdesk_session::SendError::Busy)
-        );
-        eventually(Duration::from_secs(5), "500 messages", || rec.count() == 500).await;
+        eventually(Duration::from_secs(5), "600 messages at the host", || rec.count() == 600).await;
         s.disconnect().await;
         eventually(Duration::from_secs(1), "the host session to end", || mem.host.sessions().is_empty()).await;
 
-        // A viewer that does not stop is answered BUSY by the host, and the 501st reaches nobody.
+        // And the host takes them from a viewer of any version: none is answered BUSY.
         let rec2 = Recorder::new(&[0x0301], &[]);
         let mem = Mem::new(TestUi::accepting(PermissionSet::VIEW), registry_one(rec2.clone()));
         pin(&mem.trust, &who, PermissionSet::VIEW);
@@ -893,13 +892,7 @@ fn at_most_500_chat_messages_per_session_on_both_sides() {
         for id in 1..=501 {
             io.out.send(ChatMessage { msg_id: id, text: "oi".into(), sent_at_ms: 0 }).await.unwrap();
         }
-        let busy = next_matching(&mut io, "BUSY for the 501st message", |m| match m {
-            Message::Error(e) if e.code == ErrorCode::Busy => Some(e.clone()),
-            _ => None,
-        })
-        .await;
-        assert_eq!((busy.about_type, busy.about_id), (0x0301, 501));
-        assert_eq!(rec2.count(), 500);
+        eventually(Duration::from_secs(5), "501 messages at the host", || rec2.count() == 501).await;
     });
 }
 

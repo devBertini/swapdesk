@@ -1,6 +1,6 @@
-//! Caps per session (PROTOCOL.md 5.3 and the defaults of DECISIONS "Re-pairing"): 4 terminals, 8 transfers, 500
-//! chat messages. The session counts what flows through it; a request over a cap is answered `BUSY` and nothing is
-//! done.
+//! Caps per session (PROTOCOL.md 5.3 and the defaults of DECISIONS "Re-pairing"): 4 terminals, 8 transfers; chat
+//! messages are counted and never refused (each side keeps the newest 500). The session counts what flows through
+//! it; a request over a cap is answered `BUSY` and nothing is done.
 
 use std::collections::HashSet;
 
@@ -70,26 +70,19 @@ impl CapTracker {
                 }
                 self.transfers.insert(m.transfer_id);
             }
-            Message::ChatMessage(_) => {
-                if self.chat >= caps.max_chat {
-                    return CapVerdict::Busy;
-                }
-                self.chat += 1;
-            }
+            // Chat is counted and never refused: `max_chat` is how many messages each side keeps (the chat's own
+            // ring drops the oldest), not how many a session may ever carry. Refusing the 501st ended the chat of
+            // a long session for good, silently.
+            Message::ChatMessage(_) => self.chat = self.chat.saturating_add(1),
             _ => self.release(msg),
         }
         CapVerdict::Ok
     }
 
-    /// A message of ours goes out: counts it where it frees or uses a slot. `Busy` only for chat past its cap.
-    pub fn on_outgoing(&mut self, caps: &Caps, msg: &Message) -> CapVerdict {
+    /// A message of ours goes out: counts it where it frees or uses a slot. Never `Busy` today.
+    pub fn on_outgoing(&mut self, _caps: &Caps, msg: &Message) -> CapVerdict {
         match msg {
-            Message::ChatMessage(_) => {
-                if self.chat >= caps.max_chat {
-                    return CapVerdict::Busy;
-                }
-                self.chat += 1;
-            }
+            Message::ChatMessage(_) => self.chat = self.chat.saturating_add(1),
             Message::FileOffer(m) => {
                 self.transfers.insert(m.transfer_id);
             }
@@ -216,17 +209,17 @@ mod tests {
         assert_eq!(t.transfers(), 0);
     }
 
+    /// Review of 22/11/2026, E4: the 501st message of a session, counted over both directions, was refused, and so
+    /// was every one after it: the chat of a long session stopped for good. The 500 of F-CHAT-01 is how many are
+    /// kept, which the chat's own ring does.
     #[test]
-    fn the_501st_chat_message_is_refused() {
+    fn a_long_sessions_chat_is_never_refused_for_how_much_was_said() {
         let caps = Caps::default();
         let mut t = CapTracker::default();
-        for id in 0..250 {
+        for id in 0..600 {
             assert_eq!(t.on_incoming(&caps, &chat(id)), CapVerdict::Ok);
             assert_eq!(t.on_outgoing(&caps, &chat(id)), CapVerdict::Ok);
         }
-        assert_eq!(t.chat(), 500);
-        assert_eq!(t.on_incoming(&caps, &chat(999)), CapVerdict::Busy);
-        assert_eq!(t.on_outgoing(&caps, &chat(999)), CapVerdict::Busy);
-        assert_eq!(t.chat(), 500);
+        assert_eq!(t.chat(), 1200);
     }
 }

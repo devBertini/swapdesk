@@ -151,7 +151,7 @@ Types are `u16` values sent as varints. Field types in section 9. "V" = viewer, 
 | 0x0203 | SwapDecline | either | `request_id: u32`, `code: ErrorCode` | `DECLINED`, `TIMEOUT`, `NOBODY_PRESENT`, `NOT_PERMITTED`, `BUSY` |
 | 0x0204 | SwapCancel | either | `request_id: u32` | |
 | 0x0205 | SwapArmed | either | `request_id: u32` | the future host is ready for the new connection |
-| 0x0301 | ChatMessage | both | `msg_id: u32`, `text: str(4096)`, `sent_at_ms: u64` (Unix ms) | kept in memory only, at most 500 per session (GUESS) |
+| 0x0301 | ChatMessage | both | `msg_id: u32`, `text: str(4096)`, `sent_at_ms: u64` (Unix ms) | kept in memory only; each side keeps the newest 500 (GUESS), and a session carries any number (a peer of 1.0 or 1.1.0 refuses the 501st with `BUSY`) |
 | 0x0302 | ChatRead | both | `up_to: u32` | |
 | 0x0303 | ClipboardSync | both | `enabled: bool` | each side's own switch |
 | 0x0304 | ClipboardSkipped | both | `reason: ClipSkip {Concealed, TooLarge, Unsupported}` | the item itself was not sent |
