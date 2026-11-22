@@ -157,6 +157,9 @@ fn playout<S: AudioSink>(
     let tick = Duration::from_micros(FRAME_US);
     let mut next = epoch + tick;
     let mut started = false;
+    // A device that could not be opened, or went away, is tried again from this moment (the sound of a session must
+    // not end because headphones were unplugged, or because no output existed when the first frame came).
+    let mut open_from = Instant::now();
     loop {
         let wait = next.saturating_duration_since(Instant::now());
         match rx.recv_timeout(wait) {
@@ -175,19 +178,39 @@ fn playout<S: AudioSink>(
         while next <= now && done < CATCH_UP {
             if let Ok(Some(frame)) = receiver.pop(micros_since(epoch, now)) {
                 if !started {
+                    if now < open_from {
+                        // No device for now: the frame is not played.
+                        next += tick;
+                        done += 1;
+                        continue;
+                    }
                     if sink.start().is_err() {
-                        return;
+                        open_from = Instant::now() + SINK_RETRY;
+                        next += tick;
+                        done += 1;
+                        continue;
                     }
                     started = true;
                     if sink.device_paced() {
                         // From here the device's clock leads: prime its queue and hand over.
-                        if sink.prime().is_err() {
-                            return;
-                        }
-                        emit(&mut sink, frame, counters);
-                        device_paced_loop(&rx, &mut sink, &mut receiver, epoch, counters, stop);
+                        let ended = match sink.prime() {
+                            Ok(()) => {
+                                emit(&mut sink, frame, counters);
+                                device_paced_loop(&rx, &mut sink, &mut receiver, epoch, counters, stop)
+                            }
+                            Err(_) => Paced::DeviceGone,
+                        };
                         sink.stop();
-                        return;
+                        match ended {
+                            Paced::Stopped => return,
+                            // The device went away or is not the default one any more: opened again with the
+                            // next frame (at once for a new default, after a pause for one that failed).
+                            Paced::DeviceGone => open_from = Instant::now() + SINK_RETRY,
+                            Paced::DeviceChanged => open_from = Instant::now(),
+                        }
+                        started = false;
+                        next = Instant::now();
+                        break;
                     }
                 }
                 emit(&mut sink, frame, counters);
@@ -205,6 +228,19 @@ fn playout<S: AudioSink>(
     }
 }
 
+/// How long after an output device failed (it could not be opened, it went away) it is opened again.
+const SINK_RETRY: Duration = Duration::from_secs(1);
+
+/// Why the device-paced loop ended.
+enum Paced {
+    /// The player is stopping.
+    Stopped,
+    /// The device failed: unplugged, disabled, taken by the system.
+    DeviceGone,
+    /// The system's default output is another device now.
+    DeviceChanged,
+}
+
 /// The device sets the pace: each wake-up takes the datagrams that arrived and pulls as many frames as the device
 /// queue has room for.
 fn device_paced_loop<S: AudioSink>(
@@ -214,20 +250,23 @@ fn device_paced_loop<S: AudioSink>(
     epoch: Instant,
     counters: &Counters,
     stop: &AtomicBool,
-) {
+) -> Paced {
     loop {
-        let Ok(room) = sink.wait_room(DEVICE_WAIT) else { return };
+        let Ok(room) = sink.wait_room(DEVICE_WAIT) else { return Paced::DeviceGone };
         loop {
             match rx.try_recv() {
                 Ok((at_us, datagram)) => {
                     let _ = receiver.on_datagram(at_us, &datagram);
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => return Paced::Stopped,
             }
         }
         if stop.load(Ordering::SeqCst) {
-            return;
+            return Paced::Stopped;
+        }
+        if sink.device_changed() {
+            return Paced::DeviceChanged;
         }
         let now = micros_since(epoch, Instant::now());
         for _ in 0..room {
@@ -380,6 +419,106 @@ mod tests {
         drop(blocks);
         assert_eq!(player.overrun_frames(), 0);
         drop(player);
+    }
+
+    /// A device-paced sink that fails as scripted: its first start, or its wait after some wake-ups (the device
+    /// went away), or it says the default device changed.
+    struct Flaky {
+        log: Arc<Mutex<Vec<AudioBlock>>>,
+        starts: Arc<AtomicU32>,
+        fail_first_start: bool,
+        /// Wake-ups of the first run before the device goes (0: never).
+        gone_after: u32,
+        /// Wake-ups of the first run before the default device changes (0: never).
+        changed_after: u32,
+        wakes: u32,
+    }
+
+    impl AudioSink for Flaky {
+        fn start(&mut self) -> PlatformResult<()> {
+            let n = self.starts.fetch_add(1, Ordering::SeqCst);
+            self.wakes = 0;
+            if n == 0 && self.fail_first_start {
+                return Err(swapdesk_platform::PlatformError {
+                    kind: swapdesk_platform::ErrorKind::Unavailable,
+                    op: "start",
+                    os_code: None,
+                    detail: "no output device".into(),
+                });
+            }
+            Ok(())
+        }
+        fn write(&mut self, block: &AudioBlock) -> PlatformResult<()> {
+            self.log.lock().unwrap().push(block.clone());
+            Ok(())
+        }
+        fn queued(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn stop(&mut self) {}
+        fn device_paced(&self) -> bool {
+            true
+        }
+        fn wait_room(&mut self, timeout: Duration) -> PlatformResult<usize> {
+            std::thread::sleep(Duration::from_millis(10).min(timeout));
+            self.wakes += 1;
+            let first_run = self.starts.load(Ordering::SeqCst) == 1;
+            if first_run && self.gone_after != 0 && self.wakes > self.gone_after {
+                return Err(swapdesk_platform::PlatformError {
+                    kind: swapdesk_platform::ErrorKind::AccessLost,
+                    op: "wait_room",
+                    os_code: None,
+                    detail: "the device was unplugged".into(),
+                });
+            }
+            Ok(1)
+        }
+        fn device_changed(&mut self) -> bool {
+            self.starts.load(Ordering::SeqCst) == 1 && self.changed_after != 0 && self.wakes > self.changed_after
+        }
+    }
+
+    /// Plays three seconds of tone through a `Flaky` sink; the frames played and how often the device was opened.
+    fn play_through(fail_first_start: bool, gone_after: u32, changed_after: u32) -> (usize, u32) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let starts = Arc::new(AtomicU32::new(0));
+        let (l, s) = (Arc::clone(&log), Arc::clone(&starts));
+        let player = AudioPlayer::start_with(Arc::new(AtomicU32::new(0)), move || Flaky {
+            log: l,
+            starts: s,
+            fail_first_start,
+            gone_after,
+            changed_after,
+            wakes: 0,
+        });
+        for d in datagrams(300) {
+            player.push(d);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        drop(player);
+        let played = log.lock().unwrap().len();
+        (played, starts.load(Ordering::SeqCst))
+    }
+
+    /// Review of 22/11/2026, C3: the sound of the viewer ended for good when its output device went away (unplugged
+    /// headphones, a Bluetooth set that left), and never followed a new default device. Three ways it used to die.
+    #[test]
+    fn the_sound_goes_on_after_the_output_device_goes_changes_or_was_not_there_at_first() {
+        // The device goes away after half a second: opened again after the pause, and the sound goes on.
+        let (played, starts) = play_through(false, 50, 0);
+        assert_eq!(starts, 2, "the device is opened again");
+        assert!(played > 100, "the sound goes on after the device came back: {played} frames");
+
+        // The default device changes: the new one is opened at once, with hardly a frame lost.
+        let (played, starts) = play_through(false, 0, 50);
+        assert_eq!(starts, 2, "the new default device is opened");
+        assert!(played > 220, "hardly anything is lost on a change of device: {played} frames");
+
+        // No device when the first frame came: tried again, and the sound starts when one is there.
+        let (played, starts) = play_through(true, 0, 0);
+        assert_eq!(starts, 2, "the device is tried again");
+        assert!(played > 100, "the sound starts once a device is there: {played} frames");
     }
 
     #[test]

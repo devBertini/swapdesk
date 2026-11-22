@@ -16,7 +16,7 @@
 //!   and the caller reverts with `AvRevertMmThreadCharacteristics` when done. The default tasks include `Audio` and
 //!   `Pro Audio` (https://learn.microsoft.com/en-us/windows/win32/procthread/multimedia-class-scheduler-service).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swapdesk_platform::{AudioBlock, AudioSink, ErrorKind, Result, SinkCounts};
 use windows::Win32::Foundation::HANDLE;
@@ -28,7 +28,7 @@ use windows::Win32::System::Threading::{AvRevertMmThreadCharacteristics, AvSetMm
 use windows::core::w;
 
 use crate::com::{
-    ComGuard, Event, activate_client, default_render_device, failure, os_error, wave_format_48k_stereo_f32,
+    ComGuard, Event, activate_client, default_render_device, device_id, failure, os_error, wave_format_48k_stereo_f32,
 };
 
 /// The buffer asked of the engine, in 100 ns units (30 ms). The engine raises it to its own minimum when that is
@@ -93,10 +93,17 @@ impl Drop for Open {
     }
 }
 
+/// How often the sink looks whether the system's default output is still the device it plays on.
+const DEVICE_POLL: Duration = Duration::from_secs(1);
+
 #[derive(Default)]
 pub struct WasapiRenderSink {
     open: Option<Open>,
     stats: RenderStats,
+    /// The id of the device the stream was opened on.
+    device: Option<Vec<u16>>,
+    /// When the default device was last looked at.
+    last_poll: Option<Instant>,
 }
 
 impl WasapiRenderSink {
@@ -156,6 +163,10 @@ impl AudioSink for WasapiRenderSink {
         // The thread that opens the stream is the one that serves it.
         let mmcss = Mmcss::register();
         let device = default_render_device()?;
+        // Which device this is, to tell later that the default became another one (a failed read just means the
+        // sink never says so).
+        self.device = device_id(&device).ok();
+        self.last_poll = Some(Instant::now());
         let client = activate_client(&device)?;
         let fmt = wave_format_48k_stereo_f32();
         let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
@@ -222,5 +233,15 @@ impl AudioSink for WasapiRenderSink {
 
     fn counts(&self) -> SinkCounts {
         SinkCounts { underruns: self.stats.underruns, overrun_frames: self.stats.dropped_frames }
+    }
+
+    /// Looked at once a second: the system's default output is not the device this stream was opened on.
+    fn device_changed(&mut self) -> bool {
+        if self.open.is_none() || self.last_poll.is_some_and(|t| t.elapsed() < DEVICE_POLL) {
+            return false;
+        }
+        self.last_poll = Some(Instant::now());
+        let Some(current) = self.device.as_ref() else { return false };
+        default_render_device().and_then(|d| device_id(&d)).is_ok_and(|id| &id != current)
     }
 }

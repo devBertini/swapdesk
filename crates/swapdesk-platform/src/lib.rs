@@ -325,6 +325,12 @@ pub trait AudioSink {
     fn counts(&self) -> SinkCounts {
         SinkCounts::default()
     }
+
+    /// True when the device the sink plays on is not the one it should play on any more (the system's default
+    /// output changed): the caller stops the sink and starts it again. The default never says so.
+    fn device_changed(&mut self) -> bool {
+        false
+    }
 }
 
 /// What an audio sink counted since `start`.
