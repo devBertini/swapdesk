@@ -193,6 +193,34 @@ fn a_disk_that_cannot_say_whether_a_name_is_taken_fails_the_file_at_once_instead
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Review of 22/11/2026: since 1.0 a finished file listed its whole folder to compare names: 56 ms per file in a
+/// folder of 2000 against 17 µs for a question, under the engine's lock, and on macOS a folder read needs the "Files
+/// and Folders" permission that writing a file does not (a Mac without it held every received file at its end for
+/// as long as nobody answered the system). Finishing asks the disk about the forms of the name alone, whatever the
+/// folder holds.
+#[test]
+fn finishing_a_file_never_reads_its_folder_and_asks_the_disk_a_few_questions_whatever_it_holds() {
+    let dir = temp("no-listing");
+    for i in 0..300 {
+        std::fs::write(dir.join(format!("other-{i}.bin")), b"x").unwrap();
+    }
+    let probe = Probe::new();
+    let mut e = host(Arc::clone(&probe), &dir);
+    let data = vec![9u8; 2000];
+    offer(&mut e, "relat\u{f3}rio.bin", &data);
+    e.on_data(1, 0, &data);
+    let before = probe.calls().len();
+    let outs = e.on_message(Message::FileDone(FileDone { transfer_id: 1, sha256: sha(&data) }));
+
+    assert!(outs.iter().any(|o| matches!(o, Out::Event(Event::Received { id: 1, .. }))), "{outs:?}");
+    let finish = probe.calls()[before..].to_vec();
+    assert!(!finish.contains(&"list_dir"), "the folder was read to finish one file: {finish:?}");
+    let asked = finish.iter().filter(|c| **c == "stat").count();
+    assert!(asked <= 3, "a name is asked about as given, composed and decomposed, and no more: {asked} in {finish:?}");
+    assert_eq!(std::fs::read(dir.join("relat\u{f3}rio.bin")).unwrap(), data);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_successful_receive_and_a_listing_go_through_the_trait_only() {
     let dir = temp("record");

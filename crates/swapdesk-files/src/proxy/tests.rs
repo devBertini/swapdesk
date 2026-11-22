@@ -157,11 +157,12 @@ fn a_file_the_viewer_saves_carries_the_mark_of_the_web() {
     let _ = (std::fs::remove_dir_all(&base), std::fs::remove_dir_all(&home));
 }
 
-/// Review of 22/11/2026, F7: the receiver compares the offered name with the folder's names under Unicode
-/// composition and letter case ([`crate::collide`]), but it reads them with `list_dir`, which the viewer's own disk
+/// Review of 22/11/2026, F7: the receiver compared the offered name with the folder's names under Unicode
+/// composition and letter case ([`crate::collide`]), but it read them with `list_dir`, which the viewer's own disk
 /// (the UI's token roots) refuses. Only the exact name was asked about, so on Windows a file `relato\u{301}rio.txt`
-/// from a Mac landed beside `relat\u{f3}rio.txt` as a second file that looks the same. The UI now answers the `Stat`
-/// of a missing name in a receive folder for its twin, and still lists nothing.
+/// from a Mac landed beside `relat\u{f3}rio.txt` as a second file that looks the same. The receiver now asks the
+/// disk about the name in each form it can be written in, which the UI answers, and still lists nothing; letter
+/// case is the disk's own rule.
 #[test]
 fn a_download_into_the_viewers_folder_takes_a_new_name_beside_a_twin_under_composition_or_case() {
     let base = temp("twins");
@@ -178,12 +179,12 @@ fn a_download_into_the_viewers_folder_takes_a_new_name_beside_a_twin_under_compo
     assert_eq!(fs.list_dir(&dir, 10).err(), Some(ErrorCode::InvalidName), "the service still lists nothing");
     let body = b"theirs".to_vec();
     let sha: [u8; 32] = digest(&SHA256, &body).as_ref().try_into().unwrap();
-    for (offered, expected) in [
-        ("foto.jpg", "foto (2).jpg"),
-        ("a.txt", "a (2).txt"),
-        ("new.txt", "new.txt"),
-        ("relato\u{301}rio.txt", "relato\u{301}rio (2).txt"),
-    ] {
+    let mut pairs =
+        vec![("a.txt", "a (2).txt"), ("new.txt", "new.txt"), ("relato\u{301}rio.txt", "relato\u{301}rio (2).txt")];
+    if crate::recv::tests::folds_case(&recv) {
+        pairs.push(("foto.jpg", "foto (2).jpg"));
+    }
+    for (offered, expected) in pairs {
         let mut inc = Incoming::open_with(Arc::clone(&fs), &dir, offered, body.len() as u64, 7).unwrap();
         inc.write(0, &body).unwrap();
         assert_eq!(inc.finish(&sha).unwrap(), dir.join(expected), "{offered}");

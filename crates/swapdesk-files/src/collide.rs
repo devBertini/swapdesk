@@ -4,7 +4,11 @@
 //! Why: macOS writes names decomposed (NFD: `e` + U+0301) while Windows and most senders write them composed (NFC:
 //! U+00E9). NTFS keeps both as two files that look the same; APFS and NTFS compare letter case loosely by default.
 //! A receiver that only asked the file system "does this exact name exist?" would show two identical names on one
-//! system and overwrite on the other. The receiver compares [`name_key`]s instead and never replaces a file.
+//! system and overwrite on the other. The receiver never replaces a file, and asks the disk about a name in each
+//! form it can be written in ([`forms`]: as given, composed, decomposed); letter case is the disk's own rule (NTFS
+//! and APFS find a name in any case). It does not read the folder to compare [`name_key`]s: that cost one listing
+//! per finished file, minutes for a folder of thousands, and on macOS a folder read needs the "Files and Folders"
+//! permission that writing a file there does not (review of 22/11/2026).
 //!
 //! Limit (no normalization crate is a dependency, a new one needs the owner's yes): [`compose`] is canonical
 //! composition for the Latin letters with the marks in `MARKS` (grave, acute, circumflex, tilde, macron, breve, dot
@@ -75,6 +79,63 @@ pub fn compose(name: &str) -> String {
         out.push(c);
     }
     out.into_iter().collect()
+}
+
+/// The base letter and the combining mark of a composed letter of `MARKS`.
+fn decompose_letter(c: char) -> Option<(char, char)> {
+    MARKS.iter().find_map(|(mark, pairs)| {
+        let chars: Vec<char> = pairs.chars().collect();
+        chars.chunks(2).find(|p| p[1] == c).map(|p| (p[0], *mark))
+    })
+}
+
+/// The name with each letter [`compose`] would make written as its base letter and mark, and each Hangul syllable
+/// as its jamo (NFD for those): the form macOS wrote names in on HFS+, and still gives to names that came from it.
+pub fn decompose(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 8);
+    for c in name.chars() {
+        let s = c as u32;
+        if (HANGUL_S_BASE..HANGUL_S_BASE + HANGUL_S_COUNT).contains(&s) {
+            let i = s - HANGUL_S_BASE;
+            let (l, v, t) =
+                (i / (HANGUL_V_COUNT * HANGUL_T_COUNT), (i / HANGUL_T_COUNT) % HANGUL_V_COUNT, i % HANGUL_T_COUNT);
+            out.extend(char::from_u32(HANGUL_L_BASE + l));
+            out.extend(char::from_u32(HANGUL_V_BASE + v));
+            if t != 0 {
+                out.extend(char::from_u32(HANGUL_T_BASE + t));
+            }
+        } else if let Some((base, mark)) = decompose_letter(c) {
+            out.push(base);
+            out.push(mark);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The ways `name` can be written and still be the same file: as given, composed and decomposed, each once. A name
+/// with nothing to compose or decompose (most names) has one form, so asking a disk about every form costs one
+/// question; any other name costs two or three, whatever the folder holds.
+pub fn forms(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    for other in [compose(name), decompose(name)] {
+        if !out.contains(&other) {
+            out.push(other);
+        }
+    }
+    out
+}
+
+/// Whether a disk holds `name` in any of its [`forms`]. `there` asks the disk about one exact name; its first error
+/// ends the question and is returned.
+pub fn held_in_any_form<E>(name: &str, there: impl Fn(&str) -> Result<bool, E>) -> Result<bool, E> {
+    for form in forms(name) {
+        if there(&form)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What two names must have in common to be the same file: composed, then lower-cased.
@@ -154,6 +215,39 @@ mod tests {
         // U+D55C from U+1112 U+1161 U+11AB (macOS writes Korean names decomposed).
         assert_eq!(compose("\u{1112}\u{1161}\u{11ab}"), "\u{d55c}");
         assert!(same_name("\u{d55c}\u{ae00}.txt", "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt"));
+    }
+
+    /// Review of 22/11/2026: the forms a disk is asked about instead of reading the folder.
+    #[test]
+    fn a_name_has_one_form_unless_it_can_be_composed_or_decomposed() {
+        assert_eq!(decompose(NFC), NFD);
+        assert_eq!(decompose(NFD), NFD);
+        assert_eq!(decompose("\u{d55c}\u{ae00}"), "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}");
+        assert_eq!(forms("report (2).txt"), ["report (2).txt"], "nothing to compose: one question");
+        assert_eq!(forms(NFC), [NFC, NFD]);
+        assert_eq!(forms(NFD), [NFD, NFC]);
+        // Half composed: as given, all composed, all decomposed.
+        let mixed = "relat\u{f3}rio c\u{327}a\u{303}o.pdf";
+        assert_eq!(forms(mixed), [mixed, NFC, NFD]);
+    }
+
+    #[test]
+    fn a_disk_is_asked_about_each_form_until_one_is_there_and_stops_at_an_error() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let disk = |holds: &'static str| {
+            let asked = &asked;
+            move |n: &str| {
+                asked.borrow_mut().push(n.to_string());
+                Ok::<_, ()>(n == holds)
+            }
+        };
+        assert_eq!(held_in_any_form(NFC, disk(NFD)), Ok(true), "the Mac's form of the name is there");
+        assert_eq!(*asked.borrow(), [NFC, NFD]);
+        asked.borrow_mut().clear();
+        assert_eq!(held_in_any_form(NFD, disk(NFD)), Ok(true));
+        assert_eq!(*asked.borrow(), [NFD], "found as given: nothing else is asked");
+        assert_eq!(held_in_any_form("a.txt", disk("b.txt")), Ok(false));
+        assert_eq!(held_in_any_form(NFC, |_| Err::<bool, _>("gone")), Err("gone"));
     }
 
     #[test]

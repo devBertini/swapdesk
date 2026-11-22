@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ring::digest::{Context, SHA256, digest};
 use swapdesk_proto::ErrorCode;
 
-use crate::collide::unique_name;
+use crate::collide::{held_in_any_form, unique_name};
 use crate::disk::{Fs, Kind, MAX_IO};
 use crate::local::LocalFs;
 use crate::name::validate_name;
@@ -265,22 +265,27 @@ impl Incoming {
         self.open = false;
     }
 
-    /// `name`, or `stem (n).ext` for the first n from 2 that is not the same file as one in the folder (same after
-    /// Unicode composition and letter case: [`crate::collide`]). A name the folder read could not list (more entries
-    /// than it returns, or a disk that lists nothing: the viewer's own, which answers that question for a twin under
-    /// composition and case instead, see [`crate::FsServer`]) is still caught by asking the disk for the exact name.
-    /// `None` when the disk cannot answer
-    /// that question (only "nothing is there" makes a name free; an error is not an answer, and asking the next name
-    /// would fail the same way) or every number is taken.
+    /// `name`, or `stem (n).ext` for the first n from 2 that the folder does not hold. The disk is asked about each
+    /// candidate by name, in every form it can be written in ([`crate::collide::forms`]: as given, composed,
+    /// decomposed), and answers for letter case by its own rule (NTFS and APFS find a name in any case).
+    ///
+    /// The folder itself is never read (review of 22/11/2026). Since 1.0 every finished file listed its whole folder
+    /// to compare names: a folder of 2000 files cost 56 ms per file against 17 µs for the question (a minute for
+    /// the folder, seven for 5000 files), under the engine's lock, and past 2000 entries the listing was cut short
+    /// anyway. On macOS a folder read also needs the "Files and Folders" permission, which writing the file does
+    /// not: without it every received file stayed at its end while macOS waited for someone to answer.
+    ///
+    /// `None` when the disk cannot answer (only "nothing is there" makes a name free; an error is not an answer,
+    /// and asking the next name would fail the same way) or every number is taken.
     fn unique_target(&self) -> Option<String> {
-        let listed = self.fs.list_dir(&self.dir, u32::MAX).map(|r| r.entries).unwrap_or_default();
-        let taken = |n: &str| self.fs.stat(&self.dir.join(n), false).map(|s| s.is_some());
-        unique_name(&self.name, listed.iter().map(|e| e.name.as_str()), taken).ok().flatten()
+        let there = |n: &str| self.fs.stat(&self.dir.join(n), false).map(|s| s.is_some());
+        let taken = |n: &str| held_in_any_form(n, there);
+        unique_name(&self.name, std::iter::empty(), taken).ok().flatten()
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn temp_dir(tag: &str) -> PathBuf {
@@ -335,18 +340,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Whether this disk finds a name in another letter case (NTFS and APFS do; the Linux of the CI does not, and
+    /// there two such names are two files by the disk's own rule).
+    pub(crate) fn folds_case(dir: &Path) -> bool {
+        std::fs::write(dir.join("Case-Probe.X"), b"").unwrap();
+        let folds = dir.join("case-probe.x").exists();
+        std::fs::remove_file(dir.join("Case-Probe.X")).unwrap();
+        folds
+    }
+
     #[test]
     fn a_name_that_differs_by_normalization_or_case_gets_a_new_name() {
         let dir = temp_dir("collide");
         std::fs::write(dir.join("relat\u{f3}rio.txt"), b"mine").unwrap();
+        // The form a Mac may hold a name in, met by the composed one from Windows.
+        std::fs::write(dir.join("ac\u{327}a\u{303}o.txt"), b"mine").unwrap();
         std::fs::write(dir.join("Foto.JPG"), b"mine").unwrap();
-        for (offered, expected) in [("relato\u{301}rio.txt", "relato\u{301}rio (2).txt"), ("foto.jpg", "foto (2).jpg")]
-        {
+        let mut pairs = vec![
+            ("relato\u{301}rio.txt", "relato\u{301}rio (2).txt"),
+            ("a\u{e7}\u{e3}o.txt", "a\u{e7}\u{e3}o (2).txt"),
+        ];
+        if folds_case(&dir) {
+            pairs.push(("foto.jpg", "foto (2).jpg"));
+        }
+        for (offered, expected) in pairs {
             let mut rx = Incoming::open(&dir, offered, 3, 1).unwrap();
             rx.write(0, b"abc").unwrap();
             assert_eq!(rx.finish(&sha(b"abc")).unwrap(), dir.join(expected));
         }
         assert_eq!(std::fs::read(dir.join("relat\u{f3}rio.txt")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(dir.join("ac\u{327}a\u{303}o.txt")).unwrap(), b"mine");
         assert_eq!(std::fs::read(dir.join("Foto.JPG")).unwrap(), b"mine");
         let _ = std::fs::remove_dir_all(&dir);
     }

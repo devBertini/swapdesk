@@ -679,28 +679,6 @@ impl FsServer {
         }
     }
 
-    /// The UI's token roots: the entry of the folder that holds `real` (the path `v` names, which nothing holds) whose
-    /// name is the same file as `real`'s under Unicode composition and letter case ([`crate::collide`]). A receiver
-    /// compares the offered name with the folder's names that way, but the service may not list the viewer's folders,
-    /// so the twin is looked for here, in the process that owns the disk, and the service only hears that the name
-    /// is taken. Without it NTFS takes `relato\u{301}rio.txt` from a Mac beside `relat\u{f3}rio.txt` as a second file
-    /// that looks the same. Only names below a token are looked at, never the token's own folder or what is above
-    /// it; a folder that cannot be read has no twin. It runs for every finished download (the free name is always a
-    /// miss), so it reads the names alone, without a stat per entry.
-    fn twin_in_receive_folder(&self, v: &str, real: &Path, follow: bool) -> Option<FsStat> {
-        if !matches!(self.roots, Roots::Tokens(_)) || components(v).ok()?.len() < 2 {
-            return None;
-        }
-        let name = real.file_name()?.to_str()?;
-        let parent = real.parent()?;
-        let key = crate::collide::name_key(name);
-        let twin = std::fs::read_dir(parent).ok()?.flatten().find_map(|e| {
-            let n = e.file_name().into_string().ok()?;
-            (n != name && crate::collide::name_key(&n) == key).then_some(n)
-        })?;
-        self.fs.stat(&parent.join(twin), follow).ok().flatten()
-    }
-
     /// Only the host side lists folders.
     fn listable(&self, v: &str) -> Result<PathBuf, ErrorCode> {
         match &self.roots {
@@ -825,13 +803,11 @@ impl FsServer {
                 })
             }
             FsCall::Stat { path, follow } => {
-                // The UI answers `stat` for its receive folders only (the name a file would get).
+                // The UI answers `stat` for its receive folders only (the name a file would get). A receiver asks
+                // about a name in each form it can be written in (`crate::collide::forms`), so nothing here reads
+                // the folder for a name that only looks the same.
                 let p = self.folder(&path.0)?;
-                let found = match fs.stat(&p, follow)? {
-                    None => self.twin_in_receive_folder(&path.0, &p, follow),
-                    there => there,
-                };
-                Ok(FsAnswer::Stat(found.as_ref().map(stat_view)))
+                Ok(FsAnswer::Stat(fs.stat(&p, follow)?.as_ref().map(stat_view)))
             }
             FsCall::OpenRead { path } => {
                 let h = fs.open_read(&self.readable(&path.0)?)?;
