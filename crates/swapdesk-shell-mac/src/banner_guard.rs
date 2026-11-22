@@ -19,7 +19,7 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -55,6 +55,10 @@ struct Shared {
     port: AtomicPtr<CFMachPort>,
     /// This process: what it posts is the controller's input.
     pid: i64,
+    /// Mouse events seen over the banner: the controller's (left alone) and a real device's (the banner's). The
+    /// proof on a live Mac reads them: a controller's pointer over the banner must count in the first only.
+    posted_over: AtomicU64,
+    real_over: AtomicU64,
 }
 
 /// Whether this process posted the event (the host's input sink): by the process the event came from, and by the
@@ -97,7 +101,12 @@ unsafe extern "C-unwind" fn tap_callback(
     let at = CGEvent::location(Some(ev));
     let rect = *lock(&shared.rect);
     let inside = rect.is_some_and(|r| crate::model::banner_contains(r, at.x, at.y));
-    let verdict = lock(&shared.guard).on_event(what, posted_here(shared, ev), inside);
+    let posted = posted_here(shared, ev);
+    if inside {
+        let count = if posted { &shared.posted_over } else { &shared.real_over };
+        count.fetch_add(1, Ordering::Relaxed);
+    }
+    let verdict = lock(&shared.guard).on_event(what, posted, inside);
     let pointer = match verdict {
         Verdict::Pass => None,
         Verdict::Hover => Some(Pointer::Hover),
@@ -179,6 +188,8 @@ impl BannerGuard {
             guard: Mutex::new(Guard::default()),
             port: AtomicPtr::new(std::ptr::null_mut()),
             pid: i64::from(std::process::id()),
+            posted_over: AtomicU64::new(0),
+            real_over: AtomicU64::new(0),
         });
         let (tx, rx) = sync_channel::<Option<RunLoopHandle>>(1);
         let on_thread = Arc::clone(&shared);
@@ -200,6 +211,11 @@ impl BannerGuard {
     /// Where the banner is now (see `model::banner_cg_rect`), or `None` when it is not on the screen.
     pub fn set_rect(&self, rect: Option<[f64; 4]>) {
         *lock(&self.shared.rect) = rect;
+    }
+
+    /// Mouse events seen over the banner so far: the controller's, and a real device's.
+    pub fn counts(&self) -> (u64, u64) {
+        (self.shared.posted_over.load(Ordering::Relaxed), self.shared.real_over.load(Ordering::Relaxed))
     }
 }
 

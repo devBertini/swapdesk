@@ -587,6 +587,11 @@ impl CanvasView {
         self.ivars().picked.take()
     }
 
+    /// The control the pointer is over, as the last hover left it (development proofs).
+    pub fn hovered(&self) -> Option<ControlId> {
+        self.ivars().ix.borrow().hover
+    }
+
     /// The real pointer on the host banner, as its guard reports it (the banner's panel takes no mouse events of
     /// its own): `at` in this view's points from its top left. A press and a release on the same control are a
     /// click, as in every window.

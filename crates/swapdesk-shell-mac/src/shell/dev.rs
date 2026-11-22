@@ -316,6 +316,20 @@ pub fn dev_state() -> String {
             None => out.push_str("viewer_session=none\n"),
         }
         let _ = writeln!(out, "host_session={}", state.host_session().is_some());
+        // The banner is for the person at this Mac alone: whether its guard runs, whether the panel lets the mouse
+        // through, and whose mouse events were seen over it (the controller's, a real device's).
+        if let Some(b) = s.banner.borrow().as_ref() {
+            let guard = s.banner_guard.borrow();
+            let (posted, real) = guard.as_ref().map_or((0, 0), |g| g.counts());
+            let _ = writeln!(
+                out,
+                "banner.guard={} ignores_mouse={} window={} posted_over={posted} real_over={real} hover={:?}",
+                guard.is_some(),
+                b.panel.ignoresMouseEvents(),
+                b.panel.windowNumber(),
+                b.canvas.hovered(),
+            );
+        }
         let _ = writeln!(out, "pointer={}", pointer_name());
         for (name, kind) in [("main", WindowKind::Main), ("viewer", WindowKind::Viewer), ("banner", WindowKind::Banner)]
         {
