@@ -3194,3 +3194,31 @@ fn the_page_of_a_device_in_session_leads_back_to_the_session_and_never_starts_an
     let page = ids(&s);
     assert!(page.contains(&ControlId::Control) && !page.contains(&ControlId::SessionShow), "{page:?}");
 }
+
+/// Review of 22/11/2026, H3: the three switches of the session bar that the next session starts with on (fit to
+/// the window, capture the system's shortcuts, share the clipboard) kept what the last session had left, while the
+/// pipeline and the service started the new session with them on: the clipboard switch showed off while the
+/// clipboard was shared.
+#[test]
+fn a_new_session_starts_with_the_bars_switches_as_every_session_starts() {
+    let mut s = Scenario::Visualizador.prepared_state();
+    let device = s.viewer_session().unwrap().device_id.clone();
+    for id in [ControlId::TbFit, ControlId::TbGrab, ControlId::ClipToggle] {
+        s.activate(id);
+    }
+    assert_eq!((s.fit(), s.grab_on(), s.clipboard_on()), (false, false, false), "turned off in this session");
+    s.apply(UiEvent::Session { session_id: 1, device_id: device, state: SessionState::Ended { reason: None } });
+    assert_eq!((s.fit(), s.grab_on(), s.clipboard_on()), (true, true, true), "the next session starts with them on");
+}
+
+/// Review of 22/11/2026, H10: a "did not accept the swap" card left open when its session ended came back over the
+/// picture of the next session.
+#[test]
+fn a_declined_swap_card_goes_with_its_session() {
+    let mut s = viewer();
+    let device = s.viewer_session().unwrap().device_id.clone();
+    s.apply(UiEvent::Swap { session_id: 1, event: SwapEvent::Declined { why: SwapWhy::Declined } });
+    assert!(s.swap().is_some());
+    s.apply(UiEvent::Session { session_id: 1, device_id: device, state: SessionState::Ended { reason: None } });
+    assert!(s.swap().is_none(), "nothing of that session's swap is left for the next one");
+}

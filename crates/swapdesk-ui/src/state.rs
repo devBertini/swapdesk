@@ -2357,6 +2357,13 @@ impl UiState {
             }
             if self.viewer_session().is_none() {
                 self.view_only = false;
+                // The next session starts as every session does (the picture fitted to the window, the system's
+                // shortcuts captured, the clipboard shared): the viewer's pipeline and the service start it so,
+                // and a switch left as the last session had it would show the opposite of what is true (a
+                // clipboard shown as off while it is shared).
+                self.fit = true;
+                self.grab_on = true;
+                self.clipboard_on = true;
                 self.fullscreen = false;
                 self.bar_shown = false;
                 self.bar_collapsed = false;
@@ -2371,9 +2378,11 @@ impl UiState {
                 self.term_id = None;
                 self.term = TermPhase::Idle;
                 self.consent_wait = None;
+                // The swap cards of the viewer's window go with its session: a "did not accept" card left open
+                // would otherwise sit over the picture of the next session, with any computer.
                 if matches!(
                     self.swap.as_ref().map(|s| &s.phase),
-                    Some(SwapPhase::Confirm | SwapPhase::Requested { .. })
+                    Some(SwapPhase::Confirm | SwapPhase::Requested { .. } | SwapPhase::Declined(_))
                 ) {
                     self.swap = None;
                 }
