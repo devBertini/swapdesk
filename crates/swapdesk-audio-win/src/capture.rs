@@ -28,6 +28,8 @@ const GAP_RESYNC_US: u64 = 500_000;
 const IDLE_AFTER_US: u64 = 40_000;
 /// How often the default endpoint is compared with the open one.
 const DEVICE_POLL: Duration = Duration::from_secs(1);
+/// How often a stream whose device is gone is opened again.
+const REOPEN_EVERY: Duration = Duration::from_secs(1);
 
 /// How the source captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +241,11 @@ pub struct WasapiLoopbackSource {
     last_packet_at: u64,
     last_poll: Instant,
     stats: CaptureStats,
+    /// Started and not stopped. The stream itself (`open`) may be gone meanwhile: a device that went away and
+    /// could not be opened again at once.
+    started: bool,
+    /// When the stream is opened again while it is gone.
+    reopen_at: Instant,
 }
 
 impl Default for WasapiLoopbackSource {
@@ -259,6 +266,8 @@ impl WasapiLoopbackSource {
             last_packet_at: 0,
             last_poll: Instant::now(),
             stats: CaptureStats::default(),
+            started: false,
+            reopen_at: Instant::now(),
         }
     }
 
@@ -285,11 +294,17 @@ impl WasapiLoopbackSource {
         Ok(())
     }
 
-    /// Closes and opens the stream again (the device was invalidated or the default endpoint changed).
-    fn reopen(&mut self) -> Result<()> {
+    /// Closes the stream and opens it again (the device was invalidated or the default endpoint changed). When it
+    /// cannot be opened now (no output device for a moment, the new default not ready yet) the source stays
+    /// started and tries again each second: the sound of the session comes back with the device, where it used to
+    /// end for the rest of the session.
+    fn reopen(&mut self) {
         self.open = None;
         self.stats.reopened += 1;
-        self.open_stream()
+        if self.open_stream().is_err() {
+            self.open = None;
+            self.reopen_at = Instant::now() + REOPEN_EVERY;
+        }
     }
 
     fn append_silence(&mut self, frames: usize) {
@@ -397,21 +412,41 @@ impl AudioSource for WasapiLoopbackSource {
         self.exclude_pid = exclude_pid;
         self.stats = CaptureStats::default();
         self.last_poll = Instant::now();
-        self.open_stream()
+        self.open_stream()?;
+        self.started = true;
+        Ok(())
     }
 
     fn next_block(&mut self, timeout: Duration) -> Result<Option<AudioBlock>> {
-        if self.open.is_none() {
+        if !self.started {
             return Err(failure(ErrorKind::Closed, "WasapiLoopbackSource.next_block", "not started"));
         }
         let deadline = Instant::now() + timeout;
         loop {
+            if self.open.is_none() {
+                // The device is gone: nothing is captured until it can be opened again.
+                if Instant::now() >= self.reopen_at {
+                    self.reopen();
+                }
+                if self.open.is_none() {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(left.min(Duration::from_millis(50)));
+                    continue;
+                }
+            }
             if self.default_device_changed() {
-                self.reopen()?;
+                self.reopen();
+                continue;
             }
             match self.drain() {
                 Ok(()) => {}
-                Err(e) if e.kind == ErrorKind::AccessLost => self.reopen()?,
+                Err(e) if e.kind == ErrorKind::AccessLost => {
+                    self.reopen();
+                    continue;
+                }
                 Err(e) => return Err(e),
             }
             if let Some(b) = self.take_block() {
@@ -434,6 +469,7 @@ impl AudioSource for WasapiLoopbackSource {
 
     fn stop(&mut self) {
         self.open = None;
+        self.started = false;
         self.queue.clear();
         self.have_timeline = false;
     }
