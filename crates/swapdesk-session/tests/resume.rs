@@ -158,6 +158,54 @@ fn a_killed_token_does_not_raise_a_new_prompt() {
     });
 }
 
+/// Review of 22/11/2026, B7: a stored-grant change while the session was lost dropped its resume entry, so the host's
+/// user's "Desconectar" on the "Reconectando" card found nothing to kill, and the viewer's next redial went through
+/// `UNATTENDED` into a fresh session seconds after that person ended it.
+#[test]
+fn desconectar_after_a_grant_change_still_stops_the_redial_of_an_unattended_device() {
+    run_paused(async {
+        let f = fx(PermissionSet::EMPTY, CU | PermissionSet::FILES);
+        let s = f.session(CU | PermissionSet::FILES).await;
+        assert_eq!(s.grant().mode, GrantMode::Unattended);
+        let info = s.grant().clone();
+        f.lose(s).await;
+        // An administrator takes FILES away in Permissões while the viewer is reconnecting; UNATTENDED stays.
+        set_stored(&f.mem.trust, &f.who, CU);
+        f.mem.host.stored_grants_changed(&f.who.id);
+        assert_eq!(f.mem.host.resumable_sessions(), 0, "the grant change killed the token");
+        // The host's user then presses "Desconectar" on the card.
+        f.mem.host.drop_resume(info.session_id);
+        for _ in 0..4 {
+            assert_eq!(
+                f.resume(&f.who, &info, CU | PermissionSet::FILES).await.err(),
+                Some(OpenError::Refused(ErrorCode::Declined)),
+                "a redial after Desconectar"
+            );
+            assert!(f.mem.host.sessions().is_empty(), "the device entered again without a prompt");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(f.ui.prompt_count(), 0);
+    });
+}
+
+/// Review of 22/11/2026, B7: without "Desconectar", a grant change during the loss still lets the device come back
+/// the normal way (an unattended device enters with what is stored now), as before.
+#[test]
+fn a_grant_change_during_the_loss_lets_an_unattended_device_enter_again_with_what_is_stored_now() {
+    run_paused(async {
+        let f = fx(PermissionSet::EMPTY, CU | PermissionSet::FILES);
+        let s = f.session(CU | PermissionSet::FILES).await;
+        let info = s.grant().clone();
+        f.lose(s).await;
+        set_stored(&f.mem.trust, &f.who, CU);
+        f.mem.host.stored_grants_changed(&f.who.id);
+        let again = f.resume(&f.who, &info, CU | PermissionSet::FILES).await.expect("the device enters again");
+        assert_eq!(again.grant().mode, GrantMode::Unattended, "a fresh entry, not a resume");
+        assert_ne!(again.grant().session_id, info.session_id);
+        assert!(!again.grant().granted.contains(PermissionSet::FILES), "what was revoked stays revoked");
+    });
+}
+
 /// The race of F1: the hub saw the session lost, but the viewer resumed before `drop_resume` ran. The session is
 /// live again, so the host's user's "Desconectar" ends it, under the lock that found it live.
 #[test]

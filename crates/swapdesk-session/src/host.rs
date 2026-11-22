@@ -550,7 +550,7 @@ impl HostService {
         let stored = self.stored(device).map(|d| d.grants_here).unwrap_or(PermissionSet::EMPTY);
         let live: Vec<SessionCtx> = {
             let mut t = lock(&self.inner.table);
-            t.resume.invalidate_device(device);
+            t.resume.revoke_device(device);
             t.live.values().filter(|c| c.device().as_ref() == Some(device)).cloned().collect()
         };
         for ctx in live {
@@ -657,6 +657,17 @@ impl HostService {
     /// 6.3 step 4: the future host arms a swap token for the future viewer's device (10 s, single use).
     pub fn arm_swap_token(&self, device: DeviceId, token: [u8; 16]) {
         lock(&self.inner.table).swap.arm(now(), device, token);
+    }
+
+    /// How long an armed swap token lives (`HostConfig::swap_token_ttl`).
+    pub fn swap_token_ttl(&self) -> Duration {
+        self.inner.cfg.swap_token_ttl
+    }
+
+    /// Whether a connection used the swap token `token` (asked after its life, it says whether the swap's new
+    /// connection came at all; remembered for three lifetimes).
+    pub fn swap_token_taken(&self, token: &[u8; 16]) -> bool {
+        lock(&self.inner.table).swap.was_taken(now(), token)
     }
 
     /// Resume entries that exist (live sessions and sessions waiting to be resumed), for tests and Atividade.
@@ -1028,7 +1039,11 @@ impl HostInner {
         if id == 0 {
             return false;
         }
-        let lock_on_end = self.ui.lock_on_end();
+        // A swap ends the old session with this host's own `Bye { SWAPPED }` (6.3 step 5): its user asked for the
+        // swap or accepted it, and this machine is the viewer now, so locking it would lock that person out. Only
+        // the local end counts: a viewer that merely says `SWAPPED` in its own `Bye` ends the session as any other.
+        let swapped_here = end.kind == EndKind::LocalBye && end.code == ErrorCode::Swapped;
+        let lock_on_end = self.ui.lock_on_end() && !swapped_here;
         let mut resumable = end.kind == EndKind::Lost && !lock_on_end;
         {
             let mut t = lock(&self.table);

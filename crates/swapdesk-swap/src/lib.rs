@@ -59,7 +59,8 @@ pub trait SwapEnv: Send + Sync + 'static {
     /// Whether this machine, as host, has stored `CONTROL` for `peer` in its own trust store (6.3 step 1).
     fn control_granted_to(&self, peer: &DeviceId) -> bool;
 
-    /// Shows the request; the answer comes through the channel (`true` accepts). Dropping the sender declines.
+    /// Shows the request; the answer comes through the channel (`true` accepts). Dropping the sender without an
+    /// answer says there is nobody to show it to: the asker hears `NOBODY_PRESENT`.
     fn ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool>;
 
     /// The question is no longer waiting: close its card.
@@ -119,12 +120,18 @@ enum Slot {
     Prompting { id: u32, task: Option<AbortHandle> },
     /// The other side asked, the user accepted, this side is the future viewer and waits for `SwapArmed`.
     AwaitArmed { id: u32, token: [u8; 16] },
+    /// The other side asked, the user accepted, this side is the future host: it armed the token and closes the
+    /// session after the grace unless the asker's `SwapCancel` crossed the accept (`task` is the one that closes).
+    Armed { id: u32, task: Option<AbortHandle> },
 }
 
 impl Slot {
     fn id(&self) -> u32 {
         match self {
-            Slot::Outgoing { id, .. } | Slot::Prompting { id, .. } | Slot::AwaitArmed { id, .. } => *id,
+            Slot::Outgoing { id, .. }
+            | Slot::Prompting { id, .. }
+            | Slot::AwaitArmed { id, .. }
+            | Slot::Armed { id, .. } => *id,
         }
     }
 }
@@ -187,25 +194,41 @@ impl SwapHandler {
             lock(&i.slots).remove(&key);
             return SwapOutcome::SessionEnded;
         }
-        match tokio::time::timeout(i.timings.give_up, rx).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => SwapOutcome::SessionEnded,
-            Err(_) => {
-                // The answer may have landed between the timer and the lock.
-                let still_waiting = {
-                    let mut slots = lock(&i.slots);
-                    let waiting = matches!(slots.get(&key), Some(Slot::Outgoing { id: sid, .. }) if *sid == id);
-                    if waiting {
-                        slots.remove(&key);
+        let mut rx = rx;
+        let mut limit = i.timings.give_up;
+        let mut extended = false;
+        loop {
+            match tokio::time::timeout(limit, &mut rx).await {
+                Ok(Ok(outcome)) => return outcome,
+                Ok(Err(_)) => return SwapOutcome::SessionEnded,
+                Err(_) => {}
+            }
+            // The answer may have landed between the timer and the lock. An accept that came in time but whose
+            // `SwapArmed` has not (this side is the future viewer) is not given up: the other side armed and will
+            // close the session, so this side waits for the token's life instead, once.
+            let accepted = {
+                let mut slots = lock(&i.slots);
+                match slots.get(&key) {
+                    Some(Slot::Outgoing { id: sid, token, .. }) if *sid == id => {
+                        let accepted = token.is_some() && !extended;
+                        if !accepted {
+                            slots.remove(&key);
+                        }
+                        Some(accepted)
                     }
-                    waiting
-                };
-                if still_waiting {
-                    let _ = ctx.send(SwapCancel { request_id: id }).await;
-                    SwapOutcome::GaveUp
-                } else {
-                    SwapOutcome::Swapped
+                    _ => None,
                 }
+            };
+            match accepted {
+                Some(true) => {
+                    limit = i.timings.armed_wait;
+                    extended = true;
+                }
+                Some(false) => {
+                    let _ = ctx.send(SwapCancel { request_id: id }).await;
+                    return SwapOutcome::GaveUp;
+                }
+                None => return rx.await.unwrap_or(SwapOutcome::SessionEnded),
             }
         }
     }
@@ -288,13 +311,23 @@ impl SwapHandler {
                     let token = random_token();
                     if future_host {
                         // 6.3 step 4 right here: armed before the accept leaves, so the viewer can connect at once.
+                        // The slot stays, as armed, until the close: a `SwapCancel` that crossed the accept (the
+                        // asker gave up just before it arrived) stops the close, and the session goes on.
+                        {
+                            let mut slots = lock(&inner.slots);
+                            let task = match slots.get_mut(&key) {
+                                Some(Slot::Prompting { id: sid, task }) if *sid == id => task.take(),
+                                _ => return,
+                            };
+                            slots.insert(key, Slot::Armed { id, task });
+                        }
                         e.arm_token(peer, token);
-                        drop_slot();
                         if c.send(SwapAccept { request_id: id, token }).await.is_ok()
                             && c.send(SwapArmed { request_id: id }).await.is_ok()
                         {
                             close_after(&c, inner.timings.close_grace).await;
                         }
+                        drop_slot();
                     } else {
                         {
                             let mut slots = lock(&inner.slots);
@@ -314,14 +347,24 @@ impl SwapHandler {
                         }
                     }
                 }
-                Ok(Ok(false) | Err(_)) => {
+                Ok(Ok(false)) => {
                     e.ask_closed(id, AskEnd::Answered);
                     drop_slot();
                     let _ = c.send(SwapDecline { request_id: id, code: ErrorCode::Declined }).await;
                 }
+                // The machine had nobody to show the question to (no interface at its console): nobody declined it.
+                Ok(Err(_)) => {
+                    e.ask_closed(id, AskEnd::Answered);
+                    drop_slot();
+                    let _ = c.send(SwapDecline { request_id: id, code: ErrorCode::NobodyPresent }).await;
+                }
             }
         });
-        if let Some(Slot::Prompting { task: t, .. }) = lock(&i.slots).get_mut(&key) {
+        // The task may already have turned the slot into `Armed` (an answer that was there at once).
+        if let Some(Slot::Prompting { id: sid, task: t } | Slot::Armed { id: sid, task: t }) =
+            lock(&i.slots).get_mut(&key)
+            && *sid == id
+        {
             *t = Some(task.abort_handle());
         }
     }
@@ -412,6 +455,16 @@ impl SwapHandler {
             Some(Slot::AwaitArmed { id: sid, .. }) if *sid == id => {
                 slots.remove(&key);
             }
+            // The asker gave up while this side's accept was on its way: no close, the session goes on. The armed
+            // token dies on its own (10 s, single use, for that device only).
+            Some(Slot::Armed { id: sid, task }) if *sid == id => {
+                let task = task.clone();
+                slots.remove(&key);
+                drop(slots);
+                if let Some(t) = task {
+                    t.abort();
+                }
+            }
             _ => {}
         }
     }
@@ -458,7 +511,7 @@ impl ChannelHandler for SwapHandler {
                 }
                 self.inner.env.ask_closed(id, AskEnd::Cancelled);
             }
-            Slot::AwaitArmed { .. } => {}
+            Slot::AwaitArmed { .. } | Slot::Armed { .. } => {}
         }
     }
 }

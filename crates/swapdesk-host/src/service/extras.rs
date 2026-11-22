@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Duration;
 
 use swapdesk_extras::chat::{ChatEntry, ChatError, ChatHandler};
 use swapdesk_extras::{ExtrasEvent, ExtrasSink};
@@ -40,7 +41,8 @@ pub enum ChatNote {
 /// What the interface layer (the UI hub) gives the service for swap and chat. Every method runs on a session task
 /// or on a runtime task: none may block.
 pub trait ExtrasHooks: Send + Sync + 'static {
-    /// The swap question for this machine's user ("pediu para inverter", 20 s). Dropping the sender declines.
+    /// The swap question for this machine's user ("pediu para inverter", 20 s). Dropping the sender without an answer
+    /// says nobody was there to ask (the asker hears `NOBODY_PRESENT`).
     fn swap_ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool>;
 
     /// The question is no longer waiting: close its card.
@@ -49,9 +51,14 @@ pub trait ExtrasHooks: Send + Sync + 'static {
     /// Where to dial `device` for the new connection of a swap (its last known session address).
     fn address_of(&self, device: &DeviceId) -> Option<SocketAddr>;
 
-    /// The new viewer session of a swap (this machine was the host and now views `device`), or why it did not open.
-    /// The hook hands it to the viewer's UI path.
+    /// The new viewer session of a swap (this machine was the host and now views `device`), or why it did not open
+    /// within the swap token's life. The hook hands it to the viewer's UI path.
     fn swap_viewing(&self, device: DeviceId, opened: Result<(ViewerHandle, ViewerMessages), ConnectError>);
+
+    /// This machine armed a swap token for `device` (it was to become the host) and no connection used it in its
+    /// life: the swap's new connection never came, and the other side cannot say so (the old session is gone). The
+    /// default does nothing; the UI hub tells its user.
+    fn swap_never_came(&self, _device: DeviceId) {}
 
     /// A chat event of session `session_id`.
     fn chat(&self, session_id: u64, note: ChatNote);
@@ -109,7 +116,7 @@ impl SwapEnv for CoreEnv {
         match self.hooks.get() {
             Some(h) => h.swap_ask(prompt),
             None => {
-                // Nobody to ask: the sender is dropped, which declines.
+                // Nobody to ask: the sender is dropped, which the asker hears as nobody present.
                 let (_tx, rx) = oneshot::channel();
                 rx
             }
@@ -124,7 +131,21 @@ impl SwapEnv for CoreEnv {
 
     fn arm_token(&self, device: DeviceId, token: [u8; 16]) {
         match self.host.get() {
-            Some(host) => host.arm_swap_token(device, token),
+            Some(host) => {
+                host.arm_swap_token(device, token);
+                // Looked at once the token is dead: the last try of the future viewer may begin just before, and
+                // its handshake and the decision come on top.
+                let (host, hooks) = (host.clone(), Arc::clone(&self.hooks));
+                let after = host.swap_token_ttl() + SWAP_START_MARGIN;
+                self.shared.rt.spawn(async move {
+                    tokio::time::sleep(after).await;
+                    if !host.swap_token_taken(&token)
+                        && let Some(h) = hooks.get()
+                    {
+                        h.swap_never_came(device);
+                    }
+                });
+            }
             None => {
                 self.shared.log(Level::Error, format_args!("a swap token was armed before the host service existed"))
             }
@@ -140,24 +161,66 @@ impl SwapEnv for CoreEnv {
         };
         let shared = Arc::clone(&self.shared);
         self.shared.rt.spawn(async move {
-            let started = std::time::Instant::now();
-            let opened = match hooks.address_of(&host) {
-                Some(addr) => {
-                    shared.log(Level::Debug, format_args!("swap: dialing {addr}"));
-                    connector.connect(addr, host, Intent::Control, false, PermissionSet::EMPTY, Some(token), None).await
+            let started = tokio::time::Instant::now();
+            let deadline = started + SWAP_DIAL_SPAN;
+            let mut pause = SWAP_DIAL_PAUSE;
+            let mut tries = 0u32;
+            let opened = loop {
+                tries += 1;
+                let attempt = match hooks.address_of(&host) {
+                    Some(addr) => {
+                        shared.log(Level::Debug, format_args!("swap: dialing {addr} (try {tries})"));
+                        connector
+                            .connect(addr, host, Intent::Control, false, PermissionSet::EMPTY, Some(token), None)
+                            .await
+                    }
+                    None => Err(ConnectError::UnknownDevice),
+                };
+                match attempt {
+                    // The old session is already gone on both sides: a try that fails while the token lives is
+                    // made again, or the two machines are left with no session at all.
+                    Err(e) if dial_again(&e) && tokio::time::Instant::now() + pause < deadline => {
+                        shared.log(Level::Debug, format_args!("swap: try {tries} failed ({e}); trying again"));
+                        tokio::time::sleep(pause).await;
+                        pause = (pause * 2).min(SWAP_DIAL_PAUSE_MAX);
+                    }
+                    other => break other,
                 }
-                None => Err(ConnectError::UnknownDevice),
             };
             shared.log(
                 Level::Debug,
                 format_args!(
-                    "swap: the new connection {} after {} ms",
+                    "swap: the new connection {} after {} ms and {tries} tries",
                     if opened.is_ok() { "opened" } else { "failed" },
                     started.elapsed().as_millis()
                 ),
             );
             hooks.swap_viewing(host, opened);
         });
+    }
+}
+
+/// How long the future viewer keeps trying the new connection of a swap: inside the 10 s the future host's token
+/// lives (PROTOCOL.md 6.3 step 4), with room for the last try's handshake and decision.
+const SWAP_DIAL_SPAN: Duration = Duration::from_secs(8);
+/// The pause after the first failed try; it doubles up to `SWAP_DIAL_PAUSE_MAX`.
+const SWAP_DIAL_PAUSE: Duration = Duration::from_millis(250);
+const SWAP_DIAL_PAUSE_MAX: Duration = Duration::from_secs(1);
+/// What the future host adds to the token's life before it tells its user that no connection came.
+const SWAP_START_MARGIN: Duration = Duration::from_secs(3);
+
+/// Whether a failed try of a swap's new connection may be made again: only a failure that cannot have spent the
+/// token (it is single use, and a try past it would enter as any connect, through a prompt or `UNATTENDED`). Nothing
+/// was sent (no address, the LAN guard, the socket, no connection made), or the future host refused `BUSY`, which
+/// it decides before it takes the token (a `BUSY` at its commit, after the take, means another session started
+/// meanwhile, and the next try meets that session's `BUSY` before the token again).
+fn dial_again(e: &ConnectError) -> bool {
+    use swapdesk_proto::ErrorCode;
+    use swapdesk_session::OpenError;
+    match e {
+        ConnectError::UnknownDevice | ConnectError::Refused(_) | ConnectError::Socket(_) => true,
+        ConnectError::Open(OpenError::Unreachable | OpenError::Refused(ErrorCode::Busy)) => true,
+        ConnectError::NotIpv4 | ConnectError::Open(_) => false,
     }
 }
 

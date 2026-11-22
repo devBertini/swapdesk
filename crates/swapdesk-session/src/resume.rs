@@ -40,6 +40,15 @@ struct Entry {
     lost_at: Option<Instant>,
     /// The host's user ended the session while its link was lost: kept (refusing its token) until the window ends.
     killed: bool,
+    /// The stored grants changed while the link was lost: the token no longer resumes (the device comes back the
+    /// normal way), but the entry stays until the window ends, so the host's user can still end the session for good.
+    revoked: bool,
+}
+
+impl Entry {
+    fn resumable(&self) -> bool {
+        !self.killed && !self.revoked
+    }
 }
 
 pub struct ResumeTable {
@@ -58,7 +67,7 @@ impl ResumeTable {
         let token = random_token();
         self.entries.insert(
             session_id,
-            Entry { device, granted, unattended, token: Some(token), lost_at: None, killed: false },
+            Entry { device, granted, unattended, token: Some(token), lost_at: None, killed: false, revoked: false },
         );
         token
     }
@@ -97,6 +106,17 @@ impl ResumeTable {
         self.entries.retain(|_, e| &e.device != device);
     }
 
+    /// The stored grants of the device changed: every token of it dies. The entry of a session whose link is lost
+    /// stays until its window ends, its token treated as unknown (the device comes back the normal way): the host's
+    /// interface still shows that session as reconnecting, and its "Desconectar" (`kill`) must still find it, or the
+    /// redials that follow would enter without anyone being asked.
+    pub fn revoke_device(&mut self, device: &DeviceId) {
+        self.entries.retain(|_, e| &e.device != device || e.lost_at.is_some());
+        for e in self.entries.values_mut().filter(|e| &e.device == device) {
+            e.revoked = true;
+        }
+    }
+
     /// The host rebooted or shut down: every token dies.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -108,14 +128,14 @@ impl ResumeTable {
         self.entries.retain(|_, e| e.lost_at.is_none_or(|t| now.saturating_duration_since(t) <= window));
     }
 
-    /// Whether the session has an entry that can still be resumed (a killed one only waits out its window).
+    /// Whether the session has an entry that can still be resumed (a killed or revoked one only waits out its window).
     pub fn contains(&self, session_id: u64) -> bool {
-        self.entries.get(&session_id).is_some_and(|e| !e.killed)
+        self.entries.get(&session_id).is_some_and(Entry::resumable)
     }
 
-    /// The entries that can be resumed or are live; the killed ones, kept to refuse their token, do not count.
+    /// The entries that can be resumed or are live; the killed and revoked ones, kept for their window, do not count.
     pub fn len(&self) -> usize {
-        self.entries.values().filter(|e| !e.killed).count()
+        self.entries.values().filter(|e| e.resumable()).count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,6 +155,9 @@ impl ResumeTable {
         }
         if e.killed {
             return Err(ResumeError::Killed);
+        }
+        if e.revoked {
+            return Err(ResumeError::Unknown);
         }
         match e.lost_at {
             None => Err(ResumeError::NotLost),
@@ -175,11 +198,25 @@ impl ResumeTable {
 pub struct SwapTokens {
     ttl: Duration,
     armed: Vec<([u8; 16], DeviceId, Instant)>,
+    /// The tokens a connection used, and when: whether a swap's new connection came at all (see `was_taken`).
+    taken: Vec<([u8; 16], Instant)>,
 }
 
 impl SwapTokens {
     pub fn new(ttl: Duration) -> Self {
-        Self { ttl, armed: Vec::new() }
+        Self { ttl, armed: Vec::new(), taken: Vec::new() }
+    }
+
+    /// How long a used token is remembered by `was_taken`: past its own life, for a look after it.
+    fn remembered(&self) -> Duration {
+        self.ttl * 3
+    }
+
+    /// Whether a connection used `token` (within the last three of its lifetimes).
+    pub fn was_taken(&mut self, now: Instant, token: &[u8; 16]) -> bool {
+        let keep = self.remembered();
+        self.taken.retain(|(_, at)| now.saturating_duration_since(*at) <= keep);
+        self.taken.iter().any(|(t, _)| tokens_equal(t, token))
     }
 
     pub fn arm(&mut self, now: Instant, device: DeviceId, token: [u8; 16]) {
@@ -192,7 +229,10 @@ impl SwapTokens {
         self.armed.retain(|(_, _, at)| now.saturating_duration_since(*at) <= self.ttl);
         match self.armed.iter().position(|(t, d, _)| d == device && tokens_equal(t, token)) {
             Some(i) => {
-                self.armed.swap_remove(i);
+                let (taken, _, _) = self.armed.swap_remove(i);
+                let keep = self.remembered();
+                self.taken.retain(|(_, at)| now.saturating_duration_since(*at) <= keep);
+                self.taken.push((taken, now));
                 true
             }
             None => false,

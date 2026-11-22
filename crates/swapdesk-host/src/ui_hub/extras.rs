@@ -20,7 +20,8 @@ use swapdesk_extras::wake::{
     UdpWake, WakeConfig, WakeError, WakeOutcome, WakeRoute, WakeSocket, wake_and_wait, wake_route,
 };
 use swapdesk_ipc::{
-    ApiCode, ChatItem, Message as Ipc, Notify, ReplyBody, SessionState, SwapNote, SwapWhy, Text, WAKE_WINDOW_S,
+    ApiCode, ChatItem, ConnectWhy, Message as Ipc, Notify, ReplyBody, SessionState, SwapNote, SwapWhy, Text,
+    WAKE_WINDOW_S,
 };
 use swapdesk_platform::Level;
 use swapdesk_proto::{ErrorCode, GrantMode, Intent, Os};
@@ -87,6 +88,27 @@ fn swap_why(code: ErrorCode) -> SwapWhy {
         ErrorCode::NotPermitted => SwapWhy::NotPermitted,
         ErrorCode::Busy => SwapWhy::Busy,
         _ => SwapWhy::Declined,
+    }
+}
+
+/// Why the new connection of a swap did not open, in the words of a connect that did not.
+fn swap_dial_why(e: &ConnectError) -> ConnectWhy {
+    use swapdesk_session::OpenError;
+    match e {
+        ConnectError::Refused(_)
+        | ConnectError::Open(OpenError::Timeout | OpenError::Lost | OpenError::Unreachable) => ConnectWhy::Unreachable,
+        ConnectError::Open(OpenError::Refused(c) | OpenError::Closed(c)) => match c {
+            ErrorCode::Busy => ConnectWhy::Busy,
+            ErrorCode::NobodyPresent | ErrorCode::AccountAway => ConnectWhy::NobodyPresent,
+            ErrorCode::Declined => ConnectWhy::Declined,
+            ErrorCode::Timeout => ConnectWhy::TimedOut,
+            ErrorCode::UnknownDevice | ErrorCode::Forgotten => ConnectWhy::Forgotten,
+            ErrorCode::NotPermitted => ConnectWhy::NotPermitted,
+            _ => ConnectWhy::Failed,
+        },
+        ConnectError::NotIpv4 | ConnectError::UnknownDevice | ConnectError::Socket(_) | ConnectError::Open(_) => {
+            ConnectWhy::Failed
+        }
     }
 }
 
@@ -180,7 +202,7 @@ impl Hub {
         // systems on its own side, and the asker hears that refusal.
         let conns = self.console_conns();
         if conns.is_empty() {
-            // Nobody to ask: the sender goes, which declines.
+            // Nobody to ask: the sender goes, which the asker hears as nobody present.
             return rx;
         }
         let session_id = self.session_of_device(&prompt.device);
@@ -257,10 +279,13 @@ impl Hub {
         let (handle, messages) = match opened {
             Ok(v) => v,
             Err(e) => {
-                return self.log(
+                self.log(
                     Level::Warn,
                     format_args!("the swap with {} did not open its new connection: {e}", device_id_hex(&device)),
                 );
+                // The old session ended as a swap does, so the user would see nothing at all: the console's UI is
+                // told as of a connect that did not open, with why.
+                return self.swap_not_opened(device, swap_dial_why(&e));
             }
         };
         let Some(conn) = self.console_conns().into_iter().next() else {
@@ -290,6 +315,31 @@ impl Hub {
         rt.spawn(
             async move { me.pump_viewer(conn, session_id, device, handle, messages, GrantMode::Swap, None).await },
         );
+    }
+
+    /// A swap left this machine without its new session: the console's UI hears it as a connect to `device` that
+    /// did not open (an entry of its own, as `Connect` makes), so the end of the old session is not the last word.
+    fn swap_not_opened(&self, device: DeviceId, why: ConnectWhy) {
+        let entry_id = ENTRY_ID_BIT | u64::from(self.fresh_id());
+        for c in self.console_conns() {
+            c.queue.control(Ipc::UiNotify(Notify::Session {
+                session_id: entry_id,
+                device_id: device_id_hex(&device),
+                state: SessionState::NotOpened { why },
+            }));
+        }
+    }
+
+    /// This machine was to become the host of `device` and the swap's new connection never came: the console's UI
+    /// is told that the device did not answer.
+    fn swap_never_came(&self, device: DeviceId) {
+        // A swap whose `SwapCancel` crossed the accept leaves its token unused and the old session running: nothing
+        // failed then.
+        if self.session_of_device(&device) != 0 {
+            return;
+        }
+        self.log(Level::Warn, format_args!("the swap with {}: its new connection never came", device_id_hex(&device)));
+        self.swap_not_opened(device, ConnectWhy::Unreachable);
     }
 
     // ---------- chat ----------
@@ -491,6 +541,12 @@ impl ExtrasHooks for HubExtras {
     fn swap_viewing(&self, device: DeviceId, opened: Result<(ViewerHandle, ViewerMessages), ConnectError>) {
         if let Some(h) = self.hub.upgrade() {
             h.swap_viewing(device, opened);
+        }
+    }
+
+    fn swap_never_came(&self, device: DeviceId) {
+        if let Some(h) = self.hub.upgrade() {
+            h.swap_never_came(device);
         }
     }
 

@@ -408,6 +408,21 @@ impl HostUi for HubHostUi {
                 );
             }
             HostEvent::Ended { device, session_id, end, resumable, .. } => {
+                // A session can end between its commit and `SessionStarted` (its first messages could not be sent,
+                // a panic): this hub never counted it, so it counts nothing down for it and writes no end. The same
+                // for a resume that ended before it was reported started again: its loss already did both.
+                let (heard, counted) = {
+                    let started = lock(&hub.started);
+                    let heard = started.contains_key(&session_id);
+                    (heard, heard && !lock(&hub.lost).contains_key(&session_id))
+                };
+                if !heard {
+                    hub.log(
+                        swapdesk_platform::Level::Debug,
+                        format_args!("hosted session {session_id:016x} ended before it was reported started"),
+                    );
+                    return;
+                }
                 // A lost link the core keeps resumable stays the host's session: its time and grants wait for the
                 // resume, and the end the UI shows comes when the window does.
                 let since = {
@@ -420,10 +435,12 @@ impl HostUi for HubHostUi {
                     }
                 }
                 .unwrap_or(now);
-                let duration = u32::try_from(now.saturating_sub(since) / 1000).unwrap_or(u32::MAX);
-                hub.audit(device, AuditEvent::SessionEnded(end.code), Some(duration));
-                hub.session_ended();
-                hub.hosted_ended();
+                if counted {
+                    let duration = u32::try_from(now.saturating_sub(since) / 1000).unwrap_or(u32::MAX);
+                    hub.audit(device, AuditEvent::SessionEnded(end.code), Some(duration));
+                    hub.session_ended();
+                    hub.hosted_ended();
+                }
                 if resumable {
                     hub.session_lost(session_id, device_id_hex(&device), end_reason(&end));
                 } else {

@@ -28,6 +28,8 @@ enum Answer {
     No,
     /// The card stays open.
     Hold,
+    /// Nobody is there to show it to: the answer's sender is dropped at once.
+    Nobody,
 }
 
 type Connector = Box<dyn Fn(DeviceId, [u8; 16]) + Send + Sync>;
@@ -94,6 +96,7 @@ impl SwapEnv for Env {
                 let _ = tx.send(false);
             }
             Answer::Hold => lock(&self.held).push(tx),
+            Answer::Nobody => drop(tx),
         }
         rx
     }
@@ -128,6 +131,10 @@ struct Pair {
     vh: SwapHandler,
     hh: SwapHandler,
     recorder: Option<Arc<Recorder>>,
+    /// The viewer machine's recorder, when it runs one instead of the swap handler.
+    viewer_recorder: Option<Arc<Recorder>>,
+    /// The host machine's interface ("Bloquear ao terminar", the locks it was asked for).
+    host_ui: Arc<TestUi>,
 }
 
 struct Setup {
@@ -139,6 +146,8 @@ struct Setup {
     viewer_answer: Answer,
     /// The host machine runs a recorder instead of the swap handler (a peer that never answers).
     silent_host: bool,
+    /// The viewer machine runs a recorder instead of the swap handler: the test speaks for it.
+    silent_viewer: bool,
     timings: SwapTimings,
 }
 
@@ -150,6 +159,7 @@ impl Default for Setup {
             host_answer: Answer::Yes,
             viewer_answer: Answer::Yes,
             silent_host: false,
+            silent_viewer: false,
             timings: SwapTimings::default(),
         }
     }
@@ -165,16 +175,21 @@ async fn pair(s: Setup) -> Pair {
         Some(r) => registry_one(r.clone()),
         None => registry_of(&[hh.handler()]),
     };
-    let mem = Mem::new(TestUi::accepting(PermissionSet::VIEW | CV), host_registry);
+    let host_ui = TestUi::accepting(PermissionSet::VIEW | CV);
+    let mem = Mem::new(host_ui.clone(), host_registry);
     let who = Who::new();
     pin(&mem.trust, &who, PermissionSet::VIEW | CV);
+    let viewer_recorder = s.silent_viewer.then(|| Recorder::new(SWAP_TYPES, &[]));
     let mut cfg = viewer_config(CV);
-    cfg.registry = registry_of(&[vh.handler()]);
+    cfg.registry = match &viewer_recorder {
+        Some(r) => registry_one(r.clone()),
+        None => registry_of(&[vh.handler()]),
+    };
     let (session, host_task) = mem.open(&who, cfg).await;
     let viewer = session.expect("the session opens");
     let host_ctx = mem.host.session(viewer.grant().session_id).expect("the host knows the session");
     std::mem::forget(mem);
-    Pair { viewer, host_ctx, host_task, venv, henv, vh, hh, recorder }
+    Pair { viewer, host_ctx, host_task, venv, henv, vh, hh, recorder, viewer_recorder, host_ui }
 }
 
 impl Pair {
@@ -245,6 +260,42 @@ fn accept_when_the_host_asks_arms_the_host_and_the_viewer_machine_gives_way() {
         assert!(lock(&p.henv.armed).is_empty() && lock(&p.venv.viewing).is_empty());
         assert!(lock(&p.venv.prompts)[0].asked_becomes_host, "the viewer is asked whether it takes over as host");
         p.assert_closed_swapped().await;
+    });
+}
+
+/// Review of 22/11/2026, B3: "Bloquear ao terminar" locked the machine that had just become the viewer in a swap,
+/// because the host's end of the old session (its own `Bye { SWAPPED }`) was treated as any other end.
+#[test]
+fn a_swap_that_ends_a_session_does_not_lock_the_new_viewer() {
+    run_paused(async {
+        for viewer_asks in [true, false] {
+            let p = pair(Setup::default()).await;
+            p.host_ui.set_lock_on_end(true);
+            let outcome =
+                if viewer_asks { p.vh.request(p.viewer.ctx()).await } else { p.hh.request(&p.host_ctx).await };
+            assert_eq!(outcome, SwapOutcome::Swapped);
+            let host_ui = Arc::clone(&p.host_ui);
+            p.assert_closed_swapped().await;
+            assert_eq!(
+                host_ui.locks.load(Ordering::SeqCst),
+                0,
+                "the machine that now views was locked (the viewer asked: {viewer_asks})"
+            );
+        }
+    });
+}
+
+/// Review of 22/11/2026, B3: the exception is the host's own swap; a viewer that only says `SWAPPED` in its `Bye`
+/// ends the session as any viewer does, and the host still locks.
+#[test]
+fn a_viewer_that_says_swapped_without_a_swap_still_gets_the_host_locked() {
+    run_paused(async {
+        let p = pair(Setup::default()).await;
+        p.host_ui.set_lock_on_end(true);
+        p.viewer.ctx().bye(ErrorCode::Swapped);
+        let host_end = tokio::time::timeout(Duration::from_secs(5), p.host_task).await.unwrap().unwrap();
+        assert_eq!((host_end.kind, host_end.code), (EndKind::PeerBye, ErrorCode::Swapped));
+        assert_eq!(p.host_ui.locks.load(Ordering::SeqCst), 1, "a Bye that says SWAPPED skipped the lock");
     });
 }
 
@@ -365,6 +416,65 @@ fn control_revoked_while_the_card_is_open_declines_not_permitted() {
         assert_eq!(asking.await.unwrap(), SwapOutcome::Declined(ErrorCode::NotPermitted));
         assert!(lock(&p.venv.armed).is_empty());
         assert!(p.viewer_unchanged());
+    });
+}
+
+/// Review of 22/11/2026, E8: with nobody at the asked machine to show the question to (no interface attached), the
+/// asker read "recusou" (`DECLINED`) instead of the `NOBODY_PRESENT` the protocol has for it.
+#[test]
+fn a_swap_with_nobody_to_ask_is_refused_nobody_present_not_declined() {
+    run_paused(async {
+        let p = pair(Setup { host_answer: Answer::Nobody, ..Setup::default() }).await;
+        assert_eq!(p.vh.request(p.viewer.ctx()).await, SwapOutcome::Declined(ErrorCode::NobodyPresent));
+        assert!(p.viewer_unchanged());
+        // The same the other way round.
+        let p = pair(Setup { viewer_answer: Answer::Nobody, ..Setup::default() }).await;
+        assert_eq!(p.hh.request(&p.host_ctx).await, SwapOutcome::Declined(ErrorCode::NobodyPresent));
+        assert!(p.viewer_unchanged());
+    });
+}
+
+/// Review of 22/11/2026, E8: the host asks and the viewer (the future host) accepts late, so its `SwapAccept` lands
+/// before the asker's 22 s and its `SwapArmed` after them. The asker gave up and dropped the accepted swap, while the
+/// other side, having armed, closed the session: both machines were left disconnected.
+#[test]
+fn an_accept_that_lands_before_the_asker_gives_up_still_swaps() {
+    run_paused(async {
+        let p = pair(Setup { silent_viewer: true, ..Setup::default() }).await;
+        let rec = p.viewer_recorder.clone().unwrap();
+        let (hh, ctx) = (p.hh.clone(), p.host_ctx.clone());
+        let asking = tokio::spawn(async move { hh.request(&ctx).await });
+        eventually(Duration::from_secs(5), "the request", || rec.count() == 1).await;
+        let Message::SwapRequest(req) = rec.messages()[0].clone() else { panic!("not a SwapRequest") };
+        tokio::time::sleep(Duration::from_millis(21_900)).await;
+        let token = [7; 16];
+        p.viewer.ctx().send(swapdesk_proto::SwapAccept { request_id: req.request_id, token }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        p.viewer.ctx().send(swapdesk_proto::SwapArmed { request_id: req.request_id }).await.unwrap();
+        assert_eq!(asking.await.unwrap(), SwapOutcome::Swapped, "the accepted swap was given up");
+        assert_eq!(lock(&p.henv.viewing).as_slice(), &[(p.host_ctx.device().unwrap(), token)], "the new connection");
+        assert!(!rec.messages().iter().any(|m| matches!(m, Message::SwapCancel(_))), "a cancel followed the accept");
+    });
+}
+
+/// Review of 22/11/2026, E8: the other half of the same race. The asker's `SwapCancel` crosses the late accept of
+/// the future host; the future host, which had armed, closed the session anyway, though the asker no longer swaps.
+#[test]
+fn a_cancel_that_crosses_the_accept_keeps_the_session() {
+    run_paused(async {
+        let p = pair(Setup { silent_host: true, viewer_answer: Answer::Hold, ..Setup::default() }).await;
+        let rec = p.recorder.clone().unwrap();
+        p.host_ctx.send(swapdesk_proto::SwapRequest { request_id: 7 }).await.unwrap();
+        eventually(Duration::from_secs(5), "the card", || !lock(&p.venv.prompts).is_empty()).await;
+        for tx in lock(&p.venv.held).drain(..) {
+            let _ = tx.send(true);
+        }
+        eventually(Duration::from_secs(5), "the accept and the armed", || rec.count() == 2).await;
+        // The asker gave up just before the accept reached it.
+        p.host_ctx.send(swapdesk_proto::SwapCancel { request_id: 7 }).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(p.viewer_unchanged(), "the session was closed for a swap the asker had given up");
+        assert!(!p.vh.pending(p.viewer.ctx()), "a new request may follow");
     });
 }
 

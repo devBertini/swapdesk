@@ -32,6 +32,16 @@ pub(super) const TIE_DELAY: Duration = Duration::from_secs(3);
 pub(super) const REFRESH_GAP: Duration = Duration::from_secs(30);
 /// Syncs in flight at once.
 const MAX_IN_FLIGHT: usize = 4;
+/// When a push that was refused `BUSY` or got no answer is tried again, one delay per try. Together they span a
+/// minute, the time a device's budget on the peer takes to earn its syncs back (GRANTS-SYNC.md 4.6: 6 a minute).
+const RETRY_AFTER: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
 
 #[derive(Debug, Default)]
 struct Slot {
@@ -41,6 +51,8 @@ struct Slot {
     unknown_key: bool,
     /// This machine's grants for it changed at this time and no sync has delivered them yet.
     changed_at: Option<Instant>,
+    /// How many times the push of `changed_at` was tried again after a refusal or no answer.
+    retries: usize,
     in_flight: bool,
     last_ok: Option<Instant>,
     /// When a value the peer pushed was last applied.
@@ -91,6 +103,12 @@ impl SyncState {
         self.in_flight
     }
 
+    /// Marks this machine's grants for `device` as changed at `at` and not yet delivered, without scheduling the push.
+    #[cfg(test)]
+    pub fn changed_for_test(&mut self, device: DeviceId, at: Instant) {
+        self.per.entry(device).or_default().changed_at = Some(at);
+    }
+
     /// A sync of `device` ended as a violation: its known minor is 0 until its record comes back.
     pub fn refused(&self, device: &DeviceId) -> bool {
         self.per.get(device).is_some_and(|s| s.refused)
@@ -101,7 +119,12 @@ impl Hub {
     /// This machine's user changed what `device` may do here: the push goes 1 s after the last change.
     pub(super) fn sync_after_change(self: &Arc<Self>, device: DeviceId) {
         let now = Instant::now();
-        lock(&self.sync).per.entry(device).or_default().changed_at = Some(now);
+        {
+            let mut st = lock(&self.sync);
+            let slot = st.per.entry(device).or_default();
+            slot.changed_at = Some(now);
+            slot.retries = 0;
+        }
         self.sync_later(device, PUSH_DELAY, Some(now));
     }
 
@@ -299,7 +322,7 @@ impl Hub {
         result: Result<swapdesk_proto::GrantsSync, SyncError>,
     ) {
         let hex = device_id_hex(&device);
-        let (apply, again) = {
+        let (apply, again, retry) = {
             let mut st = lock(&self.sync);
             st.in_flight = st.in_flight.saturating_sub(1);
             if result.is_ok() {
@@ -310,25 +333,42 @@ impl Hub {
             match &result {
                 Ok(answer) => {
                     slot.last_ok = Some(Instant::now());
+                    slot.retries = 0;
                     let delivered = slot.changed_at.is_none_or(|c| c <= started);
                     if delivered {
                         slot.changed_at = None;
                     }
                     // A value the peer pushed after this sync started is newer than its answer.
                     let newer = slot.peer_applied_at.is_some_and(|t| t > started);
-                    ((!newer).then_some(answer.grants), !delivered)
+                    ((!newer).then_some(answer.grants), !delivered, None)
                 }
                 Err(SyncError::Violation) => {
                     slot.refused = true;
-                    (None, false)
+                    (None, false, None)
                 }
                 Err(SyncError::UnknownKey) => {
                     slot.unknown_key = true;
-                    (None, false)
+                    (None, false, None)
                 }
-                Err(_) => (None, false),
+                // The peer was over its budget, or nothing answered: a change of this side's user that is still
+                // undelivered is tried again, a little later each time, rather than waiting for a trigger that may
+                // not come for hours. Only a change: an appearance or a refresh has its own triggers.
+                Err(SyncError::Busy | SyncError::Failed) => {
+                    let retry = match (slot.changed_at, RETRY_AFTER.get(slot.retries)) {
+                        (Some(at), Some(delay)) => {
+                            slot.retries += 1;
+                            Some((*delay, at))
+                        }
+                        _ => None,
+                    };
+                    (None, false, retry)
+                }
+                Err(_) => (None, false, None),
             }
         };
+        if let Some((delay, change)) = retry {
+            self.sync_later(device, delay, Some(change));
+        }
         match result {
             Ok(answer) => {
                 let hint = self.minor_hint(&device);

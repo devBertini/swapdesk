@@ -140,17 +140,19 @@ fn swap_both_ways_over_two_cores() {
     p.viewer.core.shutdown();
 }
 
+/// Review of 22/11/2026, E8: with nobody to ask, the asker used to read "recusou" (`DECLINED`); it is told that
+/// nobody is there (`NOBODY_PRESENT`, a code every version knows).
 #[test]
-fn a_swap_without_an_interface_is_declined_and_the_session_stays() {
+fn a_swap_without_an_interface_is_refused_nobody_present_and_the_session_stays() {
     let host = Machine::new("host-pc", true, false);
     let viewer = Machine::new("viewer-pc", true, false);
     Machine::pair(&host, &viewer, ALL);
     viewer.trust.update(|s| s.devices.iter_mut().for_each(|d| d.grants_here = PermissionSet::CONTROL)).expect("store");
-    // No hooks on the host: nobody to ask, so the question is declined.
+    // No hooks on the host: nobody to ask, so the question is refused as nobody present.
     let (handle, _seen) = viewer.core.connect(host.addr(), host.device(), Intent::Control).expect("the session opens");
     let outcome =
         viewer.core.runtime().block_on(viewer.core.request_swap(handle.session_id())).expect("a known session");
-    assert_eq!(outcome, SwapOutcome::Declined(ErrorCode::Declined));
+    assert_eq!(outcome, SwapOutcome::Declined(ErrorCode::NobodyPresent));
     assert!(handle.ctx().is_active());
     drop(handle);
     host.core.shutdown();
