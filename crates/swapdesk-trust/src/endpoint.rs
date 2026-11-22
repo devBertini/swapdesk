@@ -126,6 +126,20 @@ pub async fn connect_and_initiate(
     addr: SocketAddr,
     options: InitiateOptions,
 ) -> Result<PairOutcome> {
+    let conn = connect_pairing(endpoint, ctx, addr, HANDSHAKE_LIMIT).await?;
+    initiate(ctx, &conn, options).await
+}
+
+/// The first half of [`connect_and_initiate`]: the connection to the responder's pairing endpoint, given `limit` to
+/// open. `Timeout` and `Tls` mean nothing answered there (the other machine's pairing is not open: its endpoint
+/// exists only while it is), which a caller may try again while its own pairing mode is open; nothing of the
+/// ceremony has started. [`initiate`] runs it on the connection.
+pub async fn connect_pairing(
+    endpoint: &Endpoint,
+    ctx: &PairingContext,
+    addr: SocketAddr,
+    limit: Duration,
+) -> Result<quinn::Connection> {
     ctx.mode.current().ok_or(TrustError::NotInPairingMode)?;
     // One pairing at a time per machine, in either role: no handshake is spent while one runs.
     if ctx.trust.pairing_in_progress() {
@@ -134,11 +148,10 @@ pub async fn connect_and_initiate(
     let connecting = endpoint
         .connect_with(pairing_client_config(&ctx.identity)?, addr, SERVER_NAME)
         .map_err(|e| TrustError::Tls(e.to_string()))?;
-    let conn = tokio::time::timeout(HANDSHAKE_LIMIT, connecting)
+    tokio::time::timeout(limit, connecting)
         .await
         .map_err(|_| TrustError::Timeout("handshake"))?
-        .map_err(|e| TrustError::Tls(e.to_string()))?;
-    initiate(ctx, &conn, options).await
+        .map_err(|e| TrustError::Tls(e.to_string()))
 }
 
 /// What the owner of the pre-handshake checks (PROTOCOL.md 1: on-link, not loopback, not this machine, per-address

@@ -18,8 +18,8 @@ use swapdesk_platform::{Level, NetInterface};
 use swapdesk_proto::Sas;
 use swapdesk_trust::{
     Decision, InitiateOptions, LocalInfo, ModeOptions, PairOutcome, PairUi, PairingContext, PairingRate,
-    PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_and_initiate, device_id_hex,
-    endpoint_from_socket, open_pairing_endpoint_filtered,
+    PairingService, PeerInfo, ServeOptions, Timeouts, TrustError, connect_pairing, device_id_hex, endpoint_from_socket,
+    initiate, open_pairing_endpoint_filtered,
 };
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -115,6 +115,10 @@ impl PairUi for HubPairUi {
 }
 
 /// The `ApiCode` a pairing failure is shown as.
+/// How long one dial of the other machine's pairing endpoint may take, and the pause before the next one.
+const PAIR_DIAL_LIMIT: Duration = Duration::from_secs(3);
+const PAIR_REDIAL: Duration = Duration::from_secs(1);
+
 fn pair_error_code(e: &TrustError) -> ApiCode {
     match e {
         TrustError::Locked { .. } => ApiCode::Locked,
@@ -439,13 +443,21 @@ impl Hub {
                 let socket =
                     bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(|e| TrustError::Tls(e.to_string()))?;
                 let endpoint = endpoint_from_socket(socket, None)?;
-                connect_and_initiate(
-                    &endpoint,
-                    &ctx,
-                    SocketAddr::V4(SocketAddrV4::new(ip, pair_port)),
-                    InitiateOptions { expect, replaces: None },
-                )
-                .await
+                let addr = SocketAddr::V4(SocketAddrV4::new(ip, pair_port));
+                // The other machine's pairing endpoint exists only while its own pairing is open, and its person
+                // may press "Parear" after this one did: while nothing answers there the dial is made again, for
+                // as long as this side's pairing is open (the two minutes both screens promise). The order of the
+                // two presses does not matter.
+                let conn = loop {
+                    match connect_pairing(&endpoint, &ctx, addr, PAIR_DIAL_LIMIT).await {
+                        Ok(conn) => break conn,
+                        Err(TrustError::Timeout(_) | TrustError::Tls(_)) if me.mode.is_open() => {
+                            tokio::time::sleep(PAIR_REDIAL).await;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                };
+                initiate(&ctx, &conn, InitiateOptions { expect, replaces: None }).await
             }
             .await;
             match result {

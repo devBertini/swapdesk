@@ -1231,6 +1231,34 @@ fn free_port_pair() -> (u16, u16) {
     panic!("no two free ports in a row");
 }
 
+/// Review of 22/11/2026, A2: the person who pressed "Parear" first lost the pairing ten seconds later, because the
+/// other computer's pairing was not open yet and its endpoint was dialled once. Both screens promise two minutes:
+/// the dial is now made again while this side's pairing is open, so the order of the two presses does not matter.
+#[test]
+fn the_side_that_presses_parear_first_waits_for_the_other_instead_of_failing() {
+    let ports = free_port_pair();
+    let b = Machine::build_at("beta", FakeNetInterfaces::new(Vec::new()), true, Some(ports));
+    let a = Machine::new("alfa");
+    let mut ua = a.client(info(false));
+    let mut ub = b.client(info(false));
+    let ReplyBody::PairingId(id_a) = ua.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    let typed = device_of(ua.call(UiOp::AddByAddress { ipv4: format!("127.0.0.1:{}", ports.0) }));
+    assert!(matches!(ua.call(UiOp::PairStart { pairing_id: id_a, device_id: typed.id }).unwrap(), ReplyBody::Done));
+    // Nobody has pressed "Parear" on the other computer yet. The one dial of before gave up after ten seconds.
+    assert!(
+        ua.nothing_within(Duration::from_secs(11), |m| {
+            matches!(m, Ipc::UiNotify(Notify::Pairing { state: PairingState::Failed { .. }, .. }))
+        }),
+        "the side that pressed first is still waiting"
+    );
+    let ReplyBody::PairingId(id_b) = ub.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    ua.pairing(id_a, "ShowCode", |s| matches!(s, PairingState::ShowCode { .. }));
+    ub.pairing(id_b, "ShowCode", |s| matches!(s, PairingState::ShowCode { .. }));
+    drop((ua, ub));
+    a.finish();
+    b.finish();
+}
+
 #[test]
 fn a_device_paired_through_a_typed_address_is_dialled_at_that_address() {
     // The M3 gate found it: after pairing with "127.0.0.1:<port>", Connect dialled the default port.
