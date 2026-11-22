@@ -1822,11 +1822,15 @@ impl Window {
                 match event {
                     WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.run_tray_action(hwnd, crate::tray::TrayAction::Open),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {
-                        let (open, quit) = {
+                        let (open, disconnect, quit) = {
                             let st = self.shared.state.borrow();
-                            (st.t(swapdesk_ui::MsgKey::StatusOpen), st.t(swapdesk_ui::MsgKey::StatusQuit))
+                            (
+                                st.t(swapdesk_ui::MsgKey::StatusOpen),
+                                st.host_session().map(|_| st.t(swapdesk_ui::MsgKey::Disconnect)),
+                                st.t(swapdesk_ui::MsgKey::StatusQuit),
+                            )
                         };
-                        crate::tray::menu(hwnd, &open, &quit);
+                        crate::tray::menu(hwnd, &open, disconnect.as_deref(), &quit);
                     }
                     _ => {}
                 }
@@ -1885,11 +1889,14 @@ impl Window {
     /// What the notification area icon asks of the main window: show and raise it, or end the run.
     fn run_tray_action(&self, hwnd: HWND, action: crate::tray::TrayAction) {
         match action {
-            // SAFETY: shows and raises our own window.
+            // SAFETY: shows and raises our own window; one that sits minimized in the taskbar (a session minimizes
+            // it) comes out of it, which `SW_SHOW` alone does not do.
             crate::tray::TrayAction::Open => unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
                 let _ = SetForegroundWindow(hwnd);
             },
+            // The same as the banner's own "Desconectar".
+            crate::tray::TrayAction::Disconnect => self.shared.activate(ControlId::BannerDisconnect, self),
             // SAFETY: ends our own main window, which ends the message loop (WM_DESTROY).
             crate::tray::TrayAction::Quit => unsafe {
                 let _ = DestroyWindow(hwnd);

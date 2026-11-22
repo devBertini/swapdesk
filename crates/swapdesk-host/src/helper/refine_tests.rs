@@ -490,3 +490,121 @@ fn a_new_window_size_on_a_still_screen_is_encoded_from_the_last_picture() {
     assert!(frames.len() >= 2, "the last picture went out again at the new size: {frames:?}");
     assert!(frames.last().unwrap().0, "as a keyframe: {frames:?}");
 }
+
+/// A screen whose first capture breaks after one frame (`Os`: the system took the device back) or cannot start at
+/// all (`denied`: a permission is missing); the captures made after it deliver a frame every 20 ms.
+struct BreakingScreen {
+    first: bool,
+    denied: bool,
+    frames: usize,
+}
+
+impl ScreenSource for BreakingScreen {
+    fn displays(&mut self) -> PResult<Vec<DisplayInfo>> {
+        Ok(Vec::new())
+    }
+    fn open(&mut self, _display: DisplayId, _config: CaptureConfig) -> PResult<()> {
+        if self.denied {
+            return Err(PlatformError {
+                kind: ErrorKind::PermissionDenied(swapdesk_platform::OsGrant::ScreenRecording),
+                op: "open",
+                os_code: None,
+                detail: "no grant".into(),
+            });
+        }
+        Ok(())
+    }
+    fn next_frame(&mut self, _timeout: Duration) -> PResult<Option<Frame>> {
+        std::thread::sleep(Duration::from_millis(20));
+        self.frames += 1;
+        if self.first && self.frames > 1 {
+            return Err(PlatformError {
+                kind: ErrorKind::Os,
+                op: "next_frame",
+                os_code: None,
+                detail: "device".into(),
+            });
+        }
+        Ok(Some(a_frame()))
+    }
+    fn reacquire(&mut self) -> PResult<()> {
+        Ok(())
+    }
+    fn take_cursor(&mut self) -> Option<CursorUpdate> {
+        None
+    }
+    fn close(&mut self) {}
+}
+
+fn breaking_env(outbox: Outbox, denied: bool, made: &Arc<AtomicUsize>) -> CaptureEnv<BreakingScreen, CountingEncoder> {
+    let made = Arc::clone(made);
+    CaptureEnv {
+        screen: Arc::new(move |_| {
+            let n = made.fetch_add(1, Ordering::SeqCst);
+            Ok(BreakingScreen { first: n == 0, denied, frames: 0 })
+        }),
+        encoder: Arc::new(|_f, _c, _b| Ok(CountingEncoder { counts: Counts::default(), refuse: true })),
+        clock: Arc::new(RealClock(Instant::now())),
+        outbox,
+        displays: std::sync::Mutex::new(Vec::new()),
+        input_tx: std::sync::Mutex::new(None),
+        desktop_epoch: Arc::default(),
+        fence: Arc::default(),
+        desktop_probe: None,
+        desktop_sent: Mutex::default(),
+    }
+}
+
+/// Runs `capture_main` for `run_for` (or until it ends by itself); the frames sent, the faults told, and whether it
+/// had ended by itself.
+fn run_main(denied: bool, run_for: Duration) -> (usize, Vec<String>, usize, bool) {
+    let (outbox, rx) = Outbox::new(4096);
+    let made = Arc::new(AtomicUsize::new(0));
+    let env = breaking_env(outbox, denied, &made);
+    let (p, ctl, ids) = (params(), ctl(), AtomicU32::new(0));
+    let ended_alone = std::thread::scope(|s| {
+        let h = s.spawn(|| super::capture_main(&env, p, &ctl, &ids));
+        std::thread::sleep(run_for);
+        let alone = h.is_finished();
+        ctl.stop.store(true, Ordering::Release);
+        h.join().unwrap();
+        alone
+    });
+    let (mut frames, mut faults) = (0, Vec::new());
+    for m in rx.try_iter() {
+        match m {
+            Message::VideoFrame { .. } => frames += 1,
+            Message::HelperFault { what, .. } => faults.push(what.0),
+            _ => {}
+        }
+    }
+    (frames, faults, made.load(Ordering::SeqCst), ended_alone)
+}
+
+/// C2: a capture that failed used to end the picture for the rest of the session. It now starts again.
+#[test]
+fn a_capture_that_fails_is_started_again_and_the_picture_goes_on() {
+    let (frames, faults, made, ended_alone) = run_main(false, Duration::from_millis(1500));
+    assert_eq!(made, 2, "a second capture was made after the first broke");
+    assert!(frames > 5, "the picture goes on: {frames} frames");
+    assert_eq!(faults.len(), 1, "the failure is told once: {faults:?}");
+    assert!(!ended_alone, "the capture runs until the video is stopped");
+}
+
+/// What no new start can pass is told once and left: a missing permission must not spin for the whole session.
+#[test]
+fn a_capture_refused_for_a_missing_permission_is_told_once_and_not_started_again() {
+    let (frames, faults, made, ended_alone) = run_main(true, Duration::from_millis(1200));
+    // (The failed start lists the displays once more, which makes a second source: that is not a second start.)
+    assert_eq!(frames, 0, "no picture");
+    assert!(made <= 2, "no capture is made again and again: {made}");
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(ended_alone, "it ended by itself");
+    use super::restarts_after;
+    for kind in [ErrorKind::Os, ErrorKind::AccessLost, ErrorKind::Unavailable, ErrorKind::Timeout] {
+        assert!(restarts_after(kind), "{kind:?} can pass");
+    }
+    for kind in [ErrorKind::Unsupported, ErrorKind::InvalidInput, ErrorKind::Closed] {
+        assert!(!restarts_after(kind), "{kind:?} cannot pass");
+    }
+}

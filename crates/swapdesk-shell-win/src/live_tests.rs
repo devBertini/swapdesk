@@ -965,3 +965,18 @@ mod banner {
         assert_eq!(backend.disconnects(), 0, "and the banner did nothing with it");
     }
 }
+
+/// The banner's "Desconectar" has a second way that needs neither the banner's window nor its hook (the pointer
+/// over a window of an elevated program may never reach a hook of this process): the tray menu's entry.
+#[test]
+fn the_tray_menu_ends_the_session_this_computer_is_controlled_in() {
+    use windows::Win32::UI::WindowsAndMessaging::WM_COMMAND;
+    let (live, backend) = start_recording(Scenario::Banner.prepared_state());
+    assert_eq!(backend.disconnects(), 0);
+    // SAFETY: our window; the id the menu's entry sends.
+    unsafe {
+        let _ = PostMessageW(Some(live.hwnd()), WM_COMMAND, WPARAM(crate::tray::CMD_DISCONNECT), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(backend.disconnects(), 1, "the session is ended from the tray");
+}

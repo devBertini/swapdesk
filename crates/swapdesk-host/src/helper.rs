@@ -482,15 +482,23 @@ fn capture_main<S: ScreenSource, E: VideoEncoder>(
     // A capture or an encoder that fails for good (a device the system reset, a driver replaced, a session the
     // system took back) must not leave the viewer with a frozen picture for the rest of the session: the fault is
     // reported and the whole capture starts again, source and encoder, after a pause that grows to a few seconds.
-    // It ends only when the video is stopped, the helper ends, or the display is gone (`Ok`: the service starts the
-    // video on a display that exists).
+    // It ends only when the video is stopped, the helper ends, the display is gone (`Ok`: the service starts the
+    // video on a display that exists), or the failure is one no new start can pass (see `restarts_after`).
     let mut failures = 0u32;
     loop {
+        let began = Instant::now();
         let Err(e) = capture_run(env, p, ctl, ids) else { return };
+        // A capture that ran for a while and then failed starts from the short pause again.
+        if began.elapsed() >= CAPTURE_SETTLED {
+            failures = 0;
+        }
         failures += 1;
         // Every failure of the first few, then one in thirty: a capture that cannot start is not a log flood.
         if failures <= 3 || failures.is_multiple_of(30) {
             platform_fault(&env.outbox, &format!("video {} (start {failures})", p.display), &e);
+        }
+        if !restarts_after(e.kind) {
+            return;
         }
         let pause = CAPTURE_RESTART_PAUSE.saturating_mul(failures.min(CAPTURE_RESTART_STEPS));
         // `sleep_unless` is false when the stop came during the pause.
@@ -500,6 +508,21 @@ fn capture_main<S: ScreenSource, E: VideoEncoder>(
     }
 }
 
+/// Whether a capture that ended with this kind of error is started again. What can pass by itself is: the system
+/// took the device or the session back, the display or the desktop was not there, a call did not answer. What
+/// cannot is left as it was, reported once: a permission the person has not given (the interface names it), a
+/// codec or a size this machine does not have, a request that makes no sense.
+pub(crate) fn restarts_after(kind: ErrorKind) -> bool {
+    match kind {
+        ErrorKind::Os | ErrorKind::AccessLost | ErrorKind::Unavailable | ErrorKind::Timeout => true,
+        ErrorKind::PermissionDenied(_) | ErrorKind::Unsupported | ErrorKind::InvalidInput | ErrorKind::Closed => false,
+        // A kind added later is not retried until someone decides here that it can pass.
+        _ => false,
+    }
+}
+
+/// A capture that ran this long before failing counts as having worked.
+const CAPTURE_SETTLED: Duration = Duration::from_secs(10);
 /// The pause before a failed capture starts again: this much after the first failure, growing by as much with each
 /// one up to [`CAPTURE_RESTART_STEPS`] times it.
 const CAPTURE_RESTART_PAUSE: Duration = Duration::from_millis(500);
@@ -509,6 +532,8 @@ const ENCODER_REBUILDS: u32 = 3;
 /// The least time between two encodes of the last picture while the screen stands still (a keyframe the viewer keeps
 /// asking for, a window that keeps changing size): four a second at most.
 const STILL_AGAIN_EVERY_US: u64 = 250_000;
+/// How many times that wait doubles while the answers follow each other with no new picture (250 ms to 4 s).
+const STILL_AGAIN_DOUBLINGS: u32 = 4;
 
 /// How often a helper that started with no display lists them again.
 const DISPLAY_WAIT: Duration = Duration::from_secs(1);
@@ -623,7 +648,10 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                     force = true;
                 }
                 let frame = match frame {
-                    Some(frame) => frame,
+                    Some(frame) => {
+                        still.again_run = 0;
+                        frame
+                    }
                     None => {
                         // The screen stands still. Three things cannot wait for it to change, and each is served
                         // from the last picture, encoded again: a keyframe that is owed (the viewer's picture must
@@ -637,13 +665,18 @@ fn capture_loop<S: ScreenSource, E: VideoEncoder>(
                             let target = if refused == Some(target) { native } else { target };
                             config.is_some_and(|c| (c.width, c.height) != target)
                         };
+                        // A viewer that keeps asking while nothing changes here (a decoder that cannot take
+                        // the keyframes it gets) is answered less and less often: each answer in a row doubles
+                        // the wait, up to four seconds, until the screen changes.
+                        let wait = STILL_AGAIN_EVERY_US << still.again_run.min(STILL_AGAIN_DOUBLINGS);
                         let again = (force || resized || encoder.is_none())
                             && still.frame.is_some()
-                            && now_us.saturating_sub(still.again_at) >= STILL_AGAIN_EVERY_US;
+                            && now_us.saturating_sub(still.again_at) >= wait;
                         let last = if again { still.frame.take() } else { None };
                         match last {
                             Some(last) => {
                                 still.again_at = now_us;
+                                still.again_run = still.again_run.saturating_add(1);
                                 last
                             }
                             None => {
@@ -857,6 +890,8 @@ struct Still {
     refined: bool,
     /// Clock reading when the last picture was last encoded again while the screen stood still.
     again_at: u64,
+    /// How many times in a row it was, with no new picture in between.
+    again_run: u32,
     /// A refusal was reported (once per session).
     refuse_logged: bool,
 }

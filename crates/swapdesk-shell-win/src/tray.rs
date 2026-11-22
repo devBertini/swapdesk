@@ -30,11 +30,15 @@ const SIZE: i32 = 32;
 pub enum TrayAction {
     Open,
     Quit,
+    /// "Desconectar" while this computer is seen or controlled: the way to end that session that needs neither the
+    /// banner nor its hook (a pointer over a window of an elevated program may never reach the hook).
+    Disconnect,
 }
 
-/// The `WM_COMMAND` ids of the menu's two entries (far above the edit controls' small codes).
+/// The `WM_COMMAND` ids of the menu's entries (far above the edit controls' small codes).
 pub const CMD_OPEN: usize = 0x7101;
 pub const CMD_QUIT: usize = 0x7102;
+pub const CMD_DISCONNECT: usize = 0x7103;
 
 impl TrayAction {
     /// The action a `WM_COMMAND` id of the tray menu stands for.
@@ -42,6 +46,7 @@ impl TrayAction {
         match id {
             CMD_OPEN => Some(TrayAction::Open),
             CMD_QUIT => Some(TrayAction::Quit),
+            CMD_DISCONNECT => Some(TrayAction::Disconnect),
             _ => None,
         }
     }
@@ -146,14 +151,18 @@ pub fn remove(hwnd: HWND) {
     }
 }
 
-/// Shows the menu at the pointer. The entry chosen reaches the window as a `WM_COMMAND` with [`CMD_OPEN`] or
-/// [`CMD_QUIT`] (nothing arrives when it is dismissed), so a test can post the same ids.
-pub fn menu(hwnd: HWND, open: &str, quit: &str) {
+/// Shows the menu at the pointer: "Abrir", "Desconectar" (`disconnect`: only while this computer is seen or
+/// controlled) and "Encerrar". The entry chosen reaches the window as a `WM_COMMAND` with [`CMD_OPEN`],
+/// [`CMD_DISCONNECT`] or [`CMD_QUIT`] (nothing arrives when it is dismissed), so a test can post the same ids.
+pub fn menu(hwnd: HWND, open: &str, disconnect: Option<&str>, quit: &str) {
     // SAFETY: a popup menu owned here, shown for our own window (made foreground first, as the shell requires for the
     // menu to close when it loses focus), destroyed before returning; the system posts the command to the window.
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, &HSTRING::from(open));
+        if let Some(disconnect) = disconnect {
+            let _ = AppendMenuW(menu, MF_STRING, CMD_DISCONNECT, &HSTRING::from(disconnect));
+        }
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, &HSTRING::from(quit));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
