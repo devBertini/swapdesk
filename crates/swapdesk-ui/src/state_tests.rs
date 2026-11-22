@@ -3272,3 +3272,23 @@ fn a_chat_message_numbered_again_after_a_reconnect_does_not_replace_what_was_sai
     assert_eq!(s.chat().len(), 500, "the newest 500 are kept");
     assert_eq!(s.chat().last().map(|m| m.msg_id), Some(609));
 }
+
+/// Review of 22/11/2026, H6: the notices of the network (a Public network, a firewall that blocks) were shown only
+/// on a device's page. With no device listed there is no such page, and that is exactly when the notice explains
+/// why: the home page now shows them too.
+#[test]
+fn the_home_page_shows_the_network_notices_when_no_device_page_is_open() {
+    let mut s = UiState::default();
+    s.apply(UiEvent::Reply { ticket: Ticket(0), result: Ok(Reply::Devices(Vec::new())) });
+    let public = NetworkStatus {
+        label: "Wi-Fi".into(),
+        address: Some("192.168.0.12".into()),
+        category: Some(NetCategoryView::Public),
+        notices: vec![Notice::PublicNetwork],
+    };
+    s.apply(UiEvent::NetworkChanged(public));
+    assert!(s.selected_device().is_none(), "the home page: no device is selected");
+    assert_eq!(s.notices(), vec![NoticeKind::Public]);
+    let ids: Vec<ControlId> = s.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+    assert!(ids.contains(&ControlId::Notice(NoticeKind::Public)), "the notice and its button are on the home: {ids:?}");
+}

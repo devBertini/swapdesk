@@ -401,8 +401,10 @@ fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
     if f.st.fetch(DataKind::Devices) != swapdesk_ui::Fetch::Ready {
         return used;
     }
-    if f.st.crash_notice() {
-        used += notice_card(f, Look::Inline, NoticeKind::Crash, Rect::new(a.x, y + used, a.cw, 0.0)).h + 20.0;
+    // Every notice, the crash first. A notice of the network (a Public network, a firewall that blocks) explains
+    // why no computer is listed, and with none listed this page is the only one there is.
+    for kind in f.st.notices() {
+        used += notice_card(f, Look::Inline, kind, Rect::new(a.x, y + used, a.cw, 0.0)).h + 20.0;
     }
     if f.st.no_computer_card() {
         // F20: discovery found nothing for 10 s; the action focuses the address field.

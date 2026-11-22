@@ -447,11 +447,13 @@ impl UiState {
     /// The crash notice and the "no computer found" card (or the plain empty line): what the home shows when no
     /// device page is open.
     pub(crate) fn crash_and_empty_controls(&self, s: &mut Specs) {
-        if self.crash_notice {
-            let (title, body, button) = self.notice_texts(NoticeKind::Crash);
+        // Every notice, the crash first: a notice of the network explains why no computer is listed, and with none
+        // listed the home is the only page there is.
+        for k in self.notices() {
+            let (title, body, button) = self.notice_texts(k);
             s.heading(2, title);
             s.text(UiRole::Text, body);
-            s.button(ControlId::Notice(NoticeKind::Crash), button);
+            s.button(ControlId::Notice(k), button);
         }
         if self.no_computer_card() {
             s.heading(2, self.name_of(MsgKey::NoComputerTitle));

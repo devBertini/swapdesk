@@ -783,8 +783,11 @@ impl CanvasView {
                 true
             }
             KEY_RETURN | KEY_ENTER | KEY_SPACE => {
-                let focus = self.ivars().ix.borrow().focus;
-                if let Some(id) = focus.filter(|i| !matches!(i, ControlId::Edit(_))) {
+                // Only a control of the frame that is shown: never one a card covers.
+                let iv = self.ivars();
+                let focus = iv.ix.borrow().focus;
+                let order = crate::shell::with_state(|st| input::tab_order(st, iv.kind, &iv.out.borrow().widgets));
+                if let Some(id) = input::key_target(&order.unwrap_or_default(), focus) {
                     crate::shell::activate_from(kind, id);
                 }
                 true

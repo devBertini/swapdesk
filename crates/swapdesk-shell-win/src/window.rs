@@ -1676,8 +1676,9 @@ impl Window {
                     return Some(LRESULT(0));
                 }
                 if key == VK_RETURN.0 || key == VK_SPACE.0 {
+                    // Only a control of the frame that is shown: never one a card covers.
                     let focus = self.ix.borrow().focus;
-                    if let Some(id) = focus.filter(|i| !matches!(i, ControlId::Edit(_))) {
+                    if let Some(id) = swapdesk_paint::input::key_target(&self.tab_order(), focus) {
                         self.shared.activate(id, self);
                     }
                     return Some(LRESULT(0));

@@ -21,6 +21,13 @@ pub fn tab_order(state: &UiState, kind: WindowKind, widgets: &[Widget]) -> Vec<C
         .collect()
 }
 
+/// The control Enter or Space presses: the focused one, while it is still one of the frame's controls (`order`, see
+/// [`tab_order`]). The focus can stay on a control that a card now covers, or that went off: a key pressed then
+/// must press nothing, never the button behind the question that is on the screen.
+pub fn key_target(order: &[ControlId], focus: Option<ControlId>) -> Option<ControlId> {
+    focus.filter(|f| !matches!(f, ControlId::Edit(_)) && order.contains(f))
+}
+
 /// The control Tab (or Shift+Tab when `backwards`) moves to from `current`, wrapping at both ends. With no focus, or a
 /// focus that is no longer in `order`, it starts at the first control (the last one backwards). `None` when `order`
 /// is empty.
@@ -37,4 +44,37 @@ pub fn next_focus(order: &[ControlId], current: Option<ControlId>, backwards: bo
         (Some(i), true) => (i + n - 1) % n,
     };
     Some(order[next])
+}
+
+#[cfg(test)]
+mod key_target_tests {
+    use super::*;
+    use crate::painter::Rect;
+    use swapdesk_ui::mock::Scenario;
+
+    /// Review of 22/11/2026, H4: with the focus on "Controlar" and a request from another computer on the screen,
+    /// Enter pressed the button under the card. A key now presses only a control of the frame that is shown.
+    #[test]
+    fn enter_never_presses_a_control_that_a_card_covers() {
+        // The device page: "Controlar" is there, and has the focus.
+        let page = Scenario::Dispositivos.prepared_state();
+        let control = ControlId::Control;
+        let widget = |id| Widget { id, rect: Rect::new(0.0, 0.0, 10.0, 10.0), radius: 0.0 };
+        let shown = [widget(control)];
+        let order = tab_order(&page, WindowKind::Main, &shown);
+        assert_eq!(key_target(&order, Some(control)), Some(control));
+        // A request arrives: the card's buttons are the frame's only widgets (the page's were cleared).
+        let asked = Scenario::PedidoConexao.prepared_state();
+        let card: Vec<Widget> = asked
+            .controls(WindowKind::Main)
+            .into_iter()
+            .filter(|c| c.id.focusable() && !c.disabled && !matches!(c.id, ControlId::Control | ControlId::ViewOnly))
+            .map(|c| widget(c.id))
+            .collect();
+        assert!(!card.is_empty(), "the card has its buttons");
+        let order = tab_order(&asked, WindowKind::Main, &card);
+        assert_eq!(key_target(&order, Some(control)), None, "the button behind the card is not pressed");
+        assert_eq!(key_target(&order, Some(card[0].id)), Some(card[0].id), "a button of the card is");
+        assert_eq!(key_target(&order, None), None);
+    }
 }
