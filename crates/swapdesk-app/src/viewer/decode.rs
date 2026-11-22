@@ -441,7 +441,16 @@ impl Worker {
             Err(e) => {
                 self.feedback.on_lost(1);
                 self.shared.lost.fetch_add(1, Ordering::Relaxed);
-                self.shared.error("present", &e);
+                if crate::shared::watch::screen_took_no_picture(e.kind) {
+                    // The window is hidden or minimised: the decoder gave its picture and the renderer is whole,
+                    // the screen just takes none. That is no stall (nothing is built again for it) and no line
+                    // for the trace (it would be one for as long as the window stays hidden).
+                    self.watch.picture();
+                    *self.shared.last_error.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(format!("present: {e}"));
+                } else {
+                    self.shared.error("present", &e);
+                }
                 if e.kind == ErrorKind::Unavailable {
                     self.device_gone();
                 }

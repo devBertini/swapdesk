@@ -66,6 +66,14 @@ impl StallWatch {
     }
 }
 
+/// Whether a present that failed with this kind of error only means the screen took no picture: the renderer
+/// answers `Timeout` for every picture while its window is hidden or minimised (the swap chain still holds the
+/// last one). The pipeline works then, so it is no stall: a viewer left minimised must not build its renderer and
+/// decoder again every few seconds and ask the host for keyframes nobody sees.
+pub fn screen_took_no_picture(kind: swapdesk_platform::ErrorKind) -> bool {
+    kind == swapdesk_platform::ErrorKind::Timeout
+}
+
 /// Where a line of the pipeline's trace goes (the application's trace log).
 pub type NoteHook = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -158,6 +166,25 @@ mod tests {
         w.frame(at(300_000));
         w.clear();
         assert!(!w.stalled(at(400_000)));
+    }
+
+    /// Found by the video lane's review of the stall watch (22/11/2026): a minimised viewer window refuses every
+    /// picture with `Timeout`, which read as frames that give no picture and rebuilt the pipeline again and again.
+    #[test]
+    fn a_hidden_window_that_takes_no_picture_is_no_stall() {
+        use swapdesk_platform::ErrorKind;
+        assert!(screen_took_no_picture(ErrorKind::Timeout));
+        for kind in [ErrorKind::Unavailable, ErrorKind::Os, ErrorKind::AccessLost, ErrorKind::InvalidInput] {
+            assert!(!screen_took_no_picture(kind), "{kind:?} is a failure of the pipeline");
+        }
+        // What the decode thread does with it: the picture counts, so the watch stays quiet however long it lasts.
+        let t0 = Instant::now();
+        let mut w = StallWatch::default();
+        for ms in (0..60_000u64).step_by(33) {
+            w.frame(t0 + Duration::from_millis(ms));
+            w.picture();
+            assert!(!w.stalled(t0 + Duration::from_millis(ms)));
+        }
     }
 
     #[test]
