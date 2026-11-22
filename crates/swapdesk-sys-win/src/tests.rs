@@ -813,3 +813,46 @@ fn session_user_sid_is_refused_without_the_tcb_privilege() {
     let session = crate::active_console_session().expect("a console session");
     assert!(crate::session_user_sid(session).is_err());
 }
+
+/// Review of 22/11/2026, G1: a console change whose state could not be read (the session's user is not there to be
+/// queried in the middle of a logoff) came out of the watcher as an error, which the service took for its own end:
+/// it stopped, cleanly, and stayed stopped. The change is now told once the state can be read.
+#[test]
+fn a_console_state_that_cannot_be_read_is_read_again_and_never_ends_the_watcher() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static READS: AtomicU32 = AtomicU32::new(0);
+    fn failing_twice() -> swapdesk_platform::Result<swapdesk_platform::ConsoleState> {
+        if READS.fetch_add(1, Ordering::SeqCst) < 2 {
+            return Err(swapdesk_platform::PlatformError {
+                kind: swapdesk_platform::ErrorKind::Os,
+                op: "WTSQuerySessionInformationW",
+                os_code: Some(2),
+                detail: "the session is gone".into(),
+            });
+        }
+        Ok(swapdesk_platform::ConsoleState {
+            session_id: Some(7),
+            user: Some("ana".into()),
+            user_is_admin: false,
+            desktop: Desktop::Default,
+        })
+    }
+    let (tx, mut watcher) = crate::watcher::session_channel_reading(failing_twice);
+    tx.console_changed();
+    assert_eq!(watcher.next_event(Duration::from_millis(100)).unwrap(), None, "a failed read is no event and no end");
+    // Other events still flow while the change is owed.
+    tx.network_changed();
+    assert_eq!(watcher.next_event(Duration::from_millis(100)).unwrap(), Some(SessionEvent::NetworkChanged));
+    let started = std::time::Instant::now();
+    let state = loop {
+        // A long wait is cut short by the read that is owed.
+        match watcher.next_event(Duration::from_secs(30)).unwrap() {
+            Some(SessionEvent::ConsoleChanged(s)) => break s,
+            None => assert!(started.elapsed() < Duration::from_secs(5), "the change never came"),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!((state.session_id, state.user.as_deref()), (Some(7), Some("ana")));
+    assert_eq!(READS.load(Ordering::SeqCst), 3, "read until it could be");
+    assert_eq!(watcher.next_event(Duration::from_millis(50)).unwrap(), None, "told once");
+}

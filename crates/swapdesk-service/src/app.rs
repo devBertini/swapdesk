@@ -278,7 +278,8 @@ fn sas(core: &ServiceCore, trace: &dyn TraceSink) {
     }
 }
 
-/// Runs the service until `ctx.stop` is set or the watcher closes. The exit code: 0 clean, 1 could not start.
+/// Runs the service until `ctx.stop` is set or the watcher closes. The exit code: 0 clean, 1 could not start or
+/// ended without being asked to (the installed service's recovery actions then start it again).
 pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     let env = match open_env(&opts) {
         Ok(e) => e,
@@ -291,7 +292,7 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
     match run_with(&opts, ctx, env) {
         Ok(()) => 0,
         Err(e) => {
-            trace.log(Level::Error, "service", format_args!("did not start: {e}"));
+            trace.log(Level::Error, "service", format_args!("did not start or ended by itself: {e}"));
             eprintln!("swapdesk-service: {e}");
             1
         }
@@ -1034,7 +1035,9 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
             }
             Ok(None) => {}
             // The watcher closed: the service is stopping.
-            Err(_) => break,
+            Err(e) if e.kind == swapdesk_platform::ErrorKind::Closed => break,
+            // Anything else is one read that failed, never a reason to stop serving.
+            Err(e) => trace.log(Level::Warn, "service", format_args!("session watcher: {e}")),
         }
         let pending: Vec<(Arc<ServiceCore>, CoreEvent)> = lock(&core_events)
             .iter()
@@ -1078,7 +1081,15 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     }
     drop(net_watcher);
 
-    trace.log(Level::Info, "service", format_args!("stopping"));
+    // Nobody asked for the stop: the loop ended because its event sources are gone. The service still ends in
+    // order, but says so with its exit code, so that the recovery actions of the installed service start it again
+    // (a clean exit would leave it stopped until the next boot).
+    let unasked = !stop.is_set();
+    trace.log(
+        if unasked { Level::Error } else { Level::Info },
+        "service",
+        format_args!("stopping{}", if unasked { " without a stop request: the session watcher closed" } else { "" }),
+    );
     every_hub(&|h| h.shutdown());
     supervisor.stop_all();
     pipes.stop_all();
@@ -1087,6 +1098,9 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     lock(&core_events).clear();
     drop(accounts);
     trace.log(Level::Info, "service", format_args!("stopped"));
+    if unasked {
+        return Err("the session watcher closed without a stop request".into());
+    }
     Ok(())
 }
 

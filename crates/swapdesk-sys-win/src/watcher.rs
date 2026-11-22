@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swapdesk_platform::{ConsoleState, ErrorKind, PlatformError, Result, SessionEvent, SessionWatcher};
 use swapdesk_proto::Desktop;
@@ -139,14 +139,46 @@ impl SessionEventSender {
 
 /// A new event channel: the sender for the sources, the watcher for the consumer.
 pub fn session_channel() -> (SessionEventSender, WinSessionWatcher) {
-    let (tx, rx) = mpsc::channel();
-    (SessionEventSender { tx, awake: Arc::new(AtomicBool::new(true)) }, WinSessionWatcher { rx, stopped: false })
+    session_channel_reading(console_state)
 }
+
+/// [`session_channel`] with the function that reads the console's state (tests give one that fails).
+pub(crate) fn session_channel_reading(read: fn() -> Result<ConsoleState>) -> (SessionEventSender, WinSessionWatcher) {
+    let (tx, rx) = mpsc::channel();
+    (
+        SessionEventSender { tx, awake: Arc::new(AtomicBool::new(true)) },
+        WinSessionWatcher { rx, stopped: false, read, console_again: None },
+    )
+}
+
+/// How long after a console change whose state could not be read the state is read again.
+const CONSOLE_AGAIN: Duration = Duration::from_millis(500);
 
 /// The Windows `SessionWatcher`.
 pub struct WinSessionWatcher {
     rx: Receiver<Raw>,
     stopped: bool,
+    read: fn() -> Result<ConsoleState>,
+    /// A console change is owed to the consumer: its state could not be read, and is read again at this time.
+    console_again: Option<Instant>,
+}
+
+impl WinSessionWatcher {
+    /// The console's state after a change. A read that fails (the session's user cannot be queried in the middle of
+    /// a logon, a logoff or a switch of users) is not the watcher's end, which would stop the whole service: the
+    /// change is told as soon as the state can be read.
+    fn console_event(&mut self) -> Option<SessionEvent> {
+        match (self.read)() {
+            Ok(state) => {
+                self.console_again = None;
+                Some(SessionEvent::ConsoleChanged(state))
+            }
+            Err(_) => {
+                self.console_again = Some(Instant::now() + CONSOLE_AGAIN);
+                None
+            }
+        }
+    }
 }
 
 fn closed(detail: &str) -> PlatformError {
@@ -162,8 +194,18 @@ impl SessionWatcher for WinSessionWatcher {
         if self.stopped {
             return Err(closed("stopped"));
         }
+        let timeout = match self.console_again {
+            Some(at) => {
+                let left = at.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(self.console_event());
+                }
+                timeout.min(left)
+            }
+            None => timeout,
+        };
         match self.rx.recv_timeout(timeout) {
-            Ok(Raw::ConsoleChanged) => Ok(Some(SessionEvent::ConsoleChanged(console_state()?))),
+            Ok(Raw::ConsoleChanged) => Ok(self.console_event()),
             Ok(Raw::Desktop(d)) => Ok(Some(SessionEvent::DesktopSwitched(d))),
             Ok(Raw::DisplaysChanged) => Ok(Some(SessionEvent::DisplaysChanged)),
             Ok(Raw::Suspending) => Ok(Some(SessionEvent::Suspending)),
