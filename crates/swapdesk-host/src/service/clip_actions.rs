@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use swapdesk_extras::clipboard::ClipboardHandler;
 use swapdesk_extras::{ExtrasEvent, ExtrasSink};
-use swapdesk_platform::{ActionRunner, ErrorKind, PlatformError};
+use swapdesk_platform::{ActionRunner, ErrorKind, Level, PlatformError, TraceSink};
 use swapdesk_proto::{Action, ClipSkip, ErrorCode, Message, PermissionSet};
 use swapdesk_session::{ChannelHandler, HostService, HostUi, SessionCtx};
 use swapdesk_term::{ActionContext, ActionRelay};
@@ -104,9 +104,20 @@ enum Whose {
 struct ClipSink {
     whose: Whose,
     hooks: Arc<ClipHooksCell>,
+    trace: Arc<dyn TraceSink>,
 }
 
 impl ExtrasSink for ClipSink {
+    /// What became of each item (kind, length and number, never what it holds): the only record of a copy that did
+    /// not arrive.
+    fn note(&self, text: &str) {
+        let side = match &self.whose {
+            Whose::Viewer(_) => "viewing",
+            Whose::Host(_) => "hosting",
+        };
+        self.trace.log(Level::Debug, "clipboard", format_args!("{side}: {text}"));
+    }
+
     fn event(&self, event: ExtrasEvent) {
         let ExtrasEvent::ClipboardSkipped { reason, .. } = event else { return };
         let session_id = match &self.whose {
@@ -126,17 +137,28 @@ pub(crate) fn host_clipboard(
     host: &Arc<OnceLock<HostService>>,
 ) -> Arc<ClipboardHandler<PipeClipboard>> {
     let provider = PipeClipboard::new(Arc::new(UserHelperRpc { shared: Arc::clone(shared) }));
-    let sink = Arc::new(ClipSink { whose: Whose::Host(Arc::clone(host)), hooks: Arc::clone(hooks) });
+    let sink = Arc::new(ClipSink {
+        whose: Whose::Host(Arc::clone(host)),
+        hooks: Arc::clone(hooks),
+        trace: Arc::clone(&shared.trace),
+    });
     ClipboardHandler::new(provider, true, sink)
 }
 
 /// The clipboard feature of one viewer session: the clipboard of the UI that owns it. `session` is set to the
 /// session's id once the host granted it.
-pub(crate) fn viewer_clipboard(hooks: &Arc<ClipHooksCell>) -> (Arc<ClipboardHandler<PipeClipboard>>, Arc<AtomicU64>) {
+pub(crate) fn viewer_clipboard(
+    hooks: &Arc<ClipHooksCell>,
+    trace: &Arc<dyn TraceSink>,
+) -> (Arc<ClipboardHandler<PipeClipboard>>, Arc<AtomicU64>) {
     let session = Arc::new(AtomicU64::new(0));
     let provider =
         PipeClipboard::new(Arc::new(ViewerUiRpc { session: Arc::clone(&session), hooks: Arc::clone(hooks) }));
-    let sink = Arc::new(ClipSink { whose: Whose::Viewer(Arc::clone(&session)), hooks: Arc::clone(hooks) });
+    let sink = Arc::new(ClipSink {
+        whose: Whose::Viewer(Arc::clone(&session)),
+        hooks: Arc::clone(hooks),
+        trace: Arc::clone(trace),
+    });
     (ClipboardHandler::new(provider, true, sink), session)
 }
 

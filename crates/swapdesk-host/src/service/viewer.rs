@@ -1042,7 +1042,7 @@ pub(crate) async fn open(p: OpenParams, mut cfg: ViewerConfig) -> Result<Opened,
     let chat = ChatRouter::new(hooks);
     let _ = registry.register(chat.clone());
     // The clipboard of this session is the clipboard of the UI that owns it; the host's quick-action results land here.
-    let (clip, clip_session) = viewer_clipboard(&clip_hooks);
+    let (clip, clip_session) = viewer_clipboard(&clip_hooks, &trace);
     let actions = Arc::new(ActionWaiters::default());
     let _ = registry.register(clip.clone());
     let _ = registry.register(actions.clone());

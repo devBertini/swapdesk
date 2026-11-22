@@ -28,6 +28,10 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Polls the host lets pass before it offers what its clipboard held at the start (2 s): the viewer's own offer, made
 /// at once, opens its stream well within this, and the host then offers nothing.
 pub const HOST_START_WAIT: u32 = 8;
+/// Polls a copy is read again for after a read that failed (2 s). The clipboard is one for every program: another
+/// one may hold it open at the moment of a copy, and a read that failed used to consume the copy, which then never
+/// reached the other computer and left no trace (review of 22/11/2026).
+pub const READ_RETRIES: u32 = 8;
 /// A clipboard stream that does not finish in this time is dropped.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// The most a clipboard item's buffer reserves ahead of the bytes that have arrived (PROTOCOL.md 1: nothing is
@@ -57,6 +61,10 @@ pub struct ClipEngine<P> {
     start_wait: u32,
     /// Polls still to wait before the pending offer goes.
     wait_left: u32,
+    /// Reads that failed in a row for the copy now waiting to be read.
+    read_fails: u32,
+    /// What the last poll has to say to the trace.
+    note: Option<String>,
 }
 
 impl<P: ClipboardProvider> ClipEngine<P> {
@@ -74,7 +82,14 @@ impl<P: ClipboardProvider> ClipEngine<P> {
             offer_pending: false,
             start_wait: 0,
             wait_left: 0,
+            read_fails: 0,
+            note: None,
         }
+    }
+
+    /// What the last poll had to say to the trace, once.
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
     }
 
     fn active(&self) -> bool {
@@ -147,6 +162,7 @@ impl<P: ClipboardProvider> ClipEngine<P> {
             return None;
         }
         let first_look = self.last_count.is_none();
+        let before = (self.last_count, self.offer_pending);
         self.last_count = Some(count);
         // The provider was out of reach until now (a helper or a UI not attached yet): what is on the clipboard at the
         // first look was there before the session; only the offer at the start sends it.
@@ -157,7 +173,30 @@ impl<P: ClipboardProvider> ClipEngine<P> {
             return None;
         }
         self.offer_pending = false;
-        match self.provider.read().ok()? {
+        let read = match self.provider.read() {
+            Ok(read) => {
+                self.read_fails = 0;
+                read
+            }
+            Err(e) if self.read_fails < READ_RETRIES => {
+                // Nothing is consumed: the next poll finds the same copy (or the same offer) and reads it again.
+                (self.last_count, self.offer_pending) = before;
+                self.read_fails += 1;
+                if self.read_fails == 1 {
+                    self.note = Some(format!("the clipboard could not be read and is looked at again: {e:?}"));
+                }
+                return None;
+            }
+            Err(e) => {
+                self.read_fails = 0;
+                self.note = Some(format!(
+                    "the clipboard could not be read {} times: this copy is not sent ({e:?})",
+                    READ_RETRIES + 1
+                ));
+                return None;
+            }
+        };
+        match read {
             ClipRead::Empty => None,
             ClipRead::Unsupported if offer => None,
             ClipRead::Concealed => Some(Outgoing::Skipped(ClipSkip::Concealed)),
@@ -296,16 +335,29 @@ impl<P: ClipboardProvider + Send + 'static> ChannelHandler for ClipboardHandler<
             let read =
                 until_superseded(&mut mark, tokio::time::timeout(READ_TIMEOUT, read_item(&mut stream.recv, &mut body)))
                     .await;
-            let Some(Ok(Some(item))) = read else {
-                // Superseded, timed out or malformed: the sender is told to stop, and what was buffered goes.
-                let _ = stream.recv.stop(quinn::VarInt::from_u32(u32::from(swapdesk_proto::ErrorCode::Busy.tag())));
-                return;
+            let item = match read {
+                Some(Ok(Some(item))) => item,
+                other => {
+                    // Superseded, timed out or malformed: the sender is told to stop, and what was buffered goes.
+                    let why = match other {
+                        None => "a newer item or the session's start or end took its place",
+                        Some(Err(_)) => "it did not arrive whole in time",
+                        _ => "its stream ended early or was malformed",
+                    };
+                    sink.note(&format!("an item of the other computer was dropped: {why}"));
+                    let _ = stream.recv.stop(quinn::VarInt::from_u32(u32::from(swapdesk_proto::ErrorCode::Busy.tag())));
+                    return;
+                }
             };
-            let (kind, len) = match &item.payload {
-                ClipboardPayload::Text(t) => (ClipKind::Text, t.len()),
-                ClipboardPayload::Png(p) => (ClipKind::Png, p.len()),
-            };
+            let (kind, len, seq) = described(&item);
             let applied = tokio::task::spawn_blocking(move || lock(&engine).apply_owned(item)).await;
+            let what = match &applied {
+                Ok(Ok(true)) => "written to this clipboard".to_owned(),
+                Ok(Ok(false)) => "not written: not newer than the last one, or sync is off here".to_owned(),
+                Ok(Err(e)) => format!("not written: {e:?}"),
+                Err(_) => "not written: the write was interrupted".to_owned(),
+            };
+            sink.note(&format!("received {kind:?} of {len} bytes (item {seq}): {what}"));
             if matches!(applied, Ok(Ok(true))) {
                 sink.event(ExtrasEvent::ClipboardReceived { kind, len });
             }
@@ -315,6 +367,14 @@ impl<P: ClipboardProvider + Send + 'static> ChannelHandler for ClipboardHandler<
     fn on_end(&self, _ctx: &SessionCtx, _end: &SessionEnd) {
         self.supersede();
         lock(&self.engine).set_peer(false);
+    }
+}
+
+/// An item's kind, length and number: all the trace ever says of it.
+fn described(item: &ClipboardItem) -> (ClipKind, usize, u32) {
+    match &item.payload {
+        ClipboardPayload::Text(t) => (ClipKind::Text, t.len(), item.seq),
+        ClipboardPayload::Png(p) => (ClipKind::Png, p.len(), item.seq),
     }
 }
 
@@ -386,22 +446,41 @@ async fn poll_loop<P: ClipboardProvider + Send + 'static>(
     loop {
         tick.tick().await;
         let e = Arc::clone(&engine);
-        let Ok(out) = tokio::task::spawn_blocking(move || lock(&e).poll()).await else { return };
+        let polled = tokio::task::spawn_blocking(move || {
+            let mut e = lock(&e);
+            let out = e.poll();
+            (out, e.take_note())
+        });
+        let Ok((out, note)) = polled.await else { return };
+        if let Some(note) = note {
+            sink.note(&note);
+        }
         match out {
             None => {}
             Some(Outgoing::Skipped(reason)) => {
+                sink.note(&format!("a copy was not sent: {reason:?}"));
                 sink.event(ExtrasEvent::ClipboardSkipped { from_peer: false, reason });
                 let _ = ctx.try_send(ClipboardSkipped { reason });
             }
             Some(Outgoing::Item(item)) => {
-                let Ok(bytes) = item.encode() else { continue };
-                let Ok(mut send) = ctx.open_uni(StreamKind::Clipboard).await else { continue };
-                if send.write_all(&bytes).await.is_ok() {
-                    let _ = send.finish();
-                }
+                let (kind, len, seq) = described(&item);
+                let sent = send_item(&ctx, &item).await;
+                sink.note(&match sent {
+                    Ok(()) => format!("sent {kind:?} of {len} bytes (item {seq})"),
+                    Err(why) => format!("{kind:?} of {len} bytes (item {seq}) was not sent: {why}"),
+                });
             }
         }
     }
+}
+
+/// One item on a stream of its own; `Err` says which step failed.
+async fn send_item(ctx: &SessionCtx, item: &ClipboardItem) -> Result<(), &'static str> {
+    let bytes = item.encode().map_err(|_| "it could not be encoded")?;
+    let mut send = ctx.open_uni(StreamKind::Clipboard).await.map_err(|_| "no stream could be opened")?;
+    send.write_all(&bytes).await.map_err(|_| "its stream broke")?;
+    let _ = send.finish();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -432,6 +511,55 @@ mod tests {
         assert_eq!(e.poll(), None, "unchanged counter: nothing");
         fake.copy_externally(ClipContent::Png(vec![1, 2]), false);
         assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 2, payload: ClipboardPayload::Png(_) }))));
+    }
+
+    /// Review of 22/11/2026: a read that failed (another program held the clipboard at that moment) consumed the
+    /// copy, which then never reached the other computer, and nothing said so.
+    #[test]
+    fn a_copy_whose_read_failed_is_read_again_and_sent() {
+        let fake = FakeClipboard::new();
+        let mut e = engine(&fake);
+        fake.copy_externally(text("a"), false);
+        fake.fail_reads(2);
+        assert_eq!(e.poll(), None, "the read failed");
+        assert!(e.take_note().is_some_and(|n| n.contains("looked at again")), "and the trace is told once");
+        assert_eq!(e.poll(), None, "and failed again");
+        assert_eq!(e.take_note(), None);
+        assert_eq!(
+            e.poll(),
+            Some(Outgoing::Item(ClipboardItem { seq: 1, payload: ClipboardPayload::Text("a".into()) })),
+            "the copy is still sent once the clipboard can be read"
+        );
+        assert_eq!(e.poll(), None, "once");
+    }
+
+    #[test]
+    fn a_clipboard_that_cannot_be_read_for_two_seconds_gives_that_copy_up_and_says_so() {
+        let fake = FakeClipboard::new();
+        let mut e = engine(&fake);
+        fake.copy_externally(text("a"), false);
+        fake.fail_reads(u32::MAX);
+        for _ in 0..READ_RETRIES {
+            assert_eq!(e.poll(), None);
+        }
+        let _ = e.take_note();
+        assert_eq!(e.poll(), None);
+        assert!(e.take_note().is_some_and(|n| n.contains("not sent")), "the trace says the copy was given up");
+        fake.fail_reads(0);
+        assert_eq!(e.poll(), None, "given up: it is not sent later out of nowhere");
+        fake.copy_externally(text("b"), false);
+        assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 1, .. }))), "the next copy goes");
+    }
+
+    #[test]
+    fn the_offer_at_the_start_is_made_again_after_a_read_that_failed() {
+        let fake = FakeClipboard::new();
+        fake.copy_externally(text("before"), false);
+        let mut e = session_engine(&fake, true);
+        e.set_peer(true);
+        fake.fail_reads(1);
+        assert_eq!(e.poll(), None);
+        assert!(matches!(e.poll(), Some(Outgoing::Item(ClipboardItem { seq: 1, .. }))), "the offer was not lost");
     }
 
     #[test]

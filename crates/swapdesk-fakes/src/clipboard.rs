@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use swapdesk_platform::{ClipContent, ClipRead, ClipboardProvider, Result};
+use swapdesk_platform::{ClipContent, ClipRead, ClipboardProvider, ErrorKind, PlatformError, Result};
 
 use crate::lock;
 
@@ -11,6 +11,12 @@ struct Inner {
     concealed: bool,
     unsupported: bool,
     writes: Vec<ClipContent>,
+    fail_reads: u32,
+    fail_writes: u32,
+}
+
+fn held(op: &'static str) -> PlatformError {
+    PlatformError { kind: ErrorKind::Os, op, os_code: None, detail: "another program holds the clipboard".into() }
 }
 
 /// In-memory clipboard with a change counter and a concealed flag (a password manager's copy). Clones share it.
@@ -39,6 +45,16 @@ impl FakeClipboard {
         g.unsupported = true;
     }
 
+    /// The next `n` reads fail, as when another program holds the clipboard open.
+    pub fn fail_reads(&self, n: u32) {
+        lock(&self.0).fail_reads = n;
+    }
+
+    /// The next `n` writes fail.
+    pub fn fail_writes(&self, n: u32) {
+        lock(&self.0).fail_writes = n;
+    }
+
     /// What Swapdesk wrote, in order.
     pub fn writes(&self) -> Vec<ClipContent> {
         lock(&self.0).writes.clone()
@@ -51,7 +67,11 @@ impl ClipboardProvider for FakeClipboard {
     }
 
     fn read(&mut self) -> Result<ClipRead> {
-        let g = lock(&self.0);
+        let mut g = lock(&self.0);
+        if g.fail_reads > 0 {
+            g.fail_reads -= 1;
+            return Err(held("clipboard read"));
+        }
         Ok(if g.unsupported {
             ClipRead::Unsupported
         } else if g.concealed && g.content.is_some() {
@@ -63,6 +83,10 @@ impl ClipboardProvider for FakeClipboard {
 
     fn write(&mut self, content: &ClipContent) -> Result<()> {
         let mut g = lock(&self.0);
+        if g.fail_writes > 0 {
+            g.fail_writes -= 1;
+            return Err(held("clipboard write"));
+        }
         g.count += 1;
         g.content = Some(content.clone());
         g.concealed = false;

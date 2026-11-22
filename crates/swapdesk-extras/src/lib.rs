@@ -33,6 +33,9 @@ pub enum ExtrasEvent {
 
 pub trait ExtrasSink: Send + Sync + 'static {
     fn event(&self, event: ExtrasEvent);
+
+    /// What became of a clipboard item, for the trace alone: its kind, length and number, never what it holds.
+    fn note(&self, _text: &str) {}
 }
 
 /// A sink that drops everything.
