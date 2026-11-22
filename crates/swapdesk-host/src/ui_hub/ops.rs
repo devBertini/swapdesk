@@ -841,6 +841,10 @@ impl Hub {
                     }
                 },
                 ViewerOut::PeerGrants(grants) => self.apply_peer_grants(device, grants),
+                ViewerOut::Wake { macs } => {
+                    let at = handle.ctx().connection().map(|c| c.remote_address());
+                    self.store_wake_info(device, at, macs);
+                }
                 // The host asks its user: the panel of the feature says so, with the time left (WAITING.md 4, rows
                 // 11 and 12).
                 ViewerOut::Consent { feature, timeout_s } => {

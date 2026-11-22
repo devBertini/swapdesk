@@ -88,6 +88,10 @@ pub enum ViewerOut {
         feature: swapdesk_proto::Feature,
         timeout_s: u16,
     },
+    /// The network cards that can wake the host (`WakeInfo`, F-WAKE-01): kept with the device for "Acordar".
+    Wake {
+        macs: Vec<[u8; 6]>,
+    },
 }
 
 /// What a terminal of this session sends the UI.
@@ -917,6 +921,10 @@ impl Drive {
                 }
                 ViewerEvent::Message(Ctl::ConsentPending(p)) => {
                     let _ = self.out.send(ViewerOut::Consent { feature: p.feature, timeout_s: p.timeout_s }).await;
+                    None
+                }
+                ViewerEvent::Message(Ctl::WakeInfo(w)) => {
+                    let _ = self.out.send(ViewerOut::Wake { macs: w.macs }).await;
                     None
                 }
                 ViewerEvent::Message(_) => None,

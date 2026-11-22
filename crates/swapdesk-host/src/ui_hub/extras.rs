@@ -98,7 +98,47 @@ fn chat_code(e: ChatError) -> ApiCode {
     }
 }
 
+/// How many of a device's last addresses are kept (the newest first).
+const LAST_ADDRS: usize = 4;
+
 impl Hub {
+    /// A host told this viewer which of its network cards can wake it (`WakeInfo`, F-WAKE-01), over the session its
+    /// pinned key authenticated: kept with the device, with the address it answered from (the wake packet goes to
+    /// the broadcast address of the network that holds it). Written only when something changed.
+    pub(super) fn store_wake_info(
+        self: &Arc<Self>,
+        device: DeviceId,
+        at: Option<std::net::SocketAddr>,
+        mut macs: Vec<[u8; 6]>,
+    ) {
+        macs.truncate(8);
+        let ip = match at {
+            Some(std::net::SocketAddr::V4(a)) => Some(a.ip().octets()),
+            _ => None,
+        };
+        let same = self.p.trust.read(|s| {
+            s.find_by_id(&device)
+                .is_none_or(|d| d.wol_macs == macs && ip.is_none_or(|ip| d.last_addrs.first() == Some(&ip)))
+        });
+        if same {
+            return;
+        }
+        let written = self.p.trust.update(|s| {
+            if let Some(d) = s.devices.iter_mut().find(|d| d.device_id == device) {
+                d.wol_macs = macs.clone();
+                if let Some(ip) = ip {
+                    d.last_addrs.retain(|a| a != &ip);
+                    d.last_addrs.insert(0, ip);
+                    d.last_addrs.truncate(LAST_ADDRS);
+                }
+            }
+        });
+        match written {
+            Ok(()) => self.devices_changed(),
+            Err(e) => self.log(Level::Warn, format_args!("the trust store was not written: {e}")),
+        }
+    }
+
     // ---------- who sees what ----------
 
     /// The connections that show session `session_id`: the one that owns the viewer, else the console's.

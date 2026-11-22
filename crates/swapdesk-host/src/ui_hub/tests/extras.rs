@@ -771,3 +771,42 @@ fn the_button_goes_when_the_host_revokes_unattended() {
     viewer.finish();
     host.finish();
 }
+
+/// Review of 22/11/2026, E1: the host tells its viewer which network cards can wake it (`WakeInfo`), and the viewer
+/// dropped the message: no device ever had an address to wake, so "Acordar" could never appear. A session now
+/// leaves the host's MACs and the address it answered from with the device.
+#[test]
+fn a_session_leaves_the_hosts_wake_addresses_with_the_device_so_it_can_be_woken_later() {
+    let mut host = Machine::with_interfaces("host-pc", FakeNetInterfaces::windows_typical());
+    let viewer = Machine::new("viewer-pc");
+    host.pin(&viewer, ALL);
+    viewer.pin(&host, PermissionSet::EMPTY);
+    host.attach_helper(IpcRole::HelperUser);
+    host.hub.set_console_session(Some(1));
+    viewer.sees(&host, false);
+    let mut host_ui = host.client(info(false));
+    let mut viewer_ui = viewer.client(info(false));
+    let ReplyBody::Devices(list) = viewer_ui.call(UiOp::ListDevices).unwrap() else { panic!() };
+    assert!(!list[0].wakeable, "nothing is known of the host's network cards yet");
+
+    let req = viewer_ui.request(UiOp::Connect { device_id: host.hex(), intent: Intent::Control, unattended: false });
+    let incoming = host_ui.notify("IncomingRequest", |n| match n {
+        Notify::IncomingRequest(r) => Some(r.request_id),
+        _ => None,
+    });
+    host_ui
+        .call(UiOp::AnswerIncoming { request_id: incoming, decision: Decision::Accept, grants: ALL.bits() })
+        .expect("accepted");
+    let session = viewer_ui.connected(req);
+
+    let stored = wait_for("the host's wake addresses to be stored", || {
+        viewer.trust.read(|s| s.find_by_id(&host.id()).filter(|d| !d.wol_macs.is_empty()).cloned())
+    });
+    assert_eq!(stored.last_addrs.first(), Some(&[127, 0, 0, 1]), "and the address it answered from");
+    let ReplyBody::Devices(list) = viewer_ui.call(UiOp::ListDevices).unwrap() else { panic!() };
+    assert!(list[0].wakeable, "the device can be woken from now on");
+    assert!(viewer_ui.call(UiOp::Disconnect { session_id: session }).is_ok());
+    drop((host_ui, viewer_ui));
+    viewer.finish();
+    host.finish();
+}
