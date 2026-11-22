@@ -659,6 +659,18 @@ impl HostService {
         lock(&self.inner.table).swap.arm(now(), device, token);
     }
 
+    /// The swap was called off after its token was armed: every armed swap token of `device` dies now, so the
+    /// device cannot still enter with it (it would, for the rest of the token's 10 s, with what is stored for it
+    /// and no question).
+    pub fn disarm_swap_token(&self, device: &DeviceId) {
+        lock(&self.inner.table).swap.disarm_device(device);
+    }
+
+    /// How many swap tokens are armed for `device` now (tests).
+    pub fn armed_swap_tokens(&self, device: &DeviceId) -> usize {
+        lock(&self.inner.table).swap.armed_for(now(), device)
+    }
+
     /// How long an armed swap token lives (`HostConfig::swap_token_ttl`).
     pub fn swap_token_ttl(&self) -> Duration {
         self.inner.cfg.swap_token_ttl

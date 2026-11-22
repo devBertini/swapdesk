@@ -304,8 +304,14 @@ impl Hub {
             if let (Err(SyncError::Failed | SyncError::Guard(crate::service::ConnectError::Refused(_))), Some(other)) =
                 (&result, other)
             {
-                addr = other;
-                result = core.sync_grants_async(addr, device).await;
+                // Only an answer of the device itself counts from there. A failure at a record's address says
+                // nothing of the device (anyone on the network can announce a record), so the first result stands
+                // and a push that is owed is still tried again (security review of 22/11/2026).
+                let second = core.sync_grants_async(other, device).await;
+                if second.is_ok() {
+                    addr = other;
+                    result = second;
+                }
             }
             // The answer came over a connection the device's pinned key authenticated: it answers at `addr`.
             if let (Ok(_), SocketAddr::V4(v4)) = (&result, addr) {

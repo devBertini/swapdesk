@@ -69,6 +69,10 @@ pub trait SwapEnv: Send + Sync + 'static {
     /// Future host, 6.3 step 4: arm `token` for the future viewer's `device` (`HostService::arm_swap_token`).
     fn arm_token(&self, device: DeviceId, token: [u8; 16]);
 
+    /// The asker called the swap off after this side armed: the tokens armed for `device` die
+    /// (`HostService::disarm_swap_token`).
+    fn disarm_token(&self, _device: DeviceId) {}
+
     /// Future viewer, 6.3 step 5: open a new session connection to `host` with `Hello { swap_token }`. The old
     /// session is already closing. Starts the work and returns; the result reaches the UI by the normal session path.
     fn begin_viewing(&self, host: DeviceId, token: [u8; 16]);
@@ -455,14 +459,19 @@ impl SwapHandler {
             Some(Slot::AwaitArmed { id: sid, .. }) if *sid == id => {
                 slots.remove(&key);
             }
-            // The asker gave up while this side's accept was on its way: no close, the session goes on. The armed
-            // token dies on its own (10 s, single use, for that device only).
+            // The asker gave up while this side's accept was on its way: no close, the session goes on. The token
+            // this side armed for it dies with the swap: left armed, the asker could still enter with it for the
+            // rest of its 10 s, without a question, while this side believes the swap is off (security review of
+            // 22/11/2026).
             Some(Slot::Armed { id: sid, task }) if *sid == id => {
                 let task = task.clone();
                 slots.remove(&key);
                 drop(slots);
                 if let Some(t) = task {
                     t.abort();
+                }
+                if let Some(peer) = ctx.device() {
+                    self.inner.env.disarm_token(peer);
                 }
             }
             _ => {}

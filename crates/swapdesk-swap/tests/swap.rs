@@ -112,6 +112,13 @@ impl SwapEnv for Env {
         }
     }
 
+    fn disarm_token(&self, device: DeviceId) {
+        lock(&self.armed).retain(|(d, _)| *d != device);
+        if let Some(h) = self.host.get() {
+            h.disarm_swap_token(&device);
+        }
+    }
+
     fn begin_viewing(&self, host: DeviceId, token: [u8; 16]) {
         lock(&self.viewing).push((host, token));
         if let Some(c) = lock(&self.connector).as_ref() {
@@ -475,6 +482,9 @@ fn a_cancel_that_crosses_the_accept_keeps_the_session() {
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert!(p.viewer_unchanged(), "the session was closed for a swap the asker had given up");
         assert!(!p.vh.pending(p.viewer.ctx()), "a new request may follow");
+        // Security review of 22/11/2026: the token armed for the swap that was called off is dead, so the asker
+        // cannot still enter with it.
+        assert!(lock(&p.venv.armed).is_empty(), "the called-off swap left its token armed: {:?}", lock(&p.venv.armed));
     });
 }
 

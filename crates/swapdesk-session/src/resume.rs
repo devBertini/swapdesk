@@ -239,9 +239,15 @@ impl SwapTokens {
         }
     }
 
-    /// Forget or shutdown: every armed token of the device dies.
+    /// Forget, shutdown or a swap called off: every armed token of the device dies.
     pub fn disarm_device(&mut self, device: &DeviceId) {
         self.armed.retain(|(_, d, _)| d != device);
+    }
+
+    /// How many tokens are armed for `device` and still fresh.
+    pub fn armed_for(&mut self, now: Instant, device: &DeviceId) -> usize {
+        self.armed.retain(|(_, _, at)| now.saturating_duration_since(*at) <= self.ttl);
+        self.armed.iter().filter(|(_, d, _)| d == device).count()
     }
 }
 

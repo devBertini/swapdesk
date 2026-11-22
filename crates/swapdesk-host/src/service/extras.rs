@@ -129,6 +129,12 @@ impl SwapEnv for CoreEnv {
         }
     }
 
+    fn disarm_token(&self, device: DeviceId) {
+        if let Some(host) = self.host.get() {
+            host.disarm_swap_token(&device);
+        }
+    }
+
     fn arm_token(&self, device: DeviceId, token: [u8; 16]) {
         match self.host.get() {
             Some(host) => {
