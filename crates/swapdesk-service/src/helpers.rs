@@ -368,6 +368,9 @@ fn start_helper(env: &StartEnv, role: HelperRole, ipc: IpcRole, session: u32) ->
         }
     }
     .map_err(|e| e.to_string())?;
+    // From here on every way out but the attached helper ends the process: a helper left running would hold its
+    // session's desktop and pipe with nobody to talk to it.
+    let launched = EndUnlessKept::new(&child);
     let connected = (|| {
         let conn = listener.accept(Some(CONNECT_WITHIN)).map_err(|e| e.to_string())?;
         // C2.1: the client PID must be the PID the service launched.
@@ -377,13 +380,7 @@ fn start_helper(env: &StartEnv, role: HelperRole, ipc: IpcRole, session: u32) ->
         }
         Ok((conn, client))
     })();
-    let (conn, verified_pid) = match connected {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = child.kill();
-            return Err(e);
-        }
-    };
+    let (conn, verified_pid) = connected?;
     let cancel = conn.try_clone().map_err(|e| e.to_string())?;
     let (reader, writer) = conn.split().map_err(|e| e.to_string())?;
     // The handshake reads on the reader the core keeps afterwards, so a timeout cannot be a read timeout: a watchdog
@@ -404,16 +401,36 @@ fn start_helper(env: &StartEnv, role: HelperRole, ipc: IpcRole, session: u32) ->
     // The core records the PID verified above, never the one the helper writes in its `Hello`. A core that is gone (the
     // service is stopping) takes no helper.
     let Some(core) = (env.core)() else {
-        let _ = child.kill();
         return Err("no account may host now, or the service is stopping".into());
     };
     let attached = core.attach_helper_pid(ipc, verified_pid, reader, writer);
     drop(done_tx);
-    match attached {
-        Ok(_) => Ok(Running { child, started: Instant::now(), cancel, core: core_id(&core) }),
-        Err(e) => {
+    attached.map_err(|e| e.to_string())?;
+    launched.keep();
+    Ok(Running { child, started: Instant::now(), cancel, core: core_id(&core) })
+}
+
+/// Ends a helper that was launched when it goes out of scope, unless [`EndUnlessKept::keep`] was called: a start that
+/// fails at any step after the launch (its pipe, a handle copy, a thread, the core) leaves no process behind.
+struct EndUnlessKept<'a> {
+    child: Option<&'a ChildProcess>,
+}
+
+impl<'a> EndUnlessKept<'a> {
+    fn new(child: &'a ChildProcess) -> Self {
+        Self { child: Some(child) }
+    }
+
+    /// The helper is attached and now belongs to its slot.
+    fn keep(mut self) {
+        self.child = None;
+    }
+}
+
+impl Drop for EndUnlessKept<'_> {
+    fn drop(&mut self) {
+        if let Some(child) = self.child {
             let _ = child.kill();
-            Err(e.to_string())
         }
     }
 }
@@ -465,5 +482,32 @@ mod tests {
         assert_eq!(misplaced(&[Some(1), Some(2)], Some(2)), vec![0], "A's helper moves to B");
         assert_eq!(misplaced(&[Some(1), None], Some(2)), vec![0], "a slot with nothing running is not counted");
         assert_eq!(misplaced(&[Some(1), Some(1)], None), vec![0, 1], "nobody may host: both go");
+    }
+
+    /// A process that runs for about a minute unless it is ended, started the way a development helper is.
+    fn long_running() -> ChildProcess {
+        let root = std::env::var_os("SystemRoot").expect("SystemRoot is set on Windows");
+        let ping = PathBuf::from(root).join("System32").join("PING.EXE");
+        launch_helper_dev(&ping, &["-n".into(), "60".into(), "127.0.0.1".into()]).unwrap()
+    }
+
+    /// Review of 22/11/2026, G13: a start that failed after its helper was launched (a handle copy of the pipe, the
+    /// split of the pipe, the thread of the `Hello` watchdog) returned its error and left the helper running, with
+    /// nobody to talk to it. The launched helper is now ended on every way out but the one that keeps it.
+    #[test]
+    fn a_launched_helper_is_ended_when_its_start_fails_after_the_launch() {
+        let child = long_running();
+        let failed = || -> Result<(), String> {
+            let _launched = EndUnlessKept::new(&child);
+            Err("the pipe could not be split".to_string())?;
+            Ok(())
+        };
+        assert!(failed().is_err());
+        assert!(child.wait(Duration::from_secs(5)).unwrap().is_some(), "the helper was ended");
+
+        let kept = long_running();
+        EndUnlessKept::new(&kept).keep();
+        assert_eq!(kept.wait(Duration::from_millis(300)).unwrap(), None, "a kept helper runs on");
+        kept.kill().unwrap();
     }
 }

@@ -895,3 +895,59 @@ fn a_pipe_with_every_instance_in_use_serves_its_clients_and_takes_the_next_when_
     };
     drop((s3, c3.join().unwrap(), s2, c2));
 }
+
+/// A session id that is not the console's (the console's plus a thousand, or a thousand without a console).
+fn not_the_console() -> u32 {
+    crate::active_console_session().map_or(1000, |c| c + 1000)
+}
+
+/// Review of 22/11/2026, G12: a lock or an unlock of any Windows session reached every hub as the console's, so a
+/// session locked elsewhere (another user's, switched away from) paused the console's hosted session. The id the
+/// message names is now compared with the console's, and only the console's lock and unlock are told.
+#[test]
+fn a_lock_of_another_session_is_not_told_as_the_consoles() {
+    let (tx, mut watcher) = session_channel();
+    let window = WindowWatcher::spawn(tx).unwrap();
+    let hwnd = window.hwnd() as HWND;
+    let post = |msg: u32, w: u32, l: u32| {
+        // SAFETY: `hwnd` is the live window of `window`; posting to it is safe from any thread.
+        assert_ne!(unsafe { PostMessageW(hwnd, msg, w as usize, l as isize) }, 0);
+    };
+    let other = not_the_console();
+    post(WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, other);
+    post(WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, other);
+    // The display change marks the end: the two messages before it must have told nothing.
+    post(WM_DISPLAYCHANGE, 0, 0);
+    assert_eq!(watcher.next_event(WAIT).unwrap(), Some(SessionEvent::DisplaysChanged));
+    if let Some(console) = crate::active_console_session() {
+        post(WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, console);
+        assert_eq!(watcher.next_event(WAIT).unwrap(), Some(SessionEvent::DesktopSwitched(Desktop::Locked)));
+        post(WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, console);
+        assert_eq!(watcher.next_event(WAIT).unwrap(), Some(SessionEvent::DesktopSwitched(Desktop::Default)));
+    }
+    drop(window);
+}
+
+/// Review of 22/11/2026, G12: which lock and unlock reach the consumer, decided without a second Windows session.
+/// Only the console's are told; one whose session or console is not known is told as before (the service then
+/// behaves as it did, and a change of the console that follows sets the helpers right).
+#[test]
+fn only_the_consoles_lock_and_unlock_are_told() {
+    use crate::watcher::{Raw, session_change_of};
+    let locked = Some(Raw::Desktop(Desktop::Locked));
+    let unlocked = Some(Raw::Desktop(Desktop::Default));
+    assert_eq!(session_change_of(WTS_SESSION_LOCK, Some(1), Some(1)), locked);
+    assert_eq!(session_change_of(WTS_SESSION_UNLOCK, Some(1), Some(1)), unlocked);
+    assert_eq!(session_change_of(WTS_SESSION_LOCK, Some(2), Some(1)), None);
+    assert_eq!(session_change_of(WTS_SESSION_UNLOCK, Some(2), Some(1)), None);
+    // Nothing known about either side: told, as before.
+    assert_eq!(session_change_of(WTS_SESSION_LOCK, None, Some(1)), locked);
+    assert_eq!(session_change_of(WTS_SESSION_LOCK, Some(2), None), locked);
+    assert_eq!(session_change_of(WTS_SESSION_UNLOCK, Some(2), None), unlocked);
+    // A change of the console is told whatever session it names: the watcher reads the console's state anyway.
+    assert_eq!(session_change_of(WTS_CONSOLE_CONNECT, Some(2), Some(1)), Some(Raw::ConsoleChanged));
+    assert_eq!(session_change_of(0x7777, Some(1), Some(1)), None);
+    // Session 0 runs services only: a notification that names it names no user session.
+    assert_eq!(crate::watcher::named_session(0), None);
+    assert_eq!(crate::watcher::named_session(3), Some(3));
+}

@@ -25,6 +25,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_SERVICE_DOES_NOT_EXIST, GetLastError,
     NO_ERROR,
 };
+use windows_sys::Win32::System::RemoteDesktop::WTSSESSION_NOTIFICATION;
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, RegisterServiceCtrlHandlerExW, SC_HANDLE,
     SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SESSIONCHANGE,
@@ -35,8 +36,11 @@ use windows_sys::Win32::System::Services::{
     StartServiceCtrlDispatcherW,
 };
 
+use crate::launch::active_console_session;
 use crate::sys::{os_error, wide};
-use crate::watcher::{Raw, SessionEventSender, WinSessionWatcher, power_event, session_change_event, session_channel};
+use crate::watcher::{
+    Raw, SessionEventSender, WinSessionWatcher, named_session, power_event, session_change_of, session_channel,
+};
 
 /// `ERROR_SERVICE_SPECIFIC_ERROR`: the real code is in `dwServiceSpecificExitCode`.
 const ERROR_SERVICE_SPECIFIC_ERROR: u32 = 1066;
@@ -226,7 +230,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
 unsafe extern "system" fn handler_ex(
     control: u32,
     event_type: u32,
-    _event_data: *mut core::ffi::c_void,
+    event_data: *mut core::ffi::c_void,
     _context: *mut core::ffi::c_void,
 ) -> u32 {
     let Some(g) = GLOBAL.get() else { return ERROR_CALL_NOT_IMPLEMENTED };
@@ -238,7 +242,13 @@ unsafe extern "system" fn handler_ex(
             NO_ERROR
         }
         SERVICE_CONTROL_SESSIONCHANGE => {
-            if let Some(raw) = session_change_event(event_type) {
+            // `event_data` points to the WTSSESSION_NOTIFICATION that names the session the change is about.
+            let session = (!event_data.is_null()).then(|| {
+                // SAFETY: for SERVICE_CONTROL_SESSIONCHANGE the SCM passes a WTSSESSION_NOTIFICATION, live for the call.
+                unsafe { (*event_data.cast::<WTSSESSION_NOTIFICATION>()).dwSessionId }
+            });
+            if let Some(raw) = session_change_of(event_type, session.and_then(named_session), active_console_session())
+            {
                 g.events.push(raw);
             }
             NO_ERROR

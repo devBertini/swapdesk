@@ -10,8 +10,8 @@
 //! (`WTSRegisterSessionNotification`), `WM_POWERBROADCAST` and `WM_DISPLAYCHANGE`. The window is top-level, not
 //! message-only, because message-only windows do not receive broadcast messages.
 //!
-//! Mapping: console connect/disconnect and logon/logoff -> `ConsoleChanged(state now)`; session lock -> `DesktopSwitched(Locked)`,
-//! unlock -> `DesktopSwitched(Default)` (a reading of C3: the secure desktop of UAC is not announced here);
+//! Mapping: console connect/disconnect and logon/logoff -> `ConsoleChanged(state now)`; lock of the console's session -> `DesktopSwitched(Locked)`,
+//! its unlock -> `DesktopSwitched(Default)`, another session's lock and unlock -> nothing (a reading of C3: the secure desktop of UAC is not announced here);
 //! suspend -> `Suspending`; resume (automatic, critical or by user) -> `Resumed`, once per suspend; display change -> `DisplaysChanged`.
 //! `NetworkChanged` has no source in this module (the owner pushes it: `swapdesk-net-win`'s `NetworkWatcher`). After a service stop the
 //! watcher returns `ErrorKind::Closed` from `next_event`.
@@ -70,6 +70,25 @@ pub(crate) fn session_change_event(event_type: u32) -> Option<Raw> {
         WTS_SESSION_UNLOCK => Some(Raw::Desktop(Desktop::Default)),
         _ => None,
     }
+}
+
+/// [`session_change_event`] for a notification about `session`, with `console` the active console session read when
+/// it came. A lock or an unlock is told only when it is the console's: every hub hosts the console, and the lock of
+/// another session (a user switched away from, a remote one) would pause the console's hosted session for nothing.
+/// When either id is not known it is told as before; a change of the console is told whatever session it names,
+/// because the watcher reads the console's state when it is taken.
+pub(crate) fn session_change_of(event_type: u32, session: Option<u32>, console: Option<u32>) -> Option<Raw> {
+    let raw = session_change_event(event_type)?;
+    match (raw, session, console) {
+        (Raw::Desktop(_), Some(s), Some(c)) if s != c => None,
+        _ => Some(raw),
+    }
+}
+
+/// The user session a session notification names. Session 0 runs services only and has no desktop to lock, so an
+/// id of 0 names no user session (a message posted without its id carries 0).
+pub(crate) fn named_session(id: u32) -> Option<u32> {
+    (id != 0).then_some(id)
 }
 
 /// `SERVICE_CONTROL_POWEREVENT` / `WM_POWERBROADCAST` event type to an event.
@@ -297,7 +316,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     let ctx = unsafe { ctx.as_ref() };
     match (msg, ctx) {
         (WM_WTSSESSION_CHANGE, Some(c)) => {
-            if let Some(raw) = session_change_event(wparam as u32) {
+            // The message's lParam is the id of the session it is about.
+            let session = named_session(lparam as u32);
+            if let Some(raw) = session_change_of(wparam as u32, session, active_console_session()) {
                 c.sender.push(raw);
             }
             0

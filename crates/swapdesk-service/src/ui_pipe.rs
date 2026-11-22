@@ -331,7 +331,7 @@ impl UiPipes {
                             .name(format!("ui-conn-{session}"))
                             .spawn(move || worker.connection(session, conn, pipe));
                         match spawned {
-                            Ok(h) => lock(&me.threads).push(h),
+                            Ok(h) => me.keep_thread(h),
                             Err(e) => me.log(Level::Warn, format_args!("cannot start a connection thread: {e}")),
                         }
                     }
@@ -345,12 +345,21 @@ impl UiPipes {
             }
         });
         match accept {
-            Ok(h) => lock(&self.threads).push(h),
+            Ok(h) => self.keep_thread(h),
             Err(e) => {
                 self.log(Level::Error, format_args!("cannot start the UI pipe thread: {e}"));
                 self.sessions_of(pipe).forget(session, &close);
             }
         }
+    }
+
+    /// Keeps the handle of a thread `stop_all` waits for, and lets go of the threads that ended since: an interface
+    /// connects again at every reconnect and every start of Swapdesk, and a handle kept for each would grow for the
+    /// life of the service. A thread that ended needs no join, so this never waits.
+    fn keep_thread(&self, h: JoinHandle<()>) {
+        let mut threads = lock(&self.threads);
+        threads.retain(|t| !t.is_finished());
+        threads.push(h);
     }
 
     fn sessions_of(&self, pipe: Pipe) -> &OpenSessions {
@@ -844,6 +853,30 @@ mod tests {
         let who = server.identify_client().expect("identify");
         drop(client.join().expect("client"));
         who
+    }
+
+    /// Review of 22/11/2026, G11: the handle of every connection thread was kept until the service stopped, so each
+    /// interface that ever connected (a reconnect, a Swapdesk opened again) left its handle behind for the life of
+    /// the service. The handles of threads that ended are now let go when the next one is kept.
+    #[test]
+    fn the_threads_of_ended_connections_are_not_kept_for_the_life_of_the_service() {
+        let dev = DevPipe::new();
+        let running = |pipes: &UiPipes| lock(&pipes.threads).iter().filter(|h| !h.is_finished()).count();
+        // The two accept threads (the UI pipe and the elevator pipe) run for the life of the pipes.
+        let accepting = running(&dev.pipes);
+        for req in 1..=20 {
+            let mut ui = dev.client(IpcRole::Ui);
+            ui.send(req, UiOp::GetThisDevice);
+            let _ = ui.reply(req, 1);
+            drop(ui);
+            let until = std::time::Instant::now() + WAIT;
+            while running(&dev.pipes) > accepting {
+                assert!(std::time::Instant::now() < until, "the connection thread did not end");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let kept = lock(&dev.pipes.threads).len();
+        assert!(kept <= accepting + 1, "{kept} thread handles kept after 20 connections that ended");
     }
 
     #[test]

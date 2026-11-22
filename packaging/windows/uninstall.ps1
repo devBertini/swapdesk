@@ -10,7 +10,7 @@
     4. removes the all-users Start menu shortcut and the installed apps entry (HKLM\...\Uninstall\Swapdesk); for every user
        profile on this PC it removes the per-user Run value Swapdesk ("open at login": a hive that is not loaded is
        loaded, changed and unloaded) and the user's logs, %LOCALAPPDATA%\Swapdesk\logs (the folder Swapdesk\ goes
-       when it is empty);
+       when it is empty); the same logs folder of the SYSTEM profile, where the helper that runs as SYSTEM writes;
     5. restores SoftwareSASGeneration to the value saved by install.ps1 (or removes it when it was absent), only when
        the install recorded that it set it (install -EnableSas) and unless someone changed it since (then it is left
        and reported); removes HKLM\SOFTWARE\Swapdesk;
@@ -19,7 +19,9 @@
        runs from there), then the folder if it is empty;
     7. deletes the data folder %ProgramData%\Swapdesk (identity, trust store, settings, audit and trace logs) unless
        -KeepData is given; the updater's folder update inside it is removed whole. Only the names CONTRACTS C5.2 lists are deleted (with their .1, .tmp and .damaged-* copies),
-       then the folder if it is empty. A folder that is a reparse point is never entered.
+       then the folder if it is empty. A folder that is a reparse point is never entered. A folder a start of the
+       service set aside as untrusted (<name>.untrusted-<ms>: the data folder beside itself, accounts, an account's
+       folder) is deleted whole without following any link inside it.
   Then it writes one Application event (id 1001), removes the Event Log source Swapdesk, and queries the service, the rules, the folders, the shortcut, the registry key and the processes, and exits
   with 1 when something is left.
 
@@ -74,9 +76,16 @@ $RunValue      = 'Swapdesk'
 $TempHive      = 'SwapdeskUninstall'
 # CONTRACTS C5.2: identity.bin, trust.bin, settings.bin, audit-sessions.log, audit-network.log, trace.log
 # (rotation keeps <name>.1; a file that does not decode is set aside as <name>.damaged-<ms>; writes go through <name>.tmp).
-$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log', 'accounts.bin')
+# Beside them: blocked.bin (D65, the devices blocked by MAC, beside each trust.bin) and the service's crash record
+# last-crash.txt, renamed last-crash.seen.txt once it was told (D12; it lives with the trace).
+$DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log', 'accounts.bin', 'blocked.bin', 'last-crash.txt', 'last-crash.seen.txt')
 # ACCOUNTS.md 10.6: each account's folder accounts\<SID> holds these.
-$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'audit-sessions.log', 'audit-network.log')
+$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'audit-sessions.log', 'audit-network.log', 'blocked.bin')
+# A folder the service found untrusted at its start is set aside as <name>.untrusted-<ms> (swapdesk-secret-win
+# folder.rs): the data folder beside itself, the folder accounts and each accounts\<SID> inside it.
+$SetAsideData     = '^Swapdesk\.untrusted-[0-9]+$'
+$SetAsideAccounts = '^accounts\.untrusted-[0-9]+$'
+$SetAsideAccount  = '^S-1-[0-9-]+\.untrusted-[0-9]+$'
 $ProcessNames  = @('Swapdesk', 'swapdesk-helper', 'swapdesk-service')
 $EventSource   = 'Swapdesk'
 $EventLogName  = 'Application'
@@ -216,6 +225,54 @@ function Remove-KnownFolder([string]$Dir, [string[]]$Names, [bool]$Everything) {
     return $left
 }
 
+# Deletes a folder and all it holds without ever following a link: a link inside (a junction, a symbolic link) is
+# removed as a link and what it points to is left alone. For the folders set aside as untrusted, whose contents
+# Swapdesk did not make.
+function Remove-TreeNoLinks([string]$Dir) {
+    foreach ($item in @(Get-ChildItem -LiteralPath $Dir -Force)) {
+        $isLink = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        if ($item.PSIsContainer -and -not $isLink) {
+            Remove-TreeNoLinks $item.FullName
+        } elseif ($item.PSIsContainer) {
+            # RemoveDirectory removes a junction or a directory link itself, whatever its target holds.
+            [System.IO.Directory]::Delete($item.FullName, $false)
+        } else {
+            if (-not $isLink) { [System.IO.File]::SetAttributes($item.FullName, [System.IO.FileAttributes]::Normal) }
+            [System.IO.File]::Delete($item.FullName)
+        }
+    }
+    [System.IO.Directory]::Delete($Dir, $false)
+}
+
+# Deletes the folders of $Parent whose name matches $Pattern (a folder set aside as untrusted). A set-aside name that
+# is itself a link, or a folder that cannot be deleted, is left and returned.
+function Remove-SetAside([string]$Parent, [string]$Pattern) {
+    $left = @()
+    if (-not (Test-Path -LiteralPath $Parent)) { return $left }
+    foreach ($d in @(Get-ChildItem -LiteralPath $Parent -Force -Directory | Where-Object { $_.Name -match $Pattern })) {
+        if (Test-ReparsePoint $d.FullName) {
+            Say ("   WARNING: {0} is a reparse point (a link): not entered, not deleted. Remove it by hand after checking where it points." -f $d.FullName)
+            $left += $d.FullName
+            continue
+        }
+        try {
+            Remove-TreeNoLinks $d.FullName
+            Say ("   deleted the folder set aside as untrusted {0}" -f $d.FullName)
+        } catch {
+            Say ("   WARNING: {0} could not be deleted: {1}" -f $d.FullName, $_.Exception.Message)
+            $left += $d.FullName
+        }
+    }
+    return $left
+}
+
+# The profile folder of LocalSystem (S-1-5-18): the helper that runs as SYSTEM keeps its logs in its %LOCALAPPDATA%.
+function Get-SystemProfilePath {
+    $path = (Get-ItemProperty -LiteralPath (Join-Path $ProfileList 'S-1-5-18') -Name 'ProfileImagePath' -ErrorAction SilentlyContinue).ProfileImagePath
+    if (-not $path) { $path = Join-Path $env:windir 'System32\config\systemprofile' }
+    return [Environment]::ExpandEnvironmentVariables([string]$path)
+}
+
 # The real accounts on this PC (local, domain, Microsoft, Entra): SID and profile folder. System and service profiles are skipped.
 function Get-UserProfiles {
     $found = @()
@@ -343,6 +400,19 @@ try {
         }
         if (Test-Path -LiteralPath $logsParent) { [void](Remove-KnownFolder $logsParent @() $false) }
     }
+    # The helper that runs as SYSTEM makes its logs folder in the SYSTEM profile at every start; Get-UserProfiles
+    # leaves that profile out.
+    $systemLocal = Join-Path (Get-SystemProfilePath) 'AppData\Local\Swapdesk'
+    $systemLogs = Join-Path $systemLocal 'logs'
+    if ($DryRun) {
+        Say ('[dry-run] would: delete the folder {0} (then {1} if empty)' -f $systemLogs, $systemLocal)
+    } else {
+        if (Test-Path -LiteralPath $systemLogs) {
+            Say ("-> delete the SYSTEM helper's logs {0}" -f $systemLogs)
+            foreach ($l in @(Remove-KnownFolder $systemLogs @() $true)) { $leftovers += ("{0}: not deleted" -f $l) }
+        }
+        if (Test-Path -LiteralPath $systemLocal) { [void](Remove-KnownFolder $systemLocal @() $false) }
+    }
 
     # ---- 5. SoftwareSASGeneration
     if (Test-Path -LiteralPath $OwnKey) {
@@ -409,6 +479,7 @@ try {
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from each folder {1}\<SID>, then each folder and {1} if empty' -f ($AccountFiles -join ', '), $accountsDir)
             Say ('[dry-run] would: delete the update folder {0}\update (the updater''s state, journal, staging, rollback and applier)' -f $DataDir)
             Say ('[dry-run] would: delete {0} (with .1, .tmp, .damaged-* copies) from {1}{2}, then the folder if empty' -f ($DataFiles -join ', '), $DataDir, $(if ($Force) { ' (-Force: the whole folder)' } else { '' }))
+            Say ('[dry-run] would: delete the folders set aside as untrusted (<name>.untrusted-<ms>) in {0} and {1}, without following a link' -f $DataDir, $accountsDir)
         } else {
             # ACCOUNTS.md 10.6: the accounts first, each by the names it holds; a link is never entered.
             if (-not $Force -and (Test-Path -LiteralPath $accountsDir)) {
@@ -419,6 +490,7 @@ try {
                         Say ("-> delete the account files in {0}" -f $acct.FullName)
                         foreach ($l in @(Remove-KnownFolder $acct.FullName $AccountFiles $false)) { $leftovers += ("{0}: {1}" -f $acct.FullName, $l) }
                     }
+                    $leftovers += @(Remove-SetAside $accountsDir $SetAsideAccount)
                     foreach ($l in @(Remove-KnownFolder $accountsDir @() $false)) { $leftovers += ("{0}: {1}" -f $accountsDir, $l) }
                 }
             }
@@ -429,12 +501,23 @@ try {
                 Say ("-> delete the update folder {0}" -f $updateDir)
                 foreach ($l in @(Remove-KnownFolder $updateDir @() $true)) { $leftovers += ("{0}: {1}" -f $updateDir, $l) }
             }
+            # A folder set aside inside the data folder was not made by Swapdesk: it goes without following a link, also
+            # before -Force deletes the rest.
+            if (-not (Test-ReparsePoint $DataDir)) { $leftovers += @(Remove-SetAside $DataDir $SetAsideAccounts) }
             Say ("-> delete the data files in {0}" -f $DataDir)
             $dataLeft = @(Remove-KnownFolder $DataDir $DataFiles ([bool]$Force))
             foreach ($l in $dataLeft) { $leftovers += ("{0}: {1}" -f $DataDir, $l) }
         }
     } else {
         Say '  no data folder'
+    }
+    # The data folder an earlier start set aside beside itself, also when the data folder is gone.
+    if (-not $KeepData) {
+        if ($DryRun) {
+            Say ('[dry-run] would: delete the folders set aside as untrusted (Swapdesk.untrusted-<ms>) in {0}, without following a link' -f $env:ProgramData)
+        } else {
+            $leftovers += @(Remove-SetAside $env:ProgramData $SetAsideData)
+        }
     }
 
     # ---- checks
@@ -458,6 +541,10 @@ try {
         if (Test-Path -LiteralPath $UninstallKey) { $problems += ("installed apps entry {0} remains" -f $UninstallKey) }
         foreach ($u in (Get-UserProfiles)) {
             if (Test-Path -LiteralPath (Join-Path $u.Path 'AppData\Local\Swapdesk\logs')) { $problems += ("the logs of {0} remain" -f $u.Sid) }
+        }
+        if (Test-Path -LiteralPath $systemLogs) { $problems += ("the SYSTEM helper's logs {0} remain" -f $systemLogs) }
+        if (-not $KeepData) {
+            foreach ($d in @(Get-ChildItem -LiteralPath $env:ProgramData -Force -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $SetAsideData })) { $problems += ("folder {0} remains" -f $d.FullName) }
         }
         $srcLeft = $false
         try { $srcLeft = [System.Diagnostics.EventLog]::SourceExists($EventSource) } catch { }

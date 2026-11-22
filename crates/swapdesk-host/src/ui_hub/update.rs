@@ -85,6 +85,13 @@ pub fn failure_tag(f: InstallFailure) -> u8 {
     }
 }
 
+/// Whether a verified package may go to the applier, which ends every session: only when none is live now, or the
+/// person pressed "Encerrar e atualizar" (UPDATES.md 10.3). `live_now` is counted when the package is ready, not when
+/// the install was asked.
+pub(super) fn may_hand_over(ask: InstallAsk, live_now: usize) -> bool {
+    live_now == 0 || ask.end_sessions
+}
+
 impl Updater {
     pub fn new(manager: UpdateManager, hooks: UpdaterHooks) -> Arc<Self> {
         Arc::new(Self { manager, hooks, cancel: AtomicBool::new(false), hubs: Mutex::new(Vec::new()) })
@@ -147,6 +154,19 @@ impl Updater {
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             let result = me.manager.install(&version, ask, &me.cancel);
+            // The sessions were counted when "Atualizar agora" was pressed, minutes before on a slow link: one accepted
+            // since would be cut by the applier without the "Encerrar e atualizar" question (10.3). They are counted
+            // again here, before anyone is told the package is ready. With a live session nobody agreed to end, the
+            // package is not handed over and the version is offered again, so the next "Atualizar agora" asks.
+            if result.is_ok() && !may_hand_over(ask, (me.hooks.live_sessions)()) {
+                me.manager.ready_failed(InstallFailure::NeedsConfirmation);
+                me.changed();
+                // `check` leaves a ready package alone, so the phase left `Ready` first. A check that fails leaves the
+                // refusal (no card) until the next one; the session goes on either way.
+                let _ = me.manager.check((me.hooks.now_ms)(), (me.hooks.jitter_ms)());
+                me.changed();
+                return;
+            }
             me.changed();
             if let Ok(path) = result {
                 // Each interface saves its window state and exits (UPDATES.md 6.2 step 4); the applier then stops the
