@@ -856,3 +856,42 @@ fn a_console_state_that_cannot_be_read_is_read_again_and_never_ends_the_watcher(
     assert_eq!(READS.load(Ordering::SeqCst), 3, "read until it could be");
     assert_eq!(watcher.next_event(Duration::from_millis(50)).unwrap(), None, "told once");
 }
+
+/// Review of 22/11/2026, G4: with every instance of a pipe in use, the next instance could not be created after a
+/// client connected, and the accept returned that failure: the client that had just connected was dropped and the
+/// service ended the pipe's listener, so no interface could reach the service until the next logon. The client is
+/// now served, the accept reports a timeout while no instance can be made, and a freed instance is used again.
+#[test]
+fn a_pipe_with_every_instance_in_use_serves_its_clients_and_takes_the_next_when_one_leaves() {
+    let name = unique("t-full");
+    let mut listener = PipeListener::bind(dev_spec(&name, 2)).unwrap();
+    let dial = |n: &str| {
+        let n = n.to_string();
+        std::thread::spawn(move || connect(&n, own_pid(), WAIT).unwrap())
+    };
+    let c1 = dial(&name);
+    let s1 = listener.accept(Some(WAIT)).expect("the first client");
+    let c1 = c1.join().unwrap();
+    let c2 = dial(&name);
+    let mut s2 = listener.accept(Some(WAIT)).expect("the second client is served although no third instance fits");
+    let mut c2 = c2.join().unwrap();
+    c2.write_all(&[7]).unwrap();
+    let mut b = [0u8; 1];
+    s2.read_exact(&mut b).unwrap();
+    assert_eq!(b[0], 7);
+    // Both instances are in use: the listener waits, it does not fail.
+    assert!(matches!(listener.accept(Some(Duration::from_millis(100))), Err(PipeError::Timeout)));
+    assert!(matches!(listener.accept(Some(Duration::from_millis(100))), Err(PipeError::Timeout)));
+    // One client leaves: the next one is taken.
+    drop((s1, c1));
+    let c3 = dial(&name);
+    let started = std::time::Instant::now();
+    let s3 = loop {
+        match listener.accept(Some(Duration::from_millis(200))) {
+            Ok(s) => break s,
+            Err(PipeError::Timeout) => assert!(started.elapsed() < WAIT, "the freed instance was never used"),
+            Err(e) => panic!("{e:?}"),
+        }
+    };
+    drop((s3, c3.join().unwrap(), s2, c2));
+}

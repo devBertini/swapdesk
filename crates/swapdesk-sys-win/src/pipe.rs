@@ -666,15 +666,29 @@ impl PipeListener {
     /// Waits for a client. `Err(PipeError::Timeout)` leaves the listener usable. For a multi-instance pipe the next
     /// instance is created before this returns, so the name is never unowned between clients; a single-instance
     /// pipe accepts once and then reports `Closed`.
+    ///
+    /// When every instance of a multi-instance pipe is in use, no next one can be created: the client that just
+    /// connected is served all the same (its own instance keeps the name owned), and the calls that follow report
+    /// `Timeout` until an instance is free again. The listener never ends for it.
     pub fn accept(&mut self, timeout: Option<Duration>) -> Result<PipeConn, PipeError> {
-        let Some(instance) = self.pending.take() else {
-            return Err(PlatformError {
-                kind: ErrorKind::Closed,
-                op: "PipeListener::accept",
-                os_code: None,
-                detail: "single-instance pipe already accepted".into(),
+        let instance = match self.pending.take() {
+            Some(instance) => instance,
+            None if self.spec.max_instances > 1 => match create_instance(&self.spec, &self.sddl, false) {
+                Ok(instance) => instance,
+                Err(_) => {
+                    std::thread::sleep(timeout.map_or(FULL_WAIT, |t| t.min(FULL_WAIT)));
+                    return Err(PipeError::Timeout);
+                }
+            },
+            None => {
+                return Err(PlatformError {
+                    kind: ErrorKind::Closed,
+                    op: "PipeListener::accept",
+                    os_code: None,
+                    detail: "single-instance pipe already accepted".into(),
+                }
+                .into());
             }
-            .into());
         };
         let event = new_event()?;
         let h = instance.0;
@@ -696,11 +710,15 @@ impl PipeListener {
             }
         }
         if self.spec.max_instances > 1 {
-            self.pending = Some(create_instance(&self.spec, &self.sddl, false)?);
+            // `None` when every instance is in use: made at the next call.
+            self.pending = create_instance(&self.spec, &self.sddl, false).ok();
         }
         Ok(PipeConn::from_handle(instance)?)
     }
 }
+
+/// How long an accept waits before it says `Timeout` while every instance of its pipe is in use.
+const FULL_WAIT: Duration = Duration::from_millis(250);
 
 fn create_instance(spec: &PipeSpec, sddl: &[u16], first: bool) -> Result<OwnedHandle, PipeError> {
     let mut sd: PSECURITY_DESCRIPTOR = null_mut();

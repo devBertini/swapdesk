@@ -1107,6 +1107,10 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
         }
         if now >= next_watchdog {
             next_watchdog = now + WATCHDOG;
+            // A pipe whose listener ended on a failure is listened on again here, not only at the next change of
+            // the console: without it no interface of that session could reach the service until then. A session
+            // that is served is left as it is.
+            pipes.sync(helpers_for.0);
         }
     }
     drop(net_watcher);
