@@ -7,7 +7,10 @@
 //!   of retries. The requests that were out when it broke fail with `ServiceDown`, as before. Once the pipe is back the
 //!   interface hears [`UiEvent::ServiceReconnected`]: it ends what the old service held and asks for its data again.
 //! * When the window passes without a pipe, every waiting command and every later one is answered `ServiceDown`, the
-//!   state the interface already shows ("O serviço do Swapdesk não está respondendo.").
+//!   state the interface already shows ("O serviço do Swapdesk não está respondendo."). The pipe is still tried, on
+//!   a slower pace ([`Timing::down_every`]): a service that comes back minutes later (started by hand, by its
+//!   recovery actions, by an update that took long) is found, and the interface hears `ServiceReconnected` instead
+//!   of staying dead until the person quits it and opens it again.
 //!
 //! Each link numbers its own tickets; this backend gives the interface its own and translates the replies, so a
 //! ticket the interface holds never changes when the link under it does.
@@ -34,11 +37,13 @@ pub struct Timing {
     pub window: Duration,
     /// The time between two tries.
     pub every: Duration,
+    /// The time between two tries once the window has passed.
+    pub down_every: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Self { window: Duration::from_secs(30), every: Duration::from_secs(1) }
+        Self { window: Duration::from_secs(30), every: Duration::from_secs(1), down_every: Duration::from_secs(5) }
     }
 }
 
@@ -50,7 +55,10 @@ enum Phase {
         broke: bool,
     },
     Up(Linked),
-    Down,
+    /// The window passed: commands are answered `ServiceDown`, and the pipe is tried again at `next`.
+    Down {
+        next: Instant,
+    },
 }
 
 struct State {
@@ -169,10 +177,18 @@ impl Inner {
                         *phase = Phase::Up(link);
                     } else if since.elapsed() >= self.timing.window {
                         out.extend(queue.drain(..).map(|(t, _)| Self::down_reply(t)));
-                        *phase = Phase::Down;
+                        *phase = Phase::Down { next: Instant::now() + self.timing.down_every };
                     }
                 }
-                Phase::Up(_) | Phase::Down => {}
+                Phase::Down { next } if Instant::now() >= *next => match (self.connector)() {
+                    // The interface was told the service is down: it asks for everything again.
+                    Some(link) => {
+                        out.push(UiEvent::ServiceReconnected);
+                        *phase = Phase::Up(link);
+                    }
+                    None => *next = Instant::now() + self.timing.down_every,
+                },
+                Phase::Up(_) | Phase::Down { .. } => {}
             }
             // Pushed before the state is let go: `ServiceReconnected` comes before any reply of the new link.
             self.push(out);
@@ -190,7 +206,7 @@ impl UiBackend for Reconnecting {
                 tickets.insert(link.backend.send(command), outer);
             }
             Phase::Waiting { queue, .. } => queue.push((outer, command)),
-            Phase::Down => {
+            Phase::Down { .. } => {
                 drop(st);
                 self.inner.push([Inner::down_reply(outer)]);
             }
@@ -293,7 +309,31 @@ mod tests {
     }
 
     fn fast() -> Timing {
-        Timing { window: Duration::from_millis(400), every: Duration::from_millis(20) }
+        Timing {
+            window: Duration::from_millis(400),
+            every: Duration::from_millis(20),
+            down_every: Duration::from_millis(100),
+        }
+    }
+
+    /// Review of 22/11/2026, G3: after the window the interface never tried the service again, and showed "O
+    /// serviço do Swapdesk não está respondendo." until the person quit it and opened it again.
+    #[test]
+    fn a_service_that_comes_back_after_the_window_is_found_and_the_interface_is_told() {
+        let service = Service::new(false);
+        let b = Reconnecting::start(service.connector(), Arc::new(Wake(AtomicUsize::new(0))), fast());
+        let early = b.send(Command::ListDevices);
+        let got = wait_events(&b, 1);
+        assert_eq!(got.iter().map(reply_of).collect::<Vec<_>>(), vec![(early, Err(ApiCode::ServiceDown))]);
+        assert!(!b.is_up());
+
+        service.up.store(true, Ordering::SeqCst);
+        let got = wait_events(&b, 1);
+        assert!(matches!(got.as_slice(), [UiEvent::ServiceReconnected]), "{got:?}");
+        assert!(b.is_up());
+        let late = b.send(Command::GetSettings);
+        let got = wait_events(&b, 1);
+        assert_eq!(got.iter().map(reply_of).collect::<Vec<_>>(), vec![(late, Ok(()))]);
     }
 
     fn wait_events(b: &Reconnecting, want: usize) -> Vec<UiEvent> {
