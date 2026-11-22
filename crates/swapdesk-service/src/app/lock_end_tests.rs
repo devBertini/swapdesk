@@ -112,3 +112,19 @@ fn the_service_lock_is_the_console_session_lock_and_nothing_else() {
     lock_console(&mut runner, &trace, 1);
     assert_eq!(*lock(&calls.0), vec!["lock_console_session"]);
 }
+
+/// Review of 22/11/2026, G2: every console change restarted both helpers, and a logon or a logoff of any other
+/// session reports one. A live session lost its terminals and its copies and its picture stalled for nothing.
+#[test]
+fn the_helpers_start_again_only_when_the_console_session_or_its_user_changed() {
+    let at = |session: u32, user: Option<&str>| (Some(session), user.map(str::to_owned));
+    let ana = at(1, Some("Ana"));
+    assert!(!console_moved(&ana, &at(1, Some("Ana"))), "another session logged on or off: nothing changed here");
+    assert!(!console_moved(&ana, &at(1, Some("ana"))), "the same account, written another way");
+    assert!(console_moved(&ana, &at(2, Some("Ana"))), "the console went to another session");
+    assert!(console_moved(&ana, &at(1, Some("Bia"))), "another user took the session");
+    assert!(console_moved(&ana, &at(1, None)), "the user logged off");
+    assert!(console_moved(&at(1, None), &ana), "a user logged on");
+    assert!(console_moved(&ana, &(None, None)), "no console session at all");
+    assert!(!console_moved(&at(1, None), &at(1, None)), "still the sign-in screen");
+}

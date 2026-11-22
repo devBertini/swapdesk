@@ -709,6 +709,17 @@ fn read_console(dev: bool) -> ConsoleRead {
     sid.map_or(ConsoleRead::Unreadable, ConsoleRead::User)
 }
 
+/// Whether the helpers must start again after a console change: the console session is another one, or the user at
+/// it is (names of Windows accounts are compared without their case).
+fn console_moved(was: &(Option<u32>, Option<String>), now: &(Option<u32>, Option<String>)) -> bool {
+    let same_user = match (&was.1, &now.1) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (None, None) => true,
+        _ => false,
+    };
+    was.0 != now.0 || !same_user
+}
+
 /// How often a console user that could not be read is read again.
 const CONSOLE_RETRY: Duration = Duration::from_secs(1);
 
@@ -986,6 +997,8 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
     let mut next_net = Instant::now() + reconcile;
     let mut next_watchdog = Instant::now() + WATCHDOG;
     let mut console_retry: Option<Instant> = None;
+    // The console session and its user the helpers were last started for.
+    let mut helpers_for = (session, console.user.clone());
     {
         let accounts = Arc::clone(&accounts);
         let _ = live_sessions.set(Box::new(move || accounts.all().iter().map(|a| a.hub.live_sessions()).sum()));
@@ -1013,7 +1026,14 @@ fn run_with(opts: &Options, ctx: ServiceContext, env: Env) -> Result<(), String>
                 term_env.set_session(state.session_id);
                 // Also a logon or logoff of any session: a session id that changed hands needs a pipe for its new user.
                 pipes.sync(state.session_id);
-                supervisor.console_changed(state.session_id, state.user.is_some());
+                // The helpers start again only when the console session or its user changed. A logon or a logoff
+                // of some other session reports a console change too, and restarting the helpers for it would end
+                // the terminals and the copies of a live session and stall its picture for nothing.
+                let now = (state.session_id, state.user.clone());
+                if console_moved(&helpers_for, &now) {
+                    supervisor.console_changed(state.session_id, state.user.is_some());
+                    helpers_for = now;
+                }
             }
             Ok(Some(SessionEvent::DesktopSwitched(d))) => every_hub(&|h| h.set_desktop(d)),
             Ok(Some(SessionEvent::NetworkChanged)) => {
