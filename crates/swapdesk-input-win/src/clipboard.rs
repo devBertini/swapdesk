@@ -1,6 +1,6 @@
 //! `ClipboardProvider` (C3) on the Windows clipboard (F-CLIP-01, PROTOCOL.md 7.5): UTF-8 text through
 //! `CF_UNICODETEXT` and PNG through the registered `"PNG"` format, with `CF_DIB` (screenshots, "copy image") converted to
-//! PNG on read. Content a password manager marked as hidden (`ExcludeClipboardContentFromMonitorProcessing`,
+//! a compressed PNG on read (the deflate of [`crate::deflate`], after the clipboard is closed). Content a password manager marked as hidden (`ExcludeClipboardContentFromMonitorProcessing`,
 //! `CanIncludeInClipboardHistory` = 0, `Clipboard Viewer Ignore`) reads as `Concealed` and is never returned.
 //!
 //! Change detection is the clipboard sequence number (`GetClipboardSequenceNumber`), which the contract polls: no
@@ -12,7 +12,10 @@
 //! Writing a PNG puts the `"PNG"` format on the clipboard only (no `CF_DIB`: that would need a PNG decoder); programs
 //! that read `"PNG"` (browsers, Office, Paint) paste it.
 //!
-//! The pure parts (DIB to PNG, the PNG length, UTF-16 decoding, the concealed rule) build on every host.
+//! Line ends: text is read as the clipboard holds it (CR-LF) and written with CR-LF, a lone LF from a Mac peer
+//! becoming CR-LF ([`windows_line_ends`]).
+//!
+//! The pure parts (DIB to PNG, the PNG length, UTF-16 decoding, the line ends, the concealed rule) build on every host.
 
 use swapdesk_proto::MAX_CLIPBOARD_TEXT;
 
@@ -39,6 +42,30 @@ pub(crate) fn decode_text(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// The text a peer sent with the line ends `CF_UNICODETEXT` asks for ("Each line ends with a carriage
+/// return/linefeed (CR-LF) combination", Microsoft Learn "Standard Clipboard Formats", read on 22/11/2026): a lone LF
+/// becomes CR-LF. The conversion is made here, where text is written, and never where it is read: a Windows side
+/// keeps sending its CR-LF as it is, so a 1.0 or 1.1.0 Windows peer, which writes what it gets as it comes, still
+/// receives CR-LF; a Mac peer turns CR-LF into LF where it writes.
+pub(crate) fn windows_line_ends(text: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let lone = |i: usize| bytes[i] == b'\n' && (i == 0 || bytes[i - 1] != b'\r');
+    let count = (0..bytes.len()).filter(|&i| lone(i)).count();
+    if count == 0 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + count);
+    let mut from = 0;
+    for i in (0..bytes.len()).filter(|&i| lone(i)) {
+        // `i` is the byte of an ASCII LF: a character boundary.
+        out.push_str(&text[from..i]);
+        out.push_str("\r\n");
+        from = i + 1;
+    }
+    out.push_str(&text[from..]);
+    std::borrow::Cow::Owned(out)
 }
 
 pub(crate) fn encode_text(text: &str) -> Vec<u8> {
@@ -68,26 +95,31 @@ pub(crate) fn png_exact_len(data: &[u8]) -> Option<usize> {
     }
 }
 
+/// The CRC-32 table of PNG (polynomial 0xEDB88320), built at compile time.
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut c = n as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            k += 1;
+        }
+        table[n] = c;
+        n += 1;
+    }
+    table
+};
+
 fn crc32(data: &[&[u8]]) -> u32 {
     let mut crc = u32::MAX;
     for part in data {
         for &b in *part {
-            crc ^= u32::from(b);
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-            }
+            crc = CRC_TABLE[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
         }
     }
     !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for &x in data {
-        a = (a + u32::from(x)) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
 }
 
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
@@ -97,27 +129,55 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32(&[kind, data]).to_be_bytes());
 }
 
-/// A PNG of 8-bit RGB rows in zlib "stored" blocks (no compression: a clipboard image is local and the peer's link
-/// is a LAN; the 16 MiB limit of 7.5 is checked by the sync engine).
+/// The Paeth predictor of PNG.
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let p = i16::from(a) + i16::from(b) - i16::from(c);
+    let (pa, pb, pc) = ((p - i16::from(a)).abs(), (p - i16::from(b)).abs(), (p - i16::from(c)).abs());
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
+}
+
+/// Appends `row` filtered for the compressor: of None, Sub, Up and Paeth, the one whose bytes, read as signed, sum to
+/// the least (the heuristic of the PNG specification, 12.8). `prior` is the row above (zeros for the first).
+fn filter_row(row: &[u8], prior: &[u8], scratch: &mut [Vec<u8>; 4], raw: &mut Vec<u8>) {
+    const BPP: usize = 3;
+    for (kind, out) in scratch.iter_mut().enumerate() {
+        out.clear();
+        out.extend(row.iter().enumerate().map(|(i, &x)| {
+            let a = if i >= BPP { row[i - BPP] } else { 0 };
+            let (b, c) = (prior[i], if i >= BPP { prior[i - BPP] } else { 0 });
+            x.wrapping_sub(match kind {
+                0 => 0,
+                1 => a,
+                2 => b,
+                _ => paeth(a, b, c),
+            })
+        }));
+    }
+    let cost = |v: &Vec<u8>| v.iter().map(|&x| u64::from((x as i8).unsigned_abs())).sum::<u64>();
+    let best = (0..4).min_by_key(|&k| cost(&scratch[k])).unwrap_or(0);
+    raw.push([0, 1, 2, 4][best]);
+    raw.extend_from_slice(&scratch[best]);
+}
+
+/// A PNG of 8-bit RGB rows, each row filtered and the whole compressed with deflate (review of 22/11/2026, D8: stored
+/// blocks took a 4K screenshot past the 16 MiB limit of 7.5, which the sync engine checks).
 pub(crate) fn encode_png_rgb(width: u32, height: u32, rgb_rows: &[u8]) -> Vec<u8> {
     let stride = width as usize * 3;
     let mut raw = Vec::with_capacity((stride + 1) * height as usize);
+    let mut scratch: [Vec<u8>; 4] = Default::default();
+    let zeros = vec![0u8; stride];
+    let mut prior: &[u8] = &zeros;
     for row in rgb_rows.chunks_exact(stride) {
-        raw.push(0); // filter: none
-        raw.extend_from_slice(row);
+        filter_row(row, prior, &mut scratch, &mut raw);
+        prior = row;
     }
-    let mut z = vec![0x78, 0x01];
-    let mut blocks = raw.chunks(65535).peekable();
-    if blocks.peek().is_none() {
-        z.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
-    }
-    while let Some(b) = blocks.next() {
-        z.push(u8::from(blocks.peek().is_none()));
-        z.extend_from_slice(&(b.len() as u16).to_le_bytes());
-        z.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
-        z.extend_from_slice(b);
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let z = crate::deflate::zlib(&raw);
     let mut ihdr = Vec::with_capacity(13);
     ihdr.extend_from_slice(&width.to_be_bytes());
     ihdr.extend_from_slice(&height.to_be_bytes());
@@ -197,7 +257,7 @@ mod win {
     };
     use windows::core::{PCWSTR, w};
 
-    use super::{COPY_CAP, decode_text, dib_to_png, encode_text, is_concealed, png_exact_len};
+    use super::{COPY_CAP, decode_text, dib_to_png, encode_text, is_concealed, png_exact_len, windows_line_ends};
 
     const OPEN_ATTEMPTS: u32 = 10;
     const OPEN_WAIT: Duration = Duration::from_millis(15);
@@ -373,7 +433,7 @@ mod win {
         }
 
         fn read(&mut self) -> Result<ClipRead> {
-            let _open = Open::with_retry(None)?;
+            let open = Open::with_retry(None)?;
             // SAFETY: plain query while the clipboard is open.
             if unsafe { CountClipboardFormats() } == 0 {
                 return Ok(ClipRead::Empty);
@@ -390,7 +450,11 @@ mod win {
                 return Ok(png.map_or(ClipRead::Unsupported, |p| ClipRead::Content(ClipContent::Png(p))));
             }
             if available(u32::from(CF_DIB.0)) {
-                let png = read_format(u32::from(CF_DIB.0)).and_then(|b| dib_to_png(&b));
+                let dib = read_format(u32::from(CF_DIB.0));
+                // Compressing a 4K screen takes a moment: the clipboard is let go first, since every other program
+                // that copies or pastes waits while it is open.
+                drop(open);
+                let png = dib.and_then(|b| dib_to_png(&b));
                 return Ok(png.map_or(ClipRead::Unsupported, |p| ClipRead::Content(ClipContent::Png(p))));
             }
             Ok(ClipRead::Unsupported)
@@ -399,7 +463,7 @@ mod win {
         fn write(&mut self, content: &ClipContent) -> Result<()> {
             let (format, bytes) = match content {
                 ClipContent::Text(t) if t.len() <= MAX_CLIPBOARD_TEXT as usize => {
-                    (u32::from(CF_UNICODETEXT.0), encode_text(t))
+                    (u32::from(CF_UNICODETEXT.0), encode_text(&windows_line_ends(t)))
                 }
                 ClipContent::Png(p) if p.len() <= MAX_CLIPBOARD_PNG as usize && png_exact_len(p) == Some(p.len()) => {
                     (self.png, p.clone())
@@ -429,23 +493,36 @@ pub use win::WinClipboard;
 mod tests {
     use super::*;
 
-    /// Inflates the stored blocks of a zlib stream (all this module writes) and checks the Adler-32.
-    fn unstore(z: &[u8]) -> Vec<u8> {
-        assert_eq!(&z[..2], &[0x78, 0x01]);
-        let (mut at, mut out) = (2, Vec::new());
-        loop {
-            let last = z[at] & 1 == 1;
-            assert_eq!(z[at] & 0b110, 0, "stored block");
-            let len = u16::from_le_bytes([z[at + 1], z[at + 2]]);
-            assert_eq!(u16::from_le_bytes([z[at + 3], z[at + 4]]), !len);
-            out.extend_from_slice(&z[at + 5..at + 5 + len as usize]);
-            at += 5 + len as usize;
-            if last {
-                break;
+    /// The RGB rows of a PNG this module wrote: the IDAT inflated (the Adler-32 checked) and each row unfiltered.
+    fn pixels(png: &[u8]) -> (u32, u32, Vec<u8>) {
+        let c = chunks(png);
+        let ihdr = &c[0].1;
+        let (w, h) =
+            (u32::from_be_bytes(ihdr[..4].try_into().unwrap()), u32::from_be_bytes(ihdr[4..8].try_into().unwrap()));
+        assert_eq!(&ihdr[8..], &[8, 2, 0, 0, 0], "8-bit RGB");
+        let z: Vec<u8> = c.iter().filter(|(k, _)| k == b"IDAT").flat_map(|(_, d)| d.clone()).collect();
+        let raw = crate::deflate::inflate::zlib(&z).expect("a valid zlib stream");
+        let stride = w as usize * 3;
+        assert_eq!(raw.len(), (stride + 1) * h as usize);
+        let mut rgb: Vec<u8> = Vec::with_capacity(stride * h as usize);
+        for (y, row) in raw.chunks_exact(stride + 1).enumerate() {
+            let start = rgb.len();
+            for i in 0..stride {
+                let a = if i >= 3 { rgb[start + i - 3] } else { 0 };
+                let b = if y > 0 { rgb[start + i - stride] } else { 0 };
+                let c = if y > 0 && i >= 3 { rgb[start + i - stride - 3] } else { 0 };
+                let predicted = match row[0] {
+                    0 => 0,
+                    1 => a,
+                    2 => b,
+                    3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                    4 => paeth(a, b, c),
+                    f => panic!("filter {f}"),
+                };
+                rgb.push(row[1 + i].wrapping_add(predicted));
             }
         }
-        assert_eq!(&z[at..], &adler32(&out).to_be_bytes());
-        out
+        (w, h, rgb)
     }
 
     /// Splits a PNG into (kind, data) and checks each CRC.
@@ -485,7 +562,8 @@ mod tests {
     #[test]
     fn crc_and_adler_known_values() {
         assert_eq!(crc32(&[b"123456789"]), 0xCBF4_3926);
-        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+        assert_eq!(crc32(&[b"1234", b"56789"]), 0xCBF4_3926, "over parts");
+        assert_eq!(crate::deflate::adler32(b"Wikipedia"), 0x11E6_0398);
     }
 
     #[test]
@@ -497,20 +575,101 @@ mod tests {
         let c = chunks(&png);
         assert_eq!(c.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [*b"IHDR", *b"IDAT", *b"IEND"]);
         assert_eq!(c[0].1, [0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0]);
-        let raw = unstore(&c[1].1);
-        assert_eq!(raw, [0, 3, 2, 1, 6, 5, 4, 0, 30, 20, 10, 60, 50, 40]);
+        assert_eq!(pixels(&png), (2, 2, vec![3, 2, 1, 6, 5, 4, 30, 20, 10, 60, 50, 40]));
         assert_eq!(png_exact_len(&png), Some(png.len()));
+    }
+
+    /// Review of 22/11/2026, D8: the compressed PNG keeps every pixel of a screen, whichever filter each row took.
+    #[test]
+    fn a_compressed_screen_png_keeps_every_pixel() {
+        let (dib, rgb) = screen(640, 400);
+        let png = dib_to_png(&dib).unwrap();
+        assert_eq!(pixels(&png), (640, 400, rgb.clone()));
+        assert!(png.len() * 10 < rgb.len(), "{} bytes for {} of pixels", png.len(), rgb.len());
+        // Noise, which no filter helps: still exact, and no larger than the stored blocks would have been.
+        let mut x: u32 = 7;
+        let noise: Vec<u8> = (0..300 * 200 * 3)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 24) as u8
+            })
+            .collect();
+        let png = encode_png_rgb(300, 200, &noise);
+        assert_eq!(pixels(&png), (300, 200, noise.clone()));
+        assert!(png.len() < noise.len() + 200 + 1024, "{} bytes", png.len());
     }
 
     #[test]
     fn a_top_down_32_bit_bitfields_dib_is_read_and_unusual_ones_are_refused() {
         let px = [1, 2, 3, 255, 4, 5, 6, 255];
         let png = dib_to_png(&dib(1, -2, 32, 3, &px)).unwrap();
-        assert_eq!(unstore(&chunks(&png)[1].1), [0, 3, 2, 1, 0, 6, 5, 4]);
+        assert_eq!(pixels(&png), (1, 2, vec![3, 2, 1, 6, 5, 4]));
         assert!(dib_to_png(&dib(1, 1, 16, 0, &[0; 4])).is_none(), "16 bit");
         assert!(dib_to_png(&dib(1, 1, 24, 1, &[0; 4])).is_none(), "RLE");
         assert!(dib_to_png(&dib(2, 2, 24, 0, &[0; 8])).is_none(), "short pixel data");
         assert!(dib_to_png(&[0; 10]).is_none());
+    }
+
+    /// A screen as a 32-bit bottom-up `CF_DIB`: a vertical gradient behind three white windows full of glyph-like ink
+    /// (a different pseudo-random pattern per character cell) and a dark taskbar. Returns the DIB and its RGB rows,
+    /// top first.
+    fn screen(width: usize, height: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut rgb = vec![0u8; width * height * 3];
+        let mut x_state: u32 = 0x9E37_79B9;
+        let mut next = || {
+            x_state ^= x_state << 13;
+            x_state ^= x_state >> 17;
+            x_state ^= x_state << 5;
+            x_state
+        };
+        let windows =
+            [(width / 20, height / 10, width / 2, height / 2), (width / 2, height / 3, width * 9 / 20, height / 2)];
+        let cells: Vec<u32> = (0..(width / 8 + 1) * (height / 16 + 1)).map(|_| next()).collect();
+        for y in 0..height {
+            for x in 0..width {
+                let px = &mut rgb[(y * width + x) * 3..][..3];
+                let mut c =
+                    [(30 + y * 120 / height) as u8, (60 + y * 80 / height) as u8, (120 + y * 100 / height) as u8];
+                if y >= height - height / 36 {
+                    c = [32, 32, 40];
+                }
+                for &(wx, wy, ww, wh) in &windows {
+                    if (wx..wx + ww).contains(&x) && (wy..wy + wh).contains(&y) {
+                        c = [255, 255, 255];
+                        let (cx, cy) = (x / 8, y / 16);
+                        let cell = cells[cy * (width / 8 + 1) + cx];
+                        // Ink in rows 3 to 12 of a cell, a bit per pixel of the cell's own pattern, on most lines.
+                        if (3..13).contains(&(y % 16)) && cy % 5 != 4 && (cell >> ((y % 16) + (x % 8))) & 1 == 1 {
+                            c = [20, 20, 20];
+                        }
+                    }
+                }
+                px.copy_from_slice(&c);
+            }
+        }
+        let mut pixels = Vec::with_capacity(width * height * 4);
+        for y in (0..height).rev() {
+            for &[r, g, b] in rgb[y * width * 3..(y + 1) * width * 3].as_chunks::<3>().0 {
+                pixels.extend_from_slice(&[b, g, r, 0]);
+            }
+        }
+        (dib(width as i32, height as i32, 32, 0, &pixels), rgb)
+    }
+
+    /// Review of 22/11/2026, D8: a screenshot (`CF_DIB`) was stored as a PNG with no compression, about 24 MiB at
+    /// 3840x2160, past the 16 MiB limit of 7.5: copying the screen from 4K up never reached the other side. It is
+    /// compressed now and fits with room to spare.
+    #[test]
+    fn a_4k_screenshot_becomes_a_png_within_the_clipboard_limit() {
+        let (dib, _) = screen(3840, 2160);
+        let png = dib_to_png(&dib).expect("a PNG");
+        assert!(
+            png.len() <= swapdesk_proto::MAX_CLIPBOARD_PNG as usize / 4,
+            "{} bytes for a 4K screen, limit {}",
+            png.len(),
+            swapdesk_proto::MAX_CLIPBOARD_PNG
+        );
+        assert_eq!(png_exact_len(&png), Some(png.len()));
     }
 
     #[test]
@@ -532,6 +691,25 @@ mod tests {
         assert_eq!(decode_text(&padded), "olá, 世界 😀");
         assert_eq!(decode_text(&[0x00, 0xD8, 0x41, 0]), "\u{FFFD}A", "a lone surrogate is replaced");
         assert_eq!(decode_text(&[]), "");
+    }
+
+    /// Review of 22/11/2026, D9: text from a Mac (LF line ends) was written to the Windows clipboard as it came, where
+    /// `CF_UNICODETEXT` ends every line with CR-LF, so programs that read only CR-LF (Notepad before 2018, many
+    /// older ones) showed it on one line. A lone LF now becomes CR-LF; text that already has CR-LF (from Windows) and
+    /// a lone CR are left alone.
+    #[test]
+    fn text_from_the_peer_gets_windows_line_ends_and_crlf_is_kept() {
+        assert_eq!(windows_line_ends("a\nb\n"), "a\r\nb\r\n");
+        assert_eq!(windows_line_ends("\n\n"), "\r\n\r\n");
+        assert_eq!(windows_line_ends("a\r\nb"), "a\r\nb", "already Windows");
+        assert_eq!(windows_line_ends("a\r\n\nb"), "a\r\n\r\nb", "mixed");
+        assert_eq!(windows_line_ends("a\rb"), "a\rb", "a lone CR stays");
+        assert_eq!(windows_line_ends("olá\n世界"), "olá\r\n世界");
+        assert!(
+            matches!(windows_line_ends("no line end"), std::borrow::Cow::Borrowed(_)),
+            "no copy when nothing changes"
+        );
+        assert!(matches!(windows_line_ends("a\r\nb"), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

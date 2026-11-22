@@ -9,6 +9,7 @@
 //! the sink, never the sink itself. The grabber runs in the viewer, on its own thread, with no window.
 
 pub mod clipboard;
+mod deflate;
 pub mod grab;
 pub mod plan;
 pub mod pointer;

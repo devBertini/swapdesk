@@ -5,16 +5,20 @@
 //! picture size and display, the scale mode) and the UI thread computes the same function from them
 //! (`swapdesk_render_win::layout::map_pointer` over `Layout::compute`, exactly what the renderer calls).
 //!
-//! Rules: a move inside the picture is a `Pointer` record when the position changed; a press inside the picture
-//! first moves the pointer there, then goes as a `Button` record (a press in the letterbox or outside is ignored,
-//! and so is its release); a release always goes for a button that was pressed; while a button is held the pointer is
-//! clamped into the video rectangle (a drag may leave the window); a wheel turn inside the picture is a `Wheel`
-//! record.
+//! Rules: a move inside the picture is a `Pointer` record when the position changed; a point in the letterbox within
+//! [`EDGE_MARGIN`] of the picture counts as the nearest edge pixel (so the edges and corners of the host's screen can
+//! be reached with a quick move); a press inside the picture or that margin first moves the pointer there, then goes
+//! as a `Button` record (a press farther in the letterbox or outside is ignored, and so is its release); a release
+//! always goes for a button that was pressed; while a button is held the pointer is clamped into the picture (a drag
+//! may leave the window and follows the edge); a wheel turn inside the picture or the margin is a `Wheel` record.
 
 use swapdesk_platform::{Rect, ScaleMode};
 use swapdesk_proto::{InputEvent, MouseButton};
 use swapdesk_render_win::layout::{Layout, map_pointer};
 use swapdesk_shell_win::{MouseKind, MouseMsg, PointerButton};
+
+/// How far outside the picture, in window pixels, a pointer in the letterbox still lands on the picture's edge pixel.
+pub const EDGE_MARGIN: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerMap {
@@ -33,10 +37,28 @@ impl PointerMap {
         map_pointer(self.area, self.frame, &layout, x, y)
     }
 
-    fn clamp(&self, x: i32, y: i32) -> (i32, i32) {
-        let max_x = self.area.x + self.area.width.saturating_sub(1) as i32;
-        let max_y = self.area.y + self.area.height.saturating_sub(1) as i32;
-        (x.clamp(self.area.x, max_x), y.clamp(self.area.y, max_y))
+    /// The router's mapping. Inside the picture it is [`to_wire`](Self::to_wire). In the letterbox within
+    /// [`EDGE_MARGIN`] of the picture it is the nearest edge pixel: a fast move past the edge would otherwise stop
+    /// short of it, and the edges and corners of the host's screen could not be reached. With a button held
+    /// (`held`) every point is taken to the nearest picture pixel, so a drag follows the edge wherever it goes.
+    fn snap_to_wire(&self, x: i32, y: i32, held: bool) -> Option<(u16, u16)> {
+        let layout = Layout::compute(self.frame, (self.area.width, self.area.height), self.mode)?;
+        let (left, top) = (self.area.x + layout.dest.x as i32, self.area.y + layout.dest.y as i32);
+        let (right, bottom) = (left + layout.dest.w as i32 - 1, top + layout.dest.h as i32 - 1);
+        if !held {
+            let in_area = x >= self.area.x
+                && y >= self.area.y
+                && x < self.area.x + self.area.width as i32
+                && y < self.area.y + self.area.height as i32;
+            let near = x >= left - EDGE_MARGIN
+                && y >= top - EDGE_MARGIN
+                && x <= right + EDGE_MARGIN
+                && y <= bottom + EDGE_MARGIN;
+            if !(in_area && near) {
+                return None;
+            }
+        }
+        map_pointer(self.area, self.frame, &layout, x.clamp(left, right), y.clamp(top, bottom))
     }
 }
 
@@ -67,7 +89,7 @@ impl PointerRouter {
     }
 
     fn move_to(&mut self, map: &PointerMap, x: i32, y: i32, out: &mut Vec<InputEvent>) -> bool {
-        let Some((wx, wy)) = map.to_wire(x, y) else { return false };
+        let Some((wx, wy)) = map.snap_to_wire(x, y, self.held != 0) else { return false };
         if self.at != Some((map.display, wx, wy)) {
             self.at = Some((map.display, wx, wy));
             out.push(InputEvent::Pointer { display: map.display, x: wx, y: wy });
@@ -79,7 +101,7 @@ impl PointerRouter {
     pub fn mouse(&mut self, msg: &MouseMsg, map: Option<&PointerMap>) -> Vec<InputEvent> {
         let mut out = Vec::new();
         let Some(map) = map else { return out };
-        let (x, y) = if self.held != 0 { map.clamp(msg.x, msg.y) } else { (msg.x, msg.y) };
+        let (x, y) = (msg.x, msg.y);
         match msg.kind {
             MouseKind::Move => {
                 self.move_to(map, x, y, &mut out);
@@ -98,7 +120,7 @@ impl PointerRouter {
                 }
             }
             MouseKind::Wheel { dx, dy } => {
-                if map.to_wire(x, y).is_some() {
+                if map.snap_to_wire(x, y, self.held != 0).is_some() {
                     out.push(InputEvent::Wheel { dx, dy });
                 }
             }
@@ -229,6 +251,86 @@ mod tests {
         r.mouse(&msg(MouseKind::Button { button: PointerButton::Middle, down: true }, 500, 500), Some(&m));
         assert_eq!(r.release_all(), vec![InputEvent::ReleaseAll]);
         assert!(!r.any_held());
+    }
+
+    /// An 800x600 picture shown 1:1 in a 1000x1000 area at (10, 20): bars on all four sides. The picture covers window
+    /// pixels x 110..=909 and y 220..=819.
+    fn boxed_map() -> PointerMap {
+        PointerMap { area: rect(10, 20, 1000, 1000), frame: (800, 600), display: 1, mode: ScaleMode::OneToOne }
+    }
+
+    fn moved(r: &mut PointerRouter, m: &PointerMap, x: i32, y: i32) -> Option<(u16, u16)> {
+        match r.mouse(&msg(MouseKind::Move, x, y), Some(m)).as_slice() {
+            [InputEvent::Pointer { x, y, .. }] => Some((*x, *y)),
+            [] => None,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Review of 22/11/2026, D7: a move that ran past the picture into the letterbox was dropped, so the remote pointer
+    /// stopped wherever the last move inside had left it and the edges and corners of the host's screen (the taskbar,
+    /// a hot corner) could be reached only by landing on the edge pixel itself. A move within a small margin outside the
+    /// picture now lands on the edge pixel.
+    #[test]
+    fn a_move_just_past_the_picture_lands_on_its_edge_and_the_corners_are_reached() {
+        let m = boxed_map();
+        let mut r = PointerRouter::new();
+        let d = EDGE_MARGIN - 1;
+        assert_eq!(moved(&mut r, &m, 110 - d, 220 - d), Some((0, 0)), "top left");
+        assert_eq!(moved(&mut r, &m, 909 + d, 220 - d), Some((65535, 0)), "top right");
+        assert_eq!(moved(&mut r, &m, 909 + d, 819 + d), Some((65535, 65535)), "bottom right");
+        assert_eq!(moved(&mut r, &m, 110 - d, 819 + d), Some((0, 65535)), "bottom left");
+        // A fast move from well inside to just past one edge keeps the other coordinate.
+        let inside = moved(&mut r, &m, 510, 520).expect("inside");
+        assert_eq!(moved(&mut r, &m, 510, 819 + 3), Some((inside.0, 65535)));
+        // The letterbox beyond the margin, and anything outside the area, still map to nothing.
+        assert_eq!(moved(&mut r, &m, 510, 819 + EDGE_MARGIN + 1), None);
+        assert_eq!(moved(&mut r, &m, 110 - EDGE_MARGIN - 1, 520), None);
+        // The fitted picture of the other tests: its bars are above and below only.
+        let f = fit_map();
+        assert_eq!(moved(&mut r, &f, 10 + 999, 20 + 218 - 2), Some((65535, 0)));
+        assert_eq!(moved(&mut r, &f, 10 + 1000, 20 + 218 - 2), None, "right of the area");
+    }
+
+    /// Review of 22/11/2026, D7: with a button held the pointer was clamped into the video area, not the picture, so a
+    /// drag into the letterbox mapped to nothing and the drag stopped short of the edge. It now follows the edge.
+    #[test]
+    fn a_drag_into_the_letterbox_or_out_of_the_window_follows_the_picture_edge() {
+        let m = fit_map();
+        let mut r = PointerRouter::new();
+        let down = r.mouse(&msg(MouseKind::Button { button: PointerButton::Left, down: true }, 500, 500), Some(&m));
+        assert!(matches!(down.as_slice(), [InputEvent::Pointer { .. }, InputEvent::Button { down: true, .. }]));
+        let at = |e: Vec<InputEvent>| match e.as_slice() {
+            [InputEvent::Pointer { x, y, .. }] => (*x, *y),
+            other => panic!("{other:?}"),
+        };
+        // The bottom bar of the area (the picture ends at y 20 + 218 + 562 = 800).
+        let (_, y) = at(r.mouse(&msg(MouseKind::Move, 500, 1010), Some(&m)));
+        assert_eq!(y, 65535);
+        // Out of the window to the top left.
+        assert_eq!(at(r.mouse(&MouseMsg { inside: false, ..msg(MouseKind::Move, -40, -40) }, Some(&m))), (0, 0));
+    }
+
+    /// Review of 22/11/2026, D7: a pointer that can park on the edge must be able to click there and turn the wheel
+    /// there; a press far in the letterbox is still ignored.
+    #[test]
+    fn a_press_and_a_wheel_turn_in_the_margin_go_at_the_edge() {
+        let m = boxed_map();
+        let mut r = PointerRouter::new();
+        let down = r.mouse(&msg(MouseKind::Button { button: PointerButton::Left, down: true }, 510, 819 + 4), Some(&m));
+        assert!(
+            matches!(down.as_slice(), [InputEvent::Pointer { y: 65535, .. }, InputEvent::Button { down: true, .. }]),
+            "{down:?}"
+        );
+        r.mouse(&msg(MouseKind::Button { button: PointerButton::Left, down: false }, 510, 819 + 4), Some(&m));
+        assert_eq!(
+            r.mouse(&msg(MouseKind::Wheel { dx: 0, dy: 120 }, 110 - 4, 520), Some(&m)),
+            vec![InputEvent::Wheel { dx: 0, dy: 120 }]
+        );
+        assert!(
+            r.mouse(&msg(MouseKind::Button { button: PointerButton::Left, down: true }, 510, 1010), Some(&m))
+                .is_empty()
+        );
     }
 
     #[test]

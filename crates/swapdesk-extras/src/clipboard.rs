@@ -2,7 +2,9 @@
 //!
 //! [`ClipEngine`] is the logic over a `ClipboardProvider`, with no I/O: it polls the provider's change counter, decides
 //! what goes out (text and PNG within the 7.5 limits; concealed content never; an item is only sent when both sides
-//! switched sync on; what the clipboard holds when sync becomes active is offered once), and applies what comes in (the newest `seq` wins; what it writes does not echo back).
+//! switched sync on; what the clipboard holds when sync becomes active is offered once, and only one side's offer
+//! crosses: the viewer offers at once, the host holds its own back and drops it when the viewer's arrives), and applies
+//! what comes in (the newest `seq` wins; what it writes does not echo back).
 //! [`ClipboardHandler`] plugs the engine into a session: one unidirectional stream (kind 0x04) per item.
 
 use std::future::Future;
@@ -16,13 +18,16 @@ use swapdesk_proto::{
     CLIPBOARD_HEADER_LEN, ClipKind, ClipSkip, ClipboardHeader, ClipboardItem, ClipboardPayload, ClipboardSkipped,
     ClipboardSync, MAX_CLIPBOARD_PNG, MAX_CLIPBOARD_TEXT, Message, PermissionSet, StreamKind, Wire,
 };
-use swapdesk_session::{ChannelHandler, IncomingStream, SessionCtx, SessionEnd};
+use swapdesk_session::{ChannelHandler, IncomingStream, Role, SessionCtx, SessionEnd};
 use tokio::sync::watch;
 
 use crate::{ExtrasEvent, ExtrasSink, lock};
 
 /// How often the provider's change counter is looked at (the 1 s budget of F-CLIP-01 leaves room).
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Polls the host lets pass before it offers what its clipboard held at the start (2 s): the viewer's own offer, made
+/// at once, opens its stream well within this, and the host then offers nothing.
+pub const HOST_START_WAIT: u32 = 8;
 /// A clipboard stream that does not finish in this time is dropped.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// The most a clipboard item's buffer reserves ahead of the bytes that have arrived (PROTOCOL.md 1: nothing is
@@ -48,6 +53,10 @@ pub struct ClipEngine<P> {
     peer_on: bool,
     /// Sync just became active on both sides: the next poll offers what the clipboard holds, changed or not.
     offer_pending: bool,
+    /// Polls the offer waits for once it is pending: 0 on the viewer, [`HOST_START_WAIT`] on the host.
+    start_wait: u32,
+    /// Polls still to wait before the pending offer goes.
+    wait_left: u32,
 }
 
 impl<P: ClipboardProvider> ClipEngine<P> {
@@ -55,27 +64,63 @@ impl<P: ClipboardProvider> ClipEngine<P> {
     /// once when both sides have sync on.
     pub fn new(mut provider: P, local_on: bool) -> Self {
         let last_count = provider.change_count().ok();
-        Self { provider, last_count, out_seq: 0, in_seq: None, local_on, peer_on: false, offer_pending: false }
+        Self {
+            provider,
+            last_count,
+            out_seq: 0,
+            in_seq: None,
+            local_on,
+            peer_on: false,
+            offer_pending: false,
+            start_wait: 0,
+            wait_left: 0,
+        }
     }
 
     fn active(&self) -> bool {
         self.local_on && self.peer_on
     }
 
+    /// Sync was `was` active before a switch changed: when it has just become active the offer is armed, with this
+    /// side's wait.
+    fn arm_offer(&mut self, was: bool) {
+        if !was && self.active() {
+            self.offer_pending = true;
+            self.wait_left = self.start_wait;
+        }
+    }
+
     pub fn set_local(&mut self, on: bool) {
         let was = self.active();
         self.local_on = on;
-        self.offer_pending |= !was && self.active();
+        self.arm_offer(was);
     }
 
     pub fn local_on(&self) -> bool {
         self.local_on
     }
 
+    /// How many polls this side lets pass before it offers what its clipboard held when sync became active (at the
+    /// start of a session or when a switch turned it on). Only one side's clipboard may win, or each side writes the
+    /// other's and both lose their own: the viewer's wins (its user is the one at the keyboard, who copied to paste
+    /// on the other machine), so the viewer offers at once and the host waits [`HOST_START_WAIT`] polls for it.
+    pub fn set_start_wait(&mut self, polls: u32) {
+        self.start_wait = polls;
+    }
+
+    /// The peer answered the start itself (one of its items is arriving, or it sent a notice that its own could not
+    /// go): the offer this side still holds back is dropped, so the peer's clipboard is not written over. Only the
+    /// side that waits gives way: a viewer meeting a 1.0 or 1.1.0 host, which offers at once, still makes its own.
+    pub fn peer_offered(&mut self) {
+        if self.start_wait > 0 {
+            self.offer_pending = false;
+        }
+    }
+
     pub fn set_peer(&mut self, on: bool) {
         let was = self.active();
         self.peer_on = on;
-        self.offer_pending |= !was && self.active();
+        self.arm_offer(was);
     }
 
     /// A new session: the peer's `seq` starts over. What is on the clipboard now is offered once sync is on at both
@@ -88,11 +133,16 @@ impl<P: ClipboardProvider> ClipEngine<P> {
     }
 
     /// Looks at the clipboard once. A change while sync is off on either side is consumed without being sent. When
-    /// sync has just become active on both sides, what the clipboard holds is offered like a copy, except that a type
-    /// that is never synced says nothing.
+    /// sync has just become active on both sides, what the clipboard holds is offered like a copy (once this side's
+    /// start wait is over), except that a type that is never synced says nothing. A copy made during the wait goes at
+    /// once, as any copy does, and takes the offer's place.
     pub fn poll(&mut self) -> Option<Outgoing> {
         let count = self.provider.change_count().ok()?;
-        let offer = self.offer_pending && self.active();
+        let mut offer = self.offer_pending && self.active();
+        if offer && self.wait_left > 0 {
+            self.wait_left -= 1;
+            offer = false;
+        }
         if self.last_count == Some(count) && !offer {
             return None;
         }
@@ -211,6 +261,7 @@ impl<P: ClipboardProvider + Send + 'static> ChannelHandler for ClipboardHandler<
         match msg {
             Message::ClipboardSync(m) => lock(&self.engine).set_peer(m.enabled),
             Message::ClipboardSkipped(m) => {
+                lock(&self.engine).peer_offered();
                 self.sink.event(ExtrasEvent::ClipboardSkipped { from_peer: true, reason: m.reason })
             }
             _ => {}
@@ -222,6 +273,12 @@ impl<P: ClipboardProvider + Send + 'static> ChannelHandler for ClipboardHandler<
         let on = {
             let mut e = lock(&self.engine);
             e.new_session();
+            // The viewer's clipboard wins at the start. A 1.0 or 1.1.0 viewer offers at once too, so a new host meets
+            // it the same way; a new viewer meeting an old host still races it, as both did before.
+            e.set_start_wait(match ctx.role() {
+                Role::Viewer => 0,
+                Role::Host => HOST_START_WAIT,
+            });
             e.local_on()
         };
         let _ = ctx.try_send(ClipboardSync { enabled: on });
@@ -230,6 +287,8 @@ impl<P: ClipboardProvider + Send + 'static> ChannelHandler for ClipboardHandler<
     }
 
     fn on_stream(&self, ctx: &SessionCtx, mut stream: IncomingStream) {
+        // The peer's item is on its way: an offer this side still holds back would write over the peer's clipboard.
+        lock(&self.engine).peer_offered();
         let (engine, sink) = (Arc::clone(&self.engine), Arc::clone(&self.sink));
         let mut mark = self.supersede();
         ctx.spawn_gated(PermissionSet::CLIPBOARD, async move {
@@ -484,6 +543,119 @@ mod tests {
         assert_eq!(e.poll(), None, "the clipboard holds the peer's item now");
     }
 
+    /// The two sides of a session over the fake: the viewer offers at once, the host waits as the handler sets it.
+    fn start_pair(
+        viewer: &FakeClipboard,
+        host: &FakeClipboard,
+    ) -> (ClipEngine<FakeClipboard>, ClipEngine<FakeClipboard>) {
+        let mut v = session_engine(viewer, true);
+        let mut h = session_engine(host, true);
+        h.set_start_wait(HOST_START_WAIT);
+        v.set_peer(true);
+        h.set_peer(true);
+        (v, h)
+    }
+
+    /// Runs `rounds` poll ticks in which the host looks first (its tick can come before the viewer's item arrives) and
+    /// each item is handed over as the handler does (the stream opens, then the item is written). Returns the items
+    /// that went each way.
+    fn exchange(v: &mut ClipEngine<FakeClipboard>, h: &mut ClipEngine<FakeClipboard>, rounds: u32) -> (u32, u32) {
+        let (mut to_host, mut to_viewer) = (0, 0);
+        for _ in 0..rounds {
+            if let Some(Outgoing::Item(item)) = h.poll() {
+                to_viewer += 1;
+                v.peer_offered();
+                v.apply(&item).unwrap();
+            }
+            if let Some(Outgoing::Item(item)) = v.poll() {
+                to_host += 1;
+                h.peer_offered();
+                h.apply(&item).unwrap();
+            }
+        }
+        (to_host, to_viewer)
+    }
+
+    /// Review of 22/11/2026, D2: both sides offered their clipboard the moment sync was on at both, so whichever item
+    /// landed last won, at random, and a copy made before connecting could be lost on both machines (each wrote the
+    /// other's). Now the viewer's clipboard wins: the host holds its offer back and drops it once the viewer's arrives.
+    #[test]
+    fn at_the_start_only_the_viewers_clipboard_crosses_when_both_held_a_copy() {
+        let (viewer, host) = (FakeClipboard::new(), FakeClipboard::new());
+        viewer.copy_externally(text("viewer before"), false);
+        host.copy_externally(text("host before"), false);
+        let (mut v, mut h) = start_pair(&viewer, &host);
+        assert_eq!(exchange(&mut v, &mut h, HOST_START_WAIT + 4), (1, 0), "one item, from the viewer");
+        assert_eq!(host.writes(), vec![text("viewer before")]);
+        assert_eq!(viewer.writes(), vec![], "the viewer's copy is kept");
+        // Turning the sync on in the session follows the same rule.
+        h.set_peer(false);
+        v.set_local(false);
+        viewer.copy_externally(text("viewer later"), false);
+        host.copy_externally(text("host later"), false);
+        let _ = (v.poll(), h.poll());
+        h.set_peer(true);
+        v.set_local(true);
+        assert_eq!(exchange(&mut v, &mut h, HOST_START_WAIT + 4), (1, 0));
+        assert_eq!(host.writes().last(), Some(&text("viewer later")));
+        assert_eq!(viewer.writes(), vec![]);
+    }
+
+    /// Review of 22/11/2026, D2: holding the host's offer back must not lose it when the viewer had nothing to offer;
+    /// it goes once the wait is over.
+    #[test]
+    fn the_host_offers_what_it_held_once_the_wait_is_over_when_the_viewer_had_nothing() {
+        let (viewer, host) = (FakeClipboard::new(), FakeClipboard::new());
+        host.copy_externally(text("host before"), false);
+        let (_, mut h) = start_pair(&viewer, &host);
+        for tick in 0..HOST_START_WAIT {
+            assert_eq!(h.poll(), None, "tick {tick}: still waiting for the viewer's offer");
+        }
+        assert_eq!(
+            h.poll(),
+            Some(Outgoing::Item(ClipboardItem { seq: 1, payload: ClipboardPayload::Text("host before".into()) }))
+        );
+        assert_eq!(h.poll(), None, "offered once");
+        // A copy at the host during the wait goes at once, as any copy does, and takes the offer's place.
+        let (_, mut h) = start_pair(&viewer, &host);
+        assert_eq!(h.poll(), None);
+        host.copy_externally(text("host during"), false);
+        assert!(
+            matches!(h.poll(), Some(Outgoing::Item(ClipboardItem { payload: ClipboardPayload::Text(t), .. })) if t == "host during")
+        );
+        for _ in 0..HOST_START_WAIT + 2 {
+            assert_eq!(h.poll(), None, "nothing is offered after it");
+        }
+    }
+
+    /// Review of 22/11/2026, D2: a viewer whose clipboard could not be sent at the start (concealed, too large) says
+    /// so with a notice; its user's clipboard still wins, so the host does not write over it.
+    #[test]
+    fn a_notice_from_the_viewer_at_the_start_keeps_the_hosts_offer_back() {
+        let (viewer, host) = (FakeClipboard::new(), FakeClipboard::new());
+        host.copy_externally(text("host before"), false);
+        let (_, mut h) = start_pair(&viewer, &host);
+        assert_eq!(h.poll(), None);
+        h.peer_offered();
+        for _ in 0..HOST_START_WAIT + 2 {
+            assert_eq!(h.poll(), None);
+        }
+    }
+
+    /// Review of 22/11/2026, D2: only the side that waits gives way. A 1.0 or 1.1.0 host offers at once, and when its
+    /// own offer could not go it says so with a notice; that notice must not cancel the viewer's offer, or the
+    /// viewer's copy from before the session would not cross where it always did.
+    #[test]
+    fn the_viewers_offer_goes_whatever_the_host_answered_first() {
+        let (viewer, host) = (FakeClipboard::new(), FakeClipboard::new());
+        viewer.copy_externally(text("viewer before"), false);
+        let (mut v, _) = start_pair(&viewer, &host);
+        v.peer_offered();
+        assert!(
+            matches!(v.poll(), Some(Outgoing::Item(ClipboardItem { payload: ClipboardPayload::Text(t), .. })) if t == "viewer before")
+        );
+    }
+
     mod over_a_session {
         use super::*;
         use swapdesk_fakes::{FakeClock, MemorySecretStore};
@@ -521,6 +693,8 @@ mod tests {
         #[derive(Default)]
         struct OldPeer {
             messages: Mutex<Vec<Message>>,
+            /// The notice it sends at the start, as an old side whose own offer was skipped does.
+            notice: Option<ClipSkip>,
         }
 
         impl ChannelHandler for OldPeer {
@@ -538,6 +712,9 @@ mod tests {
             }
             fn on_start(&self, ctx: &SessionCtx) {
                 let _ = ctx.try_send(ClipboardSync { enabled: true });
+                if let Some(reason) = self.notice {
+                    let _ = ctx.try_send(ClipboardSkipped { reason });
+                }
             }
             fn on_stream(&self, _ctx: &SessionCtx, _stream: IncomingStream) {}
         }
@@ -555,6 +732,23 @@ mod tests {
         /// Runs a session whose viewer has a `ClipboardHandler` over `fake` and whose host is an `OldPeer` granting
         /// `grants`; returns the messages the old peer saw after the session had time to offer.
         fn run(grants: PermissionSet, fake: &FakeClipboard) -> Vec<Message> {
+            run_with(grants, fake, Side::Viewer, OldPeer::default(), Duration::from_millis(1200))
+        }
+
+        /// Where the `ClipboardHandler` runs; the other side is the old peer.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Side {
+            Viewer,
+            Host,
+        }
+
+        fn run_with(
+            grants: PermissionSet,
+            fake: &FakeClipboard,
+            side: Side,
+            peer: OldPeer,
+            wait: Duration,
+        ) -> Vec<Message> {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
             rt.block_on(async {
                 let clock = Arc::new(FakeClock::new(MonoMicros(1)));
@@ -575,9 +769,16 @@ mod tests {
                         s.devices.push(d);
                     })
                     .unwrap();
-                let peer = Arc::new(OldPeer::default());
-                let mut hr = Registry::new();
-                hr.register(peer.clone()).unwrap();
+                let peer = Arc::new(peer);
+                let handler = ClipboardHandler::new(fake.clone(), true, Arc::new(crate::NullSink));
+                let (mut hr, mut vr) = (Registry::new(), Registry::new());
+                if side == Side::Viewer {
+                    hr.register(peer.clone()).unwrap();
+                    vr.register(handler).unwrap();
+                } else {
+                    hr.register(handler).unwrap();
+                    vr.register(peer.clone()).unwrap();
+                }
                 let host = HostService::new(
                     HostConfig::new("host-pc", Os::Windows, "11 24H2", "0.1.0", capabilities()),
                     trust,
@@ -585,9 +786,6 @@ mod tests {
                     hr,
                     clock.clone(),
                 );
-                let handler = ClipboardHandler::new(fake.clone(), true, Arc::new(crate::NullSink));
-                let mut vr = Registry::new();
-                vr.register(handler).unwrap();
                 let mut cfg = ViewerConfig::new("viewer-mac", Os::MacOs, "15.1", "0.1.0", capabilities(), clock);
                 cfg.requested = grants;
                 cfg.registry = vr;
@@ -595,7 +793,7 @@ mod tests {
                 let h = host.clone();
                 tokio::spawn(async move { h.serve_io(host_io, None, id).await });
                 let session = ViewerSession::open_io(viewer_io, None, Some([9; 16]), cfg).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(1200)).await;
+                tokio::time::sleep(wait).await;
                 let seen = lock(&peer.messages).clone();
                 session.disconnect().await;
                 seen
@@ -621,6 +819,59 @@ mod tests {
             let fake = FakeClipboard::new();
             fake.copy_externally(text("hunter2"), true);
             assert_eq!(run(PermissionSet::CONTROL, &fake), vec![], "not even the notice reaches the peer");
+        }
+
+        /// The time the host's start wait takes in a session, and some room.
+        fn past_the_hosts_wait() -> Duration {
+            POLL_INTERVAL * (HOST_START_WAIT + 4)
+        }
+
+        /// Review of 22/11/2026, D2: a host meeting a 1.0 or 1.1.0 viewer (which offers at once, as before) holds its
+        /// own offer back and drops it when the viewer's answer comes: here the viewer's offer was skipped and its
+        /// notice is the answer, so the host's concealed clipboard says nothing.
+        #[test]
+        fn a_host_keeps_its_offer_back_when_an_old_viewer_answered_the_start() {
+            let fake = FakeClipboard::new();
+            fake.copy_externally(text("hunter2"), true);
+            let peer = OldPeer { notice: Some(ClipSkip::TooLarge), ..OldPeer::default() };
+            let grants = PermissionSet::CONTROL.union(PermissionSet::CLIPBOARD);
+            let seen = run_with(grants, &fake, Side::Host, peer, past_the_hosts_wait());
+            assert_eq!(seen, vec![Message::ClipboardSync(ClipboardSync { enabled: true })]);
+        }
+
+        /// Review of 22/11/2026, D2: and when the old viewer offered nothing, the host's offer goes after its wait, in
+        /// the messages 1.0 knows.
+        #[test]
+        fn a_host_offers_after_its_wait_when_an_old_viewer_offered_nothing() {
+            let fake = FakeClipboard::new();
+            fake.copy_externally(text("hunter2"), true);
+            let grants = PermissionSet::CONTROL.union(PermissionSet::CLIPBOARD);
+            let seen = run_with(grants, &fake, Side::Host, OldPeer::default(), past_the_hosts_wait());
+            assert_eq!(
+                seen,
+                vec![
+                    Message::ClipboardSync(ClipboardSync { enabled: true }),
+                    Message::ClipboardSkipped(ClipboardSkipped { reason: ClipSkip::Concealed }),
+                ]
+            );
+        }
+
+        /// Review of 22/11/2026, D2: a viewer meeting an old host whose own offer was skipped (its notice comes at
+        /// once) still makes its own offer: here its clipboard is concealed, so the old host hears that notice.
+        #[test]
+        fn a_viewer_still_offers_when_an_old_host_sent_a_notice_first() {
+            let fake = FakeClipboard::new();
+            fake.copy_externally(text("hunter2"), true);
+            let peer = OldPeer { notice: Some(ClipSkip::TooLarge), ..OldPeer::default() };
+            let grants = PermissionSet::CONTROL.union(PermissionSet::CLIPBOARD);
+            let seen = run_with(grants, &fake, Side::Viewer, peer, Duration::from_millis(1200));
+            assert_eq!(
+                seen,
+                vec![
+                    Message::ClipboardSync(ClipboardSync { enabled: true }),
+                    Message::ClipboardSkipped(ClipboardSkipped { reason: ClipSkip::Concealed }),
+                ]
+            );
         }
     }
 
