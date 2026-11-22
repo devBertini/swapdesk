@@ -25,6 +25,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
 };
 
+/// Every record this module injects says it comes from a session, so Swapdesk's own windows can drop it
+/// (`swapdesk_platform::WIN_SESSION_INPUT_MARK`).
+const SESSION_MARK: usize = swapdesk_platform::WIN_SESSION_INPUT_MARK;
+
 fn os_error(op: &'static str, detail: String, code: i64) -> PlatformError {
     PlatformError { kind: ErrorKind::Os, op, os_code: Some(code), detail }
 }
@@ -33,7 +37,7 @@ fn kb(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: SESSION_MARK },
         },
     }
 }
@@ -41,7 +45,9 @@ fn kb(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 fn mouse(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT { dx, dy, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: SESSION_MARK },
+        },
     }
 }
 
@@ -258,6 +264,21 @@ mod tests {
     fn flags_of(i: &INPUT) -> u32 {
         // SAFETY: the tests build only keyboard records here.
         unsafe { i.Anonymous.ki.dwFlags.0 }
+    }
+
+    /// Owner, 22/11/2026: the controller's input must not operate the Swapdesk of the computer it controls. The mark
+    /// is what lets Swapdesk's windows tell that input from a person's.
+    #[test]
+    fn every_injected_record_carries_the_sessions_mark() {
+        let key = to_input(&RawInput::Key(KbInput { kind: KbKind::Scan { code: 0x1E, extended: false }, up: false }));
+        let text = to_input(&RawInput::Key(KbInput { kind: KbKind::Unicode(0xE7), up: false }));
+        let moved = to_input(&RawInput::Mouse(MouseInput::MoveAbs { x: 1, y: 2 }));
+        // SAFETY: the first two are keyboard records and the third a mouse record, as built above.
+        unsafe {
+            assert_eq!(key.Anonymous.ki.dwExtraInfo, swapdesk_platform::WIN_SESSION_INPUT_MARK);
+            assert_eq!(text.Anonymous.ki.dwExtraInfo, swapdesk_platform::WIN_SESSION_INPUT_MARK);
+            assert_eq!(moved.Anonymous.mi.dwExtraInfo, swapdesk_platform::WIN_SESSION_INPUT_MARK);
+        }
     }
 
     #[test]

@@ -525,6 +525,14 @@ pub trait TraceSink: Send + Sync {
     fn log(&self, level: Level, target: &'static str, what: core::fmt::Arguments<'_>);
 }
 
+// ---------- the session's input, told apart on Windows ----------
+/// What the Windows host writes into `dwExtraInfo` of every input record it injects for a session. A program reads
+/// it back for the message it is handling (`GetMessageExtraInfo`) and a low-level hook for each event, so the
+/// controller's input can be told from a person's at the machine. Swapdesk's own windows drop input that carries it:
+/// the controller never operates the Swapdesk of the computer it controls. Not a secret: knowing it only lets a
+/// program give up reach it had.
+pub const WIN_SESSION_INPUT_MARK: usize = 0x5344_494E;
+
 // ---------- secrets (C5) ----------
 pub trait SecretStore: Send + Sync {
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>>;

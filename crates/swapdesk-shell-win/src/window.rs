@@ -1822,6 +1822,11 @@ impl Window {
             crate::tray::WM_TRAY if self.kind == WindowKind::Main => {
                 use windows::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_RBUTTONUP};
                 let event = (lparam.0 & 0xFFFF) as u32;
+                // The system tells a click on the icon with its own message, which says nothing of who clicked: the
+                // banner's hook does. The controller opens neither the window nor the menu from the tray.
+                if self.shared.state.borrow().host_session().is_some() && crate::session_input::press_from_session() {
+                    return Some(LRESULT(0));
+                }
                 match event {
                     WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.run_tray_action(hwnd, crate::tray::TrayAction::Open),
                     WM_RBUTTONUP | WM_CONTEXTMENU => {

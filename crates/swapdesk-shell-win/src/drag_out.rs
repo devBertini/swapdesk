@@ -38,8 +38,7 @@ use windows::Win32::UI::Shell::{
     FILEDESCRIPTORW, IDataObjectAsyncCapability, IDataObjectAsyncCapability_Impl, SHCreateStdEnumFmtEtc,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetClientRect, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, TranslateMessage,
-    WM_APP, WM_QUIT,
+    GetClientRect, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, WM_APP, WM_QUIT,
 };
 use windows::core::{BOOL, HRESULT, Ref, w};
 use windows_core::implement;
@@ -420,8 +419,8 @@ fn pump_messages(wait: Duration) {
                 PostQuitMessage(msg.wParam.0 as i32);
                 return;
             }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            // As in the main loop: the controller's input never reaches a window of Swapdesk.
+            crate::session_input::dispatch(&msg);
         }
     }
 }

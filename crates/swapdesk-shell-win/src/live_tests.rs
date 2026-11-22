@@ -532,6 +532,30 @@ fn escape_on_the_main_window_cancels_a_waiting_card() {
     assert_eq!(backend.disconnects(), 1, "Esc sent the cancel of the waiting entry");
 }
 
+/// Owner, 22/11/2026: the controller's mouse and keyboard never operate the Swapdesk of the computer it controls.
+/// The host marks every input it injects; a key that comes through the window's queue with that mark does nothing,
+/// and the same key without it works as always.
+#[test]
+fn input_that_carries_the_sessions_mark_never_reaches_a_window_of_swapdesk() {
+    use swapdesk_ui::SessionState;
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+    let (live, backend) = start_recording(Scenario::Dispositivos.prepared_state());
+    deliver(&live, &backend, entry_event(SessionState::Prompted { remaining_s: 15 }));
+    let escape_through_the_queue = || {
+        // SAFETY: posts to our window: the key arrives through the window thread's message loop, as input does.
+        unsafe { PostMessageW(Some(live.hwnd()), WM_KEYDOWN, WPARAM(usize::from(VK_ESCAPE.0)), LPARAM(0)) }
+            .expect("post");
+        std::thread::sleep(Duration::from_millis(400));
+    };
+    crate::session_input::TEST_EXTRA.store(swapdesk_platform::WIN_SESSION_INPUT_MARK, Ordering::SeqCst);
+    escape_through_the_queue();
+    assert_eq!(backend.disconnects(), 0, "the controller's Esc cancelled the person's waiting entry");
+    crate::session_input::TEST_EXTRA.store(0, Ordering::SeqCst);
+    escape_through_the_queue();
+    assert_eq!(backend.disconnects(), 1, "the person's own Esc still cancels it");
+}
+
 #[test]
 fn escape_on_the_main_window_closes_an_ended_card() {
     use swapdesk_ui::{ConnectWhy, SessionState};

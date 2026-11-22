@@ -33,7 +33,8 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, HC_ACTION, HHOOK, KillTimer, LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED, MSG,
     MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_TIMER, WM_USER,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_QUIT,
+    WM_RBUTTONDOWN, WM_TIMER, WM_USER,
 };
 
 /// Posted to the banner's window for a real pointer over it: `wParam` is one of the `POINTER_*` kinds, `lParam` the
@@ -99,6 +100,12 @@ pub fn unpack(lparam: isize) -> (i32, i32) {
 /// `LowLevelMouseProc`. Never unwinds into the system.
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        // Every button that goes down, with whose it is: the tray's click comes without a mark of its own.
+        if matches!(wparam.0 as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+            // SAFETY: with `HC_ACTION` the system passes a pointer to an `MSLLHOOKSTRUCT` that lives for the call.
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            crate::session_input::note_press(info.dwExtraInfo);
+        }
         let event = match wparam.0 as u32 {
             WM_MOUSEMOVE => Some(MouseEvent::Move),
             WM_LBUTTONDOWN => Some(MouseEvent::LeftDown),

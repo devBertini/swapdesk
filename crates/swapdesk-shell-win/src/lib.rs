@@ -16,6 +16,7 @@ mod fullscreen;
 mod gfx;
 mod live_region;
 mod offscreen;
+mod session_input;
 mod surface;
 mod system;
 mod terminal;

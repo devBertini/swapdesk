@@ -190,8 +190,8 @@ fn run_shell(
     // SAFETY: the standard message loop.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            // The controller's input never operates Swapdesk itself: dropped before any window sees it.
+            crate::session_input::dispatch(&msg);
         }
     }
     if shared.tray.get() {
