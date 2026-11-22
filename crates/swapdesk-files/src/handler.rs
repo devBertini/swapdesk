@@ -481,7 +481,7 @@ async fn worker(
                     }
                 } else {
                     let e = Arc::clone(&engine);
-                    blocking(move || lock(&e).on_message(m)).await.unwrap_or_default()
+                    blocking(move || on_peer_message(&e, m)).await.unwrap_or_default()
                 }
             }
             Work::Cmd(c, place) => {
@@ -575,6 +575,30 @@ async fn do_op(engine: Arc<Mutex<Engine>>, work: WorkQueue, ops: Arc<OpSlots>, j
     ops.give();
 }
 
+/// One peer message through the engine. An offer opens its receiving file without the engine's lock: on a resume
+/// that reads the verified prefix back to rebuild its hash (gigabytes for a large file), and the session's other
+/// transfers, whose data tasks take the lock for every chunk, must not wait for it.
+fn on_peer_message(engine: &Mutex<Engine>, m: Message) -> Vec<Out> {
+    let Message::FileOffer(offer) = m else { return lock(engine).on_message(m) };
+    let begun = lock(engine).offer_begin(offer);
+    match begun {
+        Ok(job) => {
+            let opened = job.open();
+            lock(engine).offer_end(job, opened)
+        }
+        Err(outs) => outs,
+    }
+}
+
+/// The reader of an accepted outgoing transfer, from `from`. The bytes before `from` are read and hashed without
+/// the engine's lock, for the same reason as [`on_peer_message`].
+fn open_send_reader(engine: &Mutex<Engine>, id: u32, from: u64) -> Result<ChunkReader, ErrorCode> {
+    let out = lock(engine).outgoing(id)?;
+    let reader = out.reader(from)?;
+    lock(engine).reader_opened(id)?;
+    Ok(reader)
+}
+
 /// The sending side of one data stream: header, the bytes from `from`, finish, then `FileDone` through the engine.
 async fn send_stream(ctx: SessionCtx, engine: Arc<Mutex<Engine>>, work: WorkQueue, id: u32, from: u64) {
     let fail = |code: ErrorCode| {
@@ -587,7 +611,7 @@ async fn send_stream(ctx: SessionCtx, engine: Arc<Mutex<Engine>>, work: WorkQueu
         }
     };
     let e = Arc::clone(&engine);
-    let reader = match blocking(move || lock(&e).open_reader(id, from)).await {
+    let reader = match blocking(move || open_send_reader(&e, id, from)).await {
         Some(Ok(r)) => r,
         Some(Err(code)) => return fail(code).await,
         None => return fail(ErrorCode::Internal).await,
@@ -795,5 +819,163 @@ mod tests {
             drop(place);
             tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
         });
+    }
+
+    mod resume_reads {
+        //! The reads of a resume (the prefix read and hashed again) against the engine's lock.
+
+        use std::path::Path;
+        use std::sync::atomic::AtomicU32;
+        use std::sync::{OnceLock, Weak};
+
+        use swapdesk_proto::{FileAccept, FileOffer};
+
+        use super::*;
+        use crate::disk::{DirRead, FsStat, Kind, ReadHandle};
+
+        /// `LocalFs` that counts the reads of file contents and fails the test when one runs while the engine it
+        /// serves is locked.
+        #[derive(Default)]
+        struct LockWatch {
+            inner: LocalFs,
+            engine: OnceLock<Weak<Mutex<Engine>>>,
+            reads: AtomicU32,
+        }
+
+        impl LockWatch {
+            fn read(&self) {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if let Some(e) = self.engine.get().and_then(Weak::upgrade) {
+                    assert!(e.try_lock().is_ok(), "a file is read while the engine is locked");
+                }
+            }
+        }
+
+        impl Fs for LockWatch {
+            fn list_dir(&self, path: &Path, max_entries: u32) -> Result<DirRead, ErrorCode> {
+                self.inner.list_dir(path, max_entries)
+            }
+            fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode> {
+                self.inner.stat(path, follow)
+            }
+            fn open_read(&self, path: &Path) -> Result<ReadHandle, ErrorCode> {
+                self.inner.open_read(path)
+            }
+            fn read_at(&self, id: u64, offset: u64, len: u32) -> Result<Vec<u8>, ErrorCode> {
+                self.read();
+                self.inner.read_at(id, offset, len)
+            }
+            fn read_stat(&self, id: u64) -> Result<FsStat, ErrorCode> {
+                self.inner.read_stat(id)
+            }
+            fn close_read(&self, id: u64) {
+                self.inner.close_read(id);
+            }
+            fn stat_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<Option<FsStat>, ErrorCode> {
+                self.inner.stat_file(dir, name, kind)
+            }
+            fn part_create(&self, dir: &Path, name: &str) -> Result<(), ErrorCode> {
+                self.inner.part_create(dir, name)
+            }
+            fn part_truncate(&self, dir: &Path, name: &str, len: u64) -> Result<(), ErrorCode> {
+                self.inner.part_truncate(dir, name, len)
+            }
+            fn part_append(&self, dir: &Path, name: &str, offset: u64, data: &[u8]) -> Result<(), ErrorCode> {
+                self.inner.part_append(dir, name, offset, data)
+            }
+            fn part_len(&self, dir: &Path, name: &str) -> Result<u64, ErrorCode> {
+                self.inner.part_len(dir, name)
+            }
+            fn part_read(&self, dir: &Path, name: &str, offset: u64, len: u32) -> Result<Vec<u8>, ErrorCode> {
+                self.read();
+                self.inner.part_read(dir, name, offset, len)
+            }
+            fn part_sync(&self, dir: &Path, name: &str, final_mtime_ms: Option<u64>) -> Result<(), ErrorCode> {
+                self.inner.part_sync(dir, name, final_mtime_ms)
+            }
+            fn part_rename(&self, dir: &Path, name: &str, target_name: &str) -> Result<(), ErrorCode> {
+                self.inner.part_rename(dir, name, target_name)
+            }
+            fn remove_file(&self, dir: &Path, name: &str, kind: Kind) -> Result<(), ErrorCode> {
+                self.inner.remove_file(dir, name, kind)
+            }
+            fn meta_read(&self, dir: &Path, name: &str) -> Result<Option<Vec<u8>>, ErrorCode> {
+                self.inner.meta_read(dir, name)
+            }
+            fn meta_write(&self, dir: &Path, name: &str, data: &[u8]) -> Result<(), ErrorCode> {
+                self.inner.meta_write(dir, name, data)
+            }
+        }
+
+        fn temp(tag: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("swapdesk-files-handler-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        /// A host engine over a `LockWatch` that knows it.
+        fn watched(dir: &Path) -> (Arc<LockWatch>, Arc<Mutex<Engine>>) {
+            let fs = Arc::new(LockWatch::default());
+            let mut cfg = FilesConfig::new(Side::Host, dir.to_path_buf());
+            cfg.default_dir = Some(dir.to_path_buf());
+            let engine = Arc::new(Mutex::new(Engine::with_fs(cfg, Arc::clone(&fs) as Arc<dyn Fs>)));
+            assert!(fs.engine.set(Arc::downgrade(&engine)).is_ok());
+            (fs, engine)
+        }
+
+        const SIZE: usize = 3 << 20;
+
+        /// Review of 22/11/2026, F9: a sender that resumes reads and hashes every byte before the receiver's
+        /// verified length again, and it did that while holding the engine's lock, so each other transfer of the
+        /// session (its data, its messages) waited for the whole prefix of a large file.
+        #[test]
+        fn a_sender_that_resumes_hashes_the_prefix_without_holding_the_engine() {
+            let dir = temp("send-prefix");
+            let path = dir.join("big.bin");
+            std::fs::write(&path, vec![9u8; SIZE]).unwrap();
+            let (fs, engine) = watched(&dir);
+            let _ = lock(&engine).send_file(1, &path, None);
+            let from = 2u64 << 20;
+            let outs = lock(&engine).on_message(Message::FileAccept(FileAccept { transfer_id: 1, resume_from: from }));
+            assert!(outs.iter().any(|o| matches!(o, Out::Send { id: 1, from: f } if *f == from)), "{outs:?}");
+
+            let reader = open_send_reader(&engine, 1, from).expect("the reader opens");
+            assert_eq!(reader.position(), from);
+            assert!(fs.reads.load(Ordering::SeqCst) >= 8, "the 2 MiB prefix was read in pieces");
+            drop(reader);
+            assert!(lock(&engine).cancel(1).iter().any(|o| matches!(o, Out::Event(Event::Cancelled { id: 1 }))));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// Review of 22/11/2026, F9: a receiver offered a file again rebuilds the hash of its verified prefix from
+        /// the partial file, and it did that inside the engine's lock (and the message worker), so the session's
+        /// other transfers stalled for as long as the prefix took to read.
+        #[test]
+        fn a_receiver_offered_a_file_again_rehashes_its_prefix_without_holding_the_engine() {
+            let dir = temp("recv-prefix");
+            let (fs, engine) = watched(&dir);
+            let offer =
+                FileOffer { transfer_id: 1, name: "big.bin".into(), size: SIZE as u64, mtime_ms: 5, dest: None };
+            let _ = lock(&engine).on_message(Message::FileOffer(offer.clone()));
+            let data = vec![4u8; 256 * 1024];
+            for i in 0..10u64 {
+                let _ = lock(&engine).on_data(1, i * data.len() as u64, &data);
+            }
+            let _ = lock(&engine).link_lost();
+            assert_eq!(fs.reads.load(Ordering::SeqCst), 0, "nothing was read back yet");
+
+            let outs = on_peer_message(&engine, Message::FileOffer(offer));
+            let resumed = outs.iter().find_map(|o| match o {
+                Out::Msg(Message::FileAccept(a)) if a.transfer_id == 1 => Some(a.resume_from),
+                _ => None,
+            });
+            // The lost link made every received byte the verified length (a clean stop).
+            assert_eq!(resumed, Some(10 * 256 * 1024), "the received bytes are kept: {outs:?}");
+            assert!(fs.reads.load(Ordering::SeqCst) >= 8, "the prefix was read back to rebuild its hash");
+            assert!(lock(&engine).has(1));
+            let _ = lock(&engine).cancel(1);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

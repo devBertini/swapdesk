@@ -240,7 +240,8 @@ impl Incoming {
         self.open = false;
         // Keep the sender's modification time when the OS lets us.
         self.fs.part_sync(&self.dir, &self.name, Some(self.mtime_ms)).map_err(|_| FinishError::Io)?;
-        let target_name = self.unique_target();
+        // No free name, or a disk that cannot say: the partial file stays as it is, for a later try.
+        let target_name = self.unique_target().ok_or(FinishError::Io)?;
         self.fs.part_rename(&self.dir, &self.name, &target_name).map_err(|_| FinishError::Io)?;
         let _ = self.fs.remove_file(&self.dir, &self.name, Kind::Meta);
         Ok(self.dir.join(target_name))
@@ -266,11 +267,15 @@ impl Incoming {
 
     /// `name`, or `stem (n).ext` for the first n from 2 that is not the same file as one in the folder (same after
     /// Unicode composition and letter case: [`crate::collide`]). A name the folder read could not list (more entries
-    /// than it returns) is still caught by asking the disk for the exact name.
-    fn unique_target(&self) -> String {
+    /// than it returns, or a disk that lists nothing: the viewer's own, which answers that question for a twin under
+    /// composition and case instead, see [`crate::FsServer`]) is still caught by asking the disk for the exact name.
+    /// `None` when the disk cannot answer
+    /// that question (only "nothing is there" makes a name free; an error is not an answer, and asking the next name
+    /// would fail the same way) or every number is taken.
+    fn unique_target(&self) -> Option<String> {
         let listed = self.fs.list_dir(&self.dir, u32::MAX).map(|r| r.entries).unwrap_or_default();
-        let taken = |n: &str| !matches!(self.fs.stat(&self.dir.join(n), false), Ok(None));
-        unique_name(&self.name, listed.iter().map(|e| e.name.as_str()), taken)
+        let taken = |n: &str| self.fs.stat(&self.dir.join(n), false).map(|s| s.is_some());
+        unique_name(&self.name, listed.iter().map(|e| e.name.as_str()), taken).ok().flatten()
     }
 }
 

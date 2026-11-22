@@ -2,7 +2,7 @@
 //! reaches the disk only through the trait, and that a failed rename leaves the partial file intact.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ring::digest::{SHA256, digest};
@@ -16,16 +16,28 @@ fn temp(tag: &str) -> PathBuf {
     d
 }
 
-/// Wraps `LocalFs`, records each call's name, and can fail renames.
+/// Most `stat` calls a failing disk answers before the probe calls it a runaway loop.
+const STAT_RUNAWAY: u32 = 1000;
+
+/// Wraps `LocalFs`, records each call's name, and can fail renames and the `stat` of a name.
 struct Probe {
     inner: LocalFs,
     calls: Mutex<Vec<&'static str>>,
     fail_rename: AtomicBool,
+    /// `stat` of anything but a folder fails, as when the process that owns the disk went away.
+    fail_stat: AtomicBool,
+    failed_stats: AtomicU32,
 }
 
 impl Probe {
     fn new() -> Arc<Self> {
-        Arc::new(Self { inner: LocalFs::new(), calls: Mutex::new(Vec::new()), fail_rename: AtomicBool::new(false) })
+        Arc::new(Self {
+            inner: LocalFs::new(),
+            calls: Mutex::new(Vec::new()),
+            fail_rename: AtomicBool::new(false),
+            fail_stat: AtomicBool::new(false),
+            failed_stats: AtomicU32::new(0),
+        })
     }
 
     fn rec(&self, call: &'static str) {
@@ -44,6 +56,11 @@ impl Fs for Probe {
     }
     fn stat(&self, path: &Path, follow: bool) -> Result<Option<FsStat>, ErrorCode> {
         self.rec("stat");
+        if self.fail_stat.load(Ordering::SeqCst) {
+            let n = self.failed_stats.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(n <= STAT_RUNAWAY, "stat failed {n} times and was asked again: the receiver does not stop");
+            return Err(ErrorCode::IoFailed);
+        }
         self.inner.stat(path, follow)
     }
     fn open_read(&self, path: &Path) -> Result<ReadHandle, ErrorCode> {
@@ -150,6 +167,29 @@ fn a_failing_rename_leaves_the_partial_file_intact() {
     assert!(probe.calls().contains(&"part_rename"));
     assert_eq!(std::fs::read(dir.join("a.bin.swapdesk-part")).unwrap(), data, "the partial file is untouched");
     assert!(!dir.join("a.bin").exists(), "no final file appeared");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Review of 22/11/2026, F12: the final name was chosen by asking the disk about `name`, `name (2)`, `name (3)` and
+/// on, and every failed answer counted as "taken", with no last number: when the process that owns the disk went
+/// away as a file finished, the receiver asked about four billion names under the engine's lock (about an hour). A
+/// disk that cannot answer now fails the file at once, with the partial file kept for a later try.
+#[test]
+fn a_disk_that_cannot_say_whether_a_name_is_taken_fails_the_file_at_once_instead_of_trying_every_number() {
+    let dir = temp("stat-gone");
+    let probe = Probe::new();
+    let mut e = host(Arc::clone(&probe), &dir);
+    let data = vec![5u8; 4000];
+    offer(&mut e, "c.bin", &data);
+    e.on_data(1, 0, &data);
+    probe.fail_stat.store(true, Ordering::SeqCst);
+    let outs = e.on_message(Message::FileDone(FileDone { transfer_id: 1, sha256: sha(&data) }));
+
+    assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileVerified(v)) if !v.ok)), "{outs:?}");
+    assert!(outs.iter().any(|o| matches!(o, Out::Event(Event::Failed { id: 1, code: ErrorCode::IoFailed }))));
+    assert_eq!(probe.failed_stats.load(Ordering::SeqCst), 1, "one failed answer is enough to stop");
+    assert!(!probe.calls().contains(&"part_rename"), "nothing is renamed to a name nobody could check");
+    assert_eq!(std::fs::read(dir.join("c.bin.swapdesk-part")).unwrap(), data, "the partial file is kept");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

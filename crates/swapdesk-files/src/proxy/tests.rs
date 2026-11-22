@@ -157,6 +157,46 @@ fn a_file_the_viewer_saves_carries_the_mark_of_the_web() {
     let _ = (std::fs::remove_dir_all(&base), std::fs::remove_dir_all(&home));
 }
 
+/// Review of 22/11/2026, F7: the receiver compares the offered name with the folder's names under Unicode
+/// composition and letter case ([`crate::collide`]), but it reads them with `list_dir`, which the viewer's own disk
+/// (the UI's token roots) refuses. Only the exact name was asked about, so on Windows a file `relato\u{301}rio.txt`
+/// from a Mac landed beside `relat\u{f3}rio.txt` as a second file that looks the same. The UI now answers the `Stat`
+/// of a missing name in a receive folder for its twin, and still lists nothing.
+#[test]
+fn a_download_into_the_viewers_folder_takes_a_new_name_beside_a_twin_under_composition_or_case() {
+    let base = temp("twins");
+    let recv = base.join("recv");
+    std::fs::create_dir_all(&recv).unwrap();
+    for mine in ["relat\u{f3}rio.txt", "Foto.JPG", "a.txt"] {
+        std::fs::write(recv.join(mine), b"mine").unwrap();
+    }
+    let tokens = Arc::new(Tokens::new());
+    let r = tokens.receive_into(recv.clone());
+    let link = Link::start(FsServer::new(Roots::Tokens(Arc::clone(&tokens))));
+    let fs: Arc<dyn Fs> = Arc::new(link.fs());
+    let dir = PathBuf::from(format!("r{r}"));
+    assert_eq!(fs.list_dir(&dir, 10).err(), Some(ErrorCode::InvalidName), "the service still lists nothing");
+    let body = b"theirs".to_vec();
+    let sha: [u8; 32] = digest(&SHA256, &body).as_ref().try_into().unwrap();
+    for (offered, expected) in [
+        ("foto.jpg", "foto (2).jpg"),
+        ("a.txt", "a (2).txt"),
+        ("new.txt", "new.txt"),
+        ("relato\u{301}rio.txt", "relato\u{301}rio (2).txt"),
+    ] {
+        let mut inc = Incoming::open_with(Arc::clone(&fs), &dir, offered, body.len() as u64, 7).unwrap();
+        inc.write(0, &body).unwrap();
+        assert_eq!(inc.finish(&sha).unwrap(), dir.join(expected), "{offered}");
+    }
+    for mine in ["relat\u{f3}rio.txt", "Foto.JPG", "a.txt"] {
+        assert_eq!(std::fs::read(recv.join(mine)).unwrap(), b"mine", "{mine} is untouched");
+    }
+    // The token itself is the folder: nothing above it is looked at for a twin.
+    assert!(fs.stat(&dir, true).unwrap().is_some_and(|s| s.is_dir));
+    drop(link);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn a_file_is_read_through_the_pipe_with_the_whole_file_hashed() {
     let home = temp("send");

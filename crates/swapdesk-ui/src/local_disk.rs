@@ -274,10 +274,26 @@ pub fn move_into(paths: &[PathBuf], into: &Path) -> Result<(), ApiCode> {
         if std::fs::canonicalize(p).ok().and_then(|f| f.parent().map(Path::to_path_buf)) == Some(into_full.clone()) {
             continue;
         }
-        if std::fs::rename(p, &to).is_err() {
-            // Another volume: copy, then remove the source only once the copy is whole.
-            copy_tree(p, &to).map_err(|e| io_code(&e))?;
-            remove_tree(p).map_err(|e| io_code(&e))?;
+        match std::fs::rename(p, &to) {
+            Ok(()) => {}
+            // Another volume: copy, then remove the source only once the copy is whole. A copy that stops half way
+            // takes away what it made, so the source stays the one whole copy; something that took the name since
+            // the check above is not the copy's and is left alone.
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                if std::fs::symlink_metadata(&to).is_ok() {
+                    return Err(ApiCode::Refused);
+                }
+                if let Err(e) = copy_tree(p, &to) {
+                    if e.kind() != std::io::ErrorKind::AlreadyExists {
+                        let _ = remove_tree(&to);
+                    }
+                    return Err(io_code(&e));
+                }
+                remove_tree(p).map_err(|e| io_code(&e))?;
+            }
+            // Any other refusal (a file inside held open, no permission) is the move's answer: copying and deleting
+            // would meet the same refusal half way through the delete and leave the files split between the two.
+            Err(e) => return Err(io_code(&e)),
         }
     }
     Ok(())
@@ -403,6 +419,31 @@ mod tests {
         std::fs::create_dir_all(dir.join("other/src")).unwrap();
         assert_eq!(move_into(&[dir.join("other/src")], &dir.join("dest")), Err(ApiCode::Refused));
         assert!(dir.join("other/src").exists(), "nothing moved");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Review of 22/11/2026, F13: any failed rename was taken for a move to another volume, so a move inside one disk
+    /// that the system refused (a file in the folder open in another program) copied the folder, then deleted the
+    /// source until the open file stopped it: the files ended half here, half there. Only a move across volumes
+    /// copies now; any other refusal leaves both folders as they were.
+    #[cfg(windows)]
+    #[test]
+    fn a_move_inside_one_disk_that_the_system_refuses_leaves_the_source_whole_and_copies_nothing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch("move-refused");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("dest")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("src/open.txt"), b"open").unwrap();
+        // Another program holds the file and lets others read it, not delete or rename it (FILE_SHARE_READ).
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(dir.join("src/open.txt")).unwrap();
+        assert!(std::fs::rename(dir.join("src"), dir.join("probe")).is_err(), "the system refuses the folder's rename");
+
+        assert!(move_into(&[dir.join("src")], &dir.join("dest")).is_err());
+        assert_eq!(std::fs::read(dir.join("src/a.txt")).unwrap(), b"a", "the source keeps every file");
+        assert_eq!(std::fs::read(dir.join("src/open.txt")).unwrap(), b"open");
+        assert!(!dir.join("dest/src").exists(), "nothing was copied");
+        drop(held);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

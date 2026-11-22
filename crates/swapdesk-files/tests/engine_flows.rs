@@ -605,3 +605,56 @@ fn a_viewer_that_declines_the_file_it_asked_for_ends_its_own_transfer_with_the_r
     assert!(outs.iter().any(|o| matches!(o, Out::Event(Event::Cancelled { id: 9 }))));
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Review of 22/11/2026, F9: the sender's reader is now opened without the engine's lock, so a pause can come while
+/// the prefix is read. Marking the transfer as sending once the reader is open would undo that pause, and the
+/// person's "Retomar" would then do nothing.
+#[test]
+fn a_pause_while_the_senders_prefix_is_read_stays_a_pause_and_can_be_resumed() {
+    let home = temp("pause-prefix");
+    let src = home.join("big.bin");
+    std::fs::write(&src, data(600_000, 3)).unwrap();
+    let mut viewer = Engine::new(FilesConfig::new(Side::Viewer, home.clone()));
+    let _ = viewer.send_file(2, &src, None);
+    let accept = swapdesk_proto::FileAccept { transfer_id: 2, resume_from: 300_000 };
+    let outs = viewer.on_message(Message::FileAccept(accept));
+    assert!(outs.iter().any(|o| matches!(o, Out::Send { id: 2, from: 300_000 })), "{outs:?}");
+    // What the handler does: the file under the lock, the prefix without it, then back under the lock.
+    let out = viewer.outgoing(2).unwrap();
+    let paused = viewer.pause(2);
+    assert!(paused.iter().any(|o| matches!(o, Out::Event(Event::Paused { id: 2 }))), "{paused:?}");
+    let reader = out.reader(300_000).unwrap();
+    assert_eq!(viewer.reader_opened(2), Ok(()));
+    drop(reader);
+    let resumed = viewer.resume(2);
+    assert!(resumed.iter().any(|o| matches!(o, Out::Msg(Message::FileResume(r)) if r.transfer_id == 2)), "{resumed:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Review of 22/11/2026, F9: an offer's receiving file is now opened without the engine's lock (a resume reads its
+/// verified prefix back), so the engine can hear of a lost link in the middle. The id stays taken while the file
+/// opens, and an opening the lost link overtook answers nothing and keeps the partial file for the next offer.
+#[test]
+fn an_offer_whose_file_opens_while_the_link_is_lost_answers_nothing_and_keeps_its_partial_file() {
+    let home = temp("open-lost");
+    let mut cfg = FilesConfig::new(Side::Host, home.clone());
+    cfg.default_dir = Some(home.clone());
+    let mut host = Engine::new(cfg);
+    let offer = FileOffer { transfer_id: 4, name: "late.bin".into(), size: 10, mtime_ms: 1, dest: None };
+    let Ok(job) = host.offer_begin(offer.clone()) else { panic!("the offer is taken") };
+    assert!(host.has(4), "the id is taken while its file opens");
+    let again = host.on_message(Message::FileOffer(offer.clone()));
+    assert!(
+        again.iter().any(|o| matches!(o, Out::Msg(Message::FileDecline(d)) if d.code == ErrorCode::ProtocolViolation)),
+        "a second offer of that id is refused: {again:?}"
+    );
+    let opened = job.open();
+    let _ = host.link_lost();
+    assert!(host.offer_end(job, opened).is_empty(), "nothing goes to a link that is gone");
+    assert!(!host.has(4));
+    assert!(home.join("late.bin.swapdesk-part").exists(), "the partial file stays for the next offer");
+    // The next offer of that file is answered as usual.
+    let outs = host.on_message(Message::FileOffer(offer));
+    assert!(outs.iter().any(|o| matches!(o, Out::Msg(Message::FileAccept(a)) if a.transfer_id == 4)), "{outs:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}

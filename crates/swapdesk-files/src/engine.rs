@@ -255,6 +255,9 @@ pub struct Engine {
     page_reqs: HashSet<u32>,
     vol_reqs: HashSet<u32>,
     ops: HashSet<u32>,
+    /// Offers whose receiving file is being opened without the engine's lock (between [`Engine::offer_begin`] and
+    /// [`Engine::offer_end`]): their ids are taken.
+    opening: HashSet<u32>,
     /// Host: the volume kinds the viewer reached so far (FILES-UI.md 8.3, the bits of `Event::Reach`).
     reach: u8,
     /// Host: the volumes as the disk last said, to tell the kind of a volume path.
@@ -278,6 +281,35 @@ fn failed(id: u32, code: ErrorCode) -> Out {
     Out::Event(Event::Failed { id, code })
 }
 
+/// The decline of offer `id`; `asked` when it was the viewer's own request, which then ends here as failed.
+fn decline_outs(id: u32, code: ErrorCode, asked: bool) -> Vec<Out> {
+    let mut outs = vec![Out::Msg(Message::FileDecline(FileDecline { transfer_id: id, code }))];
+    if asked {
+        outs.push(failed(id, code));
+    }
+    outs
+}
+
+/// The opening of the receiving file of an offer, apart from the engine (see [`Engine::offer_begin`]).
+pub struct OfferJob {
+    fs: Arc<dyn Fs>,
+    dir: PathBuf,
+    offer: FileOffer,
+    /// What the answer starts with (the audit's reach event).
+    outs: Vec<Out>,
+    /// The offer answers the viewer's own request: a failure ends that request too.
+    asked: bool,
+}
+
+impl OfferJob {
+    /// Opens the partial file, or finds the one of an earlier try and rebuilds the hash of its verified prefix
+    /// ([`Incoming::open_with`]). Blocks for as long as that prefix takes to read.
+    pub fn open(&self) -> Result<Incoming, ErrorCode> {
+        let m = &self.offer;
+        Incoming::open_with(Arc::clone(&self.fs), &self.dir, &m.name, m.size, m.mtime_ms)
+    }
+}
+
 impl Engine {
     /// An engine over this machine's disk ([`LocalFs`]).
     pub fn new(cfg: FilesConfig) -> Self {
@@ -295,6 +327,7 @@ impl Engine {
             page_reqs: HashSet::new(),
             vol_reqs: HashSet::new(),
             ops: HashSet::new(),
+            opening: HashSet::new(),
             reach: 0,
             kinds: Vec::new(),
         }
@@ -308,9 +341,10 @@ impl Engine {
         self.transfers.len()
     }
 
-    /// Does the engine hold transfer `id` (running, paused, or a `FileGet` still waiting for its offer)?
+    /// Does the engine hold transfer `id` (running, paused, a `FileGet` still waiting for its offer, or an offer
+    /// whose file is being opened)?
     pub fn has(&self, id: u32) -> bool {
-        self.transfers.contains_key(&id) || self.gets.contains_key(&id)
+        self.transfers.contains_key(&id) || self.gets.contains_key(&id) || self.opening.contains(&id)
     }
 
     // ---------- local commands ----------
@@ -482,6 +516,7 @@ impl Engine {
             outs.push(Out::Event(Event::Paused { id }));
         }
         self.gets.clear();
+        self.opening.clear();
         self.dir_reqs.clear();
         self.page_reqs.clear();
         self.vol_reqs.clear();
@@ -493,12 +528,27 @@ impl Engine {
 
     /// The reader for the data stream of an accepted outgoing transfer.
     pub fn open_reader(&mut self, id: u32, from: u64) -> Result<ChunkReader, ErrorCode> {
-        match self.transfers.get_mut(&id) {
-            Some(Transfer::Tx(t)) => {
-                let r = t.out.reader(from)?;
-                t.state = TxState::Sending;
-                Ok(r)
-            }
+        let r = self.outgoing(id)?.reader(from)?;
+        self.reader_opened(id)?;
+        Ok(r)
+    }
+
+    /// The file of an outgoing transfer, to open its reader without the engine: [`Outgoing::reader`] reads and hashes
+    /// every byte before `from` (gigabytes on the resume of a large file), and the session's other transfers must not
+    /// wait for that. Then [`Engine::reader_opened`].
+    pub fn outgoing(&self, id: u32) -> Result<Outgoing, ErrorCode> {
+        match self.transfers.get(&id) {
+            Some(Transfer::Tx(t)) => Ok(t.out.clone()),
+            _ => Err(ErrorCode::NotFound),
+        }
+    }
+
+    /// The reader of transfer `id` is open; `NotFound` when the transfer ended meanwhile. The state is left as it is:
+    /// `FileAccept` made it `Sending` before the reader was asked for, and a pause that came while the prefix was
+    /// read stays a pause (its `Stop` already ended the stream task this reader was for).
+    pub fn reader_opened(&self, id: u32) -> Result<(), ErrorCode> {
+        match self.transfers.get(&id) {
+            Some(Transfer::Tx(_)) => Ok(()),
             _ => Err(ErrorCode::NotFound),
         }
     }
@@ -684,18 +734,28 @@ impl Engine {
         }
     }
 
+    /// A file offered by the peer, from the start to the answer on this thread. The handler does not use this: it
+    /// opens the receiving file without the engine's lock (see [`Engine::offer_begin`]).
     fn on_offer(&mut self, m: FileOffer) -> Vec<Out> {
+        match self.offer_begin(m) {
+            Ok(job) => {
+                let opened = job.open();
+                self.offer_end(job, opened)
+            }
+            Err(outs) => outs,
+        }
+    }
+
+    /// A file offered by the peer, up to the opening of its receiving file. `Err` is the whole answer (declined);
+    /// `Ok` is the opening, which [`OfferJob::open`] does without the engine (a resume reads the verified prefix
+    /// back to rebuild its hash, as long as the bytes need), and [`Engine::offer_end`] then turns into the answer.
+    /// Until then the transfer id is taken.
+    pub fn offer_begin(&mut self, m: FileOffer) -> Result<OfferJob, Vec<Out>> {
         let id = m.transfer_id;
         // A viewer that declines the file it asked for ends its own transfer too: the person is told why (a name
         // this system cannot hold, no free space), and the request is over instead of waiting for ever.
         let asked = self.cfg.side == Side::Viewer && self.gets.contains_key(&id);
-        let decline = move |code| {
-            let mut outs = vec![Out::Msg(Message::FileDecline(FileDecline { transfer_id: id, code }))];
-            if asked {
-                outs.push(failed(id, code));
-            }
-            outs
-        };
+        let decline = move |code| Err(decline_outs(id, code, asked));
         // A viewer accepts a file only as the answer to its own `FileGet`; `dest` is ignored there.
         let dir = match self.cfg.side {
             Side::Viewer => match self.gets.remove(&id) {
@@ -706,7 +766,7 @@ impl Engine {
                 None => return decline(ErrorCode::NotPermitted),
             },
             Side::Host => {
-                if self.transfers.contains_key(&id) {
+                if self.transfers.contains_key(&id) || self.opening.contains(&id) {
                     return decline(ErrorCode::ProtocolViolation);
                 }
                 match m.dest.as_deref().map(PathBuf::from).or_else(|| self.cfg.default_dir.clone()) {
@@ -721,21 +781,36 @@ impl Engine {
         if m.size > self.cfg.max_file_size {
             return decline(ErrorCode::TooLarge);
         }
-        if self.transfers.contains_key(&id) {
+        if self.transfers.contains_key(&id) || self.opening.contains(&id) {
             return decline(ErrorCode::ProtocolViolation);
         }
-        let mut outs: Vec<Out> = match (&m.dest, self.cfg.side) {
+        let outs: Vec<Out> = match (&m.dest, self.cfg.side) {
             (Some(dest), Side::Host) => self.note_reach(dest).into_iter().collect(),
             _ => Vec::new(),
         };
-        match Incoming::open_with(Arc::clone(&self.fs), &dir, &m.name, m.size, m.mtime_ms) {
+        self.opening.insert(id);
+        Ok(OfferJob { fs: Arc::clone(&self.fs), dir, offer: m, outs, asked })
+    }
+
+    /// The answer to an offer whose receiving file [`OfferJob::open`] opened (or could not). When the link was lost
+    /// meanwhile nothing goes on: the partial file keeps its verified length for the next offer.
+    pub fn offer_end(&mut self, job: OfferJob, opened: Result<Incoming, ErrorCode>) -> Vec<Out> {
+        let OfferJob { offer: m, mut outs, asked, .. } = job;
+        let id = m.transfer_id;
+        if !self.opening.remove(&id) {
+            if let Ok(mut inc) = opened {
+                inc.suspend();
+            }
+            return Vec::new();
+        }
+        match opened {
             Ok(inc) => {
                 let resume_from = inc.resume_from();
                 self.transfers.insert(id, Transfer::Rx(Box::new(Rx { inc, done_sha: None, paused: false })));
                 outs.push(Out::Event(Event::Incoming { id, name: m.name, size: m.size, resume_from }));
                 outs.push(Out::Msg(Message::FileAccept(FileAccept { transfer_id: id, resume_from })));
             }
-            Err(code) => outs.extend(decline(code)),
+            Err(code) => outs.extend(decline_outs(id, code, asked)),
         }
         outs
     }

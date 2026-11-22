@@ -95,20 +95,32 @@ fn split_ext(name: &str) -> (&str, &str) {
     }
 }
 
-/// `candidate` when no `existing` name is the same file; otherwise `stem (n).ext` for the first n from 2 that is not.
-/// `also_taken` answers for names the listing may not hold (a folder read cut short): true means taken.
-pub fn unique_name<'a>(
+/// The last n of `stem (n).ext` that [`unique_name`] tries. A folder that already holds every number up to it was
+/// not made by a person, and the bound keeps a disk that calls every name taken from holding the receiver for ever.
+pub const MAX_COPY_NUMBER: u32 = 9999;
+
+/// `candidate` when no `existing` name is the same file; otherwise `stem (n).ext` for the first n from 2 to
+/// [`MAX_COPY_NUMBER`] that is not, and `None` when all of them are. `also_taken` answers for names the listing may
+/// not hold (a folder read cut short): true means taken. Its first error ends the search and is returned: a disk
+/// that cannot say whether a name is free cannot say it for the next one either.
+pub fn unique_name<'a, E>(
     candidate: &str,
     existing: impl IntoIterator<Item = &'a str>,
-    also_taken: impl Fn(&str) -> bool,
-) -> String {
+    also_taken: impl Fn(&str) -> Result<bool, E>,
+) -> Result<Option<String>, E> {
     let keys: HashSet<String> = existing.into_iter().map(name_key).collect();
-    let free = |n: &str| !keys.contains(&name_key(n)) && !also_taken(n);
-    if free(candidate) {
-        return candidate.to_string();
+    let free = |n: &str| -> Result<bool, E> { Ok(!keys.contains(&name_key(n)) && !also_taken(n)?) };
+    if free(candidate)? {
+        return Ok(Some(candidate.to_string()));
     }
     let (stem, ext) = split_ext(candidate);
-    (2u32..).map(|n| format!("{stem} ({n}){ext}")).find(|c| free(c)).unwrap_or_else(|| candidate.to_string())
+    for n in 2..=MAX_COPY_NUMBER {
+        let c = format!("{stem} ({n}){ext}");
+        if free(&c)? {
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -150,30 +162,57 @@ mod tests {
         assert_eq!(compose("x\u{301}"), "x\u{301}");
     }
 
+    /// `unique_name` over a disk that answers every question.
+    fn pick<'a>(candidate: &str, existing: impl IntoIterator<Item = &'a str>, taken: impl Fn(&str) -> bool) -> String {
+        unique_name(candidate, existing, |n| Ok::<_, ()>(taken(n))).unwrap().unwrap()
+    }
+
     #[test]
     fn free_name_is_kept() {
-        assert_eq!(unique_name("a.txt", ["b.txt"], |_| false), "a.txt");
+        assert_eq!(pick("a.txt", ["b.txt"], |_| false), "a.txt");
     }
 
     #[test]
     fn exact_collision_gets_two() {
-        assert_eq!(unique_name("a.txt", ["a.txt"], |_| false), "a (2).txt");
-        assert_eq!(unique_name("noext", ["noext"], |_| false), "noext (2)");
-        assert_eq!(unique_name(".bashrc", [".bashrc"], |_| false), ".bashrc (2)");
-        assert_eq!(unique_name("a.tar.gz", ["a.tar.gz"], |_| false), "a.tar (2).gz");
+        assert_eq!(pick("a.txt", ["a.txt"], |_| false), "a (2).txt");
+        assert_eq!(pick("noext", ["noext"], |_| false), "noext (2)");
+        assert_eq!(pick(".bashrc", [".bashrc"], |_| false), ".bashrc (2)");
+        assert_eq!(pick("a.tar.gz", ["a.tar.gz"], |_| false), "a.tar (2).gz");
     }
 
     #[test]
     fn normalization_and_case_collide() {
-        assert_eq!(unique_name(NFD, [NFC], |_| false), "relato\u{301}rio c\u{327}a\u{303}o (2).pdf");
-        assert_eq!(unique_name(NFC, [NFD], |_| false), "relat\u{f3}rio \u{e7}\u{e3}o (2).pdf");
-        assert_eq!(unique_name("Foto.JPG", ["foto.jpg"], |_| false), "Foto (2).JPG");
+        assert_eq!(pick(NFD, [NFC], |_| false), "relato\u{301}rio c\u{327}a\u{303}o (2).pdf");
+        assert_eq!(pick(NFC, [NFD], |_| false), "relat\u{f3}rio \u{e7}\u{e3}o (2).pdf");
+        assert_eq!(pick("Foto.JPG", ["foto.jpg"], |_| false), "Foto (2).JPG");
     }
 
     #[test]
     fn skips_taken_numbers_in_any_form() {
         let existing = ["a.txt", "A (2).TXT", "a (3).txt"];
-        assert_eq!(unique_name("a.txt", existing, |_| false), "a (4).txt");
-        assert_eq!(unique_name("a.txt", ["a.txt"], |n| n == "a (2).txt"), "a (3).txt");
+        assert_eq!(pick("a.txt", existing, |_| false), "a (4).txt");
+        assert_eq!(pick("a.txt", ["a.txt"], |n| n == "a (2).txt"), "a (3).txt");
+    }
+
+    /// Review of 22/11/2026, F12: the numbers had no end and a failed answer counted as "taken", so a disk that
+    /// could not answer kept the search going through every `u32`. Now the first error ends it and the numbers stop
+    /// at [`MAX_COPY_NUMBER`].
+    #[test]
+    fn the_search_stops_at_the_first_error_and_after_the_last_number() {
+        let asked = std::cell::Cell::new(0u32);
+        let failing = unique_name("a.txt", ["a.txt"], |_| {
+            asked.set(asked.get() + 1);
+            Err::<bool, _>("gone")
+        });
+        assert_eq!(failing, Err("gone"));
+        assert_eq!(asked.get(), 1, "one failed answer ends the search");
+
+        asked.set(0);
+        let full = unique_name("a.txt", [], |_| {
+            asked.set(asked.get() + 1);
+            Ok::<_, ()>(true)
+        });
+        assert_eq!(full, Ok(None), "every number taken: no name, rather than a name that is taken");
+        assert_eq!(asked.get(), MAX_COPY_NUMBER, "the name itself and 2 to the last number");
     }
 }
