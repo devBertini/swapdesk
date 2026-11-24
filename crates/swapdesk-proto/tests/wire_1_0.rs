@@ -151,6 +151,7 @@ const ENUM_VALUES_AFTER_MINOR_0: &[(&str, u64, u16)] = &[
     ("ErrorCode", 26, 2),
     ("Desktop", 4, 1),
     ("Codec", 2, 2),
+    ("Os", 2, 3),
 ];
 
 #[test]
@@ -194,6 +195,7 @@ fn every_enum_value_of_minor_0_is_carried_by_a_fixture() {
             "ErrorCode" => ErrorCode::from_tag(tag as u16).map(ErrorCode::min_minor),
             "Desktop" => Desktop::from_tag(tag as u8).map(Desktop::min_minor),
             "Codec" => Codec::from_tag(tag as u8).map(Codec::min_minor),
+            "Os" => Os::from_tag(tag as u8).map(Os::min_minor),
             _ => Some(0),
         };
         for tag in &defined {

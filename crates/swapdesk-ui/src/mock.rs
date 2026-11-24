@@ -65,6 +65,23 @@ const ENTRY_BIT: u64 = 1 << 63;
 pub const ENTRY: u64 = ENTRY_BIT | 7;
 pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
+/// A paired phone (docs/ANDROID.md): not in the common world, a scenario adds it.
+pub const PHONE: &str = "celular-ana";
+
+fn phone() -> DeviceView {
+    DeviceView {
+        id: PHONE.into(),
+        name: "Celular da Ana".into(),
+        os: Os::Android,
+        os_version: "15".into(),
+        status: DeviceStatus::Offline,
+        paired: true,
+        grants_here: perms(&[Permission::View, Permission::Control, Permission::Audio]),
+        grants_there: None,
+        last_session: None,
+        wakeable: false,
+    }
+}
 
 fn perms(list: &[Permission]) -> Permissions {
     list.iter().fold(Permissions::NONE, |p, x| p.with(*x))
@@ -223,6 +240,7 @@ pub enum Scenario {
     InicioRedePublica,
     ConversaAnfitriao,
     EncerrarComCopias,
+    DispositivoCelular,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -333,12 +351,13 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 71] = [
+    pub const ALL: [Scenario; 72] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::InicioRedePublica,
         Scenario::ConversaAnfitriao,
         Scenario::EncerrarComCopias,
+        Scenario::DispositivoCelular,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -415,6 +434,7 @@ impl Scenario {
             Scenario::InicioRedePublica => "inicio-rede-publica",
             Scenario::ConversaAnfitriao => "conversa-anfitriao",
             Scenario::EncerrarComCopias => "encerrar-com-copias",
+            Scenario::DispositivoCelular => "dispositivo-celular",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -500,6 +520,7 @@ impl Scenario {
             Scenario::EncerrarComCopias => {
                 "new: the question before ending a session with copies under way (FILES-UI.md 5; owner, 22/11/2026)"
             }
+            Scenario::DispositivoCelular => "new: the page of a paired phone (docs/ANDROID.md, F-NET-03)",
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
             Scenario::Permissoes => "3. Permissões por direção",
@@ -1071,6 +1092,12 @@ impl Scenario {
             ],
             // The banner offers "Inverter" only toward a machine of this OS (Windows here): the Desktop.
             Scenario::Banner => vec![Event(Self::host_session_to(DESKTOP))],
+            // A paired phone beside the computers: it is the phone that comes in, so its page dials nothing.
+            Scenario::DispositivoCelular => {
+                let mut list = devices();
+                list.insert(2, phone());
+                vec![Event(UiEvent::DevicesChanged(list)), Select(PHONE)]
+            }
             // "Desconectar" (or the window's close button) pressed while the copy of ExploradorCopiando runs.
             Scenario::EncerrarComCopias => {
                 let mut v = Scenario::ExploradorCopiando.script();
@@ -1771,6 +1798,7 @@ mod tests {
             (Scenario::InicioRedePublica, Screen::Home, &[Main]),
             (Scenario::ConversaAnfitriao, Screen::Devices, &[Main, Banner]),
             (Scenario::EncerrarComCopias, Screen::Devices, &[Main, Viewer]),
+            (Scenario::DispositivoCelular, Screen::Devices, &[Main]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),

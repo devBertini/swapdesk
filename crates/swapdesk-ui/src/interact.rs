@@ -496,6 +496,8 @@ impl UiState {
             // A session with it is open: the page leads back to it, or ends it. Nothing here starts another.
             s.button(ControlId::SessionEnd, self.name_of(MsgKey::Disconnect));
             s.button(ControlId::SessionShow, self.name_of(MsgKey::SessionBack));
+        } else if d.paired && !Self::dials(d) {
+            // A phone: nothing here starts a connection to it.
         } else if d.paired && Self::can_wake(d) {
             s.button(ControlId::Wake, self.name_of(MsgKey::Wake));
         } else if d.paired {
@@ -548,7 +550,7 @@ impl UiState {
                 s.button(ControlId::ChatSend, self.name_of(MsgKey::ChatSendButton));
             }
             DeviceTab::Overview => {
-                s.text(UiRole::Text, self.name_of(MsgKey::SwapNote));
+                s.text(UiRole::Text, self.name_of(if Self::dials(d) { MsgKey::SwapNote } else { MsgKey::PhoneNote }));
                 s.heading(2, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
                 s.text(UiRole::Text, self.permission_summary(d.grants_here));
                 s.add(ControlId::EditGrants, UiRole::Link, self.name_of(MsgKey::PermsPanelEdit));
@@ -578,6 +580,13 @@ impl UiState {
                 s.text(UiRole::Text, self.name_of(MsgKey::HistoryPlaceholder));
             }
         }
+    }
+
+    /// Whether a computer ever starts a connection to `d`. Not to a phone: it announces nothing and listens on
+    /// nothing, so it is the phone that comes in, and its page has no "Assistir", "Controlar" or "Acordar"
+    /// (docs/ANDROID.md, F-NET-03).
+    pub fn dials(d: &DeviceView) -> bool {
+        d.os != Os::Android
     }
 
     /// An asleep paired device that stored the addresses to wake it with: "Acordar" replaces the connect buttons.
@@ -730,7 +739,7 @@ impl UiState {
     /// (D32), so on a Mac its switch stays off and inert, with the line that says why (ELEVATION-MAC.md, owner
     /// decision 3).
     pub fn grant_available(&self, p: Permission) -> bool {
-        !(p == Permission::AdminTerminal && self.this.as_ref().is_some_and(|t| t.os == Os::MacOs))
+        !(p == Permission::AdminTerminal && self.this.as_ref().is_some_and(|t| t.os != Os::Windows))
     }
 
     /// The read-only column "Este computador pode, no X": (label, "Sim" / "Não" / "–"), plus whether it is a yes.
@@ -1478,8 +1487,9 @@ impl UiState {
     /// toward another OS on its own).
     /// Since 1.1 a swap is offered toward any peer, Windows or Mac (F-XSWAP-01); a 1.0 peer across systems declines
     /// it on its own side and the decline card says so.
-    pub fn swap_offered(&self, _s: &SessionView) -> bool {
-        true
+    /// Not toward a phone until it can host (docs/ANDROID.md, slice A16): a swap would have this computer dial it.
+    pub fn swap_offered(&self, s: &SessionView) -> bool {
+        self.device_by_id(&s.device_id).is_none_or(Self::dials)
     }
 
     /// "MacBook do escritório controla este computador há 12 min".

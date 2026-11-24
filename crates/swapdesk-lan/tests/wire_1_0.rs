@@ -98,7 +98,9 @@ fn the_fixtures_cover_every_txt_key_os_and_pairing_state_and_the_wake_packets() 
         }
     }
     assert_eq!(keys, TXT_KEYS_OF_MINOR_0.iter().map(|k| k.to_string()).collect::<BTreeSet<_>>());
-    assert_eq!(oses, Os::ALL.iter().map(|o| o.tag()).collect::<BTreeSet<_>>(), "an Os without a TXT fixture");
+    // The systems 1.0 knew; a later one (`Os::min_minor`) has no 1.0 fixture and is covered in `txt.rs`.
+    let of_1_0: BTreeSet<_> = Os::ALL.iter().filter(|o| o.min_minor() == 0).map(|o| o.tag()).collect();
+    assert_eq!(oses, of_1_0, "an Os of 1.0 without a TXT fixture");
     assert_eq!(pairing, BTreeSet::from([false, true]));
     assert!(all.iter().any(|s| matches!(s.item, Item::MagicPacket(_))));
     assert!(all.iter().any(|s| matches!(s.item, Item::DirectedBroadcast { .. })));

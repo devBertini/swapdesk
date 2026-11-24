@@ -184,6 +184,7 @@ pub fn os_label(lang: Language, os: Os, version: &str) -> String {
     let name = match os {
         Os::Windows => "Windows",
         Os::MacOs => "macOS",
+        Os::Android => "Android",
     };
     text(lang, &Msg::new(MsgKey::OsLabel).with(name).with(version)).trim().to_owned()
 }
@@ -194,6 +195,7 @@ pub fn status_line(lang: Language, d: &DeviceView) -> String {
     let msg = match &d.status {
         DeviceStatus::Online { .. } => Msg::new(MsgKey::StatusOnline).with(os),
         DeviceStatus::Asleep => Msg::new(MsgKey::StatusAsleep).with(os),
+        DeviceStatus::Offline if d.os == Os::Android => Msg::new(MsgKey::StatusPhoneIdle).with(os),
         DeviceStatus::Offline => Msg::new(MsgKey::StatusOffline).with(os),
         DeviceStatus::OnNetworkUnpaired { pairing_open: true } => Msg::new(MsgKey::StatusUnpairedOpen),
         DeviceStatus::OnNetworkUnpaired { pairing_open: false } => Msg::new(MsgKey::StatusUnpaired),
@@ -209,6 +211,7 @@ pub fn detail_line(lang: Language, d: &DeviceView) -> String {
         }
         DeviceStatus::Asleep if d.wakeable => Msg::new(MsgKey::DetailAsleep),
         DeviceStatus::Asleep => Msg::new(MsgKey::DetailAsleepNoWake),
+        DeviceStatus::Offline if d.os == Os::Android => Msg::new(MsgKey::DetailPhoneIdle),
         DeviceStatus::Offline => Msg::new(MsgKey::DetailOffline),
         DeviceStatus::OnNetworkUnpaired { .. } => Msg::new(MsgKey::DetailUnpaired),
     };

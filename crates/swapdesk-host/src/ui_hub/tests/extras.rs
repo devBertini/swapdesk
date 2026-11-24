@@ -535,6 +535,20 @@ pub(super) fn waking(ui: &mut Client, id: u64) -> u16 {
     })
 }
 
+/// Minor 3 (docs/ANDROID.md, F-NET-03): a phone is never asleep and never woken, whatever its record holds.
+#[test]
+fn a_paired_phone_is_never_asleep_and_cannot_be_woken() {
+    let other = Machine::new("celular");
+    let (m, _sent) = sleeper(&other);
+    m.trust.update(|s| s.devices.iter_mut().for_each(|d| d.os = swapdesk_proto::Os::Android)).expect("store");
+    let mut ui = m.client(info(false));
+    let ReplyBody::Devices(list) = ui.call(UiOp::ListDevices).unwrap() else { panic!() };
+    assert_eq!(
+        (list[0].os, list[0].status.clone(), list[0].wakeable),
+        (swapdesk_proto::Os::Android, swapdesk_ipc::DeviceStatus::Offline, false)
+    );
+}
+
 #[test]
 fn wake_sends_the_magic_packet_to_the_route_broadcast_and_connects_when_the_device_appears() {
     let mut other = Machine::new("other-pc");

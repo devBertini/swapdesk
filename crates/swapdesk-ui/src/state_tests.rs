@@ -1268,6 +1268,48 @@ fn ending_a_session_asks_for_an_open_terminal_and_not_when_nothing_would_stop() 
     assert_eq!(hosted.activate(ControlId::BannerDisconnect).commands, vec![Command::Disconnect { session_id: 2 }]);
 }
 
+/// Minor 3 (docs/ANDROID.md, F-NET-03): a paired phone is listed with its system, and its page starts no
+/// connection to it: it is the phone that comes in. Permissões, Histórico and Esquecer stay.
+#[test]
+fn a_paired_phones_page_dials_nothing_and_keeps_permissions_and_forget() {
+    let mut s = Scenario::DispositivoCelular.prepared_state();
+    let d = s.selected_device().cloned().expect("the phone is selected");
+    assert_eq!((d.os, UiState::dials(&d)), (Os::Android, false));
+    assert_eq!(crate::format::status_line(s.language(), &d), "Não conectado, Android 15");
+    assert_eq!(crate::format::detail_line(s.language(), &d), "Não conectado a este computador");
+    let has = |s: &UiState, id: ControlId| s.controls(WindowKind::Main).iter().any(|c| c.id == id);
+    for dial in [ControlId::ViewOnly, ControlId::Control, ControlId::Wake] {
+        assert!(!has(&s, dial), "{dial:?} is offered on a phone's page");
+    }
+    assert!(
+        s.controls(WindowKind::Main).iter().any(|c| c.label.starts_with("É o celular que inicia a conexão")),
+        "the page says who starts the connection"
+    );
+    s.activate(ControlId::Tab(DeviceTab::Permissions));
+    assert!(has(&s, ControlId::Grant(Permission::Control)) && has(&s, ControlId::Forget));
+    // A computer's page is as it was.
+    let _ = s.select_device(MAC);
+    assert!(has(&s, ControlId::Control) && has(&s, ControlId::ViewOnly));
+}
+
+/// "Inverter" is not offered toward a phone until it can host (docs/ANDROID.md, slice A16): the swap would have this
+/// computer dial a device that listens on nothing.
+#[test]
+fn a_swap_is_not_offered_in_a_session_with_a_phone() {
+    let mut s = Scenario::Banner.prepared_state();
+    let h = s.host_session().cloned().expect("a hosted session");
+    assert!(s.swap_offered(&h), "offered toward a computer");
+    let mut list = s.devices().to_vec();
+    for d in &mut list {
+        if d.id == h.device_id {
+            d.os = Os::Android;
+        }
+    }
+    s.apply(UiEvent::DevicesChanged(list));
+    assert!(!s.swap_offered(&h));
+    assert!(!s.controls(WindowKind::Banner).iter().any(|c| c.id == ControlId::BannerSwap));
+}
+
 /// The conversation is offered only on the page of the device that controls this computer now.
 #[test]
 fn only_the_controllers_page_has_the_conversation() {

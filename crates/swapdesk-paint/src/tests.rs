@@ -153,6 +153,25 @@ fn the_controllers_page_paints_the_conversation_and_says_read_once() {
     assert!(out.edits.iter().any(|e| e.id == EditId::Chat), "the field to answer in");
 }
 
+/// The page of a paired phone (docs/ANDROID.md, F-NET-03): its system in the status line, the wire that says the
+/// phone controls this computer, the note of who starts, and no button that would dial it.
+#[test]
+fn a_phones_page_says_it_controls_this_computer_and_offers_no_dial() {
+    use swapdesk_ui::WindowKind::Main;
+    let state = Scenario::DispositivoCelular.prepared_state();
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let out = paint(Frame::new(&p, &state, &ix, design_size(Main), true), Main);
+    let drawn = p.drawn.borrow().clone();
+    for text in ["Celular da Ana", "Controla este computador", "Android 15"] {
+        assert!(drawn.iter().any(|d| d.contains(text)), "{text:?} is drawn: {drawn:?}");
+    }
+    assert!(!drawn.iter().any(|d| d == "Você controla"), "the computer's wire text is not drawn for a phone");
+    for dial in [ControlId::ViewOnly, ControlId::Control, ControlId::Wake] {
+        assert!(!out.widgets.iter().any(|w| w.id == dial), "{dial:?} is painted on a phone's page");
+    }
+}
+
 /// The question before ending a session with work under way (FILES-UI.md 5; owner, 22/11/2026): its words, the
 /// safe answer on the left and "Desconectar" on the right, over the session window.
 #[test]

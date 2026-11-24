@@ -22,6 +22,7 @@ pub mod mode;
 pub mod pairing;
 pub mod records;
 pub mod store;
+pub mod systems;
 pub mod tls;
 pub mod wipe;
 
@@ -46,3 +47,4 @@ pub use pairing::{
 };
 pub use records::{Lockout, PairedDevice, TrustStore, UserRef};
 pub use store::{Crossing, PairingGuard, PinLookup, TrustHandle};
+pub use systems::{PeerSystems, SYSTEMS_NAME};

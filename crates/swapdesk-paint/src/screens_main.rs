@@ -679,6 +679,8 @@ fn devices_main(f: &mut Frame) {
             let erect = Rect::new(brect.x - 16.0 - ew, y, ew, 40.0);
             f.button(ControlId::SessionEnd, erect, Kind::Default, &end, false);
             f.button(ControlId::SessionShow, brect, Kind::Primary, &back, false);
+        } else if d.paired && !swapdesk_ui::UiState::dials(&d) {
+            // A phone: nothing here starts a connection to it (F-NET-03).
         } else if d.paired && swapdesk_ui::UiState::can_wake(&d) {
             // Asleep: "Acordar" replaces the connect buttons (F-WAKE-01).
             let label = f.t(MsgKey::Wake);
@@ -805,7 +807,10 @@ fn pair_panel(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
     // padding 32 36, gap 22; columns 180 px wide with the wire between them.
     let bw = p.hairline();
     let inner_w = a.cw - 2.0 * bw - 72.0;
-    let note = p.label_in(&f.t(MsgKey::SwapNote), text::BODY, inner_w, Align::Center);
+    // A phone comes in and is never dialled: the wire points at this computer and the note says who starts.
+    let phone = !swapdesk_ui::UiState::dials(d);
+    let note_key = if phone { MsgKey::PhoneNote } else { MsgKey::SwapNote };
+    let note = p.label_in(&f.t(note_key), text::BODY, inner_w, Align::Center);
     let row_h = 64.0 + 10.0 + p.label("A", text::NAME).h + 10.0 + p.label("A", text::SMALL).h;
     let h = bw + 32.0 + row_h + 22.0 + note.h + 32.0 + bw;
     f.panel(Rect::new(a.x, y, a.cw, h), pal.surface);
@@ -813,26 +818,35 @@ fn pair_panel(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
     let left = a.x + bw + 36.0;
     let right = a.x + a.cw - bw - 36.0 - layout::PAIR_COLUMN_W;
     let top = y + bw + 32.0;
-    device_column(f, left, top, &this_name(f), &f.t(MsgKey::DeviceCaptionThis), pal.ink);
-    device_column(f, right, top, &d.name, &format::os_label(f.st.language(), d.os, &d.os_version), pal.link);
+    device_column(f, left, top, &this_name(f), &f.t(MsgKey::DeviceCaptionThis), pal.ink, false);
+    device_column(f, right, top, &d.name, &format::os_label(f.st.language(), d.os, &d.os_version), pal.link, phone);
 
     // The middle column is centred on the row, then pulled up by its -34 px top margin.
     let mid_x = left + layout::PAIR_COLUMN_W;
     let mid_w = right - mid_x;
-    let wire_label = p.label_in(&f.t(MsgKey::YouControl), text::WIRE, mid_w, Align::Center);
+    let wire_key = if phone { MsgKey::PhoneControls } else { MsgKey::YouControl };
+    let wire_label = p.label_in(&f.t(wire_key), text::WIRE, mid_w, Align::Center);
     let wire_top = top + (row_h - (wire_label.h + 10.0 + 18.0 - 34.0)) / 2.0 - 34.0;
     p.draw(&wire_label, mid_x, wire_top, pal.link);
     let cy = wire_top + wire_label.h + 10.0 + 9.0;
-    f.wire(mid_x, mid_x + mid_w, cy, layout::PAIR_WIRE, layout::PAIR_ARROW_W, layout::PAIR_ARROW_H, pal.link);
+    if phone {
+        f.wire_back(mid_x, mid_x + mid_w, cy, layout::PAIR_WIRE, layout::PAIR_ARROW_W, layout::PAIR_ARROW_H, pal.link);
+    } else {
+        f.wire(mid_x, mid_x + mid_w, cy, layout::PAIR_WIRE, layout::PAIR_ARROW_W, layout::PAIR_ARROW_H, pal.link);
+    }
 
     p.draw(&note, a.x + bw + 36.0, top + row_h + 22.0, pal.soft);
     h
 }
 
 /// A 180 px column: laptop outline, name (600), caption (12 px), gap 10, all centred.
-fn device_column(f: &Frame, x: f32, y: f32, name: &str, caption: &str, stroke: Color) {
+fn device_column(f: &Frame, x: f32, y: f32, name: &str, caption: &str, stroke: Color, phone: bool) {
     let p = f.p;
-    f.laptop(x + (layout::PAIR_COLUMN_W - 64.0) / 2.0, y, 64.0, 2.5, stroke);
+    if phone {
+        f.phone(x + (layout::PAIR_COLUMN_W - 64.0) / 2.0, y, 64.0, 2.5, stroke);
+    } else {
+        f.laptop(x + (layout::PAIR_COLUMN_W - 64.0) / 2.0, y, 64.0, 2.5, stroke);
+    }
     let n = p.label_in(name, text::NAME, layout::PAIR_COLUMN_W, Align::Center);
     p.draw(&n, x, y + 64.0 + 10.0, f.pal.ink);
     let c = p.label_in(caption, text::SMALL, layout::PAIR_COLUMN_W, Align::Center);

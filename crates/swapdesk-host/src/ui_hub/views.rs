@@ -367,6 +367,8 @@ impl Hub {
     }
 
     fn paired_view(&self, d: &PairedDevice, reach: &Reach, recent: &[AuditEntry]) -> DeviceView {
+        // A phone is never asleep and never woken (docs/ANDROID.md, F-NET-03), whatever its record holds.
+        let wakeable = d.os != Os::Android && !d.wol_macs.is_empty();
         let seen = reach.presence.iter().find(|p| p.device_id == d.device_id).and_then(|p| p.addrs.first());
         let typed = reach.typed.iter().find(|(id, _)| *id == d.device_id).map(|(_, a)| a);
         let status = match (reach.live.iter().find(|l| l.device == d.device_id), seen.or(typed)) {
@@ -378,7 +380,7 @@ impl Hub {
             // Seen by DNS-SD, or typed by the user at an address that is this device's: one entry, on the network.
             // The round trip is measured by the session's own pings; there is none here, so it reads 0.
             (None, Some(addr)) => DeviceStatus::Online { address: addr.to_string(), rtt_ms: 0 },
-            (None, None) if !d.wol_macs.is_empty() => DeviceStatus::Asleep,
+            (None, None) if wakeable => DeviceStatus::Asleep,
             (None, None) => DeviceStatus::Offline,
         };
         DeviceView {
@@ -391,7 +393,7 @@ impl Hub {
             grants_here: d.grants_here.bits(),
             grants_there: d.grants_there.map(PermissionSet::bits),
             last_session: Self::last_session(recent, &d.device_id),
-            wakeable: !d.wol_macs.is_empty(),
+            wakeable,
         }
     }
 

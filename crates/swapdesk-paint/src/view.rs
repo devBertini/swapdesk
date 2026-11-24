@@ -327,6 +327,27 @@ impl<'a> Frame<'a> {
         p.line((x + 4.0 * s, y + 48.0 * s), (x + 60.0 * s, y + 48.0 * s), stroke, color, false);
     }
 
+    /// The pair strip's phone, in the laptop's 64 x 64 box and stroke: an upright rounded outline with the short
+    /// line of its home indicator.
+    pub fn phone(&self, x: f32, y: f32, size: f32, stroke: f32, color: Color) {
+        let p = self.p;
+        let (x, y) = (p.snap(x), p.snap(y));
+        let s = size / 64.0;
+        p.stroke_rrect(Rect::new(x + 19.0 * s, y + 6.0 * s, 26.0 * s, 46.0 * s), 5.0 * s, stroke, color);
+        p.line((x + 28.0 * s, y + 45.0 * s), (x + 36.0 * s, y + 45.0 * s), stroke, color, false);
+    }
+
+    /// [`Self::wire`] the other way: the arrowhead at `x0`, pointing left.
+    #[allow(clippy::too_many_arguments)] // drawing helpers take the geometry and colour the CSS gives them
+    pub fn wire_back(&self, x0: f32, x1: f32, cy: f32, thickness: f32, head_w: f32, head_h: f32, color: Color) {
+        self.p.fill_rrect(
+            Rect::new(x0 + head_w, cy - thickness / 2.0, (x1 - x0 - head_w).max(0.0), thickness),
+            thickness / 2.0 - 0.01,
+            color,
+        );
+        self.p.fill_triangle([(x0 + head_w, cy - head_h / 2.0), (x0, cy), (x0 + head_w, cy + head_h / 2.0)], color);
+    }
+
     /// The wire with its arrowhead from `x0` to `x1` at `cy`: thickness 3, head 16 x 18 (or smaller).
     #[allow(clippy::too_many_arguments)] // drawing helpers take the geometry and colour the CSS gives them
     pub fn wire(&self, x0: f32, x1: f32, cy: f32, thickness: f32, head_w: f32, head_h: f32, color: Color) {

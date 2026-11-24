@@ -5,8 +5,22 @@ use core::ops::{BitAnd, BitOr};
 use crate::codec::{CodecError, Reader, Result, Wire, Writer};
 
 wire_enum! {
-    /// Operating system of a peer (9.2: 0 Windows, 1 MacOS).
-    Os: u8 { Windows = 0, MacOs = 1 }
+    /// Operating system of a peer (9.2: 0 Windows, 1 MacOS; 2 Android from minor 3).
+    Os: u8 { Windows = 0, MacOs = 1, Android = 2 }
+}
+
+impl Os {
+    /// The protocol minor that introduced this system (PROTOCOL.md 1). `Android` has no older value that says the
+    /// same: a peer below minor 3 is never told of it. A device of that system does not start a session or a
+    /// pairing with a peer it knows to be older; where the peer's minor cannot be known before the first message
+    /// (`Hello` to a typed address, and pairing, which carries no minor), the older peer ends the exchange as a
+    /// violation, which the device shows as "needs an update".
+    pub const fn min_minor(self) -> u16 {
+        match self {
+            Self::Android => 3,
+            Self::Windows | Self::MacOs => 0,
+        }
+    }
 }
 
 wire_enum! {

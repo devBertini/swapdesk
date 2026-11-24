@@ -101,7 +101,8 @@ pub fn user_command(begin: &str, end: &str) -> String {
 /// The command that prints the terminal's size as "rows cols".
 pub fn size_command(os: Os, begin: &str, end: &str) -> String {
     match os {
-        Os::MacOs => format!("echo {begin}; stty size; echo {end}"),
+        // A phone hosts no terminal (docs/ANDROID.md 3); this proof drives computers only.
+        Os::MacOs | Os::Android => format!("echo {begin}; stty size; echo {end}"),
         Os::Windows => format!(
             "echo {begin}; \"$($Host.UI.RawUI.WindowSize.Height) $($Host.UI.RawUI.WindowSize.Width)\"; echo {end}"
         ),

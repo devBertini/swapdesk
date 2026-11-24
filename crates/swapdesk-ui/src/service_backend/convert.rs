@@ -37,7 +37,7 @@ macro_rules! pair_enum {
     };
 }
 
-pair_enum!(os_to_wire, os_from_wire, a::Os, p::Os; Windows, MacOs);
+pair_enum!(os_to_wire, os_from_wire, a::Os, p::Os; Windows, MacOs, Android);
 pair_enum!(intent_to_wire, intent_from_wire, a::Intent, p::Intent; View, Control);
 pair_enum!(feature_to_wire, feature_from_wire, a::Feature, p::Feature; Terminal, Files);
 pair_enum!(quality_to_wire, quality_from_wire, a::Quality, p::Preset; Auto, Text, Motion);

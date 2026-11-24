@@ -28,7 +28,8 @@ const REPLY: Duration = Duration::from_secs(10);
 pub fn expected_list(host_os: Os) -> [(ActionKind, MsgKey); 4] {
     let task = match host_os {
         Os::Windows => MsgKey::ActTaskMonitorWindows,
-        Os::MacOs => MsgKey::ActTaskMonitorMac,
+        // A phone offers no task monitor (docs/ANDROID.md 3); this proof drives computers only.
+        Os::MacOs | Os::Android => MsgKey::ActTaskMonitorMac,
     };
     [
         (ActionKind::Lock, MsgKey::ActLock),

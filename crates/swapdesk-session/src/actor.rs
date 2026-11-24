@@ -605,6 +605,12 @@ impl Actor {
             (Phase::AwaitHello, Message::Hello(hello)) => {
                 let Side::Host { service, hello: slot, .. } = &mut self.side else { return None };
                 let cfg = &service.cfg;
+                // A viewer below the minor that introduced this host's system (a phone, to a viewer below minor 3)
+                // cannot read the answer, which names the system: it is told with a `Bye` and a code that every minor
+                // reads, and nothing else is sent (PROTOCOL.md 1).
+                if cfg.os.min_minor() > hello.proto_minor {
+                    return Some(Finish::local_bye(ErrorCode::UnsupportedVersion));
+                }
                 let ack = HelloAck {
                     proto_minor: cfg.proto_minor,
                     app_version: cfg.app_version.clone(),

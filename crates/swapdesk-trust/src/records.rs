@@ -84,7 +84,9 @@ impl Wire for PairedDevice {
         self.device_id.put(w, 0)?;
         self.spki.put(w, 0)?;
         w.put_str(&self.name, 64)?;
-        self.os.put(w, 0)?;
+        // A build of 1.0 or 1.1 reads this record strictly and knows two systems: a phone's goes to `systems.bin`
+        // and this field says a system that build knows (`crate::systems`).
+        crate::systems::stored(self.os).put(w, 0)?;
         w.put_str(&self.os_version, 32)?;
         w.put_u64(self.paired_ms);
         w.put_u64(self.last_seen_ms);

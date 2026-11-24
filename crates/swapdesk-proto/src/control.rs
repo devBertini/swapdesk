@@ -710,6 +710,9 @@ impl Message {
     pub fn min_minor(&self) -> u16 {
         let carried = match self {
             Self::Capabilities(m) => m.min_minor(),
+            // The host's answer names its system to a viewer whose minor it knows. A viewer's `Hello` names its own
+            // before any minor is known, so it is not counted here (`Os::min_minor`).
+            Self::HelloAck(m) => m.os.min_minor(),
             Self::SessionRefused(m) => m.code.min_minor(),
             Self::Bye(m) => m.code.min_minor(),
             Self::HostState(m) => m.desktop.min_minor(),
@@ -733,6 +736,11 @@ impl Message {
         }
         if self.min_minor() <= minor {
             return Some(self);
+        }
+        // A system the viewer does not know has no older value that says the same: the answer is not sent, and the
+        // host ends the session instead (`ErrorCode::UnsupportedVersion`).
+        if matches!(self, Self::HelloAck(_)) {
+            return None;
         }
         Some(match self {
             Self::Capabilities(m) => Self::Capabilities(m.for_minor(minor)),

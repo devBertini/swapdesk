@@ -336,7 +336,7 @@ fn every_unknown_tag_is_fatal() {
             }
         }
     }
-    check_u8::<Os>(&[0, 1]);
+    check_u8::<Os>(&[0, 1, 2]);
     check_u8::<Codec>(&[1, 2]);
     check_u8::<AudioCodec>(&[1]);
     check_u8::<Intent>(&[0, 1]);
@@ -370,9 +370,11 @@ fn bad_tags_inside_messages_are_fatal() {
     let good = hello_with_name(&[0], &[]);
     assert!(Message::decode_payload(1, &good).is_ok());
     // layout: proto_minor(2) app_version(1) name(1) os(1) os_version(1) intent(1) requested(2) resume(1) swap(1)
-    for (offset, what) in [(4usize, "os"), (6, "intent"), (9, "resume option"), (10, "swap option")] {
+    // The first value no build defines: 3 for the system (2 is Android from minor 3), 2 for the others.
+    for (offset, bad, what) in [(4usize, 3u8, "os"), (6, 2, "intent"), (9, 2, "resume option"), (10, 2, "swap option")]
+    {
         let mut b = good.clone();
-        b[offset] = 2;
+        b[offset] = bad;
         assert!(Message::decode_payload(1, &b).is_err(), "{what}");
     }
     // a bool of 2
@@ -847,4 +849,76 @@ fn a_video_header_in_hevc_round_trips() {
     let bytes = w.into_bytes();
     let mut r = swapdesk_proto::codec::Reader::new(&bytes);
     assert_eq!(<VideoHeader as swapdesk_proto::codec::Wire>::get(&mut r, 0).unwrap(), header);
+}
+
+/// Minor 3 (docs/ANDROID.md, slice A0): a phone is a peer. `Os::Android` is carried by the four messages that name
+/// a system, as one more value of the byte that was there; a peer below minor 3 is never answered with it.
+#[test]
+fn android_is_a_system_of_minor_3_in_the_four_messages_that_name_a_system() {
+    assert_eq!(PROTO_MINOR, 3);
+    assert_eq!((Os::Windows.min_minor(), Os::MacOs.min_minor(), Os::Android.min_minor()), (0, 0, 3));
+    assert_eq!(Os::Android.tag(), 2);
+
+    let hello = |os| {
+        Message::from(Hello {
+            proto_minor: PROTO_MINOR,
+            app_version: "1.2.0".into(),
+            name: "celular".into(),
+            os,
+            os_version: "15".into(),
+            intent: Intent::Control,
+            requested: PermissionSet::EMPTY,
+            resume: None,
+            swap_token: None,
+        })
+    };
+    // One byte tells the systems apart: nothing else of the layout moved.
+    let (windows, android) = (hello(Os::Windows).encode_frame().unwrap(), hello(Os::Android).encode_frame().unwrap());
+    assert_eq!(windows.len(), android.len());
+    let differing: Vec<(u8, u8)> =
+        windows.iter().zip(&android).filter(|(a, b)| a != b).map(|(a, b)| (*a, *b)).collect();
+    assert_eq!(differing, vec![(0, 2)]);
+    assert_eq!(Message::decode_frame_exact(&android).unwrap(), hello(Os::Android));
+    // The first message of a session leaves before any minor is known.
+    assert_eq!(hello(Os::Android).for_peer(0), Some(hello(Os::Android)));
+
+    // The host's answer goes to a viewer whose minor it knows, and never to one that does not know the system.
+    let ack = |os| {
+        Message::from(HelloAck {
+            proto_minor: PROTO_MINOR,
+            app_version: "1.2.0".into(),
+            name: "celular".into(),
+            os,
+            os_version: "15".into(),
+        })
+    };
+    assert_eq!(ack(Os::Android).min_minor(), 3);
+    assert_eq!(ack(Os::Android).for_peer(2), None);
+    assert_eq!(ack(Os::Android).for_peer(3), Some(ack(Os::Android)));
+    assert_eq!(ack(Os::MacOs).for_peer(0), Some(ack(Os::MacOs)));
+    assert_eq!(Message::decode_frame_exact(&ack(Os::Android).encode_frame().unwrap()).unwrap(), ack(Os::Android));
+
+    // Pairing names the system on both sides and carries no minor: this build reads a phone's.
+    let pair_hello = Message::from(PairHello {
+        name: "celular".into(),
+        os: Os::Android,
+        os_version: "15".into(),
+        majors: vec![1],
+        commit: [7; 32],
+    });
+    let pair_nonce = Message::from(PairNonce {
+        name: "celular".into(),
+        os: Os::Android,
+        os_version: "15".into(),
+        majors: vec![1],
+        nonce_r: [9; 32],
+    });
+    for m in [pair_hello, pair_nonce] {
+        assert_eq!(Message::decode_frame_exact(&m.encode_frame().unwrap()).unwrap(), m);
+    }
+    // A system this build does not know is a violation, as every unknown value is.
+    let mut unknown = hello(Os::Android).encode_frame().unwrap();
+    let at = windows.iter().zip(&android).position(|(a, b)| a != b).unwrap();
+    unknown[at] = 3;
+    assert!(Message::decode_frame_exact(&unknown).is_err());
 }

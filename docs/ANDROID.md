@@ -37,7 +37,7 @@ last slice (decision 8.6).
 | F-AND-08 | Sound | When `AUDIO` is granted and sound is on, the phone shall play the host's Opus stream with low-latency output inside B3 (F-AUDIO-01). |
 | F-AND-09 | Leaving the front | When the session's screen leaves the front (home, another app, the screen off), the phone shall stop asking for video and sound at once and keep the session resumable for 60 s (F-NET-01 rules); back in front within that time, the picture shall return inside BA2 without a new prompt. |
 | F-AND-10 | Traces and activity | Swapdesk on the phone shall keep its trace and activity log in the app's private storage, never holding a never-logged value (F-SEC-01), list the activity in Atividade and export it to a file the person picks (F-SESS-04). |
-| F-NET-03 | Android peers on the desktop (protocol minor 3) | When a phone pairs with a desktop of minor 3 or newer, the desktop shall pin it and show it in Pareados as an Android device that is never online (a phone announces nothing in version 1), whose page offers Permissões, Atividade and Esquecer and no Controlar, Assistir, Acordar or Inverter; it shall keep the phone's system where a build below minor 3 still loads the trust store; and no build shall send `Os::Android` or the `android` record value to a peer below minor 3 (F-NET-02). |
+| F-NET-03 | Android peers on the desktop (protocol minor 3) | When a phone pairs with a desktop of minor 3 or newer, the desktop shall pin it and list it in Pareados as an Android device that reads "Não conectado" except while a session with it is open (a phone announces nothing in version 1), whose page offers Permissões, Histórico and Esquecer and no Controlar, Assistir or Acordar, and shall offer no Inverter in a session with it until the phone can host; it shall keep the phone's system where a build below minor 3 still loads the trust store (`systems.bin`, D83); and it shall send `Os::Android` or the `android` record value to no peer it knows to be below minor 3: a host of that system answers such a viewer with `Bye { UNSUPPORTED_VERSION }`, and where the minor cannot be known before the first message (a `Hello` to a typed address, and pairing) the older peer ends the exchange as a protocol violation, which the phone shows as "needs an update" (F-NET-02). |
 
 Flows of the SPEC that hold on the phone unchanged, by their own tests in the shared crates: F-PAIR-01 to F-PAIR-04,
 F-PERM-02, F-SESS-06, F-NET-01, F-NET-02, F-SEC-01, F-CHAT-01 (when chat arrives, slice A8).
@@ -262,19 +262,27 @@ then drops the record. `PairHello` carries `os` but no minor. So a 1.1.0 desktop
 phone that tells the truth about its system. Minor 3 adds `Os::Android = 2` and the TXT value `android`, sent only
 where minor 3 is known; the phone reads a computer's `minor` key (PROTOCOL.md 10) and, below 3, shows "needs an
 update" and dials nothing (F-AND-03). A typed address has no record and so no `minor` hint: the phone tries it, and
-the older desktop ends the ceremony at `PairHello` (the exact close it gives is read in A0), which the phone shows as
-"needs an update". The phone never claims to be Windows or a Mac. Everything else the phone sends exists in minors
+the older desktop ends the ceremony at `PairHello` with the QUIC close code `PROTOCOL_VIOLATION` and no `PairResult`
+(read in the 1.1.0 code: the unknown tag is a codec error, its pairing mode stays open and its audit says
+`PairRefused`), which the phone shows as "needs an update". A phone that hosts (slice A14) answers a viewer below
+minor 3 with `Bye { UNSUPPORTED_VERSION }` in place of the `HelloAck` that would name its system. The phone never claims to be Windows or a Mac. Everything else the phone sends exists in minors
 0 to 2.
 
 Stored data: `PairedDevice.os` is part of the trust record (C5.1) and the record's decoder rejects an unknown tag
 (`Os::get` in `swapdesk-trust` `records.rs`), so a trust store holding a phone as `Android` would not load in a build
-below minor 3 (a downgrade). A0 keeps the trust record's format: the phone's system goes to a side record, as
-`PeerPorts` did (C5.1), and the trust record holds a value older builds read. Which value that is, and how an older
-build then shows the phone, is A0's design, proven by loading a minor-3 store with the 1.1.0 decoder.
+below minor 3 (a downgrade). A0 keeps the trust record's format (D83): the phone's system goes to a side file,
+`systems.bin` (`PeerSystems`, C5.1), as `PeerPorts` did, and the trust record says `Windows` for it. A store that holds
+a phone is byte for byte the store 1.1.0 writes with a Windows computer in its place, and the record's code differs
+from 1.1.0's by that one line, so the older build loads it and lists the phone as a Windows device it never reaches.
+A lost or damaged side file fails nothing: the phone reads as a computer until its next session, where the record
+follows the system the device says over the connection its pinned key authenticated.
 
-On the desktop a paired phone is never online, since it announces nothing: its page shows Permissões (where the
-desktop's person gives the phone `CONTROL`, `AUDIO` and, with an administrator, `UNATTENDED`), Atividade and Esquecer,
-and none of the actions that dial a device. The desktop's grants push toward a device that "appears" (PROTOCOL.md 1)
+On the desktop a paired phone announces nothing, so it reads "Não conectado" except while a session with it is
+open: its page shows Permissões (where the desktop's person gives the phone `CONTROL`, `AUDIO` and, with an
+administrator, `UNATTENDED`), Histórico and Esquecer, the wire of the overview points at the computer ("Controla este
+computador") with the note that the phone starts the connection, and none of the actions that dial a device is
+there. A session with a phone offers no Inverter until the phone can host (slice A16), and a phone is never asleep
+or woken, whatever its record holds. The desktop's grants push toward a device that "appears" (PROTOCOL.md 1)
 never fires for a phone; the phone learns the grants in each session (`StoredGrants`) and by its own sync when the
 computer appears to it.
 

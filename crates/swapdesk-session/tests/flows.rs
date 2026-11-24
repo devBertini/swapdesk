@@ -1489,6 +1489,33 @@ fn a_stored_grants_change_during_a_session_reaches_the_peer() {
     });
 }
 
+/// Minor 3 (docs/ANDROID.md, slice A0): a host whose system the viewer's minor does not know (a phone, to a viewer of
+/// 1.1) cannot answer with `HelloAck`, which names the system. It says `UNSUPPORTED_VERSION` in a `Bye`, which every
+/// minor reads, and sends nothing else; a viewer of minor 3 is answered as by any host.
+#[test]
+fn a_host_whose_system_the_viewer_does_not_know_says_unsupported_version() {
+    run_paused(async {
+        let phone =
+            || Mem::with(TestUi::accepting(PermissionSet::CONTROL), Registry::new(), |cfg| cfg.os = Os::Android);
+        let who = Who::new();
+
+        let mem = phone();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut io, task) = mem.connect_raw(&who);
+        io.out.send(hello_of_minor(2)).await.unwrap();
+        assert_eq!(next_msg(&mut io, "Bye").await, Message::from(Bye { code: ErrorCode::UnsupportedVersion }));
+        let end = task.await.unwrap();
+        assert_eq!((end.kind, end.code), (EndKind::LocalBye, ErrorCode::UnsupportedVersion));
+
+        let mem = phone();
+        pin(&mem.trust, &who, PermissionSet::CONTROL);
+        let (mut io, _task) = mem.connect_raw(&who);
+        io.out.send(hello_of_minor(PROTO_MINOR)).await.unwrap();
+        let ack = next_msg(&mut io, "HelloAck").await;
+        assert!(matches!(&ack, Message::HelloAck(a) if a.os == Os::Android), "{ack:?}");
+    });
+}
+
 /// Before `SessionGrant` it is a protocol violation, on the host and on the viewer.
 #[test]
 fn stored_grants_before_the_grant_is_a_protocol_violation() {

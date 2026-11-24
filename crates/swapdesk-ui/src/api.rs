@@ -59,6 +59,8 @@ pub enum ApiCode {
 pub enum Os {
     Windows,
     MacOs,
+    /// A phone or a tablet (protocol minor 3).
+    Android,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

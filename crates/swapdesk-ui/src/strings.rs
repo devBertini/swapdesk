@@ -49,6 +49,8 @@ strings! {
     StatusOnline => "Online, {0}", "Online, {0}";
     StatusAsleep => "Dormindo, {0}", "Asleep, {0}";
     StatusOffline => "Fora da rede, {0}", "Offline, {0}";
+    // A phone announces nothing, so "off the network" would be a guess: it is connected or it is not.
+    StatusPhoneIdle => "Não conectado, {0}", "Not connected, {0}";
     StatusUnpaired => "Não pareado", "Not paired";
     StatusUnpairedOpen => "Não pareado, pareamento aberto", "Not paired, pairing open";
     OsLabel => "{0} {1}", "{0} {1}";
@@ -69,6 +71,7 @@ strings! {
     DetailAsleep => "Dormindo. Dá para acordar pela rede.", "Asleep. It can be woken over the network.";
     DetailAsleepNoWake => "Dormindo", "Asleep";
     DetailOffline => "Fora da rede", "Not on the network";
+    DetailPhoneIdle => "Não conectado a este computador", "Not connected to this computer";
     DetailUnpaired => "Aparece na rede, ainda não pareado", "Seen on the network, not paired yet";
     ViewOnly => "Assistir", "Watch";
     Control => "Controlar", "Control";
@@ -84,6 +87,9 @@ strings! {
     SectionWhoControls => "Quem controla quem", "Who controls whom";
     YouControl => "Você controla", "You control";
     SwapNote => "Durante a sessão, qualquer um dos dois pode pedir para inverter.", "During a session either of you can ask to swap.";
+    // The page of a paired phone (docs/ANDROID.md, F-NET-03): it is the phone that comes in.
+    PhoneControls => "Controla este computador", "Controls this computer";
+    PhoneNote => "É o celular que inicia a conexão: abra o Swapdesk nele para controlar este computador.", "The phone starts the connection: open Swapdesk on it to control this computer.";
     PermsPanelTitle => "O {0} pode, aqui", "What {0} can do here";
     PermsPanelEdit => "Editar", "Edit";
     PermsNone => "Nada liberado aqui.", "Nothing is allowed here.";

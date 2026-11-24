@@ -751,6 +751,21 @@ impl HostInner {
     pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
         let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
         let stored_grants = stored.grants_here;
+        // The device says its system over a connection its pinned key authenticated: the record follows it. That is
+        // how a phone whose `systems.bin` entry was lost stops reading as a computer, and how a new system version
+        // reaches the list. A write that fails changes nothing of this session.
+        if stored.os != hello.os || stored.os_version != hello.os_version {
+            let (os, version) = (hello.os, hello.os_version.clone());
+            let _ = self
+                .trust
+                .update_blocking(move |s| {
+                    if let Some(d) = s.devices.iter_mut().find(|d| d.device_id == device) {
+                        d.os = os;
+                        d.os_version = version;
+                    }
+                })
+                .await;
+        }
 
         // ACCOUNTS.md 5.1: another account at the console hosts nothing for this one. The code is ACCOUNT_AWAY; a peer
         // of 1.0 reads it as NOBODY_PRESENT (the send path maps it). Nobody at the console admits only an entry
@@ -1190,6 +1205,20 @@ mod tests {
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(f)
+    }
+
+    /// Minor 3 (docs/ANDROID.md, slice A0): what a device says of its system over a connection its pinned key
+    /// authenticated is what its record says from then on. A phone whose `systems.bin` entry was lost reads as a
+    /// computer only until its next session.
+    #[test]
+    fn the_record_follows_the_system_a_device_says_in_its_authenticated_hello() {
+        block_on(async {
+            let fx = fixture(PermissionSet::UNATTENDED | PermissionSet::CONTROL);
+            let said = Hello { os: Os::Android, os_version: "16".into(), ..hello(PermissionSet::CONTROL) };
+            let _ = Arc::clone(&fx.service.inner).decide(ctx_for(&fx), said, fx.device).await;
+            let stored = fx.trust.read(|s| s.find_by_id(&fx.device).map(|d| (d.os, d.os_version.clone())));
+            assert_eq!(stored, Some((Os::Android, "16".into())));
+        });
     }
 
     /// Finding 4: a revocation that lands between the decision and its commit used to be lost, because the session

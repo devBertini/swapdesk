@@ -73,7 +73,7 @@ impl fmt::Display for TxtError {
             Self::BadName => {
                 write!(f, "TXT name is empty, over {MAX_NAME_BYTES} bytes, not UTF-8 or has control characters")
             }
-            Self::BadOs => f.write_str("TXT os is neither windows nor macos"),
+            Self::BadOs => f.write_str("TXT os is none of windows, macos, android"),
             Self::BadFingerprint => f.write_str("TXT fp is not 32 lowercase hex characters"),
             Self::BadPairFlag => f.write_str("TXT pair is not 1"),
         }
@@ -86,6 +86,7 @@ pub fn os_str(os: Os) -> &'static str {
     match os {
         Os::Windows => "windows",
         Os::MacOs => "macos",
+        Os::Android => "android",
     }
 }
 
@@ -168,6 +169,8 @@ impl Txt {
         let os = match os.ok_or(TxtError::Missing(KEY_OS))? {
             b"windows" => Os::Windows,
             b"macos" => Os::MacOs,
+            // From minor 3; a build of 1.0 or 1.1 drops a record that says it (it never lists a phone).
+            b"android" => Os::Android,
             _ => return Err(TxtError::BadOs),
         };
         let fingerprint = parse_fingerprint(fp.ok_or(TxtError::Missing(KEY_FP))?).ok_or(TxtError::BadFingerprint)?;
@@ -190,6 +193,24 @@ mod tests {
 
     fn as_entries(v: &[(String, String)]) -> Vec<(&str, &[u8])> {
         v.iter().map(|(k, val)| (k.as_str(), val.as_bytes())).collect()
+    }
+
+    /// Minor 3 (docs/ANDROID.md, slice A0): a phone that hosts announces itself as `android`. A build of 1.0 or 1.1
+    /// refuses that record (`BadOs`) and so never lists a phone; a system nobody knows is still refused here.
+    #[test]
+    fn a_phone_announces_android_and_an_unknown_system_is_still_refused() {
+        assert_eq!(os_str(Os::Android), "android");
+        let t = Txt { os: Os::Android, name: "Celular da Ana".into(), ..sample() };
+        let enc = t.encode().unwrap();
+        assert!(enc.iter().any(|(k, v)| k == KEY_OS && v == "android"), "{enc:?}");
+        assert_eq!(Txt::decode(&as_entries(&enc)).unwrap(), t);
+        let mut other = enc.clone();
+        for (k, v) in &mut other {
+            if k == KEY_OS {
+                *v = "harmony".into();
+            }
+        }
+        assert_eq!(Txt::decode(&as_entries(&other)), Err(TxtError::BadOs));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::blocklist::{BLOCKED_NAME, BlockList, BlockedDevice};
 use crate::error::{Result, TrustError};
 use crate::ids::DeviceId;
 use crate::records::{TRUST_NAME, TrustStore};
+use crate::systems::{PeerSystems, SYSTEMS_NAME};
 
 /// Answers "is this key pinned?" for the verifiers and the gate, by looking at the store as it is now.
 pub trait PinLookup: Send + Sync {
@@ -126,10 +127,15 @@ impl TrustHandle {
     /// Loads `trust.bin`, or starts empty when there is none. A blob that does not decode is an error: the
     /// service must not silently replace a store it cannot read.
     pub fn open(secrets: Arc<dyn SecretStore>) -> Result<Arc<Self>> {
-        let store = match secrets.load(TRUST_NAME)? {
+        let mut store = match secrets.load(TRUST_NAME)? {
             Some(bytes) => TrustStore::decode(&bytes)?,
             None => TrustStore::default(),
         };
+        // The systems `trust.bin` cannot say (`crate::systems`). A file that cannot be read leaves such a device as a
+        // computer until it says its system again: refusing to start would cost every pairing.
+        if let Some(systems) = secrets.load(SYSTEMS_NAME).ok().flatten().and_then(|b| PeerSystems::decode(&b).ok()) {
+            systems.apply(&mut store);
+        }
         // A `blocked.bin` that cannot be read starts an empty list (the next block writes a good one): losing the
         // list costs a device's block, while refusing to start would cost every pairing and every session.
         let blocks =
@@ -158,8 +164,16 @@ impl TrustHandle {
         let _writing = guard(&self.writer);
         // Nobody else changes the store while `_writing` is held, so this copy is the current state.
         let mut next = guard(&self.store).clone();
+        let systems_before = PeerSystems::of(&next);
         let out = f(&mut next)?;
         let bytes = next.encode().map_err(TrustError::Codec)?;
+        // `systems.bin` first, and only when it changes: a store written without its entry would read a phone as a
+        // computer, while an entry without its device says nothing.
+        let systems = PeerSystems::of(&next);
+        if systems != systems_before {
+            let side = systems.encode().map_err(TrustError::Codec)?;
+            self.secrets.store(SYSTEMS_NAME, &side).map_err(TrustError::Secret)?;
+        }
         self.secrets.store(TRUST_NAME, &bytes).map_err(TrustError::Secret)?;
         *guard(&self.store) = next;
         Ok(out)
@@ -309,6 +323,68 @@ mod tests {
 
     fn dev(seed: u8) -> PairedDevice {
         PairedDevice::new_paired(spki_from_public_key(&[seed; 32]), "pc".into(), Os::MacOs, "15".into(), 1, None)
+    }
+
+    /// Minor 3 (docs/ANDROID.md, slice A0): a build of 1.0 or 1.1 reads `trust.bin` strictly and knows two systems.
+    /// A store that holds a phone is therefore, byte for byte, the store that build writes with a computer in the
+    /// phone's place; the phone's system is in `systems.bin`, which this build reads back and that one never opens.
+    #[test]
+    fn a_phone_is_written_so_that_a_build_of_before_still_loads_the_store() {
+        use crate::systems::{PeerSystems, SYSTEMS_NAME};
+        let phone = PairedDevice::new_paired(
+            spki_from_public_key(&[7; 32]),
+            "celular".into(),
+            Os::Android,
+            "15".into(),
+            1,
+            None,
+        );
+        let as_computer = PairedDevice { os: Os::Windows, ..phone.clone() };
+        let secrets = Arc::new(MemorySecretStore::new());
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        h.update(|s| s.devices.extend([dev(1), phone.clone()])).unwrap();
+
+        let on_disk = secrets.load(TRUST_NAME).unwrap().unwrap();
+        let older = TrustStore { devices: vec![dev(1), as_computer], ..TrustStore::default() };
+        assert_eq!(on_disk, older.encode().unwrap(), "trust.bin is what 1.1 writes for a computer in its place");
+        assert_eq!(TrustStore::decode(&on_disk).unwrap(), older, "and that build loads it, the phone as a computer");
+
+        // This build reads the phone back as a phone.
+        let again = TrustHandle::open(secrets.clone()).unwrap();
+        assert_eq!(again.read(|s| s.devices[1].os), Os::Android);
+        assert_eq!(again.snapshot(), h.snapshot());
+
+        // Forgetting the phone takes its entry with it.
+        let id = phone.device_id;
+        again.update(|s| s.devices.retain(|d| d.device_id != id)).unwrap();
+        let side = PeerSystems::decode(&secrets.load(SYSTEMS_NAME).unwrap().unwrap()).unwrap();
+        assert_eq!(side, PeerSystems::default());
+    }
+
+    /// The side file is lost, damaged or was never written: nothing fails, and the phone reads as a computer until
+    /// it says its system again. A store of computers alone never writes the file.
+    #[test]
+    fn without_its_side_file_a_phone_reads_as_a_computer_and_the_store_still_opens() {
+        use crate::systems::SYSTEMS_NAME;
+        let secrets = Arc::new(MemorySecretStore::new());
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        h.update(|s| s.devices.push(dev(1))).unwrap();
+        assert_eq!(secrets.load(SYSTEMS_NAME).unwrap(), None, "computers alone need no side file");
+        let phone = PairedDevice::new_paired(
+            spki_from_public_key(&[7; 32]),
+            "celular".into(),
+            Os::Android,
+            "15".into(),
+            1,
+            None,
+        );
+        h.update(|s| s.devices.push(phone)).unwrap();
+        secrets.store(SYSTEMS_NAME, &[9, 9, 9]).unwrap();
+        let damaged = TrustHandle::open(secrets.clone()).unwrap();
+        assert_eq!(damaged.read(|s| (s.devices.len(), s.devices[1].os)), (2, Os::Windows));
+        // The device saying its system again repairs the record and the file.
+        damaged.update(|s| s.devices[1].os = Os::Android).unwrap();
+        assert_eq!(TrustHandle::open(secrets).unwrap().read(|s| s.devices[1].os), Os::Android);
     }
 
     #[test]
