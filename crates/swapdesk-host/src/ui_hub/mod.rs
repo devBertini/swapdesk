@@ -214,6 +214,9 @@ pub(crate) struct Hub {
     /// desktop is no event the session watcher sees (F-UNAT-01).
     helper_desktop: Mutex<Desktop>,
     pub mode: Arc<PairingMode>,
+    /// Whether this device listens and announces at all ([`UiHub::set_listening`]). A computer always may; a phone
+    /// only while it hosts (docs/ANDROID.md 4).
+    listening: AtomicBool,
     pairing: pairing::PairState,
     incoming: Mutex<HashMap<u32, host_ui::Pending>>,
     next_id: AtomicU32,
@@ -354,7 +357,14 @@ impl Hub {
     /// Whether this account receives connections: while its pairing mode is open, or with a pairing and its
     /// "Receber conexões" on (ACCOUNTS.md 6 and 7.2). Its endpoint listens and its record is announced exactly then.
     pub fn wants_to_receive(&self) -> bool {
-        self.mode.is_open() || (lock(&self.settings).service_enabled && self.p.trust.read(|s| !s.devices.is_empty()))
+        self.listens()
+            && (self.mode.is_open()
+                || (lock(&self.settings).service_enabled && self.p.trust.read(|s| !s.devices.is_empty())))
+    }
+
+    /// Whether this device listens and announces at all (see [`UiHub::set_listening`]).
+    pub fn listens(&self) -> bool {
+        self.listening.load(Ordering::SeqCst)
     }
 
     /// Applies [`Hub::wants_to_receive`] to the core and the announcement. Called when the core is bound, after a
@@ -485,6 +495,7 @@ impl UiHub {
             desktop: Mutex::new(Desktop::Default),
             helper_desktop: Mutex::new(Desktop::Default),
             mode,
+            listening: AtomicBool::new(true),
             pairing: pairing::PairState::default(),
             incoming: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
@@ -590,6 +601,15 @@ impl UiHub {
     /// machine whose service owns the user's interface; without it no window is required.
     pub fn set_window_launcher(&self, launcher: WindowLauncher) {
         let _ = self.hub.window_launcher.set(launcher);
+    }
+
+    /// Whether this device may listen and announce at all: `false` for a device that only dials, as a phone that
+    /// does not host (docs/ANDROID.md 4). Then no session endpoint and no pairing endpoint is ever bound and nothing
+    /// is announced, with pairings and with its own pairing mode open (it pairs as the initiator); it still
+    /// browses. The default is `true`. Set before the core is bound, or at any time later.
+    pub fn set_listening(&self, on: bool) {
+        self.hub.listening.store(on, Ordering::SeqCst);
+        self.hub.update_receiving();
     }
 
     /// The session whose UI is the host's user (the console session); `None` when nobody is at the machine.

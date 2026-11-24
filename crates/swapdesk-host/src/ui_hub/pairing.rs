@@ -348,7 +348,8 @@ impl Hub {
                 return Err(ApiCode::Busy);
             }
             self.mode.enter(ModeOptions { expect, replaces: None });
-            if self.pairing.serving.load(Ordering::SeqCst) == 0 {
+            // A device that does not listen opens its mode to dial as the initiator, and no endpoint.
+            if self.listens() && self.pairing.serving.load(Ordering::SeqCst) == 0 {
                 match self.open_pair_endpoints(&ctx) {
                     Ok(endpoints) => s.endpoints = endpoints,
                     Err(code) => {
@@ -363,7 +364,7 @@ impl Hub {
             s.peer_name = None;
             id
         };
-        self.p.presence.set_pairing(true);
+        self.p.presence.set_pairing(self.listens());
         self.update_receiving();
         let me = Arc::clone(self);
         rt.spawn(async move { me.watch_pairing_mode(id).await });

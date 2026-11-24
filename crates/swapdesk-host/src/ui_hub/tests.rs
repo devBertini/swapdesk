@@ -150,6 +150,24 @@ impl Machine {
     }
 
     fn build_full(name: &str, interfaces: FakeNetInterfaces, dev: bool, ports: Option<(u16, u16)>, minor: u16) -> Self {
+        Self::build_as(name, interfaces, dev, ports, minor, false)
+    }
+
+    /// A phone that does not host (docs/ANDROID.md 4): an Android device that only dials. It accepts loopback peers,
+    /// as every test machine, and listens on nothing, the development addresses included.
+    fn phone(name: &str) -> Self {
+        Self::build_as(name, FakeNetInterfaces::new(Vec::new()), true, None, swapdesk_proto::PROTO_MINOR, true)
+    }
+
+    fn build_as(
+        name: &str,
+        interfaces: FakeNetInterfaces,
+        dev: bool,
+        ports: Option<(u16, u16)>,
+        minor: u16,
+        phone: bool,
+    ) -> Self {
+        let (os, os_version) = if phone { (Os::Android, "15") } else { (Os::Windows, "11 24H2") };
         let identity = Arc::new(Identity::generate(0).expect("identity"));
         let secrets = Arc::new(MemorySecretStore::new());
         let trust = TrustHandle::open(secrets.clone()).expect("trust");
@@ -162,8 +180,8 @@ impl Machine {
         let nets = Arc::clone(&interfaces);
         let clock = Arc::new(MonotonicClock::new());
         let hub = UiHub::new(HubParams {
-            os: Os::Windows,
-            os_version: "11 24H2".into(),
+            os,
+            os_version: os_version.into(),
             identity: Arc::clone(&identity),
             trust: Arc::clone(&trust),
             secrets: secrets.clone(),
@@ -187,11 +205,19 @@ impl Machine {
             ui: hub.host_ui(),
             interfaces,
         };
-        let mut cfg = ServiceConfig::new(name, Os::Windows, "11 24H2", deps);
+        let mut cfg = ServiceConfig::new(name, os, os_version, deps);
         let session_port = ports.map_or(0, |p| p.0);
         cfg.session_port = session_port;
         cfg.proto_minor = minor;
-        let cfg = if dev { cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port)) } else { cfg };
+        let cfg = if phone {
+            hub.set_listening(false);
+            cfg.allow_loopback_peers = true;
+            cfg
+        } else if dev {
+            cfg.dev_loopback(SocketAddrV4::new(Ipv4Addr::LOCALHOST, session_port))
+        } else {
+            cfg
+        };
         let core = Arc::new(ServiceCore::start(cfg).expect("core starts"));
         hub.bind_core(&core);
         // The UIs of `info()` run in session 1, the console's: what a connection may do (pair, grant, connect, swap)
@@ -855,6 +881,64 @@ fn two_machines_pair_through_their_hubs_and_both_trust_stores_hold_the_other() {
     drop((ua, ub));
     a.finish();
     b.finish();
+}
+
+/// docs/ANDROID.md 4 and F-NET-03: a phone that does not host pairs as the initiator and holds no listening socket
+/// before, during or after it (no session endpoint, no pairing endpoint) and announces nothing. The computer pins
+/// it as an Android device and keeps its system in `systems.bin`.
+#[test]
+fn a_phone_pairs_as_the_initiator_without_ever_listening_or_announcing() {
+    let phone = Machine::phone("celular");
+    let pc = Machine::new("sala");
+    let quiet = |when: &str| {
+        assert!(phone.core.local_addrs().is_empty(), "{when}: a session endpoint on {:?}", phone.core.local_addrs());
+        assert!(phone.hub.pair_local_addrs().is_empty(), "{when}: a pairing endpoint");
+        assert!(phone.presence.announced() != Some(true), "{when}: the phone is announced");
+        assert!(!phone.presence.pairing_announced(), "{when}: pair=1 is announced");
+    };
+    quiet("before");
+    let mut up = phone.client(info(false));
+    let mut uc = pc.client(info(false));
+    let ReplyBody::PairingId(id_c) = uc.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    let ReplyBody::PairingId(id_p) = up.call(UiOp::PairOpen { device_id: Some(pc.hex()) }).unwrap() else { panic!() };
+    quiet("with its pairing mode open");
+    phone.sees(&pc, true);
+    assert!(matches!(up.call(UiOp::PairStart { pairing_id: id_p, device_id: pc.hex() }).unwrap(), ReplyBody::Done));
+    let code = |ui: &mut Client, id| match ui.pairing(id, "ShowCode", |s| matches!(s, PairingState::ShowCode { .. })) {
+        PairingState::ShowCode { code, peer_name } => (code.0, peer_name),
+        _ => unreachable!(),
+    };
+    let (code_p, peer_p) = code(&mut up, id_p);
+    let (code_c, peer_c) = code(&mut uc, id_c);
+    assert_eq!(code_p, code_c);
+    assert_eq!((peer_p.as_str(), peer_c.as_str()), ("sala", "celular"));
+    quiet("during the ceremony");
+    assert!(up.call(UiOp::PairConfirm { pairing_id: id_p, matches: true }).is_ok());
+    assert!(uc.call(UiOp::PairConfirm { pairing_id: id_c, matches: true }).is_ok());
+    assert_eq!(
+        up.pairing(id_p, "Done", |s| matches!(s, PairingState::Done { .. })),
+        PairingState::Done { device_id: pc.hex() }
+    );
+    assert_eq!(
+        uc.pairing(id_c, "Done", |s| matches!(s, PairingState::Done { .. })),
+        PairingState::Done { device_id: phone.hex() }
+    );
+
+    // The computer's record says what the phone is, in the file a build before minor 3 never opens.
+    assert_eq!(pc.trust.read(|s| s.find_by_id(&phone.id()).map(|d| d.os)), Some(Os::Android));
+    let side = swapdesk_platform::SecretStore::load(&*pc.secrets, swapdesk_trust::SYSTEMS_NAME).unwrap();
+    let side = swapdesk_proto::Wire::decode(&side.expect("systems.bin is written"));
+    let side: swapdesk_trust::PeerSystems = side.unwrap();
+    assert_eq!(side.entries, vec![(phone.id(), Os::Android.tag())]);
+    assert_eq!(phone.trust.read(|s| s.find_by_id(&pc.id()).map(|d| d.os)), Some(Os::Windows));
+    // With a pairing and its mode closed, a phone still listens on nothing.
+    wait_for("the computer's pair=1 off again", || (!pc.presence.pairing_announced()).then_some(()));
+    std::thread::sleep(Duration::from_millis(300));
+    quiet("paired");
+
+    drop((up, uc));
+    phone.finish();
+    pc.finish();
 }
 
 #[test]
