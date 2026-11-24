@@ -61,6 +61,10 @@ pub enum DeviceTab {
     Overview,
     Permissions,
     History,
+    /// The conversation with the device that controls this computer now: offered on that device's page for as
+    /// long as its session is live (the banner's "Abrir chat" leads here; the controlling side has the session
+    /// window's own chat panel).
+    Chat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -592,6 +596,9 @@ pub enum Effect {
     /// Bring the session's window to the front, out of the taskbar or the Dock if it was minimized ("Voltar à
     /// sessão" on the page of the device the session is with).
     ShowViewer,
+    /// Bring the main window to the front, out of the notification area, the taskbar or the Dock (the banner's
+    /// "Abrir chat": the conversation is on the page of the device that controls this computer).
+    ShowMain,
 }
 
 /// What to restore when an optimistic change is refused.
@@ -931,8 +938,32 @@ impl UiState {
     pub fn nav(&self) -> Nav {
         if self.nav == Nav::Devices && self.selected_device().is_none() { Nav::Home } else { self.nav }
     }
+    /// The tab the device page shows. The conversation is there only while the selected device controls this
+    /// computer: once its session ended, or another device was picked, the page is back on its overview.
     pub fn tab(&self) -> DeviceTab {
-        self.tab
+        if self.tab == DeviceTab::Chat && !self.chat_tab_offered() { DeviceTab::Overview } else { self.tab }
+    }
+
+    /// Whether the selected device is the one that controls this computer now, whose page then has the
+    /// conversation with it.
+    pub fn chat_tab_offered(&self) -> bool {
+        match (self.selected_device(), self.host_session()) {
+            (Some(d), Some(h)) => d.id == h.device_id,
+            _ => false,
+        }
+    }
+
+    /// The session a chat message is said in: the one this computer controls another through, else the one it is
+    /// controlled in.
+    pub(crate) fn chat_session_id(&self) -> Option<u64> {
+        self.viewer_session().or_else(|| self.host_session()).map(|s| s.id)
+    }
+
+    /// Whether the conversation is on the screen for the person at this computer: the session window's chat panel,
+    /// or the page of the device that controls it.
+    fn chat_showing(&self) -> bool {
+        (self.drawer == Some(DrawerTab::Chat) && self.viewer_session().is_some())
+            || (self.nav == Nav::Devices && self.tab() == DeviceTab::Chat)
     }
     pub fn pairing(&self) -> Option<&PairingView> {
         self.pairing.as_ref()
@@ -1842,6 +1873,12 @@ impl UiState {
         }
         self.tab = tab;
         self.rename = None;
+        // The conversation shows everything now: the other computer is told what was read.
+        if self.tab() == DeviceTab::Chat
+            && let (Some(session_id), Some(up_to)) = (self.chat_session_id(), self.read_all_chat())
+        {
+            self.followups.push(Command::ChatMarkRead { session_id, up_to });
+        }
         Changed::MAIN
     }
 
@@ -2136,7 +2173,7 @@ impl UiState {
                 let theirs = !message.mine;
                 let id = message.msg_id;
                 // With the panel open the message is read as it arrives: the peer is told.
-                if theirs && self.drawer == Some(DrawerTab::Chat) && self.viewer_session().is_some() {
+                if theirs && self.chat_showing() {
                     message.read = true;
                     self.followups.push(Command::ChatMarkRead { session_id, up_to: id });
                 }

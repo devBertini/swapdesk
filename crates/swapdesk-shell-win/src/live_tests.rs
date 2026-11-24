@@ -831,11 +831,48 @@ mod banner {
 
     /// Where "Desconectar" is in the banner's client pixels (its centre), and its rectangle there.
     fn disconnect_button(state: &swapdesk_ui::UiState, scale: f32) -> ((i32, i32), (i32, i32, i32, i32)) {
+        banner_button(state, scale, ControlId::BannerDisconnect)
+    }
+
+    /// The middle and the box of one of the banner's buttons, in the banner's client pixels.
+    fn banner_button(state: &swapdesk_ui::UiState, scale: f32, id: ControlId) -> ((i32, i32), (i32, i32, i32, i32)) {
         let size = swapdesk_paint::banner_size_for(state);
         let shot = render(state, WindowKind::Banner, size, scale, &Interaction::default()).expect("render");
-        let w = shot.output.widgets.iter().find(|w| w.id == ControlId::BannerDisconnect).expect("Desconectar");
+        let w = shot.output.widgets.iter().find(|w| w.id == id).expect("the banner's button");
         let (x, y, bw, bh) = (w.rect.x * scale, w.rect.y * scale, w.rect.w * scale, w.rect.h * scale);
         (((x + bw / 2.0) as i32, (y + bh / 2.0) as i32), (x as i32, y as i32, bw as i32, bh as i32))
+    }
+
+    /// Owner, 22/11/2026 (review H2): the banner's "Abrir chat" did nothing on the controlled computer. A press on
+    /// it, told by the banner's hook as a person's click is, brings the main window back in front, where the
+    /// conversation with the controller is.
+    #[test]
+    fn the_banners_chat_button_brings_the_main_window_back() {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_MINIMIZE, ShowWindow};
+        let state = Scenario::Banner.prepared_state();
+        let (live, _backend) = start_recording(Scenario::Banner.prepared_state());
+        let banner = banner_window(&live);
+        let main = live.hwnd();
+        // SAFETY: plain Win32 calls on this program's own windows.
+        let scale = unsafe {
+            let _ = ShowWindow(main, SW_MINIMIZE);
+            GetDpiForWindow(banner) as f32 / 96.0
+        };
+        std::thread::sleep(Duration::from_millis(400));
+        // SAFETY: a plain query of our window.
+        assert!(unsafe { IsIconic(main) }.as_bool(), "the main window is out of the way");
+        let ((cx, cy), _) = banner_button(&state, scale, ControlId::BannerChat);
+        for kind in [POINTER_PRESS, POINTER_RELEASE] {
+            // SAFETY: posts to our window.
+            unsafe { PostMessageW(Some(banner), WM_BANNER_POINTER, WPARAM(kind), LPARAM(pack(cx, cy))) }.expect("post");
+        }
+        let started = Instant::now();
+        // SAFETY: a plain query of our window.
+        while unsafe { IsIconic(main) }.as_bool() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: a plain query of our window.
+        assert!(!unsafe { IsIconic(main) }.as_bool(), "\"Abrir chat\" brought the main window back");
     }
 
     fn close_to(pixel: u32, color: tokens::Color) -> bool {

@@ -463,6 +463,15 @@ impl Shared {
                     viewer.bring_forward();
                 }
             }
+            Some(Effect::ShowMain) => {
+                if let Some(h) = self.main_hwnd() {
+                    // SAFETY: our own window: shown again out of the notification area or the taskbar, in front.
+                    unsafe {
+                        let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
+                        let _ = SetForegroundWindow(h);
+                    }
+                }
+            }
             // The Mac's notices (Login Items, macOS permissions): no Windows service raises them, so nothing is done here.
             Some(Effect::OpenLoginItems) => {}
             Some(Effect::RequestOsPermissions) => {
@@ -815,7 +824,8 @@ pub(crate) fn handling(effect: &Effect) -> Handling {
         | Effect::RequestOsPermissions
         | Effect::OpenLocal
         | Effect::RevealLocal
-        | Effect::ShowViewer => Handling::Immediate,
+        | Effect::ShowViewer
+        | Effect::ShowMain => Handling::Immediate,
     }
 }
 
@@ -841,6 +851,7 @@ mod effect_tests {
             Effect::RevealLocal,
             Effect::SystemDrag,
             Effect::ShowViewer,
+            Effect::ShowMain,
         ];
         for e in &all {
             match e {
@@ -857,7 +868,8 @@ mod effect_tests {
                 | Effect::ContextMenu
                 | Effect::RevealLocal
                 | Effect::SystemDrag
-                | Effect::ShowViewer => {}
+                | Effect::ShowViewer
+                | Effect::ShowMain => {}
             }
         }
         all

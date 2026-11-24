@@ -131,6 +131,28 @@ fn every_scenario_paints_through_the_trait_and_places_every_control() {
     }
 }
 
+/// The conversation on the controller's page (owner, 22/11/2026): the tab, both sides' messages, the field and the
+/// button; and "Lida às" once, under this side's last read message. It was drawn under every message with that
+/// message's number, the other side's included, since each side numbers its own from 1.
+#[test]
+fn the_controllers_page_paints_the_conversation_and_says_read_once() {
+    use swapdesk_ui::{DeviceTab, EditId, WindowKind::Main};
+    let state = Scenario::ConversaAnfitriao.prepared_state();
+    assert_eq!(state.tab(), DeviceTab::Chat);
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let out = paint(Frame::new(&p, &state, &ix, design_size(Main), true), Main);
+    let drawn = p.drawn.borrow().clone();
+    for text in ["Conversa", "Vou instalar a atualização do Windows. Posso reiniciar?", "Pode, já salvei tudo."] {
+        assert!(drawn.iter().any(|d| d == text), "{text:?} is drawn: {drawn:?}");
+    }
+    let read = drawn.iter().filter(|d| d.starts_with("Lida às")).count();
+    assert_eq!(read, 1, "said once, under this side's message: {drawn:?}");
+    assert!(out.widgets.iter().any(|w| w.id == ControlId::ChatSend), "the button to send");
+    assert!(out.widgets.iter().any(|w| w.id == ControlId::Tab(DeviceTab::Chat)), "the tab");
+    assert!(out.edits.iter().any(|e| e.id == EditId::Chat), "the field to answer in");
+}
+
 #[test]
 fn the_banner_grows_by_one_line_when_it_has_a_files_line_and_draws_it_under_the_row() {
     use swapdesk_ui::WindowKind::Banner;

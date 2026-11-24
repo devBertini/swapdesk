@@ -657,7 +657,7 @@ fn drawer_terminal(f: &mut Frame, b: Rect, peer: &str) {
     }
 }
 
-fn drawer_chat(f: &mut Frame, b: Rect) {
+pub(crate) fn drawer_chat(f: &mut Frame, b: Rect) {
     let (p, pal) = (f.p, f.pal);
     let bw = p.hairline();
     let (x, w) = (b.x + 20.0, b.w - 40.0);
@@ -681,8 +681,10 @@ fn drawer_chat(f: &mut Frame, b: Rect) {
     p.draw(&note, x, y, pal.soft);
     y += note.h + 12.0;
     let msgs: Vec<_> = f.st.chat().to_vec();
-    let last_mine_read = msgs.iter().rev().find(|m| m.mine && m.read).map(|m| m.msg_id);
-    for m in &msgs {
+    // "Lida às" goes under the last message of this side that the other read, and under that one alone: each side
+    // numbers its own messages from 1 (and again after a link came back), so a number does not name a message.
+    let last_mine_read = msgs.iter().rposition(|m| m.mine && m.read);
+    for (i, m) in msgs.iter().enumerate() {
         let maxw = w * 0.8;
         let l = p.label_in(&m.text, text::BODY, maxw - 28.0, Align::Start);
         let bw_ = (l.w + 28.0).min(maxw);
@@ -697,7 +699,7 @@ fn drawer_chat(f: &mut Frame, b: Rect) {
             p.draw(&l, bx + 14.0, y + 10.0, pal.ink);
         }
         y += bh + 12.0;
-        if Some(m.msg_id) == last_mine_read {
+        if Some(i) == last_mine_read {
             let t = format::local_time(m.sent_at_ms, f.st.clock().utc_offset_min);
             let s = f.st.tm(&Msg::new(MsgKey::ChatReadAt).with(format!("{:02}:{:02}", t.hour, t.minute)));
             let rl = p.label(&s, text::SMALL);

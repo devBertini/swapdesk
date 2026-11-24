@@ -505,13 +505,9 @@ impl UiState {
             s.button(ControlId::PairWithDevice, self.tm(&Msg::new(MsgKey::PairTitleWith).with(d.name.clone())));
         }
         if d.paired {
-            for (tab, key) in [
-                (DeviceTab::Overview, MsgKey::TabOverview),
-                (DeviceTab::Permissions, MsgKey::TabPermissions),
-                (DeviceTab::History, MsgKey::TabHistory),
-            ] {
+            for (tab, key) in self.device_tabs() {
                 let c = s.add(ControlId::Tab(tab), UiRole::Tab, self.name_of(key));
-                c.selected = self.tab == tab;
+                c.selected = self.tab() == tab;
             }
         }
         let notices = self.notices();
@@ -528,7 +524,29 @@ impl UiState {
             s.text(UiRole::Text, self.name_of(MsgKey::PairNotPairedBody));
             return;
         }
-        match self.tab {
+        match self.tab() {
+            DeviceTab::Chat => {
+                // The conversation, oldest first, as in the session window's panel; the newest message of the
+                // other side is a polite live region.
+                let newest_in = self.chat.last().filter(|m| !m.mine).map(|m| m.msg_id);
+                for m in &self.chat {
+                    let line = if m.mine {
+                        self.tm(&Msg::new(MsgKey::ChatLineMine).with(m.text.clone()))
+                    } else {
+                        self.tm(&Msg::new(MsgKey::ChatLinePeer).with(d.name.clone()).with(m.text.clone()))
+                    };
+                    let live = newest_in == Some(m.msg_id);
+                    if live {
+                        s.region(Region::Status);
+                    }
+                    s.text(UiRole::Text, line);
+                    if live {
+                        s.region(Region::Content);
+                    }
+                }
+                s.add(ControlId::Edit(EditId::Chat), UiRole::TextInput, self.name_of(MsgKey::ChatLabel));
+                s.button(ControlId::ChatSend, self.name_of(MsgKey::ChatSendButton));
+            }
             DeviceTab::Overview => {
                 s.text(UiRole::Text, self.name_of(MsgKey::SwapNote));
                 s.heading(2, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
@@ -1524,6 +1542,20 @@ impl UiState {
         self.viewer_session().map(|s| s.id)
     }
 
+    /// The tabs of a paired device's page, in order: the conversation last, and only on the page of the device
+    /// that controls this computer now.
+    pub fn device_tabs(&self) -> Vec<(DeviceTab, MsgKey)> {
+        let mut tabs = vec![
+            (DeviceTab::Overview, MsgKey::TabOverview),
+            (DeviceTab::Permissions, MsgKey::TabPermissions),
+            (DeviceTab::History, MsgKey::TabHistory),
+        ];
+        if self.chat_tab_offered() {
+            tabs.push((DeviceTab::Chat, MsgKey::TabChat));
+        }
+        tabs
+    }
+
     /// The user activated a control (click, Enter, Space, or a screen reader's default action).
     pub fn activate(&mut self, id: ControlId) -> Activation {
         let mut a = Activation { changed: Changed::MAIN, ..Activation::default() };
@@ -1963,7 +1995,17 @@ impl UiState {
             | ControlId::ExpConflictApplyAll => {
                 self.explorer_activate(id, &mut a);
             }
-            ControlId::BannerChat => a.changed = Changed::NONE,
+            // The conversation is on the page of the device that controls this computer: the main window comes to
+            // the front on it (owner, 22/11/2026). Before, the button did nothing.
+            ControlId::BannerChat => match self.host_session().map(|h| h.device_id.clone()) {
+                Some(device) => {
+                    let _ = self.select_device(&device);
+                    let _ = self.select_tab(DeviceTab::Chat);
+                    a.effect = Some(Effect::ShowMain);
+                    a.changed = Changed::ALL;
+                }
+                None => a.changed = Changed::NONE,
+            },
             ControlId::ChatSend => {
                 a.effect = Some(Effect::SubmitEdit(EditId::Chat));
                 a.changed = Changed::NONE;
@@ -2029,7 +2071,7 @@ impl UiState {
     }
 
     /// Marks the other side's messages read; the highest id that was unread, when there was any.
-    fn read_all_chat(&mut self) -> Option<u32> {
+    pub(crate) fn read_all_chat(&mut self) -> Option<u32> {
         let mut top = None;
         for m in self.chat.iter_mut().filter(|m| !m.mine && !m.read) {
             m.read = true;
@@ -2316,7 +2358,7 @@ impl UiState {
             EditId::Chat => {
                 // Chat sends on Enter only, never on a timer (R-UI-4).
                 let text = text.trim().to_owned();
-                if let (false, Some(session_id)) = (text.is_empty(), self.session_id()) {
+                if let (false, Some(session_id)) = (text.is_empty(), self.chat_session_id()) {
                     a.commands.push(Command::ChatSend { session_id, text });
                 }
             }

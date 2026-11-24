@@ -734,6 +734,13 @@ fn devices_main(f: &mut Frame) {
         }
         DeviceTab::Permissions => permissions(f, &a, y, &d),
         DeviceTab::History => history(f, &a, y, &d),
+        DeviceTab::Chat => {
+            // The conversation with the device that controls this computer, in a panel that takes the rest of the
+            // page: the same messages, field and button as the session window's chat panel.
+            let r = Rect::new(a.x, y, a.cw, (f.h - y - 32.0).max(220.0));
+            f.panel(r, f.pal.surface);
+            crate::screens_viewer::drawer_chat(f, r);
+        }
     }
 }
 
@@ -771,11 +778,7 @@ fn tabs(f: &mut Frame, x: f32, y: f32, cw: f32) -> f32 {
     // The container's 1 px border sits under the tabs' -1 px margin.
     p.fill_rect(Rect::new(x, y + 39.0, cw, bw), pal.line);
     let mut tx = x;
-    for (tab, key) in [
-        (DeviceTab::Overview, MsgKey::TabOverview),
-        (DeviceTab::Permissions, MsgKey::TabPermissions),
-        (DeviceTab::History, MsgKey::TabHistory),
-    ] {
+    for (tab, key) in f.st.device_tabs() {
         let selected = f.st.tab() == tab;
         let id = ControlId::Tab(tab);
         let label = p.label(&f.t(key), if selected { text::TAB_SELECTED } else { text::TAB });

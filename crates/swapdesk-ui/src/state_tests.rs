@@ -1161,6 +1161,70 @@ fn chat_counts_unread_reads_them_when_the_panel_opens_and_keeps_each_sides_numbe
     );
 }
 
+/// Owner, 22/11/2026 (review H2): the banner's "Abrir chat" did nothing, so the person at a controlled computer
+/// could neither read nor answer the chat. It opens the main window on the conversation with the controller.
+#[test]
+fn the_banners_chat_button_opens_the_main_window_on_the_conversation_with_the_controller() {
+    let mut h = Scenario::Banner.prepared_state();
+    let controller = h.host_session().unwrap().device_id.clone();
+    let has_chat_tab =
+        |s: &UiState| s.controls(WindowKind::Main).iter().any(|c| c.id == ControlId::Tab(DeviceTab::Chat));
+    h.apply(UiEvent::Chat {
+        session_id: 2,
+        message: ChatView { msg_id: 1, mine: false, text: "posso reiniciar?".into(), sent_at_ms: 1, read: false },
+    });
+    assert_eq!(h.chat_unread(), 1);
+    let _ = h.take_followups();
+
+    let a = h.activate(ControlId::BannerChat);
+    assert_eq!(a.effect, Some(Effect::ShowMain), "the main window comes to the front");
+    assert_eq!(h.selected_device().map(|d| d.id.clone()), Some(controller.clone()), "on the controller's page");
+    assert_eq!(h.tab(), DeviceTab::Chat, "in its conversation");
+    assert!(has_chat_tab(&h));
+    assert_eq!(h.chat_unread(), 0, "what is on the screen is read");
+    assert_eq!(
+        h.take_followups(),
+        vec![Command::ChatMarkRead { session_id: 2, up_to: 1 }],
+        "and the controller is told"
+    );
+    let page = h.controls(WindowKind::Main);
+    assert!(page.iter().any(|c| c.id == ControlId::Edit(EditId::Chat)), "with the field to answer");
+    assert!(page.iter().any(|c| c.id == ControlId::ChatSend));
+
+    // The answer goes through the session this computer is controlled in.
+    let sent = h.submit_edit(EditId::Chat, " pode ".into());
+    assert_eq!(sent.commands, vec![Command::ChatSend { session_id: 2, text: "pode".into() }]);
+
+    // A message that arrives while the conversation is open is read as it arrives.
+    h.apply(UiEvent::Chat {
+        session_id: 2,
+        message: ChatView { msg_id: 2, mine: false, text: "ok".into(), sent_at_ms: 2, read: false },
+    });
+    assert_eq!(h.chat_unread(), 0);
+    assert_eq!(h.take_followups(), vec![Command::ChatMarkRead { session_id: 2, up_to: 2 }]);
+
+    // The conversation belongs to the session: once it ends the page is back on its overview, without the tab.
+    h.apply(UiEvent::Session { session_id: 2, device_id: controller, state: SessionState::Ended { reason: None } });
+    assert_eq!(h.tab(), DeviceTab::Overview);
+    assert!(!has_chat_tab(&h));
+}
+
+/// The conversation is offered only on the page of the device that controls this computer now.
+#[test]
+fn only_the_controllers_page_has_the_conversation() {
+    let mut h = Scenario::Banner.prepared_state();
+    let controller = h.host_session().unwrap().device_id.clone();
+    let other = h.devices().iter().find(|d| d.paired && d.id != controller).map(|d| d.id.clone()).expect("another");
+    let _ = h.activate(ControlId::BannerChat);
+    assert_eq!(h.tab(), DeviceTab::Chat);
+    let _ = h.select_device(&other);
+    assert_eq!(h.tab(), DeviceTab::Overview);
+    assert!(!h.device_tabs().iter().any(|(t, _)| *t == DeviceTab::Chat), "another device's page has no conversation");
+    // Without a session at all the banner's button has nothing to open.
+    let mut idle = base();
+    assert_eq!(idle.activate(ControlId::BannerChat).effect, None);
+}
+
 #[test]
 fn an_asleep_device_offers_acordar_and_the_waking_entry_runs_to_its_end() {
     let mut s = base();

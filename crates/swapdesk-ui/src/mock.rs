@@ -221,6 +221,7 @@ pub enum Scenario {
     InicioEscuro,
     /// The home page with the notice of a Public network: with no device page open the home is where it shows.
     InicioRedePublica,
+    ConversaAnfitriao,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -331,10 +332,11 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 69] = [
+    pub const ALL: [Scenario; 70] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::InicioRedePublica,
+        Scenario::ConversaAnfitriao,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -409,6 +411,7 @@ impl Scenario {
             Scenario::Inicio => "inicio",
             Scenario::InicioEscuro => "inicio-escuro",
             Scenario::InicioRedePublica => "inicio-rede-publica",
+            Scenario::ConversaAnfitriao => "conversa-anfitriao",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -488,6 +491,9 @@ impl Scenario {
             Scenario::Inicio => "new: Início, the home screen (D35)",
             Scenario::InicioEscuro => "new: Início escuro (D35)",
             Scenario::InicioRedePublica => "new: Início with the notice of a Public network (review of 22/11/2026, H6)",
+            Scenario::ConversaAnfitriao => {
+                "new: the conversation with the controller on its page, opened by the banner's chat button (owner, 22/11/2026)"
+            }
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
             Scenario::Permissoes => "3. Permissões por direção",
@@ -1059,6 +1065,32 @@ impl Scenario {
             ],
             // The banner offers "Inverter" only toward a machine of this OS (Windows here): the Desktop.
             Scenario::Banner => vec![Event(Self::host_session_to(DESKTOP))],
+            // The controlled computer's side of a chat: the banner's button brought the main window here.
+            Scenario::ConversaAnfitriao => vec![
+                Event(Self::host_session_to(MAC)),
+                Event(UiEvent::Chat {
+                    session_id: 2,
+                    message: ChatView {
+                        msg_id: 1,
+                        mine: false,
+                        text: "Vou instalar a atualização do Windows. Posso reiniciar?".into(),
+                        sent_at_ms: at(15, 23, 0),
+                        read: false,
+                    },
+                }),
+                Activate(ControlId::BannerChat),
+                Event(UiEvent::Chat {
+                    session_id: 2,
+                    message: ChatView {
+                        msg_id: 1,
+                        mine: true,
+                        text: "Pode, já salvei tudo.".into(),
+                        sent_at_ms: at(15, 24, 0),
+                        read: false,
+                    },
+                }),
+                Event(UiEvent::ChatRead { session_id: 2, up_to: 1 }),
+            ],
             // Swap is offered only toward a machine of this OS (this mock machine is Windows): the Desktop.
             Scenario::Inverter => {
                 vec![Select(DESKTOP), Event(Self::viewer_session_to(DESKTOP, 12)), Activate(ControlId::TbSwap)]
@@ -1725,6 +1757,7 @@ mod tests {
             (Scenario::Inicio, Screen::Home, &[Main]),
             (Scenario::InicioEscuro, Screen::Home, &[Main]),
             (Scenario::InicioRedePublica, Screen::Home, &[Main]),
+            (Scenario::ConversaAnfitriao, Screen::Devices, &[Main, Banner]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),

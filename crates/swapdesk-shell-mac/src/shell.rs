@@ -925,6 +925,7 @@ impl Shell {
                     crate::drag_out::begin(&canvas, out, self.mtm);
                 }
             }
+            Handling::ShowMain => self.show_main(),
             Handling::ShowViewer => {
                 if let Some(v) = self.viewer.borrow().as_ref() {
                     if v.window.isMiniaturized() {

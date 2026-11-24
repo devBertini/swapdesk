@@ -38,6 +38,8 @@ pub enum Handling {
     SystemDrag,
     /// The session's window comes to the front, out of the Dock when it was minimized.
     ShowViewer,
+    /// The main window, in front.
+    ShowMain,
 }
 
 impl Handling {
@@ -56,7 +58,8 @@ impl Handling {
             | Handling::OpenLocalFile
             | Handling::RevealInFinder
             | Handling::SystemDrag
-            | Handling::ShowViewer => false,
+            | Handling::ShowViewer
+            | Handling::ShowMain => false,
         }
     }
 }
@@ -78,6 +81,7 @@ pub fn handling(effect: Effect) -> Handling {
         Effect::RevealLocal => Handling::RevealInFinder,
         Effect::SystemDrag => Handling::SystemDrag,
         Effect::ShowViewer => Handling::ShowViewer,
+        Effect::ShowMain => Handling::ShowMain,
     }
 }
 

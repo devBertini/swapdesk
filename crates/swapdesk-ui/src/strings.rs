@@ -78,6 +78,7 @@ strings! {
     TabOverview => "Visão geral", "Overview";
     TabPermissions => "Permissões", "Permissions";
     TabHistory => "Histórico", "History";
+    TabChat => "Conversa", "Chat";
 
     // Overview
     SectionWhoControls => "Quem controla quem", "Who controls whom";

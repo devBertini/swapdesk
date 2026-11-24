@@ -139,6 +139,7 @@ fn every_effect() -> Vec<Effect> {
         Effect::RevealLocal,
         Effect::SystemDrag,
         Effect::ShowViewer,
+        Effect::ShowMain,
     ];
     for e in &all {
         match e {
@@ -155,7 +156,8 @@ fn every_effect() -> Vec<Effect> {
             | Effect::ContextMenu
             | Effect::RevealLocal
             | Effect::SystemDrag
-            | Effect::ShowViewer => {}
+            | Effect::ShowViewer
+            | Effect::ShowMain => {}
         }
     }
     all
