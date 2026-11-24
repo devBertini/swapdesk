@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Platform crate (`*-android`): it holds the NDK's multinetwork calls. The workspace lints are repeated here without
+# Platform crate (`*-android`): it holds the NDK's multinetwork calls and the system log's. The workspace lints are repeated here without
 # `unsafe_code = "forbid"`.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -18,5 +18,7 @@ todo = "warn"
 unimplemented = "warn"
 
 [dependencies]
+# The sealed secret store: AES-256-GCM and the system's random bytes.
+ring.workspace = true
 swapdesk-lan = { path = "../swapdesk-lan" }
 swapdesk-platform = { path = "../swapdesk-platform" }
