@@ -105,6 +105,9 @@ fn every_main_scenario_renders_at_a_phones_size() {
     for (name, state) in [
         ("celular-precisa-atualizar", swapdesk_ui::mock::phone_needs_update_state()),
         ("celular-pareamento-precisa-atualizar", swapdesk_ui::mock::phone_pairing_needs_update_state()),
+        ("celular-sem-bloqueio-de-tela", swapdesk_ui::mock::phone_screen_lock_state()),
+        ("celular-dados-nao-abrem", swapdesk_ui::mock::phone_stopped_state(swapdesk_ui::Stopped::DataUnreadable)),
+        ("celular-nao-iniciou", swapdesk_ui::mock::phone_stopped_state(swapdesk_ui::Stopped::NotStarted)),
     ] {
         let r = render(&state, WindowKind::Main, phone, 2.0, &ix).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(r.distinct_colors() > 3, "{name} looks blank");

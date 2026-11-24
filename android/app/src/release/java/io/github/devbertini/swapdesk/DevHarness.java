@@ -14,6 +14,10 @@ final class DevHarness {
         return "";
     }
 
+    static boolean secure(Activity activity, boolean real) {
+        return real;
+    }
+
     static void run(Activity activity, TextView status) {}
 
     static PaintView screen(Activity activity) {

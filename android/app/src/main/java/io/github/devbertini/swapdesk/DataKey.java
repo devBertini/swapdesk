@@ -2,6 +2,7 @@ package io.github.devbertini.swapdesk;
 
 import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
 
 import java.io.File;
@@ -13,6 +14,7 @@ import java.security.KeyStore;
 import java.security.SecureRandom;
 import java.util.Arrays;
 
+import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -29,26 +31,66 @@ final class DataKey {
     private static final String TRANSFORMATION = "AES/GCM/NoPadding";
     private static final int IV_LENGTH = 12;
     private static final int KEY_LENGTH = 32;
+    /** A key store that did not answer is asked again, this many times in all, a little later each time. */
+    private static final int ATTEMPTS = 3;
+    private static final long PAUSE_MS = 250;
 
     private DataKey() {}
 
     /**
+     * What the app sealed on this phone cannot be opened again, and waiting or asking again changes nothing: the
+     * Keystore no longer holds the key that wrapped the data key, that key was invalidated for good, or the wrapped
+     * file is not what this phone's key wrapped. Nothing replaces the files silently; the screen says so.
+     */
+    static final class Unreadable extends Exception {
+        Unreadable(String why) {
+            super(why);
+        }
+    }
+
+    /**
      * The data key: unwrapped from the private folder of the app, or made and wrapped at the first start. Throws
-     * when the Keystore no longer opens what it wrapped (its key was lost): the sealed files are then unreadable,
-     * and nothing here replaces them silently.
+     * {@link Unreadable} only for what is final; any other failure (a key store that did not answer) is tried
+     * again a few times, and thrown as what it was when it stays.
      */
     static byte[] load(Context context) throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+                Thread.sleep(PAUSE_MS * attempt);
+            }
+            try {
+                return loadOnce(context);
+            } catch (Unreadable e) {
+                throw e;
+            } catch (Exception e) {
+                last = e;
+            }
+        }
+        throw last;
+    }
+
+    private static byte[] loadOnce(Context context) throws Exception {
         File file = new File(context.getFilesDir(), FILE);
         if (file.exists()) {
             byte[] wrapped = Files.readAllBytes(file.toPath());
             if (wrapped.length <= IV_LENGTH) {
-                throw new GeneralSecurityException("the wrapped data key is too short");
+                throw new Unreadable("the wrapped data key is too short");
             }
-            Cipher cipher = Cipher.getInstance(TRANSFORMATION);
-            cipher.init(Cipher.DECRYPT_MODE, wrappingKey(false), new GCMParameterSpec(128, wrapped, 0, IV_LENGTH));
-            byte[] key = cipher.doFinal(wrapped, IV_LENGTH, wrapped.length - IV_LENGTH);
+            SecretKey wrapping = wrappingKey(false);
+            byte[] key;
+            try {
+                Cipher cipher = Cipher.getInstance(TRANSFORMATION);
+                cipher.init(Cipher.DECRYPT_MODE, wrapping, new GCMParameterSpec(128, wrapped, 0, IV_LENGTH));
+                key = cipher.doFinal(wrapped, IV_LENGTH, wrapped.length - IV_LENGTH);
+            } catch (KeyPermanentlyInvalidatedException e) {
+                throw new Unreadable("the Keystore's key was invalidated for good");
+            } catch (BadPaddingException e) {
+                // The authentication tag does not match: this phone's key did not wrap this file, or it changed.
+                throw new Unreadable("the wrapped data key does not open with this phone's key");
+            }
             if (key.length != KEY_LENGTH) {
-                throw new GeneralSecurityException("the data key has another length");
+                throw new Unreadable("the data key has another length");
             }
             return key;
         }
@@ -78,7 +120,7 @@ final class DataKey {
             return key;
         }
         if (!create) {
-            throw new GeneralSecurityException("the Keystore no longer holds the key that wrapped the data key");
+            throw new Unreadable("the Keystore no longer holds the key that wrapped the data key");
         }
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         generator.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)

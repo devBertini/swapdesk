@@ -111,6 +111,36 @@ pub enum NoticeKind {
     /// A phone that Android does not let reach the local network ([`LocalNetwork`]): nothing else works until it
     /// does, so it comes before every other notice.
     LocalNetwork,
+    /// A phone without a secure screen lock: it enters no pairing. Not a card of a page: the text and the button
+    /// of the pairing dialog that says so.
+    ScreenLock,
+    /// [`Stopped::DataUnreadable`]: the one card of the stopped screen.
+    DataUnreadable,
+    /// [`Stopped::NotStarted`]: the one card of the stopped screen.
+    NotStarted,
+}
+
+/// Why the app shows one card and nothing else ([`Screen::Stopped`]): a phone whose core did not start, so there is
+/// no service behind the screens. The shell that could not start it says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// What the app stored on this device does not open, and waiting or starting again changes nothing: the card
+    /// says what clearing the app's data costs and leads to the system's page where that is done. Nothing is
+    /// erased by the app.
+    DataUnreadable,
+    /// The core did not start this time, and nothing says it will not the next: no button, the shell tries again
+    /// when the person comes back.
+    NotStarted,
+}
+
+impl Stopped {
+    /// The notice whose texts and button are this state's card.
+    pub fn notice(self) -> NoticeKind {
+        match self {
+            Self::DataUnreadable => NoticeKind::DataUnreadable,
+            Self::NotStarted => NoticeKind::NotStarted,
+        }
+    }
 }
 
 /// What Android says about the local network, which from Android 17 is a permission the person grants
@@ -211,6 +241,8 @@ pub const SWAP_WAIT_S: u16 = 22;
 /// The body of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// One card alone ([`Stopped`]): nothing of the app is behind it.
+    Stopped,
     Home,
     Devices,
     Activity,
@@ -762,6 +794,11 @@ pub struct UiState {
     pub(crate) crash_notice: bool,
     /// A phone's local network permission ([`UiState::set_local_network`]).
     pub(crate) local_network: LocalNetwork,
+    /// Whether this phone has a secure screen lock ([`UiState::set_device_secure`]); a computer's state never
+    /// reads it.
+    pub(crate) device_secure: bool,
+    /// The core did not start ([`UiState::set_stopped`]).
+    pub(crate) stopped: Option<Stopped>,
     /// Seconds the device list has been answered and empty (F20): the "no computer found" card shows at 10.
     pub(crate) empty_s: u16,
     /// The machine's updater (UPDATES.md 10); `None` while unknown or when the service has none (a development
@@ -813,9 +850,13 @@ pub const MAC_SCREEN_RECORDING_SETTINGS: &str =
 /// its permissions are: not an address, a name the phone's shell knows.
 pub const ANDROID_APP_SETTINGS: &str = "android-settings:this-app";
 
+/// Android's security settings (`Settings.ACTION_SECURITY_SETTINGS`), where a screen lock is set.
+pub const ANDROID_SECURITY_SETTINGS: &str = "android-settings:security";
+
 /// The system pages [`Effect::OpenWebPage`] may open besides an `https://` page. Nothing else is handed to the system.
 pub const SYSTEM_PAGES: &[&str] = &[
     ANDROID_APP_SETTINGS,
+    ANDROID_SECURITY_SETTINGS,
     WINDOWS_NETWORK_SETTINGS,
     MAC_FILES_AND_FOLDERS_SETTINGS,
     MAC_ACCESSIBILITY_SETTINGS,
@@ -920,6 +961,8 @@ impl UiState {
             swap_left_s: 0,
             crash_notice: false,
             local_network: LocalNetwork::Allowed,
+            device_secure: true,
+            stopped: None,
             update: None,
             update_confirm: false,
             update_rate: 0,
@@ -1602,6 +1645,9 @@ impl UiState {
 
     /// The body of the main window.
     pub fn screen(&self) -> Screen {
+        if self.stopped.is_some() {
+            return Screen::Stopped;
+        }
         if self.pairing.is_some() {
             return Screen::Pairing;
         }
@@ -1615,6 +1661,10 @@ impl UiState {
 
     /// Which notices to show in place of the selected device's content.
     pub fn notices(&self) -> Vec<NoticeKind> {
+        // A stopped app says one thing.
+        if let Some(stopped) = self.stopped {
+            return vec![stopped.notice()];
+        }
         // Without the local network a phone reaches nothing: its notice stands first, also before the crash's.
         let local = (self.local_network != LocalNetwork::Allowed).then_some(NoticeKind::LocalNetwork);
         let crash = local.into_iter().chain(self.crash_notice.then_some(NoticeKind::Crash));
@@ -1646,6 +1696,27 @@ impl UiState {
 
     pub fn local_network(&self) -> LocalNetwork {
         self.local_network
+    }
+
+    /// Whether Android says the phone has a secure screen lock (a PIN, a pattern or a password); the phone's
+    /// shell says it at the start and whenever the person comes back to the app. Without one "Parear" starts no
+    /// pairing: its dialog says what to set (docs/ANDROID.md 5).
+    pub fn set_device_secure(&mut self, secure: bool) -> Changed {
+        self.device_secure = secure;
+        Changed::NONE
+    }
+
+    pub fn device_secure(&self) -> bool {
+        self.device_secure
+    }
+
+    /// The core did not start, and why ([`Stopped`]): the main window shows that card alone. `None` takes it away.
+    pub fn set_stopped(&mut self, stopped: Option<Stopped>) -> Changed {
+        if std::mem::replace(&mut self.stopped, stopped) == stopped { Changed::NONE } else { Changed::ALL }
+    }
+
+    pub fn stopped(&self) -> Option<Stopped> {
+        self.stopped
     }
 
     pub fn show_crash_notice(&mut self) {
@@ -3033,6 +3104,7 @@ impl UiState {
             ApiCode::Internal => MsgKey::ErrInternal,
             ApiCode::NoSpace => MsgKey::TransferNoSpace,
             ApiCode::NeedsUpdate => MsgKey::ErrNeedsUpdate,
+            ApiCode::NeedsScreenLock => MsgKey::ErrNeedsScreenLock,
         };
         match &error.detail {
             // These say everything themselves: the generic line before them would read as a second problem.

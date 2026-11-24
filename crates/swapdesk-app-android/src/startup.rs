@@ -15,9 +15,9 @@ use swapdesk_sys_android::logcat::Logcat;
 use swapdesk_sys_android::network;
 use swapdesk_sys_android::sealed::{KEY_LEN, SealedStore};
 use swapdesk_ui::prefs::FilePrefs;
-use swapdesk_ui::{Language, LocalNetwork, UiState};
+use swapdesk_ui::{Language, LocalNetwork, Stopped, UiState};
 
-use crate::phone_service::{PhoneParams, PhoneService};
+use crate::phone_service::{PhoneParams, PhoneService, StartError};
 
 /// The trace of the app: the file in its private folder, and the system log for a development build to follow.
 struct Tee(FileTrace, Logcat);
@@ -92,7 +92,7 @@ fn after_bind(dev: &Dev) -> AfterBind {
 
 /// `Core.start`: opens the sealed store with `key` in `<dir>/secrets`, the trace in `dir`, and starts the service.
 /// A second call starts nothing.
-pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> Result<String, String> {
+pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> Result<String, StartError> {
     let mut app = app();
     if app.is_some() {
         return Ok("the core is already running".into());
@@ -107,7 +107,7 @@ pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> 
     let file = FileTrace::open(&dir, "trace.log", Level::Debug, DEFAULT_CAP).map_err(|e| format!("the trace: {e}"))?;
     let trace: Arc<dyn TraceSink> = Arc::new(Tee(file, Logcat { max_level: Level::Info }));
     if !set_after_bind(after_bind(&dev)) {
-        return Err("the socket step was already installed".into());
+        return Err(StartError::Failed("the socket step was already installed".into()));
     }
     let service = PhoneService::start(
         PhoneParams {
@@ -140,12 +140,34 @@ pub fn show_live(language: &str, dark: bool) -> Result<String, String> {
         // A new activity of the same process: the screen goes on from where it was.
         return Ok("shown again".into());
     }
-    let language = if language.to_ascii_lowercase().starts_with("pt") { Language::PtBr } else { Language::En };
-    let mut state = UiState::new(language, dark);
+    let mut state = UiState::new(language_of(language), dark);
     state.set_phone(true);
+    let _ = state.set_device_secure(app.service.device_secure());
     state.load_prefs(Box::new(FilePrefs::in_dir(&app.dir)));
     crate::phone_screen::show(state, app.service.backend(), true);
     Ok("shown".into())
+}
+
+/// The language a first start begins with: Portuguese of Brazil for a phone set to Portuguese, else English.
+fn language_of(tag: &str) -> Language {
+    if tag.to_ascii_lowercase().starts_with("pt") { Language::PtBr } else { Language::En }
+}
+
+/// `Shell.showStopped`: the core did not start, so there is no service to show. The screen is one card that says
+/// so (`Stopped`): `unreadable` when what the app stored does not open and never will, else that it did not start
+/// this time. Nothing is erased here or anywhere in the app.
+pub fn show_stopped(language: &str, dark: bool, unreadable: bool) {
+    let stopped = if unreadable { Stopped::DataUnreadable } else { Stopped::NotStarted };
+    crate::phone_screen::show_stopped(language_of(language), dark, stopped);
+}
+
+/// `Core.screenLock`: whether the phone has a secure screen lock now. The service enters no pairing without one,
+/// and the screens say what to set when "Parear" is tapped.
+pub fn screen_lock(secure: bool) {
+    if let Some(app) = app().as_ref() {
+        app.service.set_device_secure(secure);
+    }
+    crate::phone_screen::with_shell(|shell| shell.set_device_secure(secure));
 }
 
 /// `Shell.localNetwork`: what Android says about the local network now: 0 allowed (or a system that does not ask),

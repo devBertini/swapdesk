@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use swapdesk_android::phone_service::{PhoneParams, PhoneService};
+use swapdesk_android::phone_service::{PhoneParams, PhoneService, StartError};
 use swapdesk_crossdrive::Pump;
 use swapdesk_fakes::{FakeNetInterfaces, LogCapture, MemorySecretStore, MonotonicClock};
 use swapdesk_host::pipe::duplex;
@@ -172,6 +172,12 @@ fn the_phone_pairs_with_a_computer_by_address_and_never_listens() {
     else {
         panic!("a device")
     };
+    // docs/ANDROID.md 5 (a lost phone): until Android said the phone has a secure screen lock, the service enters
+    // no pairing, whoever asks.
+    let refused = pp.ask(Command::PairOpen { device_id: None }, T).expect_err("no screen lock is known yet");
+    assert!(refused.contains("NeedsScreenLock"), "{refused}");
+    assert!(!phone_service.device_secure());
+    phone_service.set_device_secure(true);
     let Reply::PairingId(on_phone) = pp.ask(Command::PairOpen { device_id: None }, T).expect("phone open") else {
         panic!("a pairing id")
     };
@@ -230,4 +236,52 @@ fn the_phone_pairs_with_a_computer_by_address_and_never_listens() {
     drop(again);
     drop(cp);
     computer.shutdown();
+}
+
+/// A secret store that answers every read with an error of the system (a key store that did not answer).
+struct Unanswering;
+
+impl SecretStore for Unanswering {
+    fn load(&self, _: &str) -> swapdesk_platform::Result<Option<Vec<u8>>> {
+        Err(swapdesk_platform::PlatformError {
+            kind: swapdesk_platform::ErrorKind::Os,
+            op: "load",
+            os_code: None,
+            detail: "the store did not answer".into(),
+        })
+    }
+    fn store(&self, _: &str, _: &[u8]) -> swapdesk_platform::Result<()> {
+        Ok(())
+    }
+    fn delete(&self, _: &str) -> swapdesk_platform::Result<()> {
+        Ok(())
+    }
+}
+
+/// What the app stored and cannot read again stops the start as unreadable (the screen then says what the way out
+/// costs, and the app erases nothing); a store that did not answer is a start that failed this time, and nothing
+/// says the next one will.
+#[test]
+fn a_stored_record_that_does_not_read_stops_the_start_as_unreadable() {
+    let params = |folder: &Folder, secrets: Arc<dyn SecretStore>| PhoneParams {
+        default_name: "celular".into(),
+        os_version: "16".into(),
+        secrets,
+        dir: folder.0.clone(),
+        interfaces: Arc::new(FakeNetInterfaces::new(Vec::new())),
+        clock: Arc::new(MonotonicClock::new()),
+        trace: Arc::new(LogCapture::new()),
+        discovery: false,
+        dev_loopback: true,
+    };
+    let folder = Folder::new("unreadable");
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.store("identity.bin", &[7, 7, 7]).expect("a record that is no device key");
+    let stopped = PhoneService::start(params(&folder, secrets.clone()), Arc::new(NoWake), None).err();
+    assert!(matches!(stopped, Some(StartError::Unreadable(_))), "{stopped:?}");
+    assert_eq!(secrets.load("identity.bin").unwrap().as_deref(), Some(&[7u8, 7, 7][..]), "nothing was replaced");
+
+    let folder = Folder::new("unanswering");
+    let stopped = PhoneService::start(params(&folder, Arc::new(Unanswering)), Arc::new(NoWake), None).err();
+    assert!(matches!(stopped, Some(StartError::Failed(_))), "{stopped:?}");
 }

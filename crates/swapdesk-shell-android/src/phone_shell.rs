@@ -35,6 +35,8 @@ pub enum Ask {
     OpenPage(String),
     /// Open this app's page in the system's settings, where its permissions are.
     OpenAppSettings,
+    /// Open the system's security settings, where a screen lock is set.
+    OpenSecuritySettings,
     /// Something the phone does not do yet, for the app's log.
     Note(String),
 }
@@ -47,6 +49,7 @@ pub mod ask {
     pub const OPEN_PAGE: u8 = 4;
     pub const NOTE: u8 = 5;
     pub const OPEN_APP_SETTINGS: u8 = 6;
+    pub const OPEN_SECURITY_SETTINGS: u8 = 7;
     /// No choice of a menu is marked.
     pub const NONE_SELECTED: u16 = u16::MAX;
 }
@@ -355,6 +358,12 @@ impl PhoneShell {
         self.state.set_clock(swapdesk_ui::format::Clock { now_ms, utc_offset_min });
     }
 
+    /// Whether Android says the phone has a secure screen lock (`UiState::set_device_secure`).
+    pub fn set_device_secure(&mut self, secure: bool) {
+        let changed = self.state.set_device_secure(secure);
+        self.note_change(changed);
+    }
+
     /// What Android says about the local network now (`UiState::set_local_network`).
     pub fn set_local_network(&mut self, now: swapdesk_ui::LocalNetwork) {
         let changed = self.state.set_local_network(now);
@@ -427,6 +436,9 @@ impl PhoneShell {
             Handling::Submit(edit) => self.asks.push(Ask::SubmitEdit { edit, clear: edit == EditId::Chat }),
             Handling::OpenWebPage => match self.state.take_web_page().filter(|p| openable_page(p)) {
                 Some(page) if page == swapdesk_ui::state::ANDROID_APP_SETTINGS => self.asks.push(Ask::OpenAppSettings),
+                Some(page) if page == swapdesk_ui::state::ANDROID_SECURITY_SETTINGS => {
+                    self.asks.push(Ask::OpenSecuritySettings);
+                }
                 Some(page) if page.starts_with("https://") => self.asks.push(Ask::OpenPage(page)),
                 // A page of another system's settings: no notice of a phone asks for one.
                 _ => {}
@@ -448,6 +460,7 @@ impl PhoneShell {
     ///   4 open page:   the address (u16 length, UTF-8)
     ///   5 note:        the text (u16 length, UTF-8)
     ///   6 open the app's page in the system's settings: nothing more
+    ///   7 open the system's security settings: nothing more
     /// ```
     pub fn take_asks(&mut self) -> Vec<u8> {
         let asks = std::mem::take(&mut self.asks);
@@ -483,6 +496,7 @@ impl PhoneShell {
                     w.str(text);
                 }
                 Ask::OpenAppSettings => w.u8(ask::OPEN_APP_SETTINGS),
+                Ask::OpenSecuritySettings => w.u8(ask::OPEN_SECURITY_SETTINGS),
             }
         }
         w.0

@@ -320,3 +320,52 @@ fn a_computer_that_needs_an_update_fits_every_phone_and_offers_no_dial() {
         }
     }
 }
+
+/// The dialog of a phone without a screen lock and the two cards of a phone whose core did not start, at every
+/// phone size: nothing is drawn outside the screen, every control takes a finger, and the stopped screens show
+/// nothing of the app's panes.
+#[test]
+fn the_screen_lock_dialog_and_the_stopped_cards_fit_every_phone() {
+    use swapdesk_ui::Stopped;
+    for (w, h) in PHONES {
+        let states = [
+            ("lock", swapdesk_ui::mock::phone_screen_lock_state(), 2),
+            ("unreadable", swapdesk_ui::mock::phone_stopped_state(Stopped::DataUnreadable), 1),
+            ("not started", swapdesk_ui::mock::phone_stopped_state(Stopped::NotStarted), 0),
+        ];
+        for (name, state, buttons) in &states {
+            let (p, out) = frame(state, (w, h), &touched(0.0, 0));
+            let what = format!("{name} at {w}x{h}");
+            assert_eq!(
+                out.widgets.len(),
+                *buttons,
+                "{what}: {:?}",
+                out.widgets.iter().map(|x| x.id).collect::<Vec<_>>()
+            );
+            // The dialog stands over nothing that scrolls; a stopped card is its own pane, which scrolls when
+            // the screen is too short for it (a phone held sideways).
+            assert_eq!(out.page_view.is_some(), *name != "lock", "{what}");
+            let (title, ..) = state.notice_texts(state.notices().first().copied().unwrap_or(NoticeKind::ScreenLock));
+            assert!(p.drawn.borrow().contains(&title), "{what}: {title:?} is not drawn");
+            assert!(!p.drawn.borrow().iter().any(|t| t == "Pareados"), "{what}: a pane shows behind");
+            for (x, end, text) in p.spans.borrow().iter() {
+                assert!(*x >= -0.5 && *end <= w + 0.5, "{what}: {text:?} is drawn from {x} to {end}");
+            }
+            // Everything is reached: in sight, or by scrolling the pane to its end.
+            let below = out.widgets.iter().map(|wd| wd.rect.bottom() - h).fold(0.0, f32::max);
+            assert!(
+                below <= out.scroll_max + 0.01,
+                "{what}: {below} below the screen, the pane scrolls {}",
+                out.scroll_max
+            );
+            let (_, end) = frame(state, (w, h), &touched(out.scroll_max, out.scroll_key));
+            for wd in &end.widgets {
+                assert!(wd.rect.x >= -0.01 && wd.rect.right() <= w + 0.01, "{what}: {:?} at {:?}", wd.id, wd.rect);
+                assert!(wd.rect.bottom() <= h + 0.01, "{what}: {:?} at {:?} with the pane at its end", wd.id, wd.rect);
+                let (cx, cy) = wd.rect.center();
+                assert_eq!(hit_touch(&end.widgets, cx, cy), Some(wd.id), "{what}: a touch on {:?}", wd.id);
+                assert!(wd.touch.h >= 48.0 - 0.01 && wd.touch.w >= 48.0 - 0.01, "{what}: {:?} is too small", wd.id);
+            }
+        }
+    }
+}

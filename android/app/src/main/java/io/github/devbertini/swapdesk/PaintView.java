@@ -63,7 +63,8 @@ import java.util.TimeZone;
  * <p>The asks ({@code PhoneShell::take_asks}): u8 count, then per ask a u8 code and: 1 a list of choices (u16
  * selected or 0xFFFF, u16 count, the choices); 2 the keyboard in a field (u8 field); 3 a field's text to the core
  * (u8 field, u8 clear afterwards); 4 a page for the browser (its address); 5 a note for the log (its text); 6 the
- * app's page in the system's settings (nothing more). A string is its u16 length and its UTF-8 bytes.
+ * app's page in the system's settings (nothing more); 7 the system's security settings (nothing more). A string
+ * is its u16 length and its UTF-8 bytes.
  */
 final class PaintView extends FrameLayout {
     private static final String TAG = "Swapdesk";
@@ -98,6 +99,7 @@ final class PaintView extends FrameLayout {
     private static final int ASK_OPEN_PAGE = 4;
     private static final int ASK_NOTE = 5;
     private static final int ASK_OPEN_APP_SETTINGS = 6;
+    private static final int ASK_OPEN_SECURITY_SETTINGS = 7;
 
     private final Activity activity;
     private final Fonts fonts;
@@ -337,6 +339,20 @@ final class PaintView extends FrameLayout {
         requestFrame();
     }
 
+    /** Opens a page of the system's settings; a phone without that page gets the first page of its settings. */
+    private void settings(Intent page) {
+        try {
+            activity.startActivity(page);
+        } catch (android.content.ActivityNotFoundException missing) {
+            Log.i(TAG, "no settings page for " + page.getAction());
+            try {
+                activity.startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS));
+            } catch (android.content.ActivityNotFoundException none) {
+                Log.i(TAG, "no settings to open");
+            }
+        }
+    }
+
     private void second() {
         followSystem();
         Shell.tick();
@@ -529,8 +545,12 @@ final class PaintView extends FrameLayout {
                         break;
                     case ASK_OPEN_APP_SETTINGS:
                         Log.i(TAG, "ASK the app's settings");
-                        activity.startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        settings(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                 Uri.fromParts("package", activity.getPackageName(), null)));
+                        break;
+                    case ASK_OPEN_SECURITY_SETTINGS:
+                        Log.i(TAG, "ASK the security settings");
+                        settings(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
                         break;
                     default:
                         throw new IllegalStateException("ask " + code + " is not one this build knows");

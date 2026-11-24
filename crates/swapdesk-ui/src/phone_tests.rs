@@ -244,3 +244,94 @@ fn a_pairing_that_met_an_old_computer_says_it_needs_an_update_and_only_closes() 
     en.set_language(crate::Language::En);
     assert!(says(&en, "This computer needs an update") && says(&en, "pair again"));
 }
+
+/// docs/ANDROID.md 5 (a lost phone): whoever holds a paired phone opens the computers it paired with, so a phone
+/// without a secure screen lock starts no pairing. "Parear" opens the dialog that says what to set and leads to the
+/// system's security settings; nothing is sent. With a lock, the same tap starts the pairing. A computer's state
+/// never reads the flag.
+#[test]
+fn a_phone_without_a_screen_lock_starts_no_pairing_and_says_what_to_set() {
+    let mut phone = Scenario::EstadoNaoPareado.phone_state();
+    assert!(phone.device_secure(), "secure until the shell says otherwise: a mock and a computer pair");
+    let _ = phone.set_device_secure(false);
+    let act = phone.activate(ControlId::PairWithDevice);
+    assert!(act.commands.is_empty(), "{:?}", act.commands);
+    let lock = ControlId::Notice(NoticeKind::ScreenLock);
+    assert!(matches!(
+        phone.pairing().map(|p| &p.state),
+        Some(crate::PairingState::Failed { reason: crate::ApiCode::NeedsScreenLock })
+    ));
+    let on_page = ids(&phone);
+    assert!(on_page.contains(&lock) && on_page.contains(&ControlId::PairClose), "{on_page:?}");
+    assert!(!on_page.contains(&ControlId::PairRetry), "trying again without a lock changes nothing");
+    assert!(says(&phone, "Defina um bloqueio de tela para parear"));
+    assert!(says(&phone, "só você faz isso") && says(&phone, "Abrir os ajustes de segurança"));
+    assert!(!says(&phone, "Não foi possível parear"));
+
+    // The button leads to the system's security settings and closes the dialog.
+    let act = phone.activate(lock);
+    assert_eq!(act.effect, Some(Effect::OpenWebPage));
+    assert_eq!(phone.take_web_page().as_deref(), Some(crate::state::ANDROID_SECURITY_SETTINGS));
+    assert!(crate::state::openable_page(crate::state::ANDROID_SECURITY_SETTINGS));
+    assert!(phone.pairing().is_none());
+
+    // Back with a lock set: "Parear" starts the pairing.
+    let _ = phone.set_device_secure(true);
+    let act = phone.activate(ControlId::PairWithDevice);
+    assert!(matches!(act.commands.as_slice(), [Command::PairOpen { device_id: Some(_) }]), "{:?}", act.commands);
+
+    // "Tentar de novo" on a pairing that failed goes through the same start.
+    let mut again = Scenario::EstadoNaoPareado.phone_state();
+    let _ = again.activate(ControlId::PairWithDevice);
+    if let Some(p) = &mut again.pairing {
+        p.state = crate::PairingState::Failed { reason: crate::ApiCode::Timeout };
+    }
+    let _ = again.set_device_secure(false);
+    let act = again.activate(ControlId::PairRetry);
+    assert!(act.commands.is_empty(), "{:?}", act.commands);
+    assert!(ids(&again).contains(&lock));
+
+    // What the service refuses by itself reads the same on the screen (a reply that says so).
+    assert_eq!(
+        phone.error_text(&crate::ApiError::new(crate::ApiCode::NeedsScreenLock)),
+        "Defina um bloqueio de tela neste celular para parear."
+    );
+
+    // A computer pairs, whatever the flag says.
+    let mut computer = Scenario::EstadoNaoPareado.prepared_state();
+    let _ = computer.set_device_secure(false);
+    let act = computer.activate(ControlId::PairWithDevice);
+    assert!(matches!(act.commands.as_slice(), [Command::PairOpen { .. }]));
+}
+
+/// A phone whose core did not start shows one card and nothing else of the app: no pane, no navigation. Data that
+/// does not open names no cause, says nothing was erased and what clearing costs, and leads to the system's page
+/// of the app; a start that failed this time has no button.
+#[test]
+fn a_stopped_phone_shows_one_card_and_nothing_else() {
+    use crate::Stopped;
+    let mut phone = crate::mock::phone_stopped_state(Stopped::DataUnreadable);
+    assert_eq!(phone.screen(), crate::Screen::Stopped);
+    assert_eq!(phone.notices(), vec![NoticeKind::DataUnreadable]);
+    let button = ControlId::Notice(NoticeKind::DataUnreadable);
+    assert_eq!(ids(&phone).into_iter().filter(|c| c.focusable()).collect::<Vec<_>>(), vec![button]);
+    assert!(says(&phone, "Os dados do Swapdesk neste celular não abrem mais"));
+    assert!(says(&phone, "Nada foi apagado.") && says(&phone, "apaga todos os pareamentos deste celular"));
+    assert!(says(&phone, "em cada computador, esqueça este celular"));
+    let act = phone.activate(button);
+    assert_eq!(act.effect, Some(Effect::OpenWebPage));
+    assert_eq!(phone.take_web_page().as_deref(), Some(crate::state::ANDROID_APP_SETTINGS));
+    assert!(act.commands.is_empty(), "the app erases nothing and has no service to ask");
+    assert_eq!(phone.screen(), crate::Screen::Stopped, "the card stays");
+
+    let later = crate::mock::phone_stopped_state(Stopped::NotStarted);
+    assert!(ids(&later).iter().all(|c| !c.focusable()), "nothing to press");
+    assert!(says(&later, "O Swapdesk não conseguiu iniciar agora") && says(&later, "Nada foi apagado."));
+
+    let mut en = crate::mock::phone_stopped_state(Stopped::DataUnreadable);
+    en.set_language(crate::Language::En);
+    assert!(says(&en, "no longer opens") && says(&en, "Nothing was erased."));
+    // Taken away, the app's own screens are back.
+    let _ = en.set_stopped(None);
+    assert_eq!(en.screen(), crate::Screen::Home);
+}

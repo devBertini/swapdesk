@@ -288,3 +288,29 @@ fn the_local_network_notice_asks_android_for_the_apps_settings() {
     settle(&mut shell);
     assert!(!placed(&shell) && shell.state().notices().is_empty());
 }
+
+/// docs/ANDROID.md 5: on a phone without a secure screen lock a tap on "Parear" sends nothing to the service and
+/// shows the dialog; its button asks Android for the security settings, and back takes the dialog away.
+#[test]
+fn parear_without_a_screen_lock_asks_android_for_the_security_settings() {
+    let (mut shell, backend) = shell_of(Scenario::EstadoNaoPareado.phone_state());
+    shell.set_device_secure(false);
+    settle(&mut shell);
+    let sent = backend.sent.lock().unwrap().len();
+    tap(&mut shell, ControlId::PairWithDevice);
+    settle(&mut shell);
+    assert_eq!(backend.sent.lock().unwrap().len(), sent, "no pairing is asked of the service");
+    assert!(shell.takes_back(), "back closes the dialog");
+    tap(&mut shell, ControlId::Notice(NoticeKind::ScreenLock));
+    assert_eq!(shell.asks(), [Ask::OpenSecuritySettings]);
+    assert_eq!(shell.take_asks(), vec![1, ask::OPEN_SECURITY_SETTINGS]);
+    assert!(shell.state().pairing().is_none());
+
+    shell.set_device_secure(true);
+    settle(&mut shell);
+    tap(&mut shell, ControlId::PairWithDevice);
+    assert!(
+        backend.sent.lock().unwrap().iter().any(|c| matches!(c, Command::PairOpen { .. })),
+        "with a lock the pairing starts"
+    );
+}

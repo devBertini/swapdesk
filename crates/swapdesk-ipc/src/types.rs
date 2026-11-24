@@ -45,6 +45,9 @@ wire_enum! {
         /// The other device's Swapdesk is older than this device's system needs (a phone needs protocol minor 3,
         /// docs/ANDROID.md 5); added with the phone.
         NeedsUpdate = 11,
+        /// This device enters no pairing until it has a secure screen lock (a phone, docs/ANDROID.md 5: a lost
+        /// phone); added with the phone.
+        NeedsScreenLock = 12,
     }
 }
 

@@ -1,6 +1,7 @@
 package io.github.devbertini.swapdesk;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -32,6 +33,17 @@ public final class MainActivity extends Activity {
     private static final int ASK_LOCAL_NETWORK = 1;
     private static final String ASKED_LOCAL_NETWORK = "local_network_asked";
 
+    /** The core runs. */
+    private static final int STARTED = 0;
+    /** What the app stored cannot be opened again ({@link DataKey.Unreadable}, or the core saying so). */
+    private static final int UNREADABLE = 1;
+    /** The core did not start this time. */
+    private static final int NOT_STARTED = 2;
+
+    /** Whether the core started, and if not, which card the screen shows ({@link Shell#showStopped}). */
+    private int stopped = STARTED;
+    /** This activity was in front once already: a later return tries a start that failed again. */
+    private boolean resumedOnce;
     private TextView status;
     private TextView notice;
     private Button openSettings;
@@ -71,16 +83,35 @@ public final class MainActivity extends Activity {
         try {
             started = Core.start(getFilesDir().getPath(), DataKey.load(this), deviceName(), Build.VERSION.RELEASE,
                     DevHarness.options(this));
+        } catch (DataKey.Unreadable e) {
+            // What the app stored cannot be opened again. Said on the screen, never worked around: nothing here
+            // erases or replaces a file.
+            started = "ERROR unreadable: the data key: " + e.getMessage();
         } catch (Exception e) {
-            // The Keystore did not give the data key back: nothing sealed can be read. Said, never worked around.
+            // The key store did not hand the data key over this time.
             started = "ERROR the data key: " + e;
         }
         Log.i(TAG, "CORE " + started);
         status.setText("Swapdesk " + version + "\n" + started);
+        boolean running = started.startsWith("started") || started.contains("already running");
+        if (running) {
+            // Before anything can ask for a pairing: without a secure screen lock the core enters none.
+            tellScreenLock();
+        } else {
+            stopped = started.startsWith("ERROR unreadable") ? UNREADABLE : NOT_STARTED;
+        }
         Networks.start(this);
         DevHarness.run(this, status);
         screen = DevHarness.screen(this);
-        boolean running = started.startsWith("started") || started.contains("already running");
+        if (screen == null && !running && !DevHarness.scripted(this)) {
+            // No core, so no service to show: the one card that says what happened, and what to do about it.
+            int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+            Shell.showStopped(Locale.getDefault().toLanguageTag(), night == Configuration.UI_MODE_NIGHT_YES,
+                    stopped == UNREADABLE);
+            Log.i(TAG, "SCREEN stopped " + (stopped == UNREADABLE ? "unreadable" : "not started"));
+            screen = new PaintView(this);
+            DevHarness.watch(this, screen);
+        }
         if (screen == null && running && !DevHarness.scripted(this)) {
             // The app's own screens, over its own service.
             int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
@@ -121,8 +152,30 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Also on the way back from the settings of the system, where the person may have changed the answer.
+        if (stopped == NOT_STARTED && resumedOnce) {
+            // The person came back to an app that did not start: it tries again from the beginning.
+            recreate();
+            return;
+        }
+        resumedOnce = true;
+        if (stopped != STARTED) {
+            // No core: nothing asks Android for anything, or its dialog would open over the card.
+            return;
+        }
+        // Also on the way back from the settings of the system, where the person may have changed the answers.
+        tellScreenLock();
         showLocalNetwork();
+    }
+
+    /**
+     * Tells the core whether the phone has a secure screen lock (a PIN, a pattern or a password): without one it
+     * enters no pairing, and "Parear" says what to set ({@link Core#screenLock}).
+     */
+    private void tellScreenLock() {
+        KeyguardManager keyguard = getSystemService(KeyguardManager.class);
+        boolean secure = DevHarness.secure(this, keyguard != null && keyguard.isDeviceSecure());
+        Log.i(TAG, "SCREEN_LOCK " + (secure ? "secure" : "none"));
+        Core.screenLock(secure);
     }
 
     /**

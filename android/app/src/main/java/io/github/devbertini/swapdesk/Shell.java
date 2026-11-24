@@ -48,6 +48,13 @@ final class Shell {
     static native String showLive(String language, boolean dark);
 
     /**
+     * The core did not start, so there is no service to show: the screen is one card that says so. {@code
+     * unreadable}: what the app stored cannot be opened again (the card says what clearing the app's data costs and
+     * leads to the system's page of the app); otherwise it did not start this time.
+     */
+    static native void showStopped(String language, boolean dark, boolean unreadable);
+
+    /**
      * What Android says about the local network now: 0 allowed (or a system that does not ask), 1 the system's
      * question is on the screen, 2 refused. The screens show their notice for 1 and 2.
      */

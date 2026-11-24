@@ -217,6 +217,8 @@ pub(crate) struct Hub {
     /// Whether this device listens and announces at all ([`UiHub::set_listening`]). A computer always may; a phone
     /// only while it hosts (docs/ANDROID.md 4).
     listening: AtomicBool,
+    /// Why this device enters no pairing now, when it may not ([`UiHub::refuse_pairing`]).
+    pair_refusal: Mutex<Option<ApiCode>>,
     pairing: pairing::PairState,
     incoming: Mutex<HashMap<u32, host_ui::Pending>>,
     next_id: AtomicU32,
@@ -496,6 +498,7 @@ impl UiHub {
             helper_desktop: Mutex::new(Desktop::Default),
             mode,
             listening: AtomicBool::new(true),
+            pair_refusal: Mutex::new(None),
             pairing: pairing::PairState::default(),
             incoming: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
@@ -610,6 +613,14 @@ impl UiHub {
     pub fn set_listening(&self, on: bool) {
         self.hub.listening.store(on, Ordering::SeqCst);
         self.hub.update_receiving();
+    }
+
+    /// While `Some(code)`, this device enters no pairing: `PairOpen` answers `code` and the mode stays closed,
+    /// whatever an interface or a script asks. A phone without a secure screen lock is such a device
+    /// (docs/ANDROID.md 5: whoever holds a paired phone opens the computers it paired with). The default is `None`:
+    /// a computer never refuses.
+    pub fn refuse_pairing(&self, why: Option<ApiCode>) {
+        *lock(&self.hub.pair_refusal) = why;
     }
 
     /// The session whose UI is the host's user (the console session); `None` when nobody is at the machine.

@@ -55,6 +55,8 @@ pub enum ApiCode {
     NoSpace,
     /// The other computer's Swapdesk is older than this device can talk to (a phone, docs/ANDROID.md 5).
     NeedsUpdate,
+    /// This phone has no secure screen lock, and enters no pairing without one.
+    NeedsScreenLock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

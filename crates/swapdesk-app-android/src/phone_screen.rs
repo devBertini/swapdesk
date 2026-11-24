@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use swapdesk_shell_android::canvas_ops::FRAME;
 use swapdesk_shell_android::{FrameCost, Metrics, PhoneShell};
-use swapdesk_ui::{UiBackend, UiState};
+use swapdesk_ui::{Language, Stopped, UiBackend, UiState};
 
 /// The densities a frame is painted at: Android's go from 0.75 to 4, and a development view that fits a desktop
 /// window into the phone's screen may go below.
@@ -35,6 +35,29 @@ pub fn set_mono_metrics(ascent: f32, descent: f32) {
     if ascent.is_finite() && descent.is_finite() && ascent > 0.0 && descent >= 0.0 && ascent + descent < 4.0 {
         SCREEN.with_borrow_mut(|s| s.mono = (ascent, descent));
     }
+}
+
+/// The backend of a screen with no service behind it (the core did not start, [`show_stopped`]): what is sent
+/// goes nowhere and nothing ever arrives.
+struct NoService;
+
+impl UiBackend for NoService {
+    fn send(&self, _: swapdesk_ui::Command) -> swapdesk_ui::Ticket {
+        swapdesk_ui::Ticket(0)
+    }
+
+    fn drain(&self) -> Vec<swapdesk_ui::UiEvent> {
+        Vec::new()
+    }
+}
+
+/// The core did not start, so there is no service to show: the screen is the one card that says so (`Stopped`),
+/// in the phone's language and appearance. Nothing is erased here or anywhere in the app.
+pub fn show_stopped(language: Language, dark: bool, stopped: Stopped) {
+    let mut state = UiState::new(language, dark);
+    state.set_phone(true);
+    let _ = state.set_stopped(Some(stopped));
+    show(state, Arc::new(NoService), false);
 }
 
 /// Shows `state` from the next frame on, with `backend` behind it, and sends what a shell sends when it starts.
@@ -182,5 +205,43 @@ mod tests {
         );
         show(Scenario::Inicio.phone_state(), Arc::new(Silent), true);
         assert!(is_live());
+    }
+
+    /// A phone whose core did not start shows one card and nothing else: what happened, that nothing was erased,
+    /// and for data that does not open the way to the system's page where the app's data is cleared (the app
+    /// erases nothing itself). A start that only failed this time offers no button.
+    #[test]
+    fn a_core_that_did_not_start_is_one_card_on_the_screen() {
+        use swapdesk_shell_android::Ask;
+        use swapdesk_ui::NoticeKind;
+        let said = |ops: &[Op], what: &str| ops.iter().any(|o| matches!(o, Op::Text { text, .. } if text == what));
+        show_stopped(Language::PtBr, false, Stopped::DataUnreadable);
+        assert!(!is_live());
+        let ops = frame(1080, 2400, 2.625);
+        assert!(said(&ops, "Os dados do Swapdesk neste celular não abrem mais"));
+        assert!(said(&ops, "Abrir os ajustes do app"));
+        assert!(!said(&ops, "Pareados") && !said(&ops, "Na rede"), "nothing of the app's panes is behind the card");
+        let button = ControlId::Notice(NoticeKind::DataUnreadable);
+        let placed =
+            with_shell(|shell| shell.output().map(|o| o.widgets.iter().map(|w| (w.id, w.rect)).collect::<Vec<_>>()))
+                .flatten()
+                .expect("a frame");
+        assert_eq!(placed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![button], "one control: the way out");
+        let (cx, cy) = placed[0].1.center();
+        let asks = with_shell(|shell| {
+            let density = shell.density();
+            shell.press(cx * density, cy * density);
+            shell.release(cx * density, cy * density);
+            shell.asks().to_vec()
+        })
+        .expect("the shell");
+        assert_eq!(asks, vec![Ask::OpenAppSettings]);
+        assert_eq!(with_shell(|shell| shell.takes_back()), Some(false), "back leaves the app");
+
+        show_stopped(Language::En, true, Stopped::NotStarted);
+        let ops = frame(1080, 2400, 2.625);
+        assert!(said(&ops, "Swapdesk could not start right now"));
+        let controls = with_shell(|shell| shell.output().map_or(0, |o| o.widgets.len()));
+        assert_eq!(controls, Some(0), "nothing to press: the app tries again when the person comes back");
     }
 }

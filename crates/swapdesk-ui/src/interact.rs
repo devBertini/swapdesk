@@ -392,6 +392,10 @@ impl UiState {
             self.incoming_controls(&mut s);
             return s.v;
         }
+        if let Some(stopped) = self.stopped {
+            self.notice_controls(&mut s, stopped.notice());
+            return s.v;
+        }
         if let Some(p) = &self.pairing {
             self.pairing_controls(&mut s, p);
             return s.v;
@@ -638,6 +642,19 @@ impl UiState {
                 self.name_of(MsgKey::NoticeLocalNetRefusedBody),
                 self.name_of(MsgKey::NoticeLocalNetButton),
             ),
+            NoticeKind::ScreenLock => (
+                self.name_of(MsgKey::PairLockTitle),
+                self.name_of(MsgKey::PairLockBody),
+                self.name_of(MsgKey::PairLockButton),
+            ),
+            NoticeKind::DataUnreadable => (
+                self.name_of(MsgKey::DataUnreadableTitle),
+                self.name_of(MsgKey::DataUnreadableBody),
+                self.name_of(MsgKey::NoticeLocalNetButton),
+            ),
+            NoticeKind::NotStarted => {
+                (self.name_of(MsgKey::NotStartedTitle), self.name_of(MsgKey::NotStartedBody), String::new())
+            }
             NoticeKind::Public => (
                 self.name_of(MsgKey::NoticePublicTitle),
                 self.tm(&Msg::new(MsgKey::NoticePublicBody).with(label)),
@@ -1055,6 +1072,11 @@ impl UiState {
                 s.text(UiRole::Text, self.name_of(MsgKey::PairDoneBody));
                 s.button(ControlId::PairDone, self.name_of(MsgKey::PairDoneButton));
             }
+            // This phone has no secure screen lock: what to set, the way to the system's settings and the way out.
+            PairingState::Failed { reason: ApiCode::NeedsScreenLock } => {
+                self.notice_controls(s, NoticeKind::ScreenLock);
+                s.button(ControlId::PairClose, self.name_of(MsgKey::PairClose));
+            }
             // Trying again changes nothing until the computer is updated: the way out is the only button.
             PairingState::Failed { reason: ApiCode::NeedsUpdate } => {
                 s.heading(2, self.name_of(MsgKey::NeedsUpdateTitle));
@@ -1263,6 +1285,7 @@ impl UiState {
             ApiCode::Internal => MsgKey::ErrInternal,
             ApiCode::NoSpace => MsgKey::TransferNoSpace, // never an elevation failure; the text is still true
             ApiCode::NeedsUpdate => MsgKey::ErrNeedsUpdate, // nor this one
+            ApiCode::NeedsScreenLock => MsgKey::ErrNeedsScreenLock, // nor this one
         };
         Some(self.name_of(key))
     }
@@ -1696,12 +1719,7 @@ impl UiState {
             ControlId::PairWithDevice if self.selected_device().is_some_and(|d| d.needs_update) => {}
             ControlId::PairWithDevice => {
                 let device_id = self.selected_device().map(|d| d.id.clone());
-                self.pairing = Some(PairingView {
-                    id: 0,
-                    device_id: device_id.clone(),
-                    state: PairingState::Open { remaining_s: PAIR_COUNTDOWN_S },
-                });
-                a.commands.push(Command::PairOpen { device_id });
+                self.start_pairing(device_id, &mut a);
             }
             ControlId::ViewOnly | ControlId::Control => {
                 // An activation that still arrives for a phone's page does nothing: nothing here dials a phone.
@@ -1810,12 +1828,7 @@ impl UiState {
             ControlId::PairClose => self.pairing = None,
             ControlId::PairRetry => {
                 let device_id = self.pairing.as_ref().and_then(|p| p.device_id.clone());
-                self.pairing = Some(PairingView {
-                    id: 0,
-                    device_id: device_id.clone(),
-                    state: PairingState::Open { remaining_s: PAIR_COUNTDOWN_S },
-                });
-                a.commands.push(Command::PairOpen { device_id });
+                self.start_pairing(device_id, &mut a);
             }
             ControlId::Allow(p) => {
                 if let Some(i) = &mut self.incoming {
@@ -1884,6 +1897,19 @@ impl UiState {
                     self.web_page = Some(crate::state::ANDROID_APP_SETTINGS.to_owned());
                     a.effect = Some(Effect::OpenWebPage);
                 }
+                NoticeKind::ScreenLock => {
+                    // The lock is set in the system's settings; back here, "Parear" starts the pairing.
+                    self.pairing = None;
+                    self.web_page = Some(crate::state::ANDROID_SECURITY_SETTINGS.to_owned());
+                    a.effect = Some(Effect::OpenWebPage);
+                }
+                NoticeKind::DataUnreadable => {
+                    // The app erases nothing itself: clearing its data is the person's act, in the system's page.
+                    self.web_page = Some(crate::state::ANDROID_APP_SETTINGS.to_owned());
+                    a.effect = Some(Effect::OpenWebPage);
+                }
+                // Its card has no button.
+                NoticeKind::NotStarted => {}
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),
             ControlId::GuideSkip | ControlId::GuideDone => a.changed = self.close_guide(),
@@ -2395,6 +2421,24 @@ impl UiState {
 
     /// A connect to a device: its card shows at once (id 0 until the service answers) and one `Connect` goes out. A
     /// device with a card waiting sends nothing.
+    /// "Parear" on a computer's page and "Tentar de novo" on a pairing that failed both start here. A phone
+    /// without a secure screen lock starts none (docs/ANDROID.md 5: whoever holds a paired phone opens the
+    /// computers it paired with): the dialog says what to set, and nothing is sent. The service refuses the same
+    /// by itself, whatever this state believes.
+    fn start_pairing(&mut self, device_id: Option<String>, a: &mut Activation) {
+        if self.phone && !self.device_secure {
+            let state = PairingState::Failed { reason: ApiCode::NeedsScreenLock };
+            self.pairing = Some(PairingView { id: 0, device_id, state });
+            return;
+        }
+        self.pairing = Some(PairingView {
+            id: 0,
+            device_id: device_id.clone(),
+            state: PairingState::Open { remaining_s: PAIR_COUNTDOWN_S },
+        });
+        a.commands.push(Command::PairOpen { device_id });
+    }
+
     fn start_connect(&mut self, device_id: String, intent: Intent, a: &mut Activation) {
         if self.sessions.iter().any(|s| s.device_id == device_id && s.is_waiting_entry()) {
             a.changed = Changed::NONE;

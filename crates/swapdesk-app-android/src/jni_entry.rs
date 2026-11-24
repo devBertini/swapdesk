@@ -39,7 +39,22 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_start<'caller>(
         let key = env.convert_byte_array(&key)?;
         let outcome =
             crate::startup::start(&dir.to_string(), &key, &name.to_string(), &os_version.to_string(), &dev.to_string());
-        JString::from_str(env, said(outcome))
+        // A start stopped by stored data that does not read says "ERROR unreadable: ...": Java shows that card.
+        JString::from_str(env, said(outcome.map_err(|why| why.to_string())))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Core.screenLock(secure)`: see [`crate::startup::screen_lock`]. Main thread only.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_screenLock<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    secure: jboolean,
+) {
+    env.with_env(|_| -> Result<_, Error> {
+        crate::startup::screen_lock(secure);
+        Ok(())
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -239,6 +254,23 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_showLive<'caller
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `Shell.showStopped(language, dark, unreadable)`: see [`crate::startup::show_stopped`]. Main thread only.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_showStopped<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    language: JString<'caller>,
+    dark: jboolean,
+    unreadable: jboolean,
+) {
+    env.with_env(|_| -> Result<_, Error> {
+        let language: String = language.to_string();
+        crate::startup::show_stopped(&language, dark, unreadable);
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `Shell.localNetwork(state)`: see [`crate::startup::local_network`]. Main thread only.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_localNetwork<'caller>(
@@ -424,7 +456,21 @@ mod dev {
                 if let Some(this) = st.this_device() {
                     let _ = write!(s, " ready={:?}", this.ready);
                 }
-                let _ = write!(s, " local={:?}", st.local_network());
+                let _ = write!(s, " local={:?} lock={}", st.local_network(), st.device_secure());
+                // The pairing dialog's state, and the one card of a core that did not start.
+                if let Some(pairing) = st.pairing() {
+                    let name = match &pairing.state {
+                        swapdesk_ui::PairingState::Open { .. } => "Open".to_owned(),
+                        swapdesk_ui::PairingState::Waiting => "Waiting".to_owned(),
+                        swapdesk_ui::PairingState::ShowCode { .. } => "ShowCode".to_owned(),
+                        swapdesk_ui::PairingState::Done { .. } => "Done".to_owned(),
+                        swapdesk_ui::PairingState::Failed { reason } => format!("Failed({reason:?})"),
+                    };
+                    let _ = write!(s, " pair={name}");
+                }
+                if let Some(stopped) = st.stopped() {
+                    let _ = write!(s, " stopped={stopped:?}");
+                }
                 // The first notice as the screens word it: its title, its text and its button.
                 if let Some(kind) = st.notices().first() {
                     let (title, body, button) = st.notice_texts(*kind);

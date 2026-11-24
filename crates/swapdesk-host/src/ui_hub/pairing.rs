@@ -329,6 +329,10 @@ impl Hub {
 
     /// `PairOpen`: pairing mode for 2 minutes (D12), the endpoints, the `pair=1` announcement, the screen's id.
     pub fn pair_open(self: &Arc<Self>, conn: &Conn, device_id: Option<String>) -> Result<u32, ApiCode> {
+        // The one door into pairing mode: a device that may not pair now opens it for nobody (`refuse_pairing`).
+        if let Some(code) = *lock(&self.pair_refusal) {
+            return Err(self.api_error(code, "a pairing this device may not enter now"));
+        }
         let rt = self.rt().ok_or(ApiCode::ServiceDown)?;
         if self.p.trust.pairing_in_progress() {
             return Err(ApiCode::Busy);

@@ -164,3 +164,24 @@ fn a_wake_that_finds_an_old_computer_does_not_connect() {
     phone.finish();
     pc.finish();
 }
+
+/// docs/ANDROID.md 5 (a lost phone): a device told to refuse pairing opens its mode for nobody, whatever an
+/// interface or a script asks, and says why; told otherwise, it pairs again. A computer is never told, so it never
+/// refuses.
+#[test]
+fn a_device_told_to_refuse_pairing_enters_no_pairing_mode() {
+    let m = Machine::new("sala");
+    let mut ui = m.client(info(false));
+    let ReplyBody::PairingId(id) = ui.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
+    assert!(m.hub.hub.mode.is_open(), "a computer pairs: nothing ever told it not to");
+    assert!(ui.call(UiOp::PairCancel { pairing_id: id }).is_ok());
+
+    m.hub.refuse_pairing(Some(ApiCode::NeedsScreenLock));
+    assert_eq!(ui.call(UiOp::PairOpen { device_id: None }).unwrap_err(), ApiCode::NeedsScreenLock);
+    assert!(!m.hub.hub.mode.is_open() && !m.presence.pairing_announced(), "nothing opened, nothing announced");
+    m.hub.refuse_pairing(None);
+    assert!(ui.call(UiOp::PairOpen { device_id: None }).is_ok());
+
+    drop(ui);
+    m.finish();
+}

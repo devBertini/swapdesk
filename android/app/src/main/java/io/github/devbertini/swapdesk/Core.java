@@ -19,6 +19,13 @@ final class Core {
     static native String start(String dir, byte[] dataKey, String name, String osVersion, String dev);
 
     /**
+     * Whether the phone has a secure screen lock now (a PIN, a pattern or a password). Until this is called, and
+     * while it is false, the core enters no pairing: whoever holds a paired phone opens the computers it paired
+     * with (docs/ANDROID.md 5).
+     */
+    static native void screenLock(boolean secure);
+
+    /**
      * The phone's connected networks, whole, at every change ({@link Networks} writes the buffer). Returns what
      * the guard approves now; a refusal starts with "ERROR ".
      */

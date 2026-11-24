@@ -32,6 +32,7 @@ const SCROLL_HOME: u8 = 3;
 const SCROLL_DEVICE: u8 = 4;
 const SCROLL_ACTIVITY: u8 = 5;
 const SCROLL_SETTINGS: u8 = 6;
+const SCROLL_STOPPED: u8 = 7;
 
 /// A row of the activity log: the device and the time, then two lines of what happened.
 const ACTIVITY_ROW_H: f32 = 84.0;
@@ -105,6 +106,20 @@ pub(crate) fn paint(f: &mut Frame) {
         Nav::Settings => SCROLL_SETTINGS,
         _ => SCROLL_DEVICE,
     };
+    let scroll = pane(f, view, key, page);
+    bar(f, scroll > 0.0);
+    main::error_toast(f);
+}
+
+/// The stopped screen in the compact layout: its one card in a pane that takes the whole window, with no bar
+/// (there is nowhere to go), and that scrolls when the screen is too short for the card (a phone held sideways).
+pub(crate) fn stopped(f: &mut Frame) {
+    let view = Rect::new(0.0, 0.0, f.w, f.h);
+    pane(f, view, SCROLL_STOPPED, main::stopped_page);
+}
+
+/// Paints `content` as the pane that scrolls in `view` under the scroll key `key`. Returns the offset it is at.
+fn pane(f: &mut Frame, view: Rect, key: u8, content: fn(&mut Frame) -> f32) -> f32 {
     // The height of the pane, from a pass that draws nothing. It is laid out at the offset the window asks for, so
     // a list that only lays out its rows in sight measures the same rows this frame will draw.
     let asked = if f.ix.scroll_key == key { f.ix.scroll.max(0.0) } else { 0.0 };
@@ -113,7 +128,7 @@ pub(crate) fn paint(f: &mut Frame) {
         let mut dry = Frame::new(&quiet, f.st, f.ix, (f.w, f.h), f.offscreen);
         dry.compact = true;
         place(&mut dry, view, asked);
-        page(&mut dry) + asked - view.y + MARGIN
+        content(&mut dry) + asked - view.y + MARGIN
     };
     let scroll = f.page_scroll(key, (height - view.h).max(0.0));
     f.out.page_view = Some(view);
@@ -121,12 +136,10 @@ pub(crate) fn paint(f: &mut Frame) {
     f.p.push_clip(view);
     f.touch_clip = Some(view);
     place(f, view, scroll);
-    page(f);
+    content(f);
     f.touch_clip = None;
     f.p.pop_clip();
-
-    bar(f, scroll > 0.0);
-    main::error_toast(f);
+    scroll
 }
 
 /// The bar: on the first pane the logo and Ajustes; on the others the way back, and "Renomear" on a computer's page.

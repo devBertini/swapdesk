@@ -12,8 +12,11 @@
          network, docs/ANDROID.md 4); without it nothing Swapdesk sends leaves the phone. Older versions ignore it. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- allowBackup: no cloud backup. dataExtractionRules: no transfer to another phone either, which Android 12
+         and later still make without it (res/xml/data_extraction_rules.xml says why). -->
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:extractNativeLibs="false"
         android:label="Swapdesk"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">

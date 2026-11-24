@@ -314,6 +314,15 @@ strings! {
     NoticeLocalNetRefusedBody => "Sem a permissão de rede local, o Swapdesk não encontra nem alcança nenhum computador. Nada sai do seu celular.", "Without the local network permission, Swapdesk cannot find or reach any computer. Nothing leaves your phone.";
     ReadyLocalNetAsking => "Esperando a permissão de rede local", "Waiting for the local network permission";
     ReadyLocalNetRefused => "Sem acesso à rede local", "No access to the local network";
+    // A phone: pairing needs a secure screen lock (docs/ANDROID.md 5).
+    PairLockTitle => "Defina um bloqueio de tela para parear", "Set a screen lock to pair";
+    PairLockBody => "Um celular pareado abre os seus computadores. Com um PIN, um padrão ou uma senha no celular, só você faz isso. Defina o bloqueio nos ajustes do sistema e toque em Parear de novo.", "A paired phone opens your computers. With a PIN, a pattern or a password on the phone, only you do that. Set the lock in the system’s settings and tap Pair again.";
+    PairLockButton => "Abrir os ajustes de segurança", "Open security settings";
+    // A phone whose core did not start: one card, and nothing else on the screen.
+    DataUnreadableTitle => "Os dados do Swapdesk neste celular não abrem mais", "Swapdesk’s data on this phone no longer opens";
+    DataUnreadableBody => "Os pareamentos e os ajustes guardados aqui não podem ser lidos. Nada foi apagado. Para voltar a usar o Swapdesk, limpe os dados do app nos ajustes do sistema: isso apaga todos os pareamentos deste celular. Depois, em cada computador, esqueça este celular e pareie de novo.", "The pairings and settings stored here cannot be read. Nothing was erased. To use Swapdesk again, clear the app’s data in the system’s settings: that erases every pairing of this phone. Then, on each computer, forget this phone and pair again.";
+    NotStartedTitle => "O Swapdesk não conseguiu iniciar agora", "Swapdesk could not start right now";
+    NotStartedBody => "Nada foi apagado. Feche o Swapdesk e abra de novo. Se continuar assim, reinicie o celular.", "Nothing was erased. Close Swapdesk and open it again. If it stays like this, restart the phone.";
     NoticeLocalNetButton => "Abrir os ajustes do app", "Open the app’s settings";
     NoComputerTitle => "Nenhum computador encontrado", "No computer found";
     NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e na mesma rede Wi-Fi ou cabo que este. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the other computer, check that Swapdesk is open and on the same Wi-Fi or cable as this one. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
@@ -345,6 +354,7 @@ strings! {
     ErrLocked => "Pareamento bloqueado por 15 minutos.", "Pairing locked for 15 minutes.";
     ErrInvalid => "Valor inválido.", "Invalid value.";
     ErrInternal => "Erro interno.", "Internal error.";
+    ErrNeedsScreenLock => "Defina um bloqueio de tela neste celular para parear.", "Set a screen lock on this phone to pair.";
     ErrNeedsUpdate => "O Swapdesk do outro computador precisa de atualização.", "Swapdesk on the other computer needs an update.";
 
     // Viewer window

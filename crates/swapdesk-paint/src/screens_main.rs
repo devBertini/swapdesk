@@ -24,7 +24,16 @@ pub fn paint(f: &mut Frame) {
         dialog(f, &DialogKind::ElevatedConfirm);
         return;
     }
-    if f.st.screen() == Screen::Pairing {
+    if f.st.screen() == Screen::Stopped {
+        // The core did not start: its one card alone in the window (D51), with nothing of the app behind it.
+        if f.compact {
+            crate::screens_compact::stopped(f);
+        } else {
+            f.page_top = 40.0;
+            f.page_floor = f.h - 40.0;
+            stopped_page(f);
+        }
+    } else if f.st.screen() == Screen::Pairing {
         pairing(f);
     } else if f.compact {
         crate::screens_compact::paint(f);
@@ -647,6 +656,19 @@ pub(crate) fn room(f: &Frame, a: &Area, y: f32) -> Rect {
     Rect::new(a.x, y, a.cw, (f.page_floor - y).max(0.0))
 }
 
+/// The stopped screen's content: the card of why the core did not start, centred in what the window leaves, or
+/// from the top down when the window is shorter than the card. Returns where it ends.
+pub(crate) fn stopped_page(f: &mut Frame) -> f32 {
+    let (x, w) = if f.compact {
+        let a = area(f);
+        (a.x, a.cw)
+    } else {
+        (40.0, f.w - 80.0)
+    };
+    let kinds = f.st.notices();
+    notice_cards(f, Rect::new(x, f.page_top, w, (f.page_floor - f.page_top).max(0.0)), &kinds)
+}
+
 /// What the header of a device's page offers, the negative action first and the positive one last: back to an open
 /// session or its end, the wake of a computer that sleeps, the two ways to connect, or pairing.
 fn device_actions(f: &Frame, d: &DeviceView) -> Vec<(ControlId, String, Kind)> {
@@ -1166,9 +1188,9 @@ fn history(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
 fn notice_icon(kind: NoticeKind) -> String {
     match kind {
         NoticeKind::Public | NoticeKind::Firewall | NoticeKind::LocalNetwork => icons::WIFI.to_owned(),
-        NoticeKind::Service => icons::lock(),
-        NoticeKind::MacPerms | NoticeKind::ReceiveFolder => icons::SHIELD.to_owned(),
-        NoticeKind::Crash => icons::SHIELD_ALERT.to_owned(),
+        NoticeKind::Service | NoticeKind::ScreenLock => icons::lock(),
+        NoticeKind::MacPerms | NoticeKind::ReceiveFolder | NoticeKind::NotStarted => icons::SHIELD.to_owned(),
+        NoticeKind::Crash | NoticeKind::DataUnreadable => icons::SHIELD_ALERT.to_owned(),
     }
 }
 
@@ -1899,6 +1921,18 @@ fn pairing(f: &mut Frame) {
                 PairItem::Title(msg(f, MsgKey::PairDoneTitle, &who)),
                 PairItem::Body(f.t(MsgKey::PairDoneBody)),
                 PairItem::Buttons(vec![(ControlId::PairDone, f.t(MsgKey::PairDoneButton), Kind::Primary)]),
+            ]
+        }
+        // This phone has no secure screen lock: what to set, the way to the system's settings and the way out.
+        PairingState::Failed { reason: swapdesk_ui::ApiCode::NeedsScreenLock } => {
+            let (title, body, button) = f.st.notice_texts(NoticeKind::ScreenLock);
+            vec![
+                PairItem::Title(title),
+                PairItem::Body(body),
+                PairItem::Buttons(vec![
+                    (ControlId::Notice(NoticeKind::ScreenLock), button, Kind::Primary),
+                    (ControlId::PairClose, f.t(MsgKey::PairClose), Kind::Default),
+                ]),
             ]
         }
         // Trying again changes nothing until the computer is updated: the way out is the only button.

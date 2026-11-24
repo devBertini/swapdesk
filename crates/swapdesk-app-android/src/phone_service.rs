@@ -22,10 +22,10 @@ use swapdesk_host::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use swapdesk_host::ui_hub::{
     ConnInfo, DevOptions, DnsSdPresence, FileAuditLog, HubParams, NoHooks, NoPresence, Presence, UiHub, load_settings,
 };
-use swapdesk_ipc::{FrameReader, FrameWriter, Handshake};
+use swapdesk_ipc::{ApiCode, FrameReader, FrameWriter, Handshake};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
 use swapdesk_lan::txt::Txt;
-use swapdesk_platform::{Clock, Level, NetInterfaces, SecretStore, TraceSink};
+use swapdesk_platform::{Clock, ErrorKind, Level, NetInterfaces, SecretStore, TraceSink};
 use swapdesk_proto::Os;
 use swapdesk_session::{ConsentRequest, HostUi, PromptAnswer, PromptRequest};
 use swapdesk_trust::{Identity, SystemWallClock, TrustHandle, UserRef, WallClock};
@@ -86,17 +86,60 @@ pub struct PhoneService {
     /// The running discovery, when there is one, to say what it is bound to.
     discovery: Option<Arc<DnsSdPresence>>,
     trace: Arc<dyn TraceSink>,
+    /// What Android last said about the screen lock ([`PhoneService::set_device_secure`]).
+    secure: AtomicBool,
+}
+
+/// Why the phone's service did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartError {
+    /// What the app sealed on this phone does not open with the key it was handed, or does not read: starting
+    /// again changes nothing, and the screen says what the way out costs.
+    Unreadable(String),
+    /// Anything else; nothing says the next start fails too.
+    Failed(String),
+}
+
+impl From<String> for StartError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(why) => write!(f, "unreadable: {why}"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// A stored record that did not load. One the sealed store could not open (another key, a changed file) or that
+/// does not decode will not load the next time either; a store that failed to answer may.
+fn stored(what: &str, e: &swapdesk_trust::TrustError) -> StartError {
+    use swapdesk_trust::TrustError;
+    let text = format!("{what}: {e}");
+    match e {
+        TrustError::Codec(_) => StartError::Unreadable(text),
+        TrustError::Secret(p) if p.kind == ErrorKind::InvalidInput => StartError::Unreadable(text),
+        _ => StartError::Failed(text),
+    }
 }
 
 impl PhoneService {
     /// Starts the core and the hub and connects a backend to the hub; `sink` receives the viewer's media.
-    pub fn start(p: PhoneParams, waker: Arc<dyn UiWaker>, sink: Option<Arc<dyn ViewerSink>>) -> Result<Self, String> {
+    pub fn start(
+        p: PhoneParams,
+        waker: Arc<dyn UiWaker>,
+        sink: Option<Arc<dyn ViewerSink>>,
+    ) -> Result<Self, StartError> {
         let PhoneParams { default_name, os_version, secrets, dir, interfaces, clock, trace, discovery, dev_loopback } =
             p;
         let wall = SystemWallClock;
         let identity =
-            Arc::new(Identity::load_or_create(&*secrets, wall.unix_ms()).map_err(|e| format!("identity: {e}"))?);
-        let trust = TrustHandle::open(Arc::clone(&secrets)).map_err(|e| format!("trust store: {e}"))?;
+            Arc::new(Identity::load_or_create(&*secrets, wall.unix_ms()).map_err(|e| stored("identity", &e))?);
+        let trust = TrustHandle::open(Arc::clone(&secrets)).map_err(|e| stored("trust store", &e))?;
         let settings = load_settings(&*secrets, &default_name)?;
 
         let deps = ServiceDeps {
@@ -156,6 +199,9 @@ impl PhoneService {
             dev: dev_loopback.then(DevOptions::default),
         });
         hub.set_listening(false);
+        // Closed until Android says the phone has a secure screen lock (`set_device_secure`): a start that never
+        // heard is a phone that pairs with nobody.
+        hub.refuse_pairing(Some(ApiCode::NeedsScreenLock));
         config.ui = hub.host_ui();
         let core = Arc::new(ServiceCore::start(config).map_err(|e| format!("the service core did not start: {e:?}"))?);
         hub.bind_core(&core);
@@ -193,9 +239,22 @@ impl PhoneService {
             trust,
             discovery: running_discovery,
             trace,
+            secure: AtomicBool::new(false),
         };
         service.say_discovery();
         Ok(service)
+    }
+
+    /// Whether Android says the phone has a secure screen lock (a PIN, a pattern or a password,
+    /// `KeyguardManager.isDeviceSecure`). Without one the service enters no pairing (docs/ANDROID.md 5: whoever
+    /// holds a paired phone opens the computers it paired with); until this is called it has none.
+    pub fn set_device_secure(&self, secure: bool) {
+        self.secure.store(secure, Ordering::SeqCst);
+        self.hub.refuse_pairing((!secure).then_some(ApiCode::NeedsScreenLock));
+    }
+
+    pub fn device_secure(&self) -> bool {
+        self.secure.load(Ordering::SeqCst)
     }
 
     /// The C6 backend the interface talks to.

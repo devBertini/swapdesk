@@ -51,6 +51,14 @@ final class DevHarness {
 
     private static native void add(String address);
 
+    /**
+     * Whether the phone counts as having a secure screen lock. An emulator image has none, so a proof that pairs
+     * says so with the extra "secure"; the override lives here alone, and a released app has only Android's answer.
+     */
+    static boolean secure(Activity activity, boolean real) {
+        return real || activity.getIntent().getBooleanExtra("secure", false);
+    }
+
     /** The development options the intent asks of the core, or none. */
     static String options(Activity activity) {
         String dev = activity.getIntent().getStringExtra("dev");

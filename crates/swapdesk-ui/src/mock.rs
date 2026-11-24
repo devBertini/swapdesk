@@ -1415,6 +1415,23 @@ pub fn phone_pairing_needs_update_state() -> UiState {
     s
 }
 
+/// A phone without a secure screen lock after "Parear" was tapped on a computer's page: the dialog that says
+/// what to set (docs/ANDROID.md 5).
+pub fn phone_screen_lock_state() -> UiState {
+    let mut s = Scenario::EstadoNaoPareado.phone_state();
+    let _ = s.set_device_secure(false);
+    let _ = s.activate(ControlId::PairWithDevice);
+    s
+}
+
+/// A phone whose core did not start: the one card that says so ([`crate::Stopped`]), with no service behind it.
+pub fn phone_stopped_state(stopped: crate::Stopped) -> UiState {
+    let mut s = UiState::new(Language::PtBr, false);
+    s.set_phone(true);
+    let _ = s.set_stopped(Some(stopped));
+    s
+}
+
 // ---------- the backend ----------
 
 /// What the mock backend's thread remembers between commands.
