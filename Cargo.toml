@@ -9,7 +9,8 @@ rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Platform crates (capture, input, service) opt out of this in their own manifests; every other crate forbids unsafe.
+# Platform crates (`*-win`, `*-mac`, `*-android`) opt out of this in their own manifests when they hold `unsafe`; every
+# other crate forbids it.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
@@ -39,6 +40,8 @@ accesskit_windows = "0.35.2"
 libc = "0.2.191"
 opus = "0.4.0"
 vte = { version = "0.15.0", default-features = false }
+# Android (D82): the JNI bindings of the app's shared library; only the `*-android` crates depend on it.
+jni = "0.22.4"
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 # macOS (D26): framework crates without their default all-features set; each mac crate enables "std" and what it uses.
 objc2 = "0.6.5"

@@ -1,0 +1,20 @@
+// The Android app (docs/ANDROID.md). Java only, no third-party Gradle plugin: the Rust library is built by
+// scripts/android/build-core.sh, which puts it in app/src/main/jniLibs before Gradle packs the APK.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "Swapdesk"
+include ":app"

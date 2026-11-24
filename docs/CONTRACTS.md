@@ -794,7 +794,7 @@ impl UiState {
 
 ## Crates
 
-All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` and `*-mac` crates and the development tool `swapdesk-measure` may use `unsafe` (workspace lint `unsafe_code = "forbid"`, opted out per crate); the binaries hold no logic that tests need (flows cite library tests: a binary target's id is not scanned).
+All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win`, `*-mac` and `*-android` crates and the development tool `swapdesk-measure` may use `unsafe` (workspace lint `unsafe_code = "forbid"`, opted out per crate); the binaries hold no logic that tests need (flows cite library tests: a binary target's id is not scanned).
 
 | Crate | Kind | Holds / implements | `unsafe` | Created in stage |
 |---|---|---|---|---|
@@ -839,6 +839,12 @@ All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win` a
 | `swapdesk-sys-mac` | lib | SMAppService, the LoginWindow plist writer, Unix sockets and peer checks (`libc`), `SessionWatcher`, `ActionRunner`, the `openpty` `PtySpawner`, `TraceSink` | yes | 24 |
 | `swapdesk-daemon` / `swapdesk-agent` | bin | macOS processes of C2.2 | no | 24 |
 | `swapdesk-update` | lib (later also the bins `swapdesk-pack` and `swapdesk-release-sign`, never shipped) | the update core of D53 (`UPDATES.md` 3, 4, 13): `Version`, the release manifest and its Ed25519 signature over `"swapdesk-update-manifest
+| `swapdesk-app-android` | cdylib (`libswapdesk_android.so`) + lib | the Android app's shared library (`docs/ANDROID.md` 5, D84): the JNI entry points of `io.github.devbertini.swapdesk.Core`, the core's self-test on the device, and from the next slices the service core, the backend and the viewer pipeline. Compiles to nothing off Android, as every `*-android` crate | yes (the exported JNI functions) | A1 |
+| `swapdesk-sys-android` | lib | `NetInterfaces` from the network facts Java hands over, sockets bound to the approved network, `SecretStore` over Keystore-wrapped files, `TraceSink`, `Clock` | yes | A1 (skeleton), A2 |
+| `swapdesk-codec-android` | lib | `VideoDecoder` and `Renderer` in one: `AMediaCodec` into the session surface's native window | yes | A1 (skeleton), A4 |
+| `swapdesk-audio-android` | lib | `AudioSink` on AAudio | yes | A1 (skeleton), A6 |
+| `swapdesk-input-android` | lib | the touch, key and committed-text records from Java as the session's input events (the `InputGrabber` role); later `ClipboardProvider` | no | A1 (skeleton), A5 |
+| `swapdesk-shell-android` | lib | the Android `Painter`, the edit slots, the accessibility bridge, the effects table | no | A1 (skeleton), A3 |
 "` + the manifest (keys compiled in `keys::RELEASE_KEYS`, empty until the key ceremony of slice U2), the `.sdpkg` package read only after its size and SHA-256 match, `policy::offer` (stable only, never equal or lower, not a rolled-back version); depends on `ring` only, no OS call, `unsafe` forbidden | no | 1.1 (D53·U1) |
 
 ## Lane map (M1 to M4)

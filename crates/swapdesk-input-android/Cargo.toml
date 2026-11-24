@@ -1,0 +1,11 @@
+[package]
+name = "swapdesk-input-android"
+description = "Android input for a session: the touch, key and committed-text records Java hands over, turned into the session's input events; later the clipboard (docs/ANDROID.md 5). Compiles to nothing off Android."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

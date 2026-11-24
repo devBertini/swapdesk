@@ -6,3 +6,10 @@
 node_modules/
 /spikes/
 /docs/.flows-state.json
+# Android (docs/ANDROID.md): Gradle's folders, the machine's own SDK path, and the Rust library that
+# scripts/android/build-core.sh builds into the app.
+/android/.gradle/
+/android/local.properties
+/android/build/
+/android/app/build/
+/android/app/src/main/jniLibs/

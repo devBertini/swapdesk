@@ -204,8 +204,9 @@ shared interface talks to it through `ServiceBackend` over an in-memory pipe, as
 "the service owns every socket" becomes "the core in the app owns every socket", as on the Mac. The Rust code is one
 shared library built for `aarch64-linux-android` (Rust tier 2 [S40]) with an NDK of r28 or later, which aligns to
 16 KB by default; Google Play requires 16 KB support for apps targeting Android 15 or higher, with updates refused
-from 1 February 2027 without it [S30]. Whether Rust's own link step through the NDK gives 16 KB segments is not
-verified: A1 reads the segments back (`llvm-objdump -p` / `llvm-readelf -Wl`, [S30]). Rust supports the API levels
+from 1 February 2027 without it [S30]. Rust's own link step through NDK r28 gives 16 KB segments: A1 read them back
+(`llvm-readelf -lW`: every LOAD segment of both ABIs is aligned to 0x4000, in the library and in the one taken out of
+the APK, where `zipalign -c -P 16` also verifies), and the build script refuses a library that is not. Rust supports the API levels
 the newest LTS NDK supports [S40]; the NDK's lowest level for r26 and later is not stated on the page read beyond
 "API 19 and older unsupported" [S41] (not verified), far below the minimum of decision 8.3.
 
@@ -316,9 +317,25 @@ negative on the left), D51's centring, light and dark following the system, and 
 Android's main thread: no blocking call there, R-UI-8; the slow-operation threshold of R-UI-10 is the display's frame
 time, 16 ms at 60 Hz, 8 ms at 120 Hz).
 
-**Build.** An `android/` Gradle project builds the APK and calls cargo for the shared library; its own gate step
-(`gradlew assembleDebug` and the unit tests) runs beside the desktop gate, never inside it. ABI: `arm64-v8a` only in
-version 1 (GUESS: the owner's phone is 64-bit ARM; to confirm).
+**Build (slice A1, D84).** `android/` is a plain Gradle project in Java (Android Gradle plugin 9.1.0 on Gradle 9.3.1,
+a JDK 17 or later, no AndroidX and no third-party Gradle plugin); it packs the APK and never calls cargo.
+`scripts/android/build-core.sh` builds `swapdesk-app-android` for each ABI with the NDK (`scripts/android/env.sh` holds
+the compiler, the archiver and the CMake toolchain for libopus), copies `libswapdesk_android.so` into the app's
+`jniLibs` and reads its alignment back. `scripts/android/check.sh [--apk]` is the Android gate: clippy of every
+`*-android` crate for both targets with warnings denied, the libraries, and with `--apk` the debug APK. It runs beside
+the desktop gate, never inside it: off Android those crates compile to nothing. The app's version is the workspace's,
+read from `Cargo.toml` by the Gradle script. ABIs: `arm64-v8a` for phones and `x86_64` for the emulator image; which of
+them the released APK carries is settled at the release slice (GUESS: `arm64-v8a` only; the owner's phone to confirm).
+A release build of the library uses the profile that unwinds (`release-service`), since a panic must reach Java as an
+exception and never end the app's process.
+
+**Proof without the phone (slice A1).** The project's own emulator image (Android 16, `x86_64`, with `arm64-v8a`
+through the image's translation) runs the app; the core says what it finds in the log (`adb logcat -s Swapdesk:I`).
+The emulator's network is its own (10.0.2.0/24 behind the host): the computer side of a proof is a development
+instance of the service started with `--dev-loopback`, which the guest reaches at `10.0.2.2:<port>`, driven by
+`examples/cross_host_driver` on its UI pipe; that address is on-link in the guest's network, so the phone's own guard
+needs no exception for it. From the host to the guest the emulator console redirects a UDP port (`redir add
+udp:<host port>:<guest port>`). Multicast does not cross, so discovery is proven on the phone only.
 
 ## 6. Budgets
 
@@ -341,7 +358,7 @@ Tracked, not budgeted: the APK size of `arm64-v8a` (GUESS ≤ 15 MB), read from 
 
 | ID | Risk | What shows it early |
 |---|---|---|
-| AR1 | The dependency tree does not cross-compile or misbehaves on Android: `ring` (its page does not list Android as a target [S44]; not verified either way), `quinn`, `tokio`, `mdns-sd` and its `if-addrs`, libopus through CMake | **Spike A1**: build the core for `aarch64-linux-android` and run discovery plus one TLS handshake to the PC on the phone. Fallback for libopus: `opus-rs` (D16) |
+| AR1 | The dependency tree does not cross-compile or misbehaves on Android: `ring` (its page does not list Android as a target [S44]; not verified either way), `quinn`, `tokio`, `mdns-sd` and its `if-addrs`, libopus through CMake | **Spike A1**: build the core for `aarch64-linux-android` and run discovery plus one TLS handshake to the PC on the phone. Fallback for libopus: `opus-rs` (D16). **Result (24/11/2026):** every crate of the core cross-compiled for both targets at the first try and links into one library. On the emulator image the library of each ABI generated device keys (`ring`), completed a pinned-key session handshake over loopback with bytes both ways (`rustls`, `quinn`, `tokio`) and coded a frame with libopus; from the emulator a QUIC handshake completed with a desktop development instance's pairing endpoint, and timed out with pairing closed. Nothing needed a fallback. Still owed to the phone: discovery (`mdns-sd` on real Wi-Fi), the socket bound to the Wi-Fi network, and the same checks on its hardware |
 | AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1] |
 | AR3 | A VPN on the phone routes or blocks Swapdesk's traffic despite the socket binding | A1 repeats the handshake with a VPN app on (always-on and blocking modes) |
 | AR4 | Decode latency varies by device; the low-latency key is optional [S16] | A4 measures BA4 and BA3 on the owner's phone first |

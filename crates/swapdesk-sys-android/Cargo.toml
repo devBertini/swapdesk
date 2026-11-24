@@ -1,0 +1,18 @@
+[package]
+name = "swapdesk-sys-android"
+description = "Android system services for the core: the networks Java reports as `NetInterfaces`, sockets bound to the approved network, the Keystore-wrapped `SecretStore`, the trace sink and the clock (docs/ANDROID.md 5). Compiles to nothing off Android."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Platform crate (`*-android`): it will hold the NDK calls of its lane. The workspace lints are repeated here without
+# `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
