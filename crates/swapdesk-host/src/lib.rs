@@ -15,10 +15,12 @@
 pub mod accounts;
 pub mod blocking;
 pub mod datagrams;
+pub mod filetrace;
 pub mod helper;
 mod helper_pty;
 pub mod netcache;
 pub mod outbox;
+pub mod pipe;
 pub mod proxy;
 mod retry;
 pub mod rpc;
