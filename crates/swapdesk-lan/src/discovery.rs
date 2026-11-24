@@ -48,11 +48,14 @@ pub struct Config {
     pub service_port: u16,
     /// The protocol minor put in each own record as the `minor` key (none for 0).
     pub minor: u16,
+    /// Whether the own record is announced from the start (the default). A device that only dials starts with
+    /// `false`: it browses, and its record is never on the network, not even for the moment before it is withdrawn.
+    pub announce: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { mdns_port: MDNS_PORT, service_port: SESSION_PORT, minor: swapdesk_proto::PROTO_MINOR }
+        Self { mdns_port: MDNS_PORT, service_port: SESSION_PORT, minor: swapdesk_proto::PROTO_MINOR, announce: true }
     }
 }
 
@@ -228,7 +231,7 @@ impl Discovery {
         let d = Self {
             nets,
             config,
-            state: Mutex::new(State { own, announced: true, applied: Vec::new(), engine: None }),
+            state: Mutex::new(State { own, announced: config.announce, applied: Vec::new(), engine: None }),
             events: Arc::new(Events::default()),
             generation: Arc::new(AtomicU64::new(0)),
             daemons: AtomicU64::new(0),

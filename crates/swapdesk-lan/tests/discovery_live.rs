@@ -108,6 +108,32 @@ fn config(mdns_port: u16, service_port: u16) -> Config {
     Config { mdns_port, service_port, ..Config::default() }
 }
 
+/// docs/ANDROID.md 4: a device that only dials (a phone that does not host) starts with its record withdrawn. It
+/// finds the computers of the network, and no computer finds it, not even in the moment after it starts.
+#[test]
+fn a_device_that_starts_without_announcing_finds_others_and_is_never_found() {
+    let Some((real, fake)) = setup() else { return };
+    let a_nets = real_nets();
+    let quiet_nets: Arc<dyn NetInterfaces> =
+        Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: false });
+
+    let port = mdns_port(9);
+    let a = Discovery::start(a_nets, txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
+    let quiet = Discovery::start(
+        quiet_nets,
+        txt("Celular", 0xC3, Os::Android),
+        Config { announce: false, ..config(port, 47822) },
+    )
+    .unwrap();
+    assert!(!quiet.announced());
+
+    wait_for(&quiet, Duration::from_secs(5), |e| found(e, 0xA1).is_some()).expect("the quiet device did not find A");
+    let seen = wait_for(&a, Duration::from_secs(3), |e| found(e, 0xC3).is_some());
+    assert!(seen.is_none(), "A found a device that announces nothing");
+    a.shutdown();
+    quiet.shutdown();
+}
+
 #[test]
 fn two_instances_discover_each_other_on_an_approved_interface_within_5_seconds() {
     let Some((real, fake)) = setup() else { return };

@@ -943,13 +943,18 @@ name = "swapdesk-app-android"
 version = "1.1.0"
 dependencies = [
  "jni",
- "quinn",
  "swapdesk-audio",
+ "swapdesk-crossdrive",
+ "swapdesk-fakes",
+ "swapdesk-host",
+ "swapdesk-ipc",
  "swapdesk-lan",
  "swapdesk-platform",
  "swapdesk-proto",
+ "swapdesk-session",
  "swapdesk-sys-android",
  "swapdesk-trust",
+ "swapdesk-ui",
  "tokio",
 ]
 

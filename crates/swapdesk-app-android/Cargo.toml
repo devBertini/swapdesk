@@ -1,6 +1,6 @@
 [package]
 name = "swapdesk-app-android"
-description = "The Android app's shared library: the JNI entry points over the service core, the backend and the viewer pipeline (docs/ANDROID.md 5). Compiles to nothing off Android."
+description = "The Android app's shared library: the JNI entry points over the service core, the backend and the viewer pipeline (docs/ANDROID.md 5). The service assembly builds on every host; the JNI side on Android only."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,13 +25,22 @@ name = "swapdesk_android"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
-[target.'cfg(target_os = "android")'.dependencies]
-jni.workspace = true
-quinn.workspace = true
-swapdesk-audio = { path = "../swapdesk-audio" }
+[dependencies]
+swapdesk-host = { path = "../swapdesk-host" }
+swapdesk-ipc = { path = "../swapdesk-ipc" }
 swapdesk-lan = { path = "../swapdesk-lan" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-session = { path = "../swapdesk-session" }
 swapdesk-sys-android = { path = "../swapdesk-sys-android" }
 swapdesk-trust = { path = "../swapdesk-trust" }
+swapdesk-ui = { path = "../swapdesk-ui" }
 tokio.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+swapdesk-audio = { path = "../swapdesk-audio" }
+
+[dev-dependencies]
+swapdesk-crossdrive = { path = "../swapdesk-crossdrive" }
+swapdesk-fakes = { path = "../swapdesk-fakes" }

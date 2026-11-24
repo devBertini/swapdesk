@@ -4,11 +4,14 @@
 //! Slice A1, the foundation: the library says its version and runs [`selftest`], which exercises on the device what
 //! a cross-compile alone cannot prove (key generation, a pinned-key QUIC handshake, Opus).
 //!
-//! Compiles to nothing off Android (the D29 pattern), so the desktop gate builds an empty crate.
-#![cfg(target_os = "android")]
+//! [`service`] is the app's service core, plain Rust that builds and is tested on every host. The JNI entry points
+//! and the self-test are Android only.
 
+#[cfg(target_os = "android")]
 mod jni_entry;
+#[cfg(target_os = "android")]
 pub mod selftest;
+pub mod service;
 
 /// The version the app shows and logs: the workspace's version and the protocol it speaks.
 pub fn version() -> String {
