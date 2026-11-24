@@ -383,6 +383,41 @@ fn known_minor_prefers_the_authenticated_value_over_the_hint() {
     b.finish();
 }
 
+/// A phone announces nothing (docs/ANDROID.md, D83): out of discovery no grants sync is dialled toward it, where a
+/// computer in the same place is dialled at its last address. The phone learns the grants in its own sessions.
+#[test]
+fn no_sync_is_dialled_toward_a_phone_that_announces_nothing() {
+    let (a, b) = paired(PermissionSet::CONTROL, PermissionSet::VIEW);
+    // B is out of discovery, said minor 3 in a session, and its last address is known.
+    lock(&a.hub.hub.minors).said(b.id(), 3, None);
+    let be = |os: swapdesk_proto::Os| {
+        a.trust
+            .update(|s| {
+                for d in &mut s.devices {
+                    d.os = os;
+                    d.last_addrs = vec![[127, 0, 0, 1]];
+                }
+            })
+            .expect("store");
+    };
+    be(swapdesk_proto::Os::Android);
+    let mut ui = a.client(info(false));
+    assert!(ui.call(UiOp::SetGrants { device_id: b.hex(), grants: PermissionSet::VIEW.bits() }).is_ok());
+    std::thread::sleep(super::super::sync_dial::TIE_DELAY + Duration::from_millis(500));
+    assert_eq!(dialled(&a), 0, "a phone that announces nothing is not dialled");
+    // The same record as a computer's: dialled at its last address.
+    be(swapdesk_proto::Os::MacOs);
+    assert!(ui.call(UiOp::SetGrants { device_id: b.hex(), grants: PermissionSet::CONTROL.bits() }).is_ok());
+    let t = Instant::now();
+    while dialled(&a) < 1 {
+        assert!(t.elapsed() < Duration::from_secs(6), "a computer out of discovery is dialled");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(ui);
+    a.finish();
+    b.finish();
+}
+
 #[test]
 fn a_peer_of_minor_0_is_never_dialled_for_a_sync() {
     let (a, b) = paired(PermissionSet::CONTROL, PermissionSet::VIEW);

@@ -59,6 +59,13 @@ pub trait SwapEnv: Send + Sync + 'static {
     /// Whether this machine, as host, has stored `CONTROL` for `peer` in its own trust store (6.3 step 1).
     fn control_granted_to(&self, peer: &DeviceId) -> bool;
 
+    /// Whether `peer` can be the host of a session now. A phone that does not host cannot (docs/ANDROID.md): a swap
+    /// that would make it the host is declined with `UNAVAILABLE` before anything is asked or armed, since it would
+    /// end the session and then dial a device that listens on nothing.
+    fn peer_can_host(&self, _peer: &DeviceId) -> bool {
+        true
+    }
+
     /// Shows the request; the answer comes through the channel (`true` accepts). Dropping the sender without an
     /// answer says there is nobody to show it to: the asker hears `NOBODY_PRESENT`.
     fn ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool>;
@@ -184,6 +191,9 @@ impl SwapHandler {
         if future_host && !i.env.control_granted_to(&peer) {
             return SwapOutcome::Declined(ErrorCode::NotPermitted);
         }
+        if !future_host && !i.env.peer_can_host(&peer) {
+            return SwapOutcome::Declined(ErrorCode::Unavailable);
+        }
         let key = (ctx.session_id(), ctx.role());
         let id = i.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -269,6 +279,9 @@ impl SwapHandler {
             } else if future_host && !i.env.control_granted_to(&peer) {
                 // 6.3 step 1: no prompt.
                 Some(ErrorCode::NotPermitted)
+            } else if !future_host && !i.env.peer_can_host(&peer) {
+                // The asker would become the host and cannot be one: no prompt either.
+                Some(ErrorCode::Unavailable)
             } else if !i.env.somebody_present() {
                 Some(ErrorCode::NobodyPresent)
             } else {

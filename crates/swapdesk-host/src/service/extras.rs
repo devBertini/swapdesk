@@ -112,6 +112,11 @@ impl SwapEnv for CoreEnv {
         self.trust.read(|s| s.find_by_id(peer).is_some_and(|d| d.grants_here.contains(PermissionSet::CONTROL)))
     }
 
+    /// A phone does not host until it can (docs/ANDROID.md, slice A16): no swap makes one the host.
+    fn peer_can_host(&self, peer: &DeviceId) -> bool {
+        self.trust.read(|s| s.find_by_id(peer).is_none_or(|d| d.os != swapdesk_proto::Os::Android))
+    }
+
     fn ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool> {
         match self.hooks.get() {
             Some(h) => h.swap_ask(prompt),

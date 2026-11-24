@@ -636,8 +636,16 @@ impl Hub {
         let Some(id) = parse_device_id(device_id) else { return reply(conn, req, Err(ApiCode::Invalid)) };
         // The user acted on the device: a key it refused may be pinned again.
         self.sync_user_acted(&id);
-        if self.p.trust.read(|s| s.find_by_id(&id).is_none()) {
+        let Some(dev) = self.p.trust.read(|s| s.find_by_id(&id).cloned()) else {
             return reply(conn, req, Err(ApiCode::NotFound));
+        };
+        // Whatever an interface shows, nothing is dialled toward a phone that is not hosting (F-NET-03).
+        if !self.dialable(&dev) {
+            return reply(
+                conn,
+                req,
+                Err(self.api_error(ApiCode::Refused, "a connection to a phone that is not hosting")),
+            );
         }
         if self.core().is_none() {
             return reply(conn, req, Err(ApiCode::ServiceDown));

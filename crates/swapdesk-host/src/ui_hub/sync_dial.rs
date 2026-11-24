@@ -290,8 +290,7 @@ impl Hub {
         }
         // A phone listens on nothing unless it announces itself (docs/ANDROID.md): out of discovery there is no
         // address of it to dial, only the one it last came from. It learns the grants in its own sessions.
-        let phone = self.p.trust.read(|s| s.find_by_id(device).is_some_and(|d| d.os == swapdesk_proto::Os::Android));
-        if phone && !self.p.presence.peers().iter().any(|p| &p.device_id == device) {
+        if self.p.trust.read(|s| s.find_by_id(device).is_some_and(|d| !self.dialable(d))) {
             return None;
         }
         self.address_of(device).map(SocketAddr::V4)

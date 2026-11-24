@@ -7,6 +7,9 @@
 //! here, in a file that build never opens. Without this file (lost, or written by an older build after a forget)
 //! the device reads as a computer of [`stored`]'s system until it says its own again, over a connection its pinned
 //! key authenticates.
+//!
+//! The file changes around `trust.bin`, never in an order a failed write could leave wrong (`TrustHandle::try_update`):
+//! what a change adds is written before `trust.bin`, what it removes is taken out after.
 
 use swapdesk_proto::codec::Result;
 use swapdesk_proto::{CodecError, Os, Reader, Wire, Writer};
@@ -43,6 +46,41 @@ impl PeerSystems {
                 .map(|d| (d.device_id, d.os.tag()))
                 .collect(),
         }
+        .sorted()
+    }
+
+    /// The entries in one order, so two lists that say the same compare equal.
+    pub fn sorted(mut self) -> Self {
+        self.entries.sort_unstable();
+        self
+    }
+
+    /// What `systems.bin` should hold for `store`: [`Self::of`] it, plus the entries of `disk` (what the file holds
+    /// now) whose system this build does not know, for devices still paired. A later build wrote those: this one
+    /// carries them, so its own writes do not cost such a device its system.
+    pub fn wanted(store: &TrustStore, disk: Option<&Self>) -> Self {
+        let mut out = Self::of(store);
+        for (id, tag) in disk.map(|d| d.entries.as_slice()).unwrap_or_default() {
+            let carried = Os::from_tag(*tag).is_none()
+                && store.devices.iter().any(|d| &d.device_id == id)
+                && !out.entries.iter().any(|(have, _)| have == id);
+            if carried {
+                out.entries.push((*id, *tag));
+            }
+        }
+        out.sorted()
+    }
+
+    /// `self` plus the entries of `held` for the devices of `paired` that `self` has none for: what the file holds
+    /// between the two writes of a change, so that no failed write costs a device that is still paired its system.
+    pub fn keeping(&self, held: &Self, paired: &[DeviceId]) -> Self {
+        let mut out = self.clone();
+        for (id, tag) in &held.entries {
+            if paired.contains(id) && !out.entries.iter().any(|(have, _)| have == id) {
+                out.entries.push((*id, *tag));
+            }
+        }
+        out.sorted()
     }
 
     /// Gives each device of `store` that has an entry its real system. An entry of a device that is not paired, or

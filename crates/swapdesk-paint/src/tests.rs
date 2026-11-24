@@ -163,7 +163,8 @@ fn a_phones_page_says_it_controls_this_computer_and_offers_no_dial() {
     let ix = Interaction::default();
     let out = paint(Frame::new(&p, &state, &ix, design_size(Main), true), Main);
     let drawn = p.drawn.borrow().clone();
-    for text in ["Celular da Ana", "Controla este computador", "Android 15"] {
+    let note = "É o celular que inicia a conexão: abra o Swapdesk nele para controlar este computador.";
+    for text in ["Celular da Ana", "Controla este computador", "Android 15", note] {
         assert!(drawn.iter().any(|d| d.contains(text)), "{text:?} is drawn: {drawn:?}");
     }
     assert!(!drawn.iter().any(|d| d == "Você controla"), "the computer's wire text is not drawn for a phone");

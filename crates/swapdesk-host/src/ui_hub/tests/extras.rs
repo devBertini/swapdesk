@@ -539,14 +539,22 @@ pub(super) fn waking(ui: &mut Client, id: u64) -> u16 {
 #[test]
 fn a_paired_phone_is_never_asleep_and_cannot_be_woken() {
     let other = Machine::new("celular");
-    let (m, _sent) = sleeper(&other);
+    let (m, sent) = sleeper(&other);
     m.trust.update(|s| s.devices.iter_mut().for_each(|d| d.os = swapdesk_proto::Os::Android)).expect("store");
+    m.hub.set_console_session(Some(1));
     let mut ui = m.client(info(false));
     let ReplyBody::Devices(list) = ui.call(UiOp::ListDevices).unwrap() else { panic!() };
     assert_eq!(
         (list[0].os, list[0].status.clone(), list[0].wakeable),
         (swapdesk_proto::Os::Android, swapdesk_ipc::DeviceStatus::Offline, false)
     );
+    // The service refuses the orders themselves, whatever an interface shows (review of 24/11/2026: before, only
+    // the interface hid them).
+    let wake = ui.call(UiOp::Wake { device_id: other.hex(), intent: Intent::Control });
+    assert_eq!(wake.err(), Some(ApiCode::Invalid), "a phone is never woken");
+    let connect = ui.call(UiOp::Connect { device_id: other.hex(), intent: Intent::Control, unattended: false });
+    assert_eq!(connect.err(), Some(ApiCode::Refused), "a phone that is not hosting is never dialled");
+    assert!(lock(&sent).is_empty(), "no magic packet left");
 }
 
 #[test]

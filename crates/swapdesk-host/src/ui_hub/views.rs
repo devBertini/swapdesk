@@ -533,6 +533,13 @@ impl Hub {
 
     /// An address the viewer path can dial for `id`: the device seen on the network now, one learned from a typed
     /// address while we run, else the last address stored with the device and the default port.
+    /// Whether this computer may start a connection to `d`: always to a computer; to a phone only while it announces
+    /// itself, which it does when it hosts (docs/ANDROID.md). A phone that announces nothing listens on nothing, and
+    /// the address it last came from may be another device's by now.
+    pub(super) fn dialable(&self, d: &PairedDevice) -> bool {
+        d.os != Os::Android || self.p.presence.peers().iter().any(|p| p.device_id == d.device_id)
+    }
+
     pub fn address_of(&self, id: &DeviceId) -> Option<SocketAddrV4> {
         if let Some(p) = self.p.presence.peers().iter().find(|p| &p.device_id == id)
             && let Some(ip) = p.addrs.first()

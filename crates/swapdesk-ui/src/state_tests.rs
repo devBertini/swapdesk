@@ -1285,8 +1285,16 @@ fn a_paired_phones_page_dials_nothing_and_keeps_permissions_and_forget() {
         s.controls(WindowKind::Main).iter().any(|c| c.label.starts_with("É o celular que inicia a conexão")),
         "the page says who starts the connection"
     );
+    // An activation that still arrives (a shortcut, a stale control) starts nothing.
+    for dial in [ControlId::ViewOnly, ControlId::Control, ControlId::Wake] {
+        assert!(s.activate(dial).commands.is_empty(), "{dial:?} sent a command for a phone");
+    }
+    assert!(has(&s, ControlId::Tab(DeviceTab::History)), "Histórico stays");
     s.activate(ControlId::Tab(DeviceTab::Permissions));
     assert!(has(&s, ControlId::Grant(Permission::Control)) && has(&s, ControlId::Forget));
+    // While a session with it is open the phone reads as any device does, with its address.
+    let online = DeviceView { status: DeviceStatus::Online { address: "192.168.0.40".into(), rtt_ms: 4 }, ..d.clone() };
+    assert_eq!(crate::format::status_line(s.language(), &online), "Online, Android 15");
     // A computer's page is as it was.
     let _ = s.select_device(MAC);
     assert!(has(&s, ControlId::Control) && has(&s, ControlId::ViewOnly));

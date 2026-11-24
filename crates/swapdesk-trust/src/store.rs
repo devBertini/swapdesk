@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 use crate::blocklist::{BLOCKED_NAME, BlockList, BlockedDevice};
 use crate::error::{Result, TrustError};
 use crate::ids::DeviceId;
-use crate::records::{TRUST_NAME, TrustStore};
+use crate::records::{MAX_DEVICES, TRUST_NAME, TrustStore};
 use crate::systems::{PeerSystems, SYSTEMS_NAME};
 
 /// Answers "is this key pinned?" for the verifiers and the gate, by looking at the store as it is now.
@@ -29,6 +29,9 @@ pub struct TrustHandle {
     pairing: Mutex<Slot>,
     /// The devices blocked by MAC (D65), persisted in `blocked.bin`; changes are written under `writer` too.
     blocks: Mutex<BlockList>,
+    /// What `systems.bin` holds, as this handle read or wrote it; `None` when the file could not be read (the next
+    /// change writes a good one). Changed under `writer`.
+    systems_disk: Mutex<Option<PeerSystems>>,
 }
 
 /// The machine's one pairing slot: which attempt holds it, and whether that attempt is an initiator that would give
@@ -133,7 +136,12 @@ impl TrustHandle {
         };
         // The systems `trust.bin` cannot say (`crate::systems`). A file that cannot be read leaves such a device as a
         // computer until it says its system again: refusing to start would cost every pairing.
-        if let Some(systems) = secrets.load(SYSTEMS_NAME).ok().flatten().and_then(|b| PeerSystems::decode(&b).ok()) {
+        let systems_disk = match secrets.load(SYSTEMS_NAME) {
+            Ok(None) => Some(PeerSystems::default()),
+            Ok(Some(bytes)) => PeerSystems::decode(&bytes).ok().map(PeerSystems::sorted),
+            Err(_) => None,
+        };
+        if let Some(systems) = &systems_disk {
             systems.apply(&mut store);
         }
         // A `blocked.bin` that cannot be read starts an empty list (the next block writes a good one): losing the
@@ -146,6 +154,7 @@ impl TrustHandle {
             secrets,
             pairing: Mutex::new(Slot::default()),
             blocks: Mutex::new(blocks),
+            systems_disk: Mutex::new(systems_disk),
         }))
     }
 
@@ -164,18 +173,35 @@ impl TrustHandle {
         let _writing = guard(&self.writer);
         // Nobody else changes the store while `_writing` is held, so this copy is the current state.
         let mut next = guard(&self.store).clone();
-        let systems_before = PeerSystems::of(&next);
+        let paired_before: Vec<DeviceId> = next.devices.iter().map(|d| d.device_id).collect();
         let out = f(&mut next)?;
         let bytes = next.encode().map_err(TrustError::Codec)?;
-        // `systems.bin` first, and only when it changes: a store written without its entry would read a phone as a
-        // computer, while an entry without its device says nothing.
-        let systems = PeerSystems::of(&next);
-        if systems != systems_before {
-            let side = systems.encode().map_err(TrustError::Codec)?;
+        // `systems.bin` (`crate::systems`) changes around `trust.bin`. What the change adds is written first: a store
+        // written without its entry would read a phone as a computer. What it removes goes after: a Forget whose
+        // `trust.bin` write fails must not cost the phone, still paired, its system, and a Forget (a revocation)
+        // must not fail because the side file cannot be written. An entry without its device says nothing.
+        let mut disk = guard(&self.systems_disk);
+        let want = PeerSystems::wanted(&next, disk.as_ref());
+        let first = match disk.as_ref() {
+            Some(held) => want.keeping(held, &paired_before),
+            None => want.clone(),
+        };
+        let first = if first.entries.len() > MAX_DEVICES { want.clone() } else { first };
+        let adds = first.entries.iter().any(|e| disk.as_ref().is_none_or(|held| !held.entries.contains(e)));
+        if adds {
+            let side = first.encode().map_err(TrustError::Codec)?;
             self.secrets.store(SYSTEMS_NAME, &side).map_err(TrustError::Secret)?;
+            *disk = Some(first);
         }
         self.secrets.store(TRUST_NAME, &bytes).map_err(TrustError::Secret)?;
         *guard(&self.store) = next;
+        // Best effort: an entry left behind is taken out by the next change.
+        if disk.as_ref() != Some(&want)
+            && let Ok(side) = want.encode()
+            && self.secrets.store(SYSTEMS_NAME, &side).is_ok()
+        {
+            *disk = Some(want);
+        }
         Ok(out)
     }
 
@@ -344,6 +370,8 @@ mod tests {
         let h = TrustHandle::open(secrets.clone()).unwrap();
         h.update(|s| s.devices.extend([dev(1), phone.clone()])).unwrap();
 
+        // The record's system byte (after the 16-byte id, the 44-byte key and the name with its length) is 0, Windows.
+        assert_eq!(phone.encode().unwrap()[16 + 44 + 1 + "celular".len()], Os::Windows.tag());
         let on_disk = secrets.load(TRUST_NAME).unwrap().unwrap();
         let older = TrustStore { devices: vec![dev(1), as_computer], ..TrustStore::default() };
         assert_eq!(on_disk, older.encode().unwrap(), "trust.bin is what 1.1 writes for a computer in its place");
@@ -385,6 +413,96 @@ mod tests {
         // The device saying its system again repairs the record and the file.
         damaged.update(|s| s.devices[1].os = Os::Android).unwrap();
         assert_eq!(TrustHandle::open(secrets).unwrap().read(|s| s.devices[1].os), Os::Android);
+    }
+
+    /// A secret store whose writes of one blob fail while it is named in `fail`.
+    struct Failing {
+        inner: MemorySecretStore,
+        fail: Mutex<Option<&'static str>>,
+    }
+
+    impl Failing {
+        fn new() -> Arc<Self> {
+            Arc::new(Self { inner: MemorySecretStore::new(), fail: Mutex::new(None) })
+        }
+    }
+
+    impl SecretStore for Failing {
+        fn load(&self, name: &str) -> swapdesk_platform::Result<Option<Vec<u8>>> {
+            self.inner.load(name)
+        }
+
+        fn store(&self, name: &str, bytes: &[u8]) -> swapdesk_platform::Result<()> {
+            if *guard(&self.fail) == Some(name) {
+                return Err(PlatformError {
+                    kind: ErrorKind::Os,
+                    op: "test store",
+                    os_code: None,
+                    detail: name.into(),
+                });
+            }
+            self.inner.store(name, bytes)
+        }
+
+        fn delete(&self, name: &str) -> swapdesk_platform::Result<()> {
+            self.inner.delete(name)
+        }
+    }
+
+    fn phone() -> PairedDevice {
+        PairedDevice::new_paired(spki_from_public_key(&[7; 32]), "celular".into(), Os::Android, "15".into(), 1, None)
+    }
+
+    /// Review of minor 3 (24/11/2026): forgetting a phone took its entry out of `systems.bin` before `trust.bin` was
+    /// written, so a Forget whose `trust.bin` write failed left the phone paired and, after a restart, a computer.
+    #[test]
+    fn a_forget_that_fails_to_write_the_store_does_not_cost_the_phone_its_system() {
+        let secrets = Failing::new();
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        h.update(|s| s.devices.extend([dev(1), phone()])).unwrap();
+        *guard(&secrets.fail) = Some(TRUST_NAME);
+        assert!(h.update(|s| s.devices.retain(|d| d.os != Os::Android)).is_err());
+        assert_eq!(h.read(|s| s.devices.len()), 2, "the change is undone");
+        *guard(&secrets.fail) = None;
+        let again = TrustHandle::open(secrets.clone()).unwrap();
+        assert_eq!(again.read(|s| (s.devices.len(), s.devices[1].os)), (2, Os::Android));
+    }
+
+    /// A Forget is a revocation: it does not fail because the side file cannot be written. The entry left behind
+    /// names a device that is no longer paired, says nothing, and goes at the next change.
+    #[test]
+    fn a_forget_succeeds_when_only_the_side_file_cannot_be_written() {
+        use crate::systems::{PeerSystems, SYSTEMS_NAME};
+        let secrets = Failing::new();
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        h.update(|s| s.devices.extend([dev(1), phone()])).unwrap();
+        *guard(&secrets.fail) = Some(SYSTEMS_NAME);
+        h.update(|s| s.devices.retain(|d| d.os != Os::Android)).expect("the phone is forgotten");
+        assert_eq!(TrustHandle::open(secrets.clone()).unwrap().read(|s| s.devices.len()), 1);
+        *guard(&secrets.fail) = None;
+        h.update(|s| s.devices[0].name = "sala".into()).unwrap();
+        let side = PeerSystems::decode(&secrets.load(SYSTEMS_NAME).unwrap().unwrap()).unwrap();
+        assert_eq!(side, PeerSystems::default(), "the entry left behind goes at the next change");
+    }
+
+    /// CONTRACTS C5.1: an entry of a system this build does not know (a later build wrote it) is carried while its
+    /// device is paired, and goes with the device. Before, the first write that changed the list dropped it.
+    #[test]
+    fn an_entry_of_a_system_this_build_does_not_know_is_carried_while_its_device_is_paired() {
+        use crate::systems::{PeerSystems, SYSTEMS_NAME};
+        let secrets = Arc::new(MemorySecretStore::new());
+        TrustHandle::open(secrets.clone()).unwrap().update(|s| s.devices.extend([dev(1), dev(2)])).unwrap();
+        let other = dev(2).device_id;
+        secrets.store(SYSTEMS_NAME, &PeerSystems { entries: vec![(other, 200)] }.encode().unwrap()).unwrap();
+        let h = TrustHandle::open(secrets.clone()).unwrap();
+        assert_eq!(h.read(|s| s.devices[1].os), Os::MacOs, "it reads as `trust.bin` says");
+        let file = || PeerSystems::decode(&secrets.load(SYSTEMS_NAME).unwrap().unwrap()).unwrap().entries;
+        h.update(|s| s.devices.push(phone())).unwrap();
+        let mut both = vec![(other, 200), (phone().device_id, Os::Android.tag())];
+        both.sort_unstable();
+        assert_eq!(file(), both);
+        h.update(|s| s.devices.retain(|d| d.device_id != other)).unwrap();
+        assert_eq!(file(), vec![(phone().device_id, Os::Android.tag())]);
     }
 
     #[test]

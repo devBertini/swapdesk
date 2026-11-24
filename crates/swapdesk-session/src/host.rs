@@ -365,7 +365,13 @@ pub(crate) struct HostInner {
     next_request: AtomicU64,
     /// What each device may still spend on grants syncs (GRANTS-SYNC.md 4.6).
     pub(crate) sync_budget: Mutex<crate::grants_sync::SyncBudget>,
+    /// When each device's record last followed what it said of its system ([`HostInner::follow_said_system`]), in
+    /// the clock's microseconds; entries older than the gap are dropped.
+    record_writes: Mutex<HashMap<DeviceId, u64>>,
 }
+
+/// The least time between two writes of one device's record for what it says of its system (as `peers.bin`).
+const RECORD_WRITE_GAP_US: u64 = 60_000_000;
 
 /// Owns the sessions of this machine as a host. Cheap to clone.
 #[derive(Clone)]
@@ -457,6 +463,7 @@ impl HostService {
                 changed: Notify::new(),
                 next_request: AtomicU64::new(1),
                 sync_budget: Mutex::new(crate::grants_sync::SyncBudget::default()),
+                record_writes: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -748,23 +755,39 @@ impl HostInner {
     }
 
     /// The decision for a `Hello` (5.2 step 2). Runs as a task of the session; the state machine commits the result.
-    pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
-        let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
-        let stored_grants = stored.grants_here;
-        // The device says its system over a connection its pinned key authenticated: the record follows it. That is
-        // how a phone whose `systems.bin` entry was lost stops reading as a computer, and how a new system version
-        // reaches the list. A write that fails changes nothing of this session.
-        if stored.os != hello.os || stored.os_version != hello.os_version {
-            let (os, version) = (hello.os, hello.os_version.clone());
-            let _ = self
-                .trust
+    /// The record of `device` follows the system it says over a connection its pinned key authenticated. That is how
+    /// a phone whose `systems.bin` entry was lost stops reading as a computer, and how a new system version reaches
+    /// the list. At most one write a minute per device, so no device makes every connection a write of the trust
+    /// store, and off the decision's path, whose timers a slow disk must not eat. A write that fails changes nothing
+    /// of the session.
+    fn follow_said_system(&self, device: DeviceId, os: Os, os_version: String) {
+        let now = self.clock.now().0;
+        {
+            let mut written = lock(&self.record_writes);
+            written.retain(|_, at| now.saturating_sub(*at) < RECORD_WRITE_GAP_US);
+            if written.contains_key(&device) {
+                return;
+            }
+            written.insert(device, now);
+        }
+        let trust = Arc::clone(&self.trust);
+        tokio::spawn(async move {
+            let _ = trust
                 .update_blocking(move |s| {
                     if let Some(d) = s.devices.iter_mut().find(|d| d.device_id == device) {
                         d.os = os;
-                        d.os_version = version;
+                        d.os_version = os_version;
                     }
                 })
                 .await;
+        });
+    }
+
+    pub(crate) async fn decide(self: Arc<Self>, ctx: SessionCtx, hello: Hello, device: DeviceId) -> Decision {
+        let Some(stored) = self.stored(&device) else { return Decision::Refuse(ErrorCode::UnknownDevice) };
+        let stored_grants = stored.grants_here;
+        if stored.os != hello.os || stored.os_version != hello.os_version {
+            self.follow_said_system(device, hello.os, hello.os_version.clone());
         }
 
         // ACCOUNTS.md 5.1: another account at the console hosts nothing for this one. The code is ACCOUNT_AWAY; a peer
@@ -1152,10 +1175,14 @@ mod tests {
         service: HostService,
         trust: Arc<TrustHandle>,
         device: DeviceId,
+        secrets: Arc<MemorySecretStore>,
+        clock: Arc<FakeClock>,
     }
 
     fn fixture(stored: PermissionSet) -> Fx {
-        let trust = TrustHandle::open(Arc::new(MemorySecretStore::new())).unwrap();
+        let secrets = Arc::new(MemorySecretStore::new());
+        let clock = Arc::new(FakeClock::new(MonoMicros(1)));
+        let trust = TrustHandle::open(secrets.clone()).unwrap();
         let identity = Identity::generate(0).unwrap();
         let device = device_id(identity.spki());
         trust
@@ -1167,14 +1194,8 @@ mod tests {
             })
             .unwrap();
         let cfg = HostConfig::new("host", Os::Windows, "11", "0.1.0", caps());
-        let service = HostService::new(
-            cfg,
-            trust.clone(),
-            Arc::new(NoUi),
-            Registry::new(),
-            Arc::new(FakeClock::new(MonoMicros(1))),
-        );
-        Fx { service, trust, device }
+        let service = HostService::new(cfg, trust.clone(), Arc::new(NoUi), Registry::new(), clock.clone());
+        Fx { service, trust, device, secrets, clock }
     }
 
     fn ctx_for(fx: &Fx) -> SessionCtx {
@@ -1208,16 +1229,41 @@ mod tests {
     }
 
     /// Minor 3 (docs/ANDROID.md, slice A0): what a device says of its system over a connection its pinned key
-    /// authenticated is what its record says from then on. A phone whose `systems.bin` entry was lost reads as a
-    /// computer only until its next session.
+    /// authenticated is what its record says from then on, on disk too. A phone whose `systems.bin` entry was lost
+    /// reads as a computer only until its next session. Review of 24/11/2026: at most one such write a minute per
+    /// device (before, every connection that said another version wrote the trust store).
     #[test]
     fn the_record_follows_the_system_a_device_says_in_its_authenticated_hello() {
         block_on(async {
             let fx = fixture(PermissionSet::UNATTENDED | PermissionSet::CONTROL);
-            let said = Hello { os: Os::Android, os_version: "16".into(), ..hello(PermissionSet::CONTROL) };
-            let _ = Arc::clone(&fx.service.inner).decide(ctx_for(&fx), said, fx.device).await;
-            let stored = fx.trust.read(|s| s.find_by_id(&fx.device).map(|d| (d.os, d.os_version.clone())));
-            assert_eq!(stored, Some((Os::Android, "16".into())));
+            let says =
+                |version: &str| Hello { os: Os::Android, os_version: version.into(), ..hello(PermissionSet::CONTROL) };
+            let stored = |fx: &Fx| fx.trust.read(|s| s.find_by_id(&fx.device).map(|d| (d.os, d.os_version.clone())));
+            let wait_for = |version: &'static str| {
+                let fx = &fx;
+                async move {
+                    for _ in 0..400 {
+                        if stored(fx) == Some((Os::Android, version.into())) {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    panic!("the record never said Android {version}: {:?}", stored(fx));
+                }
+            };
+            let _ = Arc::clone(&fx.service.inner).decide(ctx_for(&fx), says("16"), fx.device).await;
+            wait_for("16").await;
+            let again = TrustHandle::open(fx.secrets.clone()).unwrap();
+            assert_eq!(again.read(|s| s.find_by_id(&fx.device).map(|d| d.os)), Some(Os::Android), "on disk too");
+
+            // Another version said right away is not written; a minute later it is.
+            let writes = fx.secrets.writes("trust.bin");
+            let _ = Arc::clone(&fx.service.inner).decide(ctx_for(&fx), says("17"), fx.device).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!((stored(&fx), fx.secrets.writes("trust.bin")), (Some((Os::Android, "16".into())), writes));
+            fx.clock.advance(Duration::from_secs(61));
+            let _ = Arc::clone(&fx.service.inner).decide(ctx_for(&fx), says("18"), fx.device).await;
+            wait_for("18").await;
         });
     }
 

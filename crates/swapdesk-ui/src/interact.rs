@@ -1650,7 +1650,8 @@ impl UiState {
                 a.commands.push(Command::PairOpen { device_id });
             }
             ControlId::ViewOnly | ControlId::Control => {
-                if let Some(d) = self.selected_device() {
+                // An activation that still arrives for a phone's page does nothing: nothing here dials a phone.
+                if let Some(d) = self.selected_device().filter(|d| Self::dials(d)) {
                     let device_id = d.id.clone();
                     let intent = if id == ControlId::Control { Intent::Control } else { Intent::View };
                     self.start_connect(device_id, intent, &mut a);

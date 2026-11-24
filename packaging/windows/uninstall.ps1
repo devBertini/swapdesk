@@ -80,7 +80,7 @@ $TempHive      = 'SwapdeskUninstall'
 # last-crash.txt, renamed last-crash.seen.txt once it was told (D12; it lives with the trace).
 $DataFiles     = @('identity.bin', 'trust.bin', 'settings.bin', 'audit-sessions.log', 'audit-network.log', 'trace.log', 'accounts.bin', 'blocked.bin', 'last-crash.txt', 'last-crash.seen.txt')
 # ACCOUNTS.md 10.6: each account's folder accounts\<SID> holds these.
-$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'audit-sessions.log', 'audit-network.log', 'blocked.bin')
+$AccountFiles  = @('identity.bin', 'trust.bin', 'settings.bin', 'account.bin', 'peers.bin', 'systems.bin', 'audit-sessions.log', 'audit-network.log', 'blocked.bin')
 # A folder the service found untrusted at its start is set aside as <name>.untrusted-<ms> (swapdesk-secret-win
 # folder.rs): the data folder beside itself, the folder accounts and each accounts\<SID> inside it.
 $SetAsideData     = '^Swapdesk\.untrusted-[0-9]+$'

@@ -39,6 +39,8 @@ struct Env {
     present: AtomicBool,
     /// Used when there is no trust store.
     control: AtomicBool,
+    /// Whether the other machine can be a host (a phone that does not host cannot).
+    peer_hosts: AtomicBool,
     trust: Option<Arc<TrustHandle>>,
     answer: Mutex<Answer>,
     prompts: Mutex<Vec<SwapPrompt>>,
@@ -55,6 +57,7 @@ impl Env {
         Arc::new(Self {
             present: AtomicBool::new(true),
             control: AtomicBool::new(control),
+            peer_hosts: AtomicBool::new(true),
             trust: None,
             answer: Mutex::new(answer),
             prompts: Mutex::new(Vec::new()),
@@ -83,6 +86,10 @@ impl SwapEnv for Env {
             Some(t) => t.read(|s| s.find_by_id(peer).is_some_and(|d| d.grants_here.contains(PermissionSet::CONTROL))),
             None => self.control.load(Ordering::SeqCst),
         }
+    }
+
+    fn peer_can_host(&self, _peer: &DeviceId) -> bool {
+        self.peer_hosts.load(Ordering::SeqCst)
     }
 
     fn ask(&self, prompt: SwapPrompt) -> oneshot::Receiver<bool> {
@@ -404,6 +411,25 @@ fn a_future_host_that_never_granted_control_declines_at_once_without_a_prompt() 
         assert_eq!(p.hh.request(&p.host_ctx).await, SwapOutcome::Declined(ErrorCode::NotPermitted));
         assert!(t0.elapsed() < Duration::from_secs(1), "at once");
         assert!(lock(&p.venv.prompts).is_empty(), "no prompt");
+        assert!(p.viewer_unchanged());
+    });
+}
+
+/// A peer that cannot host (a phone that does not host, docs/ANDROID.md) is never made the host by a swap: this side
+/// neither asks it nor shows its request, and whoever asked hears `UNAVAILABLE`. Before, the swap was accepted, both
+/// sessions ended and this machine dialled a device that listens on nothing.
+#[test]
+fn a_swap_that_would_make_a_peer_that_cannot_host_the_host_is_declined_without_a_prompt() {
+    run_paused(async {
+        let p = pair(Setup::default()).await;
+        p.henv.peer_hosts.store(false, Ordering::SeqCst);
+        // The host asks: its viewer would become the host.
+        assert_eq!(p.hh.request(&p.host_ctx).await, SwapOutcome::Declined(ErrorCode::Unavailable));
+        assert!(lock(&p.venv.prompts).is_empty(), "nothing was asked of the other side");
+        // The viewer asks: the machine that would have to dial it shows no card and arms nothing.
+        assert_eq!(p.vh.request(p.viewer.ctx()).await, SwapOutcome::Declined(ErrorCode::Unavailable));
+        assert!(lock(&p.henv.prompts).is_empty(), "no card");
+        assert!(lock(&p.henv.viewing).is_empty() && lock(&p.venv.armed).is_empty());
         assert!(p.viewer_unchanged());
     });
 }

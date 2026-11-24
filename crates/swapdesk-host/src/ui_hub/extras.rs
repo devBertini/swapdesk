@@ -408,6 +408,10 @@ impl Hub {
         let Some(dev) = self.p.trust.read(|s| s.find_by_id(&id).cloned()) else {
             return reply(conn, req, Err(ApiCode::NotFound));
         };
+        // A phone is never woken, whatever its record holds (F-NET-03).
+        if dev.os == swapdesk_proto::Os::Android {
+            return reply(conn, req, Err(self.api_error(ApiCode::Invalid, "wake of a phone")));
+        }
         // The MACs it reported after pinning, and the address it had last: nothing here comes from the network now.
         if dev.wol_macs.is_empty() {
             return reply(
