@@ -1,15 +1,19 @@
 //! The Android app's shared library (docs/ANDROID.md 5): what `System.loadLibrary("swapdesk_android")` loads. Java
 //! calls in through the JNI entry points of `jni_entry`; everything behind them is the Rust core the desktops run.
 //!
-//! Slice A1, the foundation: the library says its version and runs [`selftest`], which exercises on the device what
-//! a cross-compile alone cannot prove (key generation, a pinned-key QUIC handshake, Opus).
-//!
 //! [`service`] is the app's service core, plain Rust that builds and is tested on every host. The JNI entry points
-//! and the self-test are Android only.
+//! and the one core they start (`app`) are Android only.
+//!
+//! The cargo feature `dev-harness` adds what a development build alone has, and no release library carries: the
+//! self-test and the reachability probe of slice A1 (`selftest`), and the scripted viewer (`harness`).
 
 #[cfg(target_os = "android")]
-mod jni_entry;
+mod app;
+#[cfg(all(target_os = "android", feature = "dev-harness"))]
+mod harness;
 #[cfg(target_os = "android")]
+mod jni_entry;
+#[cfg(all(target_os = "android", feature = "dev-harness"))]
 pub mod selftest;
 pub mod service;
 

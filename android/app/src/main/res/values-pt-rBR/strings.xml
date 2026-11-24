@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="local_network_why">O Swapdesk funciona só na sua rede local. Para encontrar e controlar seus computadores, o Android pede a sua permissão para alcançar os dispositivos desta rede.</string>
+    <string name="local_network_refused">Sem a permissão de rede local, o Swapdesk não encontra nem alcança nenhum computador. Nada sai do seu celular.</string>
+    <string name="open_app_settings">Abrir os ajustes do app</string>
+</resources>

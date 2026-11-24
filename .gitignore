@@ -12,4 +12,5 @@ node_modules/
 /android/local.properties
 /android/build/
 /android/app/build/
-/android/app/src/main/jniLibs/
+/android/app/src/debug/jniLibs/
+/android/app/src/release/jniLibs/

@@ -40,6 +40,14 @@ tokio.workspace = true
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
 swapdesk-audio = { path = "../swapdesk-audio" }
+# Only with the `dev-harness` feature: the scripted viewer.
+swapdesk-crossdrive = { path = "../swapdesk-crossdrive", optional = true }
+
+[features]
+# Development builds only (scripts/android/build-core.sh without --release): the self-test, the reachability probe
+# and the scripted viewer that pairs and connects with no human touch, with the development options of `Core.start`
+# (QUIC TTL for the emulator, loopback peers). A release library is built without it and checked for its symbols.
+dev-harness = ["dep:swapdesk-crossdrive"]
 
 [dev-dependencies]
 swapdesk-crossdrive = { path = "../swapdesk-crossdrive" }

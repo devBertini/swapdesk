@@ -15,7 +15,8 @@
     <application
         android:allowBackup="false"
         android:extractNativeLibs="false"
-        android:label="Swapdesk">
+        android:label="Swapdesk"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <activity
             android:name=".MainActivity"
             android:exported="true">

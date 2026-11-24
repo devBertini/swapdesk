@@ -1,97 +1,111 @@
 package io.github.devbertini.swapdesk;
 
 import android.app.Activity;
-import android.content.pm.ApplicationInfo;
-import android.net.ConnectivityManager;
-import android.net.LinkAddress;
-import android.net.LinkProperties;
-import android.net.Network;
-import android.net.NetworkCapabilities;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import java.net.Inet4Address;
-
-/** Slice A1: the app starts, loads the core and says what the core's checks found on this device. */
+/**
+ * The app before its shared screens (slice A3): it starts the core, tells it the networks of the phone, and asks
+ * for the local network where Android makes that a permission, saying what stops working when it is refused.
+ */
 public final class MainActivity extends Activity {
     private static final String TAG = "Swapdesk";
+    /** Android 17: from here the local network is a permission the person grants (docs/ANDROID.md 4). */
+    private static final int LOCAL_NETWORK_FROM = 37;
+    private static final String LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK";
+    private static final int ASK_LOCAL_NETWORK = 1;
+
+    private TextView status;
+    private TextView notice;
+    private Button openSettings;
+    private boolean asked;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        TextView text = new TextView(this);
         int pad = Math.round(24 * getResources().getDisplayMetrics().density);
-        text.setPadding(pad, pad, pad, pad);
-        setContentView(text);
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setPadding(pad, pad, pad, pad);
+        // Android draws an app behind the bars of the system: the content keeps clear of them.
+        column.setFitsSystemWindows(true);
+        status = new TextView(this);
+        notice = new TextView(this);
+        notice.setPadding(0, pad, 0, pad / 2);
+        openSettings = new Button(this);
+        openSettings.setText(R.string.open_app_settings);
+        openSettings.setOnClickListener(v -> startActivity(
+                new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null))));
+        LinearLayout.LayoutParams wrap = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        wrap.gravity = Gravity.END;
+        column.addView(status);
+        column.addView(notice);
+        column.addView(openSettings, wrap);
+        setContentView(column);
 
         String version = Core.version();
         Log.i(TAG, "core " + version);
-        text.setText("Swapdesk " + version);
-
-        // Development builds only: "am start ... --es probe <address> [--es probe_mode local|net|local+net]" asks
-        // the core whether a Swapdesk pairing endpoint answers there (the emulator reaches a development instance on
-        // its host at 10.0.2.2), from any socket or from the production one on the Wi-Fi network.
-        boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
-        String probe = debuggable ? probeSpec() : null;
-
-        Thread check = new Thread(() -> {
-            String report = probe == null ? Core.selfTest() : Core.probe(probe);
-            for (String line : report.split("\n")) {
-                Log.i(TAG, line);
-            }
-            runOnUiThread(() -> text.setText("Swapdesk " + version + "\n\n" + report));
-        }, "swapdesk-selftest");
-        check.start();
+        String started;
+        try {
+            started = Core.start(getFilesDir().getPath(), DataKey.load(this), deviceName(), Build.VERSION.RELEASE,
+                    DevHarness.options(this));
+        } catch (Exception e) {
+            // The Keystore did not give the data key back: nothing sealed can be read. Said, never worked around.
+            started = "ERROR the data key: " + e;
+        }
+        Log.i(TAG, "CORE " + started);
+        status.setText("Swapdesk " + version + "\n" + started);
+        Networks.start(this);
+        DevHarness.run(this, status);
     }
 
-    /** The probe the intent asks for, with the Wi-Fi network's address and handle when its mode names them. */
-    private String probeSpec() {
-        String address = getIntent().getStringExtra("probe");
-        if (address == null) {
-            return null;
-        }
-        String mode = getIntent().getStringExtra("probe_mode");
-        if (mode == null) {
-            return address;
-        }
-        ConnectivityManager networks = getSystemService(ConnectivityManager.class);
-        for (Network network : allNetworks(networks)) {
-            NetworkCapabilities caps = networks.getNetworkCapabilities(network);
-            LinkProperties link = networks.getLinkProperties(network);
-            if (caps == null || link == null) {
-                continue;
-            }
-            Log.i(TAG, "NETWORK " + link.getInterfaceName() + " wifi=" + caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    + " cellular=" + caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    + " vpn=" + caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-                    + " addresses=" + link.getLinkAddresses()
-                    + " default=" + network.equals(networks.getActiveNetwork()));
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                continue;
-            }
-            for (LinkAddress a : link.getLinkAddresses()) {
-                if (a.getAddress() instanceof Inet4Address) {
-                    String spec = address;
-                    if (mode.contains("local")) {
-                        spec += " local=" + a.getAddress().getHostAddress();
-                    }
-                    if (mode.contains("net")) {
-                        spec += " net=" + network.getNetworkHandle();
-                    }
-                    if (mode.contains("ttl2")) {
-                        spec += " ttl=2";
-                    }
-                    return spec;
-                }
-            }
-        }
-        Log.i(TAG, "PROBE FAIL: no Wi-Fi network with an IPv4 address");
-        return address;
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Also on the way back from the settings of the system, where the person may have changed the answer.
+        showLocalNetwork();
     }
 
-    @SuppressWarnings("deprecation") // the harness reads the networks once; the app itself listens with a callback
-    private static Network[] allNetworks(ConnectivityManager networks) {
-        return networks.getAllNetworks();
+    /** Asks for the local network once, where it is a permission, and says what its refusal stops. */
+    private void showLocalNetwork() {
+        boolean needed = Build.VERSION.SDK_INT >= LOCAL_NETWORK_FROM;
+        boolean granted = !needed || checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED;
+        if (needed && !granted && !asked) {
+            asked = true;
+            Log.i(TAG, "LOCAL_NETWORK asking");
+            notice.setText(R.string.local_network_why);
+            openSettings.setVisibility(View.GONE);
+            requestPermissions(new String[] {LOCAL_NETWORK}, ASK_LOCAL_NETWORK);
+            return;
+        }
+        Log.i(TAG, "LOCAL_NETWORK " + (!needed ? "not_needed" : granted ? "granted" : "refused"));
+        notice.setText(granted ? "" : getString(R.string.local_network_refused));
+        notice.setVisibility(granted ? View.GONE : View.VISIBLE);
+        openSettings.setVisibility(granted ? View.GONE : View.VISIBLE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == ASK_LOCAL_NETWORK) {
+            showLocalNetwork();
+        }
+    }
+
+    /** The name the person gave the phone, or its model. */
+    private String deviceName() {
+        String name = Settings.Global.getString(getContentResolver(), Settings.Global.DEVICE_NAME);
+        return name == null || name.trim().isEmpty() ? Build.MODEL : name.trim();
     }
 }

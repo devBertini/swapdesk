@@ -12,17 +12,15 @@ final class Core {
     static native String version();
 
     /**
-     * Runs the core's checks on this device (keys, a pinned-key QUIC handshake, Opus) and returns one line per
-     * check after a first line "SELFTEST passed/all". It opens sockets: never call it on the main thread.
+     * Starts the service core once (a second call starts nothing): the device key, the trust store and the logs
+     * live under {@code dir}, the app's private folder, sealed with {@code dataKey} (32 bytes, {@link DataKey}).
+     * {@code dev} is empty outside a development build. Returns what happened; a refusal starts with "ERROR ".
      */
-    static native String selfTest();
+    static native String start(String dir, byte[] dataKey, String name, String osVersion, String dev);
 
     /**
-     * Development harness: whether a Swapdesk pairing endpoint answers from this device. {@code spec} is the
-     * address ("10.0.2.2:47851"), then optionally " local=IPv4" (the production socket: on that address of this
-     * device, TTL 1) and " net=handle" (bound to that network, {@code Network.getNetworkHandle()}). One line:
-     * "PROBE ANSWERED", "PROBE REFUSED", "PROBE TIMEOUT" or "PROBE FAIL", each with its reason. Never on the main
-     * thread.
+     * The phone's connected networks, whole, at every change ({@link Networks} writes the buffer). Returns what
+     * the guard approves now; a refusal starts with "ERROR ".
      */
-    static native String probe(String spec);
+    static native String networks(byte[] facts);
 }

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- English is the fallback; Brazilian Portuguese is in values-pt-rBR. These few texts belong to the system
+         side of the app (permissions); the screens' own texts come from the shared interface. -->
+    <string name="local_network_why">Swapdesk works only on your local network. To find and control your computers, Android asks for your permission to reach the devices of this network.</string>
+    <string name="local_network_refused">Without the local network permission, Swapdesk cannot find or reach any computer. Nothing leaves your phone.</string>
+    <string name="open_app_settings">Open the app\'s settings</string>
+</resources>
