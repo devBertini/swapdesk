@@ -167,6 +167,7 @@ fn device(id: &str) -> DeviceView {
         grants_there: None,
         last_session: None,
         wakeable: false,
+        needs_update: false,
     }
 }
 

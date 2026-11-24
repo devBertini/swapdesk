@@ -144,10 +144,23 @@ pub fn device() -> BoxedStrategy<DeviceView> {
         any::<u16>(),
         proptest::option::of(any::<u16>()),
         proptest::option::of(summary),
-        any::<bool>(),
+        (any::<bool>(), any::<bool>()),
     )
-        .prop_map(|((id, name, os, os_version, status), paired, grants_here, grants_there, last_session, wakeable)| {
-            DeviceView { id, name, os, os_version, status, paired, grants_here, grants_there, last_session, wakeable }
+        .prop_map(|((id, name, os, os_version, status), paired, grants_here, grants_there, last_session, flags)| {
+            let (wakeable, needs_update) = flags;
+            DeviceView {
+                id,
+                name,
+                os,
+                os_version,
+                status,
+                paired,
+                grants_here,
+                grants_there,
+                last_session,
+                wakeable,
+                needs_update,
+            }
         })
         .boxed()
 }

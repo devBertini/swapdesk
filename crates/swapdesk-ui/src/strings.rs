@@ -53,6 +53,7 @@ strings! {
     StatusPhoneIdle => "Não conectado, {0}", "Not connected, {0}";
     StatusUnpaired => "Não pareado", "Not paired";
     StatusUnpairedOpen => "Não pareado, pareamento aberto", "Not paired, pairing open";
+    StatusNeedsUpdate => "Precisa de atualização", "Needs an update";
     OsLabel => "{0} {1}", "{0} {1}";
     DeviceCaptionThis => "Este computador", "This computer";
     EmptyDevices => "Nenhum computador encontrado ainda.", "No computers found yet.";
@@ -73,6 +74,10 @@ strings! {
     DetailOffline => "Fora da rede", "Not on the network";
     DetailPhoneIdle => "Não conectado a este computador", "Not connected to this computer";
     DetailUnpaired => "Aparece na rede, ainda não pareado", "Seen on the network, not paired yet";
+    DetailNeedsUpdate => "O Swapdesk deste computador precisa de atualização", "Swapdesk on this computer needs an update";
+    NeedsUpdateTitle => "Este computador precisa de atualização", "This computer needs an update";
+    NeedsUpdateBody => "O Swapdesk dele é de uma versão anterior à que este celular entende. Atualize o Swapdesk no computador: depois disso ele aparece aqui pronto para parear.", "Its Swapdesk is a version older than the one this phone understands. Update Swapdesk on the computer: after that it shows here ready to pair.";
+    PairNeedsUpdateBody => "Nada foi liberado. O Swapdesk desse computador é de uma versão anterior à que este celular entende. Atualize o Swapdesk nele e pareie de novo.", "Nothing was allowed. Swapdesk on that computer is a version older than the one this phone understands. Update Swapdesk there and pair again.";
     ViewOnly => "Assistir", "Watch";
     Control => "Controlar", "Control";
     Wake => "Acordar", "Wake";
@@ -340,6 +345,7 @@ strings! {
     ErrLocked => "Pareamento bloqueado por 15 minutos.", "Pairing locked for 15 minutes.";
     ErrInvalid => "Valor inválido.", "Invalid value.";
     ErrInternal => "Erro interno.", "Internal error.";
+    ErrNeedsUpdate => "O Swapdesk do outro computador precisa de atualização.", "Swapdesk on the other computer needs an update.";
 
     // Viewer window
     ViewerTitle => "{0}, Swapdesk", "{0}, Swapdesk";

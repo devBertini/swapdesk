@@ -108,7 +108,7 @@ impl PairUi for HubPairUi {
         let Some(hub) = self.hub.upgrade() else { return };
         let state = match result {
             Ok(out) => PairingState::Done { device_id: device_id_hex(&out.device.device_id) },
-            Err(e) => PairingState::Failed { reason: pair_error_code(e) },
+            Err(e) => PairingState::Failed { reason: pair_error_code(e, hub.p.os) },
         };
         hub.end_pairing(state);
         if result.is_ok() {
@@ -122,12 +122,17 @@ impl PairUi for HubPairUi {
 const PAIR_DIAL_LIMIT: Duration = Duration::from_secs(3);
 const PAIR_REDIAL: Duration = Duration::from_secs(1);
 
-fn pair_error_code(e: &TrustError) -> ApiCode {
+pub(super) fn pair_error_code(e: &TrustError, own: swapdesk_proto::Os) -> ApiCode {
     match e {
         TrustError::Locked { .. } => ApiCode::Locked,
         TrustError::Timeout(_) => ApiCode::Timeout,
         TrustError::NotInPairingMode => ApiCode::Refused,
         TrustError::UnknownDevice => ApiCode::NotFound,
+        // The other side could not read this side's first message. Only a device whose system is newer than the
+        // first protocol names anything there an older build does not know (a phone, at an address typed by
+        // hand: a record on the network is never dialled, `Hub::needs_update`). From a computer the same close is
+        // no matter of versions.
+        TrustError::PeerTooOld if own.min_minor() > 0 => ApiCode::NeedsUpdate,
         other => api_of(other.code()),
     }
 }
@@ -544,7 +549,10 @@ impl Hub {
                 Ok(_) => {}
                 // A failure before the ceremony never reached the screen's `ended`; this is its only report. After
                 // a ceremony the id is already gone and the call does nothing.
-                Err(e) => me.end_pairing_of(pairing_id, PairingState::Failed { reason: pair_error_code(&e) }),
+                Err(e) => {
+                    let reason = pair_error_code(&e, me.p.os);
+                    me.end_pairing_of(pairing_id, PairingState::Failed { reason });
+                }
             }
         });
         lock(&self.pairing.inner).task = Some(task.abort_handle());
@@ -559,6 +567,10 @@ impl Hub {
             return Ok((m.addr, m.pair_port(), None));
         }
         let id = parse_device_id(device_id).ok_or(ApiCode::Invalid)?;
+        // Whatever an interface shows, nothing is dialled toward a device that could not read it.
+        if self.needs_update(&id) {
+            return Err(self.api_error(ApiCode::NeedsUpdate, "a pairing with a device whose Swapdesk is too old"));
+        }
         let peer = self.p.presence.peers().into_iter().find(|p| p.device_id == id).ok_or(ApiCode::NotFound)?;
         let ip = *peer.addrs.first().ok_or(ApiCode::NotFound)?;
         Ok((ip, peer.pair_port, Some(id)))

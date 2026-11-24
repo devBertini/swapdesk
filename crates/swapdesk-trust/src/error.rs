@@ -18,6 +18,11 @@ pub enum TrustError {
     Protocol(ErrorCode),
     /// The peer ended the attempt with `PairResult { ok: false, code }`.
     Refused(ErrorCode),
+    /// The peer closed the connection at this side's `PairHello`, with no `PairResult`, saying it could not read
+    /// the message (`PROTOCOL_VIOLATION`) or does not speak its version (`UNSUPPORTED_VERSION`): what a build does
+    /// that is older than something the message names. Of a phone's `PairHello` that is its system, which a
+    /// build below minor 3 does not know (docs/ANDROID.md 5).
+    PeerTooOld,
     /// Pairing is locked on this machine for `remaining_ms` more.
     Locked { remaining_ms: u64 },
     /// A step took longer than its limit.
@@ -42,6 +47,7 @@ impl TrustError {
             Self::Secret(_) => ErrorCode::IoFailed,
             Self::Crypto(_) | Self::Tls(_) => ErrorCode::Internal,
             Self::Protocol(c) | Self::Refused(c) => *c,
+            Self::PeerTooOld => ErrorCode::UnsupportedVersion,
             Self::Locked { .. } => ErrorCode::PairingLocked,
             Self::Timeout(_) => ErrorCode::Timeout,
             Self::SasRejected => ErrorCode::SasRejected,
@@ -60,6 +66,7 @@ impl fmt::Display for TrustError {
             Self::Tls(what) => write!(f, "tls: {what}"),
             Self::Protocol(c) => write!(f, "protocol violation ({c:?})"),
             Self::Refused(c) => write!(f, "refused by the peer ({c:?})"),
+            Self::PeerTooOld => f.write_str("the peer could not read this side's first message"),
             Self::Locked { remaining_ms } => write!(f, "pairing locked for {remaining_ms} ms"),
             Self::Timeout(what) => write!(f, "timeout: {what}"),
             Self::SasRejected => f.write_str("the codes did not match"),

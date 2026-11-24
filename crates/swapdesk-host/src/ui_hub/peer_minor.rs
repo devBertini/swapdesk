@@ -35,10 +35,17 @@ impl PeerMinors {
     /// * A record that changed since is a device that changed (an update, a downgrade): its hint decides again.
     /// * A device that never said anything is as new as its record says, and of minor 0 when it has none.
     pub fn known(&self, device: &DeviceId, hint: Option<u16>) -> u16 {
+        self.evidence(device, hint).unwrap_or(0)
+    }
+
+    /// The minor there is evidence of for `device`, by the rules of [`Self::known`]; `None` when it is not on the
+    /// network and never said anything. `known` reads that as minor 0, which is right for what is asked of a
+    /// device (nothing newer) and wrong for a statement about it: a computer that is merely away is not old.
+    pub fn evidence(&self, device: &DeviceId, hint: Option<u16>) -> Option<u16> {
         match (self.said.get(device), hint) {
-            (Some(said), Some(now)) if said.hint != Some(now) => now,
-            (Some(said), _) => said.minor,
-            (None, hint) => hint.unwrap_or(0),
+            (Some(said), Some(now)) if said.hint != Some(now) => Some(now),
+            (Some(said), _) => Some(said.minor),
+            (None, hint) => hint,
         }
     }
 
@@ -61,6 +68,16 @@ mod tests {
 
     const A: DeviceId = [1; 16];
     const B: DeviceId = [2; 16];
+
+    #[test]
+    fn there_is_no_evidence_about_a_device_that_is_away_and_never_spoke() {
+        let mut m = PeerMinors::default();
+        assert_eq!(m.evidence(&A, None), None);
+        assert_eq!(m.evidence(&A, Some(2)), Some(2), "its record says so");
+        m.said(B, 3, Some(3));
+        assert_eq!(m.evidence(&B, None), Some(3), "what it said holds while it is away");
+        assert_eq!(m.evidence(&B, Some(2)), Some(2), "a record that changed since decides again");
+    }
 
     #[test]
     fn a_device_that_never_spoke_is_as_new_as_its_record_and_of_minor_0_without_one() {

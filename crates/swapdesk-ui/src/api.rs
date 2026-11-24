@@ -53,6 +53,8 @@ pub enum ApiCode {
     Internal,
     /// The other computer's volume has too little free space for a file (F-FILE-03).
     NoSpace,
+    /// The other computer's Swapdesk is older than this device can talk to (a phone, docs/ANDROID.md 5).
+    NeedsUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -219,6 +221,9 @@ pub struct DeviceView {
     pub grants_there: Option<Permissions>,
     pub last_session: Option<SessionSummary>,
     pub wakeable: bool,
+    /// Its Swapdesk is older than this device can talk to: the service dials nothing toward it, and its page says
+    /// so in place of the buttons that would. Only a phone's service says it.
+    pub needs_update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

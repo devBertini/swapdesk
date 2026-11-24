@@ -166,6 +166,17 @@ fn lost<E>(_: E) -> TrustError {
     TrustError::Tls("pairing stream closed".into())
 }
 
+/// Whether the peer closed the connection saying it could not read what it was sent, or does not speak its
+/// version. A responder that reads a `PairHello` it knows always answers on the stream first (`PairNonce`, or a
+/// `PairResult` with its reason); one that meets a value it does not know closes at once with the codec's code,
+/// as 1.0 and 1.1.0 do.
+fn closed_unread(conn: &quinn::Connection) -> bool {
+    let Some(quinn::ConnectionError::ApplicationClosed(close)) = conn.close_reason() else { return false };
+    [ErrorCode::ProtocolViolation, ErrorCode::UnsupportedVersion]
+        .iter()
+        .any(|code| close.error_code.into_inner() == u64::from(code.tag()))
+}
+
 async fn write_msg(send: &mut SendStream, msg: impl Into<Message>) -> Result<()> {
     let frame = msg.into().encode_frame()?;
     send.write_all(&frame).await.map_err(lost)
@@ -650,7 +661,12 @@ async fn initiate_steps(
     let Some(answer) = unless(&taken_over, within(deadline, "PairNonce", read_msg(&mut recv))).await else {
         return Err(gave_way());
     };
-    let nonce = match answer? {
+    let answer = match answer {
+        // Only here, at the answer to this side's first message: a later violation is what it is.
+        Err(TrustError::Tls(_)) if closed_unread(conn) => return Err(TrustError::PeerTooOld),
+        answer => answer?,
+    };
+    let nonce = match answer {
         // The peer committed to a nonce: the ceremony is this side's from here, unless it gave way just before.
         Message::PairNonce(n) if attempt.withdraw_offer() => n,
         Message::PairNonce(_) => {

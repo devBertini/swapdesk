@@ -100,6 +100,21 @@ fn every_main_scenario_renders_at_a_phones_size() {
         written += 1;
     }
     assert!(written >= 30, "wrote {written}");
+    // States only a phone reaches (docs/ANDROID.md 5): a computer that needs an update, as its page and as the end
+    // of a pairing by a typed address.
+    for (name, state) in [
+        ("celular-precisa-atualizar", swapdesk_ui::mock::phone_needs_update_state()),
+        ("celular-pareamento-precisa-atualizar", swapdesk_ui::mock::phone_pairing_needs_update_state()),
+    ] {
+        let r = render(&state, WindowKind::Main, phone, 2.0, &ix).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(r.distinct_colors() > 3, "{name} looks blank");
+        r.save_png(&dir.join(format!("{name}.png"))).unwrap_or_else(|e| panic!("{name}: {e}"));
+        std::fs::write(dir.join(format!("{name}.layout.txt")), swapdesk_paint::layout_dump(&r.output))
+            .expect("layout dump");
+        let known: Vec<_> = state.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+        let extra: Vec<_> = r.output.widgets.iter().filter(|w| !known.contains(&w.id)).map(|w| w.id).collect();
+        assert!(extra.is_empty(), "{name}: controls the state does not list: {extra:?}");
+    }
 }
 
 #[test]

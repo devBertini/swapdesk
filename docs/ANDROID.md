@@ -281,6 +281,17 @@ the older desktop ends the ceremony at `PairHello` with the QUIC close code `PRO
 minor 3 with `Bye { UNSUPPORTED_VERSION }` in place of the `HelloAck` that would name its system. The phone never claims to be Windows or a Mac. Everything else the phone sends exists in minors
 0 to 2.
 
+**As built (A3.4, D90).** The service decides, not the screens: `Hub::needs_update` is true for a device when this
+device's system needs a minor (`Os::min_minor`, 3 for a phone, 0 for a computer) and there is evidence that the other
+is below it, which is the minor its record carries now or what it said in an authenticated exchange. A computer that
+is away and never spoke is not known to be old. `PairStart`, `Connect` and the grants sync refuse such a device with
+`ApiCode::NeedsUpdate` before anything is dialled, and its record says `needs_update`, which the screens show in place
+of its status and of every button that would dial. At a typed address the pairing is tried; the initiator names the
+older build's close at its first message `TrustError::PeerTooOld` (for the codes `PROTOCOL_VIOLATION` and
+`UNSUPPORTED_VERSION`, with no `PairResult` before it), counts no failure toward the lockout, and the phone's dialog
+says the computer needs an update and offers only "Fechar". Owed to the device walk: the same against a real 1.1.0
+computer (the tests close as its code does).
+
 Stored data: `PairedDevice.os` is part of the trust record (C5.1) and the record's decoder rejects an unknown tag
 (`Os::get` in `swapdesk-trust` `records.rs`), so a trust store holding a phone as `Android` would not load in a build
 below minor 3 (a downgrade). A0 keeps the trust record's format (D83): the phone's system goes to a side file,
@@ -322,7 +333,13 @@ The rule is one interface on every system (D37, F-UI-02). Three ways to honour i
    a phone's (`UiState::set_phone`) and from then on says "este celular" where a computer says "este computador"
    (one table of the texts a phone says differently, `strings.rs`) and leaves out what only a computer that
    receives has: the pairing it opens itself, the grants for the other side, the settings of login, receiving, a
-   desktop's keyboard and blocked devices. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
+   desktop's keyboard and blocked devices. The local network permission (section 4) is said by the same screens
+   (D90): Java tells the state what Android answered (`Shell.localNetwork`), and the first pane shows a notice
+   before every other card, without a button while the system's question is up and with "Abrir os ajustes do app"
+   once refused. The activity takes a turn of the phone, a split screen, the dark theme and a change of language
+   itself (`configChanges`), so the screen is never made again for them, and a new activity of a process that lived
+   on finds the state it left. The app's language is its own setting in Ajustes; the system's language is where
+   the first start begins. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
    (IME included). Accessibility comes from the shared tree (`swapdesk_ui::a11y`) through AccessKit's Android adapter,
    which AccessKit lists ("implements the Java-based Android accessibility API") [S43], or the framework's
    `AccessibilityNodeProvider` (16) [S29] if that adapter does not fit. Keeps one set of screens, texts, tokens and

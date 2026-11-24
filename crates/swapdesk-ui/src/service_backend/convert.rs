@@ -66,7 +66,8 @@ pub fn desktop_from_wire(v: p::Desktop) -> a::DesktopKind {
 }
 
 pair_enum!(code_to_wire, code_from_wire, a::ApiCode, w::ApiCode;
-    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal, NoSpace);
+    ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal, NoSpace,
+    NeedsUpdate);
 pair_enum!(ready_to_wire, ready_from_wire, a::Ready, w::Ready; ReadyToReceive, ServiceOff, ServiceNeedsApproval, NoNetwork);
 pair_enum!(category_to_wire, category_from_wire, a::NetCategoryView, w::NetCategoryView; Public, Private, Domain);
 pair_enum!(os_perm_to_wire, os_perm_from_wire, a::OsPermission, w::OsPermission; ScreenRecording, Accessibility, InputMonitoring);
@@ -189,6 +190,7 @@ pub fn device_to_wire(v: &a::DeviceView) -> w::DeviceView {
             desktop: desktop_to_wire(s.desktop),
         }),
         wakeable: v.wakeable,
+        needs_update: v.needs_update,
     }
 }
 
@@ -209,6 +211,7 @@ pub fn device_from_wire(v: w::DeviceView) -> a::DeviceView {
             desktop: desktop_from_wire(s.desktop),
         }),
         wakeable: v.wakeable,
+        needs_update: v.needs_update,
     }
 }
 
@@ -771,6 +774,7 @@ mod tests {
                 desktop: a::DesktopKind::Locked,
             }),
             wakeable: true,
+            needs_update: false,
         }
     }
 

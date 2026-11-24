@@ -3032,6 +3032,7 @@ impl UiState {
             ApiCode::Invalid => MsgKey::ErrInvalid,
             ApiCode::Internal => MsgKey::ErrInternal,
             ApiCode::NoSpace => MsgKey::TransferNoSpace,
+            ApiCode::NeedsUpdate => MsgKey::ErrNeedsUpdate,
         };
         match &error.detail {
             // These say everything themselves: the generic line before them would read as a second problem.

@@ -394,6 +394,10 @@ impl Hub {
             grants_there: d.grants_there.map(PermissionSet::bits),
             last_session: Self::last_session(recent, &d.device_id),
             wakeable,
+            needs_update: self.too_old(
+                &d.device_id,
+                reach.presence.iter().find(|p| p.device_id == d.device_id).map(|p| p.proto_minor),
+            ),
         }
     }
 
@@ -417,6 +421,7 @@ impl Hub {
                 grants_there: None,
                 last_session: None,
                 wakeable: false,
+                needs_update: self.too_old(&p.device_id, Some(p.proto_minor)),
             });
         }
         out.extend(reach.unmatched.iter().map(Self::typed_entry));
@@ -453,6 +458,7 @@ impl Hub {
             grants_there: None,
             last_session: None,
             wakeable: false,
+            needs_update: false,
         }
     }
 
@@ -472,6 +478,7 @@ impl Hub {
                 grants_there: None,
                 last_session: None,
                 wakeable: false,
+                needs_update: false,
             },
         }
     }
@@ -529,6 +536,21 @@ impl Hub {
             return 0;
         }
         lock(&self.minors).known(id, hint)
+    }
+
+    /// Whether nothing may be dialled toward `id` because its Swapdesk is older than this device's system needs
+    /// (`Os::min_minor`: a phone needs minor 3, a computer nothing, so a computer's hub never says so). Only on
+    /// evidence: the minor its record carries now, or what it said in an authenticated exchange. A device that is
+    /// away and never spoke is not known to be old. The screens say "needs an update"; pairing, a connect and the
+    /// grants sync all ask here before they dial.
+    pub fn needs_update(&self, id: &DeviceId) -> bool {
+        self.too_old(id, self.minor_hint(id))
+    }
+
+    /// [`Self::needs_update`] for a device whose record now carries `hint` (`None`: it is not on the network).
+    pub(super) fn too_old(&self, id: &DeviceId, hint: Option<u16>) -> bool {
+        let need = self.p.os.min_minor();
+        need > 0 && lock(&self.minors).evidence(id, hint).is_some_and(|minor| minor < need)
     }
 
     /// An address the viewer path can dial for `id`: the device seen on the network now, one learned from a typed

@@ -193,6 +193,8 @@ pub fn os_label(lang: Language, os: Os, version: &str) -> String {
 pub fn status_line(lang: Language, d: &DeviceView) -> String {
     let os = os_label(lang, d.os, &d.os_version);
     let msg = match &d.status {
+        // Whatever else is true of it, nothing reaches it until it is updated.
+        _ if d.needs_update => Msg::new(MsgKey::StatusNeedsUpdate),
         DeviceStatus::Online { .. } => Msg::new(MsgKey::StatusOnline).with(os),
         DeviceStatus::Asleep => Msg::new(MsgKey::StatusAsleep).with(os),
         DeviceStatus::Offline if d.os == Os::Android => Msg::new(MsgKey::StatusPhoneIdle).with(os),
@@ -206,6 +208,7 @@ pub fn status_line(lang: Language, d: &DeviceView) -> String {
 /// The line under the title of a device: "Online em 192.168.0.21, resposta em 3 ms".
 pub fn detail_line(lang: Language, d: &DeviceView) -> String {
     let msg = match &d.status {
+        _ if d.needs_update => Msg::new(MsgKey::DetailNeedsUpdate),
         DeviceStatus::Online { address, rtt_ms } => {
             Msg::new(MsgKey::DetailOnline).with(address.clone()).with(rtt_ms.to_string())
         }

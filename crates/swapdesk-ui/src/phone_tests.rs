@@ -182,3 +182,65 @@ fn a_phone_without_the_local_network_says_so_first_and_offers_the_systems_settin
     assert!(on_page.contains(&ControlId::Notice(NoticeKind::LocalNetwork)));
     assert!(!on_page.contains(&ControlId::EditGrants), "the notice takes the page's content");
 }
+
+/// docs/ANDROID.md 5: a computer whose Swapdesk is older than a phone can talk to is listed where it is, says
+/// "needs an update" in place of its status, and its page offers nothing that would dial it: what to do about it
+/// instead. An activation that still arrives sends nothing.
+#[test]
+fn a_computer_that_needs_an_update_says_so_and_offers_nothing_that_dials_it() {
+    let mut phone = crate::mock::phone_needs_update_state();
+    let d = phone.selected_device().cloned().expect("the computer's page");
+    assert!(d.needs_update && !d.paired);
+    assert_eq!(phone.device_status_line(&d), "Precisa de atualização");
+    assert_eq!(crate::format::detail_line(phone.language(), &d), "O Swapdesk deste computador precisa de atualização");
+    let on_page = ids(&phone);
+    for dial in [ControlId::PairWithDevice, ControlId::Control, ControlId::ViewOnly, ControlId::Wake] {
+        assert!(!on_page.contains(&dial), "{dial:?} on the page of a computer that needs an update");
+    }
+    assert!(says(&phone, "Este computador precisa de atualização"));
+    assert!(says(&phone, "Atualize o Swapdesk no computador"));
+    assert!(!says(&phone, "ainda não está pareado"), "not the text of a computer that can be paired");
+    for dial in [ControlId::PairWithDevice, ControlId::Control, ControlId::ViewOnly] {
+        let act = phone.activate(dial);
+        assert!(act.commands.is_empty(), "{dial:?} sent {:?}", act.commands);
+    }
+    assert!(phone.pairing().is_none());
+
+    // The same computer once paired (it went back to an older build): no connect either, and the page says why.
+    let mut paired = crate::mock::phone_needs_update_state();
+    for d in paired.devices.iter_mut().filter(|d| d.needs_update) {
+        d.paired = true;
+        d.status = crate::DeviceStatus::Online { address: "192.168.0.30".into(), rtt_ms: 2 };
+    }
+    let on_page = ids(&paired);
+    assert!(!on_page.contains(&ControlId::Control) && !on_page.contains(&ControlId::ViewOnly), "{on_page:?}");
+    assert!(says(&paired, "O Swapdesk deste computador precisa de atualização"));
+    assert!(paired.activate(ControlId::Control).commands.is_empty());
+
+    // A computer that does not need one keeps its button.
+    let fine = Scenario::EstadoNaoPareado.phone_state();
+    assert!(ids(&fine).contains(&ControlId::PairWithDevice));
+}
+
+/// A pairing by a typed address that ended at a computer too old to read the phone: the dialog names the cause
+/// and what to do, and offers only its way out (trying again changes nothing until the computer is updated).
+#[test]
+fn a_pairing_that_met_an_old_computer_says_it_needs_an_update_and_only_closes() {
+    let phone = crate::mock::phone_pairing_needs_update_state();
+    let on_page = ids(&phone);
+    assert!(on_page.contains(&ControlId::PairClose) && !on_page.contains(&ControlId::PairRetry), "{on_page:?}");
+    assert!(says(&phone, "Este computador precisa de atualização"));
+    assert!(says(&phone, "Nada foi liberado.") && says(&phone, "pareie de novo"));
+    assert!(!says(&phone, "Não foi possível parear") && !says(&phone, "Erro interno"));
+    // Any other failure keeps its two buttons.
+    let mut other = crate::mock::phone_pairing_needs_update_state();
+    if let Some(p) = &mut other.pairing {
+        p.state = crate::PairingState::Failed { reason: crate::ApiCode::Timeout };
+    }
+    let on_page = ids(&other);
+    assert!(on_page.contains(&ControlId::PairRetry) && on_page.contains(&ControlId::PairClose));
+    // In English too.
+    let mut en = crate::mock::phone_pairing_needs_update_state();
+    en.set_language(crate::Language::En);
+    assert!(says(&en, "This computer needs an update") && says(&en, "pair again"));
+}

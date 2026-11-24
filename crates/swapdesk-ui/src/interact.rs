@@ -494,6 +494,8 @@ impl UiState {
             // A session with it is open: the page leads back to it, or ends it. Nothing here starts another.
             s.button(ControlId::SessionEnd, self.name_of(MsgKey::Disconnect));
             s.button(ControlId::SessionShow, self.name_of(MsgKey::SessionBack));
+        } else if d.needs_update {
+            // Its Swapdesk is too old for this device: nothing here dials it until it is updated.
         } else if d.paired && !Self::dials(d) {
             // A phone: nothing here starts a connection to it.
         } else if d.paired && Self::can_wake(d) {
@@ -515,6 +517,11 @@ impl UiState {
             for k in notices {
                 self.notice_controls(s, k);
             }
+            return;
+        }
+        if !d.paired && d.needs_update {
+            s.heading(2, self.name_of(MsgKey::NeedsUpdateTitle));
+            s.text(UiRole::Text, self.name_of(MsgKey::NeedsUpdateBody));
             return;
         }
         if !d.paired {
@@ -1048,6 +1055,12 @@ impl UiState {
                 s.text(UiRole::Text, self.name_of(MsgKey::PairDoneBody));
                 s.button(ControlId::PairDone, self.name_of(MsgKey::PairDoneButton));
             }
+            // Trying again changes nothing until the computer is updated: the way out is the only button.
+            PairingState::Failed { reason: ApiCode::NeedsUpdate } => {
+                s.heading(2, self.name_of(MsgKey::NeedsUpdateTitle));
+                s.text(UiRole::Text, self.name_of(MsgKey::PairNeedsUpdateBody));
+                s.button(ControlId::PairClose, self.name_of(MsgKey::PairClose));
+            }
             PairingState::Failed { reason } => {
                 s.heading(2, self.name_of(MsgKey::PairFailedTitle));
                 s.text(
@@ -1249,6 +1262,7 @@ impl UiState {
             ApiCode::Invalid => MsgKey::ErrInvalid,
             ApiCode::Internal => MsgKey::ErrInternal,
             ApiCode::NoSpace => MsgKey::TransferNoSpace, // never an elevation failure; the text is still true
+            ApiCode::NeedsUpdate => MsgKey::ErrNeedsUpdate, // nor this one
         };
         Some(self.name_of(key))
     }
@@ -1678,6 +1692,8 @@ impl UiState {
                 });
                 a.commands.push(Command::PairOpen { device_id: None });
             }
+            // An activation that still arrives for a computer that needs an update does nothing.
+            ControlId::PairWithDevice if self.selected_device().is_some_and(|d| d.needs_update) => {}
             ControlId::PairWithDevice => {
                 let device_id = self.selected_device().map(|d| d.id.clone());
                 self.pairing = Some(PairingView {
@@ -1689,7 +1705,7 @@ impl UiState {
             }
             ControlId::ViewOnly | ControlId::Control => {
                 // An activation that still arrives for a phone's page does nothing: nothing here dials a phone.
-                if let Some(d) = self.selected_device().filter(|d| Self::dials(d)) {
+                if let Some(d) = self.selected_device().filter(|d| Self::dials(d) && !d.needs_update) {
                     let device_id = d.id.clone();
                     let intent = if id == ControlId::Control { Intent::Control } else { Intent::View };
                     self.start_connect(device_id, intent, &mut a);

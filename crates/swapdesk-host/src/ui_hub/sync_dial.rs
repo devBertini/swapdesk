@@ -278,14 +278,14 @@ impl Hub {
     }
 
     /// The address to sync `device` at, when it may be synced now.
-    fn sync_target(&self, device: &DeviceId) -> Option<SocketAddr> {
+    pub(super) fn sync_target(&self, device: &DeviceId) -> Option<SocketAddr> {
         if self.p.trust.read(|s| s.find_by_id(device).is_none()) {
             return None;
         }
         // Never toward a device not known to be minor 1 (by its record, or what it said over an authenticated
         // exchange); one out of discovery is dialled at its last address and port (GRANTS-SYNC.md 3.6, peers.bin).
         let hint = self.minor_hint(device);
-        if self.known_minor(device, hint) < 1 || self.session_carries(device) {
+        if self.known_minor(device, hint) < 1 || self.session_carries(device) || self.too_old(device, hint) {
             return None;
         }
         // A phone listens on nothing unless it announces itself (docs/ANDROID.md): out of discovery there is no

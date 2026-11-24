@@ -293,3 +293,30 @@ fn the_local_network_notice_is_the_first_card_of_a_phones_first_pane() {
         }
     }
 }
+
+/// docs/ANDROID.md 5: the page of a computer that needs an update and the dialog of a pairing that met one, at
+/// every phone size: nothing is drawn outside the screen, the page offers no button that dials, the dialog only
+/// its way out.
+#[test]
+fn a_computer_that_needs_an_update_fits_every_phone_and_offers_no_dial() {
+    for (w, h) in PHONES {
+        let page = swapdesk_ui::mock::phone_needs_update_state();
+        let dialog = swapdesk_ui::mock::phone_pairing_needs_update_state();
+        for (name, state) in [("page", &page), ("dialog", &dialog)] {
+            let (p, out) = frame(state, (w, h), &touched(0.0, 0));
+            let what = format!("{name} at {w}x{h}");
+            let placed: Vec<ControlId> = out.widgets.iter().map(|wd| wd.id).collect();
+            for dial in [ControlId::PairWithDevice, ControlId::Control, ControlId::ViewOnly, ControlId::PairRetry] {
+                assert!(!placed.contains(&dial), "{what}: {dial:?} is offered");
+            }
+            assert_eq!(placed.contains(&ControlId::PairClose), name == "dialog", "{what}: {placed:?}");
+            assert!(p.drawn.borrow().iter().any(|t| t == "Este computador precisa de atualização"), "{what}");
+            for (x, end, text) in p.spans.borrow().iter() {
+                assert!(*x >= -0.5 && *end <= w + 0.5, "{what}: {text:?} is drawn from {x} to {end}");
+            }
+            for wd in &out.widgets {
+                assert!(wd.rect.x >= -0.01 && wd.rect.right() <= w + 0.01, "{what}: {:?} at {:?}", wd.id, wd.rect);
+            }
+        }
+    }
+}

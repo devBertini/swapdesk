@@ -9,12 +9,13 @@ use common::*;
 use swapdesk_proto::Wire;
 use swapdesk_proto::{
     EXPORTER_LABEL, EXPORTER_LEN, ErrorCode, Message, NONCE_LEN, Os, PROTOCOL_VERSION, PairConfirm, PairHello,
-    PairResult, PairReveal,
+    PairNonce, PairResult, PairReveal,
 };
 use swapdesk_trust::pairing::{Timeouts, commitment, compute_sas};
 use swapdesk_trust::tls::pairing_client_config;
 use swapdesk_trust::{
-    AuditEvent, Identity, InitiateOptions, ModeOptions, TrustError, connect_and_initiate, device_id, respond,
+    AuditEvent, Identity, InitiateOptions, ModeOptions, TrustError, connect_and_initiate, device_id,
+    open_pairing_endpoint, respond,
 };
 
 fn digits(sas: swapdesk_proto::Sas) -> String {
@@ -1040,5 +1041,77 @@ fn an_initiator_whose_chosen_device_is_not_the_one_that_answers_counts_no_failur
         let disk = a.disk();
         assert!(disk.lockout.failures.is_empty() && disk.lockout.provisional.is_none(), "{:?}", disk.lockout);
         assert!(b.disk().lockout.failures.is_empty(), "the responder never reached step 2 either");
+    });
+}
+
+/// A pairing endpoint that reads the initiator's `PairHello` and closes the connection with `code` and no
+/// `PairResult`: what a build does whose codec cannot decode the message (1.0 and 1.1.0 meeting a phone's `os`,
+/// docs/ANDROID.md 5; the code is the codec's, `PROTOCOL_VIOLATION`). With `answers_first` it commits to a nonce
+/// as a responder that read the message does, and closes only after the initiator's next message.
+fn closing_endpoint(code: ErrorCode, answers_first: bool) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let identity = Identity::generate(0).unwrap();
+    let endpoint = open_pairing_endpoint(loopback_socket(), &identity).unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let conn = endpoint.accept().await.expect("a connection").await.expect("the handshake");
+        let (mut send, mut recv) = conn.accept_bi().await.expect("the pairing stream");
+        assert!(matches!(read_msg(&mut recv).await, Message::PairHello(_)));
+        if answers_first {
+            let nonce = PairNonce {
+                name: "old".into(),
+                os: Os::Windows,
+                os_version: "11".into(),
+                majors: vec![PROTOCOL_VERSION],
+                nonce_r: [7; NONCE_LEN],
+            };
+            write_msg(&mut send, nonce).await;
+            assert!(matches!(read_msg(&mut recv).await, Message::PairReveal(_)));
+        }
+        conn.close(quinn::VarInt::from_u32(u32::from(code.tag())), b"");
+        endpoint.wait_idle().await;
+    });
+    (addr, task)
+}
+
+/// docs/ANDROID.md 5: a computer reached at a typed address has no record that says how old it is. A build that
+/// does not know what the first message names closes at once with its codec's code; the initiator says so by name
+/// (`PeerTooOld`), counts nothing against its lockout and ends its screen. Only at the answer to the first message
+/// and only for the two codes that say "I could not read you": anything else stays what it was.
+#[test]
+fn a_peer_that_closes_unread_at_the_first_message_is_too_old_and_costs_no_lockout() {
+    run(async {
+        for code in [ErrorCode::ProtocolViolation, ErrorCode::UnsupportedVersion] {
+            let phone = Node::new("celular", TestUi::answering(true));
+            phone.open_pairing_mode();
+            let (addr, old) = closing_endpoint(code, false);
+            let r = connect_and_initiate(&client_endpoint(), &phone.ctx, addr, InitiateOptions::default()).await;
+            assert!(matches!(r, Err(TrustError::PeerTooOld)), "{code:?}: {r:?}");
+            let disk = phone.disk();
+            assert!(disk.devices.is_empty(), "{code:?}");
+            assert!(disk.lockout.failures.is_empty() && disk.lockout.provisional.is_none(), "{code:?}: no failure");
+            let said: Vec<_> = phone.audit.entries().iter().map(|e| e.event.clone()).collect();
+            assert_eq!(said, vec![AuditEvent::PairRefused(ErrorCode::UnsupportedVersion)], "{code:?}");
+            let ended = phone.ui.last_ended().expect("the screen is told");
+            assert!(!ended.ok && ended.code == ErrorCode::UnsupportedVersion, "{code:?}: {:?}", ended.code);
+            assert!(!phone.mode.is_open(), "{code:?}: the attempt is over");
+            let _ = tokio::time::timeout(Duration::from_secs(3), old).await;
+        }
+
+        // Another code at the same place is no word about versions.
+        let a = Node::new("a", TestUi::answering(true));
+        a.open_pairing_mode();
+        let (addr, other) = closing_endpoint(ErrorCode::Internal, false);
+        let r = connect_and_initiate(&client_endpoint(), &a.ctx, addr, InitiateOptions::default()).await;
+        assert!(matches!(r, Err(TrustError::Tls(_))), "{r:?}");
+        let _ = tokio::time::timeout(Duration::from_secs(3), other).await;
+
+        // A violation after the peer answered the first message is a broken ceremony, counted as one.
+        let b = Node::new("b", TestUi::answering(true));
+        b.open_pairing_mode();
+        let (addr, later) = closing_endpoint(ErrorCode::ProtocolViolation, true);
+        let r = connect_and_initiate(&client_endpoint(), &b.ctx, addr, InitiateOptions::default()).await;
+        assert!(matches!(r, Err(TrustError::Tls(_))), "{r:?}");
+        assert_eq!(b.disk().lockout.failures.len(), 1, "it reached step 2");
+        let _ = tokio::time::timeout(Duration::from_secs(3), later).await;
     });
 }

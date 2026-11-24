@@ -620,7 +620,7 @@ pub trait UiWaker: Send + Sync { fn wake(&self); }
 // ---------- DTOs ----------
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct ApiError { pub code: ApiCode, pub detail: Option<Msg> }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiCode { ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal }
+pub enum ApiCode { ServiceDown, NotFound, NotPermitted, NeedsAdmin, Busy, Timeout, Refused, Locked, Invalid, Internal, NoSpace, NeedsUpdate }
 
 pub enum Os { Windows, MacOs }
 pub enum Permission { View, Control, Audio, Terminal, AdminTerminal, Files, Clipboard, Unattended }
@@ -638,6 +638,9 @@ pub struct DeviceView {
     pub id: String, pub name: String, pub os: Os, pub os_version: String, pub status: DeviceStatus,
     pub paired: bool, pub grants_here: Permissions, pub grants_there: Option<Permissions>,
     pub last_session: Option<SessionSummary>, pub wakeable: bool,
+    /// The device's Swapdesk is older than this device's system needs (a phone needs protocol minor 3, D90): the
+    /// service dials nothing toward it. On the pipe it is the record's last field, and `ApiCode::NeedsUpdate` is tag 11.
+    pub needs_update: bool,
 }
 pub struct SessionSummary { pub at_ms: u64, pub duration_s: u32, pub direction: Direction, pub desktop: DesktopKind }
 pub enum Direction { Incoming, Outgoing }
@@ -844,7 +847,7 @@ All crates sit in `crates/` (workspace `members = ["crates/*"]`). Only `*-win`, 
 | `swapdesk-codec-android` | lib | `VideoDecoder` and `Renderer` in one: `AMediaCodec` into the session surface's native window | yes | A1 (skeleton), A4 |
 | `swapdesk-audio-android` | lib | `AudioSink` on AAudio | yes | A1 (skeleton), A6 |
 | `swapdesk-input-android` | lib | the touch, key and committed-text records from Java as the session's input events (the `InputGrabber` role); later `ClipboardProvider` | no | A1 (skeleton), A5 |
-| `swapdesk-shell-android` | lib | the Android shell of the shared screens, plain Rust built and tested on every host (D86): `canvas_ops` (one frame as bytes, the format the Java view replays; `decode` is its reference), `recorder` (the `Painter` that writes it, by the Mac painter's rules), `text_measure` (`TextCache`: labels measured by Android through lists of needs, never a call from Rust into Java), `phone_window` (`PhoneWindow::paint` and `measured`: a frame, or the list of text to measure first; a frame always comes), `phone_shell` (`PhoneShell`: the shell around the shared state, with no Android in it: `press`, `release`, `cancel`, `scroll_by`, `scroll_to`, `reveal`, `back` and `takes_back`, `tick`, `drain`, `submit_edit`, `chose`; `take_asks` and `edits` are what the Java side reads, as bytes), `phone_effects` (the table of effects, with no catch-all). From the next slices the accessibility bridge | no | A1 (skeleton), A3 |
+| `swapdesk-shell-android` | lib | the Android shell of the shared screens, plain Rust built and tested on every host (D86): `canvas_ops` (one frame as bytes, the format the Java view replays; `decode` is its reference), `recorder` (the `Painter` that writes it, by the Mac painter's rules), `text_measure` (`TextCache`: labels measured by Android through lists of needs, never a call from Rust into Java), `phone_window` (`PhoneWindow::paint` and `measured`: a frame, or the list of text to measure first; a frame always comes), `phone_shell` (`PhoneShell`: the shell around the shared state, with no Android in it: `press`, `release`, `cancel`, `scroll_by`, `scroll_to`, `reveal`, `back` and `takes_back`, `tick`, `drain`, `submit_edit`, `chose`, `set_local_network`; `take_asks` and `edits` are what the Java side reads, as bytes; ask 6 opens the app's page in the system's settings), `phone_effects` (the table of effects, with no catch-all). From the next slices the accessibility bridge | no | A1 (skeleton), A3 |
 "` + the manifest (keys compiled in `keys::RELEASE_KEYS`, empty until the key ceremony of slice U2), the `.sdpkg` package read only after its size and SHA-256 match, `policy::offer` (stable only, never equal or lower, not a rolled-back version); depends on `ring` only, no OS call, `unsafe` forbidden | no | 1.1 (D53·U1) |
 
 ## Lane map (M1 to M4)

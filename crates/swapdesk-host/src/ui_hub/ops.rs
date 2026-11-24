@@ -647,6 +647,14 @@ impl Hub {
                 Err(self.api_error(ApiCode::Refused, "a connection to a phone that is not hosting")),
             );
         }
+        // Nor toward a device whose Swapdesk could not read what this one sends (`Hub::needs_update`).
+        if self.needs_update(&id) {
+            return reply(
+                conn,
+                req,
+                Err(self.api_error(ApiCode::NeedsUpdate, "a connection to a device whose Swapdesk is too old")),
+            );
+        }
         if self.core().is_none() {
             return reply(conn, req, Err(ApiCode::ServiceDown));
         }

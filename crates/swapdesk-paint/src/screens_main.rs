@@ -656,6 +656,9 @@ fn device_actions(f: &Frame, d: &DeviceView) -> Vec<(ControlId, String, Kind)> {
             (ControlId::SessionEnd, f.t(MsgKey::Disconnect), Kind::Default),
             (ControlId::SessionShow, f.t(MsgKey::SessionBack), Kind::Primary),
         ]
+    } else if d.needs_update {
+        // Its Swapdesk is too old for this device: nothing here dials it until it is updated.
+        Vec::new()
     } else if d.paired && !swapdesk_ui::UiState::dials(d) {
         // A phone: nothing here starts a connection to it (F-NET-03).
         Vec::new()
@@ -760,6 +763,20 @@ pub(crate) fn devices_main(f: &mut Frame) -> f32 {
     let notices = f.st.notices();
     if !notices.is_empty() {
         return notice_cards(f, room(f, &a, y), &notices);
+    }
+    if !d.paired && d.needs_update {
+        // Its Swapdesk is older than this device can talk to: what to do about it, alone in the page (D51).
+        let (title, body) = (f.t(MsgKey::NeedsUpdateTitle), f.t(MsgKey::NeedsUpdateBody));
+        return Card {
+            look: Look::Alone,
+            icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::DOWNLOAD)),
+            title: Some(&title),
+            body: Some(&body),
+            bar: None,
+            buttons: &[],
+        }
+        .paint_in(f, room(f, &a, y), card::W)
+        .bottom();
     }
     if !d.paired {
         // Not paired yet: what pairing takes, alone in the page (D51).
@@ -1884,6 +1901,12 @@ fn pairing(f: &mut Frame) {
                 PairItem::Buttons(vec![(ControlId::PairDone, f.t(MsgKey::PairDoneButton), Kind::Primary)]),
             ]
         }
+        // Trying again changes nothing until the computer is updated: the way out is the only button.
+        PairingState::Failed { reason: swapdesk_ui::ApiCode::NeedsUpdate } => vec![
+            PairItem::Title(f.t(MsgKey::NeedsUpdateTitle)),
+            PairItem::Body(f.t(MsgKey::PairNeedsUpdateBody)),
+            PairItem::Buttons(vec![(ControlId::PairClose, f.t(MsgKey::PairClose), Kind::Primary)]),
+        ],
         PairingState::Failed { reason } => vec![
             PairItem::Title(f.t(MsgKey::PairFailedTitle)),
             PairItem::Body(format!(

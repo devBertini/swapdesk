@@ -42,6 +42,9 @@ wire_enum! {
         Timeout = 5, Refused = 6, Locked = 7, Invalid = 8, Internal = 9,
         /// The receiving folder's volume has too little free space for the file (F-FILE-03); added after 1.0.
         NoSpace = 10,
+        /// The other device's Swapdesk is older than this device's system needs (a phone needs protocol minor 3,
+        /// docs/ANDROID.md 5); added with the phone.
+        NeedsUpdate = 11,
     }
 }
 
@@ -299,6 +302,9 @@ wire_struct! {
         grants_there: Option<u16>,
         last_session: Option<SessionSummary>,
         wakeable: bool,
+        /// Its Swapdesk is older than this device's system needs (`Hub::needs_update`): nothing is dialled toward
+        /// it until it is updated. Added with the phone; a computer's service never sets it.
+        needs_update: bool,
     }
 }
 

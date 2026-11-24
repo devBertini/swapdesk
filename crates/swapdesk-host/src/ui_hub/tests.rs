@@ -42,6 +42,7 @@ mod extras;
 mod files;
 mod grants_sync;
 mod lock_end;
+mod needs_update;
 mod presence;
 mod resume;
 mod review_pair;
@@ -902,7 +903,8 @@ fn a_phone_pairs_as_the_initiator_without_ever_listening_or_announcing() {
     let ReplyBody::PairingId(id_c) = uc.call(UiOp::PairOpen { device_id: None }).unwrap() else { panic!() };
     let ReplyBody::PairingId(id_p) = up.call(UiOp::PairOpen { device_id: Some(pc.hex()) }).unwrap() else { panic!() };
     quiet("with its pairing mode open");
-    phone.sees(&pc, true);
+    // The computer's record says the minor it speaks: a phone dials nothing toward one below 3 (`needs_update`).
+    phone.sees_minor(&pc, true, swapdesk_proto::PROTO_MINOR);
     assert!(matches!(up.call(UiOp::PairStart { pairing_id: id_p, device_id: pc.hex() }).unwrap(), ReplyBody::Done));
     let code = |ui: &mut Client, id| match ui.pairing(id, "ShowCode", |s| matches!(s, PairingState::ShowCode { .. })) {
         PairingState::ShowCode { code, peer_name } => (code.0, peer_name),

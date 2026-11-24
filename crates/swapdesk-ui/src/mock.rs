@@ -82,6 +82,7 @@ fn phone() -> DeviceView {
         grants_there: None,
         last_session: None,
         wakeable: false,
+        needs_update: false,
     }
 }
 
@@ -121,6 +122,7 @@ fn devices() -> Vec<DeviceView> {
                 desktop: DesktopKind::LoginWindow,
             }),
             wakeable: false,
+            needs_update: false,
         },
         DeviceView {
             id: DESKTOP.into(),
@@ -133,6 +135,7 @@ fn devices() -> Vec<DeviceView> {
             grants_there: Some(perms(&[Permission::View, Permission::Control, Permission::Files])),
             last_session: None,
             wakeable: true,
+            needs_update: false,
         },
         DeviceView {
             id: AIR.into(),
@@ -145,6 +148,7 @@ fn devices() -> Vec<DeviceView> {
             grants_there: None,
             last_session: None,
             wakeable: false,
+            needs_update: false,
         },
     ]
 }
@@ -1387,6 +1391,28 @@ impl Scenario {
         }
         s
     }
+}
+
+/// A phone's page of a computer on the network whose Swapdesk is older than a phone can talk to
+/// (docs/ANDROID.md 5): the not-paired scenario, with that computer flagged as a phone's service flags it.
+pub fn phone_needs_update_state() -> UiState {
+    let mut s = Scenario::EstadoNaoPareado.phone_state();
+    for d in s.devices.iter_mut().filter(|d| d.id == AIR) {
+        d.needs_update = true;
+    }
+    s
+}
+
+/// The same phone after a pairing by a typed address ended at a computer that could not read the phone's first
+/// message: the dialog says the computer needs an update, and offers only its way out.
+pub fn phone_pairing_needs_update_state() -> UiState {
+    let mut s = Scenario::EstadoNaoPareado.phone_state();
+    s.pairing = Some(crate::state::PairingView {
+        id: 0,
+        device_id: Some(AIR.into()),
+        state: PairingState::Failed { reason: ApiCode::NeedsUpdate },
+    });
+    s
 }
 
 // ---------- the backend ----------
