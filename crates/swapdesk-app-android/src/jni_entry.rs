@@ -194,6 +194,14 @@ shell_call!(
     Java_io_github_devbertini_swapdesk_Shell_back() -> jboolean, false, |shell| shell.back()
 );
 shell_call!(
+    /// `Shell.waitsForData()`: whether something the screens show is still on its way from the service.
+    Java_io_github_devbertini_swapdesk_Shell_waitsForData() -> jboolean, false, |shell| shell.waits_for_data()
+);
+shell_call!(
+    /// `Shell.armPlaceholders()`: what still waits shows as placeholders (100 ms after it was asked for).
+    Java_io_github_devbertini_swapdesk_Shell_armPlaceholders() -> (), (), |shell| shell.arm_placeholders()
+);
+shell_call!(
     /// `Shell.tick()`: a second went by.
     Java_io_github_devbertini_swapdesk_Shell_tick() -> (), (), |shell| shell.tick()
 );
@@ -215,6 +223,21 @@ shell_call!(
     /// `Shell.setDark(dark)`: the system's appearance.
     Java_io_github_devbertini_swapdesk_Shell_setDark(dark: jboolean) -> (), (), |shell| shell.set_dark(dark)
 );
+
+/// `Shell.showLive(language, dark)`: see [`crate::startup::show_live`]. Main thread only.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_showLive<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    language: JString<'caller>,
+    dark: jboolean,
+) -> JString<'caller> {
+    env.with_env(|env| -> Result<_, Error> {
+        let language: String = language.to_string();
+        JString::from_str(env, said(crate::startup::show_live(&language, dark)))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
 
 /// `Shell.drain()`: the backend has news (the waker posted). Main thread only.
 #[unsafe(no_mangle)]
@@ -367,7 +390,7 @@ mod dev {
                     "-"
                 };
                 let mut s = format!(
-                    "nav={:?} device={} scroll={offset:.0}/{max:.0} over={over} dark={} computers={} renaming={}                      sent={}",
+                    "nav={:?} device={} scroll={offset:.0}/{max:.0} over={over} dark={} computers={} renaming={} sent={}",
                     st.nav(),
                     st.selected_device().map_or("-", |d| d.name.as_str()),
                     st.dark(),
@@ -375,6 +398,18 @@ mod dev {
                     st.renaming().is_some(),
                     shell.commands_sent(),
                 );
+                // The live state: whether the computer on the page is paired, the session with it, the pairing
+                // code on the screen (which a person compares with the other screen's; the script does the same).
+                if let Some(d) = st.selected_device() {
+                    let session = st.open_session_with(&d.id).is_some();
+                    let _ = write!(s, " paired={} session={session} tab={:?}", d.paired, st.tab());
+                }
+                if let Some(swapdesk_ui::PairingState::ShowCode { code, .. }) = st.pairing().map(|p| &p.state) {
+                    let _ = write!(s, " code={}", code.replace(' ', ""));
+                }
+                if let Some(this) = st.this_device() {
+                    let _ = write!(s, " ready={:?}", this.ready);
+                }
                 if let Some(out) = shell.output() {
                     for w in &out.widgets {
                         let (x, y) = w.rect.center();
@@ -385,6 +420,25 @@ mod dev {
             })
             .unwrap_or_else(|| "no screen".to_owned());
             JString::from_str(env, said)
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+    }
+
+    /// `DevHarness.add(address)`: adds a computer at `address`, which may carry a port (`10.0.2.2:47850`: the
+    /// development instance of the service on the PC that runs the emulator; the address field of the screens takes
+    /// an address alone). Main thread.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_devbertini_swapdesk_DevHarness_add<'caller>(
+        mut env: EnvUnowned<'caller>,
+        _class: JClass<'caller>,
+        address: JString<'caller>,
+    ) {
+        env.with_env(|_| -> Result<_, Error> {
+            let ipv4: String = address.to_string();
+            let _ = crate::phone_screen::with_shell(|shell| {
+                shell.send(vec![swapdesk_ui::Command::AddByAddress { ipv4 }]);
+            });
+            Ok(())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
     }

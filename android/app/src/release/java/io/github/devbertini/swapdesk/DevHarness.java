@@ -19,4 +19,10 @@ final class DevHarness {
     static PaintView screen(Activity activity) {
         return null;
     }
+
+    static boolean scripted(Activity activity) {
+        return false;
+    }
+
+    static void watch(Activity activity, PaintView view) {}
 }

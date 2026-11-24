@@ -62,10 +62,20 @@ impl NetworkFacts {
         }
     }
 
+    /// What the screens and the trace call the network: its kind where Android says it ("Wi-Fi", "Ethernet", the
+    /// same word in both languages), else the kernel's name of its interface ("wlan0" says nothing to a person).
+    pub fn label(&self) -> String {
+        match self.kind() {
+            IfKind::WiFi => "Wi-Fi".into(),
+            IfKind::Ethernet => "Ethernet".into(),
+            _ => self.name.clone(),
+        }
+    }
+
     fn interface(&self) -> NetInterface {
         NetInterface {
             index: self.index,
-            name: self.name.clone(),
+            name: self.label(),
             kind: self.kind(),
             // Java reports connected networks only.
             up: true,
@@ -200,7 +210,7 @@ impl Networks {
         let facts = self.facts();
         let list: Vec<NetInterface> = facts.iter().map(NetworkFacts::interface).collect();
         let owner = approved_addrs(&list).into_iter().find(|a| a.addr == local)?;
-        facts.iter().find(|f| f.name == owner.if_name && f.index == owner.if_index).map(|f| f.handle)
+        facts.iter().find(|f| f.label() == owner.if_name && f.index == owner.if_index).map(|f| f.handle)
     }
 
     /// What to do with a QUIC socket bound to `local` (the step of `swapdesk_lan::socket::set_after_bind`): bind it
@@ -221,7 +231,7 @@ impl Networks {
         let list: Vec<NetInterface> = facts.iter().map(NetworkFacts::interface).collect();
         let approved = approved_addrs(&list);
         let pick = approved.iter().find(|a| a.kind == IfKind::WiFi).or_else(|| approved.first())?;
-        facts.iter().find(|f| f.name == pick.if_name && f.index == pick.if_index).map(|f| f.handle)
+        facts.iter().find(|f| f.label() == pick.if_name && f.index == pick.if_index).map(|f| f.handle)
     }
 }
 
@@ -284,7 +294,8 @@ mod tests {
         assert!(networks.set(phone_at_home()));
         let approved = approved_addrs(&networks.list().unwrap());
         assert_eq!(approved.len(), 1);
-        assert_eq!((approved[0].if_name.as_str(), approved[0].addr, approved[0].prefix), ("wlan0", WIFI, 24));
+        // Called by its kind, as the screens show it, not by the kernel's name of its interface.
+        assert_eq!((approved[0].if_name.as_str(), approved[0].addr, approved[0].prefix), ("Wi-Fi", WIFI, 24));
 
         let kinds: Vec<IfKind> = phone_at_home().iter().map(NetworkFacts::kind).collect();
         assert_eq!(kinds, [IfKind::Other, IfKind::WiFi, IfKind::Vpn]);

@@ -14,7 +14,8 @@ use swapdesk_sys_android::facts::{self, Networks};
 use swapdesk_sys_android::logcat::Logcat;
 use swapdesk_sys_android::network;
 use swapdesk_sys_android::sealed::{KEY_LEN, SealedStore};
-use swapdesk_ui::UiWaker;
+use swapdesk_ui::prefs::FilePrefs;
+use swapdesk_ui::{Language, UiState};
 
 use crate::phone_service::{PhoneParams, PhoneService};
 
@@ -28,16 +29,9 @@ impl TraceSink for Tee {
     }
 }
 
-/// Until the shared screens run on the phone, nothing waits to be woken.
-struct NoWake;
-
-impl UiWaker for NoWake {
-    fn wake(&self) {}
-}
-
 pub(crate) struct App {
-    /// The app's private folder, where the harness meets its orchestrator.
-    #[cfg(feature = "dev-harness")]
+    /// The app's private folder: the interface's own record (language, theme) lives here, and a development
+    /// harness meets its orchestrator here.
     pub dir: PathBuf,
     pub service: PhoneService,
 }
@@ -127,16 +121,27 @@ pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> 
             discovery: true,
             dev_loopback: dev.loopback,
         },
-        Arc::new(NoWake),
+        crate::ui_waker::waker(),
         None,
     )?;
     trace.log(Level::Info, "app", format_args!("core {} started", crate::version()));
-    *app = Some(App {
-        #[cfg(feature = "dev-harness")]
-        dir,
-        service,
-    });
+    *app = Some(App { dir, service });
     Ok("started".into())
+}
+
+/// `Shell.showLive`: the phone's own screens over its service. The state starts in the phone's language (`pt...`
+/// is Portuguese of Brazil, anything else English) and appearance, takes over what the person chose before (the
+/// record `ui.bin` in the app's folder), and asks the service for what it shows. Main thread: the screen lives
+/// there.
+pub fn show_live(language: &str, dark: bool) -> Result<String, String> {
+    let app = app();
+    let app = app.as_ref().ok_or("the core is not running")?;
+    let language = if language.to_ascii_lowercase().starts_with("pt") { Language::PtBr } else { Language::En };
+    let mut state = UiState::new(language, dark);
+    state.set_phone(true);
+    state.load_prefs(Box::new(FilePrefs::in_dir(&app.dir)));
+    crate::phone_screen::show(state, app.service.backend());
+    Ok("shown".into())
 }
 
 /// `Core.networks`: Java's newest list of networks. The guard reads it from now on, the process is bound to the

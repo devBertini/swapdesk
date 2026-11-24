@@ -124,6 +124,12 @@ final class PaintView extends FrameLayout {
     };
     private final Runnable everySecond = this::second;
     private boolean ticking;
+    private boolean placeholdersPosted;
+    private final Runnable placeholders = () -> {
+        placeholdersPosted = false;
+        Shell.armPlaceholders();
+        requestFrame();
+    };
     /** Android 13 and later: registered while the back gesture is the app's to answer. */
     private Object backCallback;
     private boolean backRegistered;
@@ -193,6 +199,11 @@ final class PaintView extends FrameLayout {
     private void acted() {
         runAsks();
         requestFrame();
+        // What the screens asked the service for and did not get within 100 ms shows as placeholders (R-UI-1).
+        if (!placeholdersPosted && Shell.waitsForData()) {
+            placeholdersPosted = true;
+            postDelayed(placeholders, 100);
+        }
     }
 
     private float density() {
@@ -294,6 +305,9 @@ final class PaintView extends FrameLayout {
         super.onAttachedToWindow();
         Shell.onNews(this::acted);
         followSystem();
+        // News that came before there was a view to tell (the answers to what the screens asked at their start).
+        Shell.drain();
+        acted();
         if (!ticking) {
             ticking = true;
             postDelayed(everySecond, 1000);
@@ -305,6 +319,8 @@ final class PaintView extends FrameLayout {
     protected void onDetachedFromWindow() {
         Shell.onNews(null);
         removeCallbacks(everySecond);
+        removeCallbacks(placeholders);
+        placeholdersPosted = false;
         ticking = false;
         if (backRegistered && Build.VERSION.SDK_INT >= 33) {
             activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
@@ -407,7 +423,15 @@ final class PaintView extends FrameLayout {
         return true;
     }
 
-    private final class Touch extends GestureDetector.SimpleOnGestureListener {
+    /**
+     * The plain listener, not {@code SimpleOnGestureListener}: that one also listens for double taps, and the
+     * detector then takes a second tap within 300 ms and 100 dp of the first as half of a double tap and never
+     * reports it as a tap. Two quick taps here are two taps, on two controls or on one.
+     */
+    private final class Touch implements GestureDetector.OnGestureListener {
+        @Override
+        public void onLongPress(MotionEvent event) {}
+
         @Override
         public boolean onDown(MotionEvent event) {
             fling.forceFinished(true);

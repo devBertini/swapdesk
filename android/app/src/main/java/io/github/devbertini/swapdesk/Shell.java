@@ -41,6 +41,18 @@ final class Shell {
     /** What the last frame cost, for the trace: {@code lists=N labels=N forced=0|1}. */
     static native String cost();
 
+    /**
+     * Shows the phone's own screens over its service: the state starts in this language ("pt..." is Portuguese of
+     * Brazil, anything else English) and appearance. After {@link Core#start}. A refusal starts with "ERROR ".
+     */
+    static native String showLive(String language, boolean dark);
+
+    /** Whether something the screens show is still on its way from the service. */
+    static native boolean waitsForData();
+
+    /** What still waits for the service shows as placeholders (100 ms after it was asked for). */
+    static native void armPlaceholders();
+
     /** Whether the screen is behind the state: a frame is wanted. */
     static native boolean wantsFrame();
 

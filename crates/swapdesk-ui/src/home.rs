@@ -34,8 +34,16 @@ pub struct NetworkChip {
 /// A card of the home screen, in display order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeCard {
-    /// "Parear": the explanation, the button and the add-by-address field.
-    Pair { title: String, body: String, button: String, address_label: String, address_hint: String, add: String },
+    /// "Parear": the explanation, the button that opens pairing on this computer (a phone has none: it never waits
+    /// to be paired with, it pairs with the computer it taps) and the add-by-address field.
+    Pair {
+        title: String,
+        body: String,
+        button: Option<String>,
+        address_label: String,
+        address_hint: String,
+        add: String,
+    },
     /// "Atividade recente": the latest entries (or the empty line) and "Ver tudo".
     Recent { title: String, lines: Vec<RecentLine>, empty: String, all: String },
 }
@@ -98,7 +106,7 @@ impl UiState {
                 HomeCard::Pair {
                     title: self.t(MsgKey::HomePairTitle),
                     body: self.t(MsgKey::HomePairBody),
-                    button: self.t(MsgKey::PairThisComputer),
+                    button: (!self.on_phone()).then(|| self.t(MsgKey::PairThisComputer)),
                     address_label: self.t(MsgKey::AddressLabel),
                     address_hint: self.t(MsgKey::HomeAddressHint),
                     add: self.t(MsgKey::HomeAddressAdd),
@@ -161,7 +169,9 @@ impl UiState {
                 HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
                     s.heading(2, title.clone());
                     s.text(UiRole::Text, body.clone());
-                    s.button(ControlId::PairThisComputer, button.clone());
+                    if let Some(button) = button {
+                        s.button(ControlId::PairThisComputer, button.clone());
+                    }
                     let c = s.add(ControlId::Edit(EditId::Address), UiRole::TextInput, address_label.clone());
                     c.description = Some(address_hint.clone());
                     s.button(ControlId::AddAddress, add.clone());

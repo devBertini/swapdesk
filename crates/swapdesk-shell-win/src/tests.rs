@@ -83,7 +83,8 @@ fn every_main_scenario_renders_at_a_phones_size() {
     let ix = Interaction { touch: true, ..Interaction::default() };
     let mut written = 0;
     for sc in Scenario::ALL {
-        let state = sc.prepared_state();
+        // As a phone shows it: this device is the phone, with a phone's wording and only what a phone has.
+        let state = sc.phone_state();
         if !state.windows().contains(&WindowKind::Main) {
             continue;
         }

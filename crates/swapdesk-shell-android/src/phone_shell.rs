@@ -314,6 +314,18 @@ impl PhoneShell {
 
     // ----- the state and the backend -----
 
+    /// Whether something the screens show is still on its way from the service: 100 ms after that started, the
+    /// shell shows placeholders for it ([`Self::arm_placeholders`], R-UI-1).
+    pub fn waits_for_data(&self) -> bool {
+        self.state.has_pending_fetch()
+    }
+
+    /// What still waits for the service shows as placeholders from now on.
+    pub fn arm_placeholders(&mut self) {
+        let changed = self.state.arm_placeholders();
+        self.note_change(changed);
+    }
+
     /// A second went by.
     pub fn tick(&mut self) {
         let changed = self.state.tick();
@@ -368,7 +380,8 @@ impl PhoneShell {
         }
     }
 
-    fn send(&mut self, commands: Vec<Command>) {
+    /// Sends commands to the backend and tracks their tickets, as the state's own commands are sent.
+    pub fn send(&mut self, commands: Vec<Command>) {
         for command in commands {
             let ticket = self.backend.send(command.clone());
             self.state.track(ticket, &command);

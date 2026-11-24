@@ -638,6 +638,8 @@ pub struct UiState {
     /// An activity refresh is out: the next `DevicesChanged` asks for none.
     activity_refresh: bool,
     pub(crate) lang: Language,
+    /// A phone's state: see [`UiState::set_phone`].
+    pub(crate) phone: bool,
     /// What the OS says (`ThemeChanged`); used while `theme` is `System`.
     pub(crate) dark: bool,
     /// What the system asks for beyond light and dark (a contrast theme, "Increase contrast").
@@ -823,6 +825,7 @@ impl UiState {
             followups: Vec::new(),
             activity_refresh: false,
             lang,
+            phone: false,
             dark,
             contrast: crate::tokens::Contrast::Standard,
             theme: Theme::System,
@@ -1126,12 +1129,25 @@ impl UiState {
 
     /// The text of a key in the current language.
     pub fn t(&self, key: MsgKey) -> String {
-        strings::plain(self.lang, key)
+        strings::template_on(self.lang, self.phone, key).to_owned()
     }
 
     /// The text of a message in the current language.
     pub fn tm(&self, msg: &Msg) -> String {
-        strings::text(self.lang, msg)
+        strings::text_on(self.lang, self.phone, msg)
+    }
+
+    /// Tells the state it is a phone's (the phone's shell does, before the first frame): it says "this phone" where
+    /// a computer says "this computer", and it shows only what a phone has. A phone dials and is never dialled
+    /// (docs/ANDROID.md 2), so nothing of hosting is on its screens: no pairing it opens itself, no grants for the
+    /// other side, none of the settings of a computer that receives.
+    pub fn set_phone(&mut self, phone: bool) {
+        self.phone = phone;
+    }
+
+    /// Whether this is a phone's state ([`Self::set_phone`]).
+    pub fn on_phone(&self) -> bool {
+        self.phone
     }
 
     /// The selected device (the first paired one when nothing is selected).
@@ -2119,6 +2135,12 @@ impl UiState {
                 self.set_devices(devices)
             }
             UiEvent::NetworkChanged(n) => {
+                // What this device is ready for depends on its network, and only the service says it: when a
+                // network came to a device that had none, or went, the service is asked again.
+                let had_none = self.this.as_ref().map(|t| t.ready == crate::api::Ready::NoNetwork);
+                if had_none.is_some_and(|none| none != n.address.is_none()) {
+                    self.followups.push(Command::GetThisDevice);
+                }
                 self.network = Some(n);
                 self.settle_os_wait();
                 self.finish_fetch(DataKind::Network);

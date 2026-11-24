@@ -224,6 +224,8 @@ pub(crate) mod icons20 {
     pub const WIFI: &str = "M2.5 8a11 11 0 0 1 15 0M5 10.75a7.25 7.25 0 0 1 10 0M7.5 13.5a3.5 3.5 0 0 1 5 0M10 16h.01";
     pub const DESKTOP: &str = "M4.25 2.75h11.5a.75.75 0 0 1 .75.75v8a.75.75 0 0 1-.75.75H4.25a.75.75 0 0 1-.75-.75v-8a.75.75 0 0 1 .75-.75zM5.5 4.75h9v5.5h-9zM3.5 12.25L1.5 16.5h17l-2-4.25M5.5 14.4h9";
     pub const LAPTOP: &str = "M4.75 3.5h10.5a1.25 1.25 0 0 1 1.25 1.25v7a1.25 1.25 0 0 1-1.25 1.25H4.75A1.25 1.25 0 0 1 3.5 11.75v-7A1.25 1.25 0 0 1 4.75 3.5zM1.75 13h16.5v.75a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z";
+    /// A phone upright, with the short line of its home indicator.
+    pub const PHONE: &str = "M6.75 2.25h6.5a1.5 1.5 0 0 1 1.5 1.5v12.5a1.5 1.5 0 0 1-1.5 1.5h-6.5a1.5 1.5 0 0 1-1.5-1.5V3.75a1.5 1.5 0 0 1 1.5-1.5zM8.75 15h2.5";
 }
 
 /// Strokes a board icon (20-unit box, 1.75 stroke) at `(x, y)` as `px` DIPs.
@@ -284,7 +286,11 @@ pub(crate) fn home_header(f: &mut Frame, a: &Area, mut y: f32) -> f32 {
     let block_h = title_h + 4.0 + body_h;
     let head_h = block_h.max(40.0);
     if let Some(os) = home.os {
-        let path = if os == swapdesk_ui::Os::MacOs { icons20::LAPTOP } else { icons20::DESKTOP };
+        let path = match os {
+            swapdesk_ui::Os::MacOs => icons20::LAPTOP,
+            swapdesk_ui::Os::Android => icons20::PHONE,
+            swapdesk_ui::Os::Windows => icons20::DESKTOP,
+        };
         icon20(f, path, a.x, y + (head_h - 40.0) / 2.0, 40.0, pal.ink);
     }
     let tx = a.x + 40.0 + 16.0;
@@ -478,6 +484,15 @@ fn card_height(f: &Frame, card: &HomeCard, w: f32, avail: f32) -> f32 {
     let inner = w - 2.0 * bw - 2.0 * CARD_PAD_X;
     let title_h = p.label("A", text::H2).h;
     match card {
+        HomeCard::Pair { body, button: None, address_hint, .. } => {
+            // A phone's card: title, body, divider, label, hint, field.
+            let body_h = f.para_height(body, text::BODY, inner);
+            let label_h = p.label("A", text::NAME).h;
+            let hint_h = f.para_height(address_hint, text::SMALL, inner);
+            2.0 * bw + 2.0 * CARD_PAD_Y + title_h + 16.0 + body_h + 16.0 + 1.0 + 16.0 + label_h + 8.0 + hint_h - 4.0
+                + 8.0
+                + 40.0
+        }
         HomeCard::Pair { body, address_label, address_hint, .. } => {
             let body_h = f.para_height(body, text::BODY, inner);
             let label_h = p.label("A", text::NAME).h;
@@ -528,9 +543,11 @@ fn paint_card(f: &mut Frame, card: &HomeCard, r: Rect, avail: f32) {
             p.draw(&t, x, y, pal.ink);
             y += t.h + 16.0;
             y += f.para(body, text::BODY, x, y, inner, pal.soft, Align::Start) + 16.0;
-            let bwid = f.button_width(button, Kind::Primary).min(inner);
-            f.button(ControlId::PairThisComputer, Rect::new(x, y, bwid, 40.0), Kind::Primary, button, false);
-            y += 40.0 + 16.0;
+            if let Some(button) = button {
+                let bwid = f.button_width(button, Kind::Primary).min(inner);
+                f.button(ControlId::PairThisComputer, Rect::new(x, y, bwid, 40.0), Kind::Primary, button, false);
+                y += 40.0 + 16.0;
+            }
             p.fill_rect(Rect::new(x, y, inner, 1.0_f32.max(bw)), pal.line);
             y += 1.0 + 16.0;
             let cap = p.label_ellipsis(address_label, text::NAME, inner);
@@ -890,7 +907,7 @@ fn pair_panel(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
     let left = a.x + bw + pad_x;
     let right = a.x + a.cw - bw - pad_x - col_w;
     let top = y + bw + pad_y;
-    device_column(f, (left, top, col_w), &this, &caption_this, pal.ink, false, name_h);
+    device_column(f, (left, top, col_w), &this, &caption_this, pal.ink, f.st.on_phone(), name_h);
     device_column(f, (right, top, col_w), &d.name, &caption_that, pal.link, phone, name_h);
 
     // The middle column is centred on the row, then pulled up by its -34 px top margin.
@@ -939,6 +956,17 @@ fn device_column(
 /// tall as its own text, in the compact layout. Returns where they end.
 fn info_panels(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
     let (p, pal) = (f.p, f.pal);
+    if !f.st.grants_shown() {
+        // Nothing connects to this device (a phone): the last session alone, across the page.
+        let bw = p.hairline();
+        let last = p.label_in(&f.st.last_session_text(d), text::BODY, a.cw - 2.0 * bw - 44.0, Align::Start);
+        let title = p.label(&f.t(MsgKey::LastSessionTitle), text::H2);
+        let panel = Rect::new(a.x, y, a.cw, 2.0 * bw + 40.0 + title.h + 10.0 + last.h);
+        f.panel(panel, pal.surface);
+        p.draw(&title, panel.x + bw + 22.0, panel.y + bw + 20.0, pal.ink);
+        p.draw(&last, panel.x + bw + 22.0, panel.y + bw + 20.0 + title.h + 10.0, pal.soft);
+        return panel.bottom();
+    }
     let stacked = f.compact;
     let pw = if stacked { a.cw } else { (a.cw - 20.0) / 2.0 };
     let bw = p.hairline();
@@ -1007,53 +1035,62 @@ fn permissions(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
         let s = f.st.tm(&Msg::new(key).with(d.name.clone()));
         if stacked { p.label_in(&s, text::H2, colw, Align::Start) } else { p.label_ellipsis(&s, text::H2, colw) }
     };
-    // Left: h2, gap 10, panel of switch rows (min-height 50, padding 0 20, border-top).
-    let title = head(f, MsgKey::PermsHereTitle);
-    p.draw(&title, lx, y, pal.ink);
-    let rows = f.st.permission_rows();
-    let panel_top = y + if stacked { title.h } else { h2 } + 10.0;
-    // Each row's label and hint; in the compact layout they wrap beside the switch and the row is as tall as they
-    // need.
-    let text_w = colw - 2.0 * bw - 40.0 - layout::SWITCH_W - 12.0;
-    let lay = |s: &str, st| if stacked { p.label_in(s, st, text_w, Align::Start) } else { p.label(s, st) };
-    let labels: Vec<_> = rows
-        .iter()
-        .map(|(_, label, hint)| (lay(label, text::BODY), hint.as_ref().map(|h| lay(h, text::SMALL))))
-        .collect();
-    let heights: Vec<f32> = labels
-        .iter()
-        .map(|(l, hint)| if stacked { (l.h + hint.as_ref().map_or(0.0, |h| h.h) + 20.0).max(52.0) } else { 50.0 })
-        .collect();
-    let panel_h = if stacked { 2.0 * bw + heights.iter().sum::<f32>() } else { 2.0 * bw + rows.len() as f32 * 50.0 };
-    f.panel(Rect::new(lx, panel_top, colw, panel_h), pal.surface);
-    let mut ry = panel_top + bw;
-    for (n, ((perm, _, _), (l, hint_l))) in rows.iter().zip(&labels).enumerate() {
-        let row_h = heights[n];
-        if n > 0 {
-            p.fill_rect(Rect::new(lx + bw, ry, colw - 2.0 * bw, bw), pal.line);
+    // What the other machine may do here; not where nothing connects to this device (a phone), whose tab is the
+    // other machine's answers alone.
+    let mut second = (a.x, y);
+    if f.st.grants_shown() {
+        // Left: h2, gap 10, panel of switch rows (min-height 50, padding 0 20, border-top).
+        let title = head(f, MsgKey::PermsHereTitle);
+        p.draw(&title, lx, y, pal.ink);
+        let rows = f.st.permission_rows();
+        let panel_top = y + if stacked { title.h } else { h2 } + 10.0;
+        // Each row's label and hint; in the compact layout they wrap beside the switch and the row is as tall as they
+        // need.
+        let text_w = colw - 2.0 * bw - 40.0 - layout::SWITCH_W - 12.0;
+        let lay = |s: &str, st| if stacked { p.label_in(s, st, text_w, Align::Start) } else { p.label(s, st) };
+        let labels: Vec<_> = rows
+            .iter()
+            .map(|(_, label, hint)| (lay(label, text::BODY), hint.as_ref().map(|h| lay(h, text::SMALL))))
+            .collect();
+        let heights: Vec<f32> = labels
+            .iter()
+            .map(|(l, hint)| if stacked { (l.h + hint.as_ref().map_or(0.0, |h| h.h) + 20.0).max(52.0) } else { 50.0 })
+            .collect();
+        let panel_h =
+            if stacked { 2.0 * bw + heights.iter().sum::<f32>() } else { 2.0 * bw + rows.len() as f32 * 50.0 };
+        f.panel(Rect::new(lx, panel_top, colw, panel_h), pal.surface);
+        let mut ry = panel_top + bw;
+        for (n, ((perm, _, _), (l, hint_l))) in rows.iter().zip(&labels).enumerate() {
+            let row_h = heights[n];
+            if n > 0 {
+                p.fill_rect(Rect::new(lx + bw, ry, colw - 2.0 * bw, bw), pal.line);
+            }
+            let block_h = l.h + hint_l.as_ref().map_or(0.0, |h| h.h);
+            let ty = ry + (row_h - block_h) / 2.0;
+            p.draw(l, lx + bw + 20.0, ty, pal.ink);
+            if let Some(h) = hint_l {
+                p.draw(h, lx + bw + 20.0, ty + l.h, pal.soft);
+            }
+            // A permission this computer cannot serve is drawn off and dimmed, like one that waits (its line says why).
+            let available = f.st.grant_available(*perm);
+            let on = available && d.grants_here.has(*perm);
+            let waiting = f.st.grant_waiting(*perm) || !available;
+            f.switch(
+                ControlId::Grant(*perm),
+                lx + colw - bw - 20.0 - layout::SWITCH_W,
+                ry + (row_h - layout::SWITCH_H) / 2.0,
+                on,
+                waiting,
+            );
+            ry += row_h;
         }
-        let block_h = l.h + hint_l.as_ref().map_or(0.0, |h| h.h);
-        let ty = ry + (row_h - block_h) / 2.0;
-        p.draw(l, lx + bw + 20.0, ty, pal.ink);
-        if let Some(h) = hint_l {
-            p.draw(h, lx + bw + 20.0, ty + l.h, pal.soft);
-        }
-        // A permission this computer cannot serve is drawn off and dimmed, like one that waits (its line says why).
-        let available = f.st.grant_available(*perm);
-        let on = available && d.grants_here.has(*perm);
-        let waiting = f.st.grant_waiting(*perm) || !available;
-        f.switch(
-            ControlId::Grant(*perm),
-            lx + colw - bw - 20.0 - layout::SWITCH_W,
-            ry + (row_h - layout::SWITCH_H) / 2.0,
-            on,
-            waiting,
-        );
-        ry += row_h;
+
+        second = if stacked { (a.x, panel_top + panel_h + 24.0) } else { (a.x + colw + 20.0, y) };
     }
 
-    // Right (under the first, compact): the other machine's answers, on a sunken panel; then the note and "Esquecer".
-    let (rx, top2) = if stacked { (a.x, panel_top + panel_h + 24.0) } else { (a.x + colw + 20.0, y) };
+    // The other machine's answers (beside the first, or under it in the compact layout), on a sunken panel; then
+    // the note and "Esquecer".
+    let (rx, top2) = second;
     let title = head(f, MsgKey::PermsThereTitle);
     let panel_top = top2 + if stacked { title.h } else { h2 } + 10.0;
     p.draw(&title, rx, top2, pal.ink);
@@ -1611,6 +1648,15 @@ pub(crate) fn settings_main(f: &mut Frame) -> f32 {
                 },
             ],
         ));
+    }
+    if f.st.on_phone() {
+        // A phone: its name, language and theme, the picture, the network. The rest is a computer's (opening at
+        // login, receiving, a desktop's keyboard, the devices it blocks), as the state's own list of controls says.
+        left.retain(|(group, _)| *group == MsgKey::SidebarThisComputer);
+        for (_, rows) in &mut left {
+            rows.retain(|row| !matches!(row, SettingRow::Toggle { id: ControlId::OpenAtLogin, .. }));
+        }
+        right.retain(|(group, _)| matches!(group, MsgKey::GroupImage | MsgKey::GroupNetwork));
     }
     if f.compact {
         // One column, the left groups first; the page itself scrolls (`screens_compact`).

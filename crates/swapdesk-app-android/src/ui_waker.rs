@@ -39,7 +39,7 @@ impl UiWaker for MainWaker {
             return;
         }
         let Some(class) = SHELL_CLASS.get() else {
-            // No view yet: its first frame drains.
+            // No view yet: it drains when it is attached (`PaintView.onAttachedToWindow`).
             self.posted.store(false, Ordering::Release);
             return;
         };

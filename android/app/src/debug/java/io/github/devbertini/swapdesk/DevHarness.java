@@ -27,6 +27,8 @@ import java.net.Inet4Address;
  *     --es mock SCENARIO               a state of the design's mock on the shared screens, as the desktops' --mock
  *         [--es fit 1]                 the desktop window of that state, whole, as large as the screen allows
  *         [--es landscape 1]           with the screen held sideways
+ *     --es add ADDRESS[:PORT]          on the app's own screens: adds the computer at that address (the port is
+ *                                      a development instance's; the screens' address field takes none)
  *         [--es frames N]              N frames painted in a row, each logged with what it cost (default 1)
  *                                      and, after every frame that changed it, a STATE line: the pane, what is
  *                                      over it, and where each control is (for taps sent with adb)
@@ -47,10 +49,19 @@ final class DevHarness {
 
     private static native String state();
 
+    private static native void add(String address);
+
     /** The development options the intent asks of the core, or none. */
     static String options(Activity activity) {
         String dev = activity.getIntent().getStringExtra("dev");
         return dev == null ? "" : dev;
+    }
+
+    /** Whether the intent asks for a run that has no screen of its own: the self-test, a probe, a scripted viewer. */
+    static boolean scripted(Activity activity) {
+        return activity.getIntent().getStringExtra("selftest") != null
+                || activity.getIntent().getStringExtra("probe") != null
+                || activity.getIntent().getStringExtra("harness") != null;
     }
 
     /**
@@ -78,8 +89,16 @@ final class DevHarness {
         }
         String frames = activity.getIntent().getStringExtra("frames");
         view.trace(frames == null ? 1 : Integer.parseInt(frames));
-        // For a script that drives the screen by real touches (adb): after a frame that changed it, where the
-        // screen is and where its controls are, in the screen's own pixels.
+        watch(activity, view);
+        return view;
+    }
+
+    /**
+     * For a script that drives a screen by real touches (adb): after every frame that changed it, a STATE line says
+     * where the screen is and where its controls are, in the screen's own pixels. With the extra {@code add}, the
+     * computer at that address (which may carry a port) is added once the screen is up.
+     */
+    static void watch(Activity activity, PaintView view) {
         String[] last = {""};
         view.afterFrame(() -> {
             String now = state();
@@ -90,7 +109,14 @@ final class DevHarness {
                 Log.i(TAG, "STATE origin=" + origin[0] + "," + origin[1] + " " + now);
             }
         });
-        return view;
+        String address = activity.getIntent().getStringExtra("add");
+        if (address != null) {
+            view.postDelayed(() -> {
+                Log.i(TAG, "ADD " + address);
+                add(address);
+                view.requestFrame();
+            }, 1500);
+        }
     }
 
     /** Runs what the intent asks for, off the main thread, and logs each line of its report. */

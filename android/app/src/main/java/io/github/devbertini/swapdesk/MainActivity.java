@@ -3,6 +3,7 @@ package io.github.devbertini.swapdesk;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
@@ -16,6 +17,8 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+
+import java.util.Locale;
 
 /**
  * The app before its shared screens (slice A3): it starts the core, tells it the networks of the phone, and asks
@@ -77,6 +80,17 @@ public final class MainActivity extends Activity {
         Networks.start(this);
         DevHarness.run(this, status);
         screen = DevHarness.screen(this);
+        boolean running = started.startsWith("started") || started.contains("already running");
+        if (screen == null && running && !DevHarness.scripted(this)) {
+            // The app's own screens, over its own service.
+            int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+            String shown = Shell.showLive(Locale.getDefault().toLanguageTag(), night == Configuration.UI_MODE_NIGHT_YES);
+            Log.i(TAG, "SCREEN " + shown);
+            if (!shown.startsWith("ERROR")) {
+                screen = new PaintView(this);
+                DevHarness.watch(this, screen);
+            }
+        }
         if (screen != null) {
             // The screens keep clear of the system's bars, of a cutout and of the keyboard: the holder takes them
             // as its padding, and shows the screen's own ground behind them.

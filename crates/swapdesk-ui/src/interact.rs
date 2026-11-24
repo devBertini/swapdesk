@@ -551,14 +551,18 @@ impl UiState {
             }
             DeviceTab::Overview => {
                 s.text(UiRole::Text, self.name_of(if Self::dials(d) { MsgKey::SwapNote } else { MsgKey::PhoneNote }));
-                s.heading(2, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
-                s.text(UiRole::Text, self.permission_summary(d.grants_here));
-                s.add(ControlId::EditGrants, UiRole::Link, self.name_of(MsgKey::PermsPanelEdit));
+                if self.grants_shown() {
+                    s.heading(2, self.tm(&Msg::new(MsgKey::PermsPanelTitle).with(d.name.clone())));
+                    s.text(UiRole::Text, self.permission_summary(d.grants_here));
+                    s.add(ControlId::EditGrants, UiRole::Link, self.name_of(MsgKey::PermsPanelEdit));
+                }
                 s.heading(2, self.name_of(MsgKey::LastSessionTitle));
                 s.text(UiRole::Text, self.last_session_text(d));
             }
             DeviceTab::Permissions => {
-                s.heading(2, self.tm(&Msg::new(MsgKey::PermsHereTitle).with(d.name.clone())));
+                if self.grants_shown() {
+                    s.heading(2, self.tm(&Msg::new(MsgKey::PermsHereTitle).with(d.name.clone())));
+                }
                 for (p, label, hint) in self.permission_rows() {
                     let available = self.grant_available(p);
                     s.switch(ControlId::Grant(p), label, available && d.grants_here.has(p), hint);
@@ -709,8 +713,18 @@ impl UiState {
         text
     }
 
-    /// The switches of "O X pode, neste computador": permission, name, hint.
+    /// Whether a device's page shows what that device may do here. Not on a phone: nothing connects to it, so there
+    /// is nothing to grant (docs/ANDROID.md 2; the slice that lets a phone be controlled brings its own).
+    pub fn grants_shown(&self) -> bool {
+        !self.phone
+    }
+
+    /// The switches of "O X pode, neste computador": permission, name, hint. None where grants are not shown
+    /// ([`Self::grants_shown`]).
     pub fn permission_rows(&self) -> Vec<(Permission, String, Option<String>)> {
+        if !self.grants_shown() {
+            return Vec::new();
+        }
         vec![
             (Permission::View, self.name_of(MsgKey::PermView), None),
             (Permission::Control, self.name_of(MsgKey::PermControl), None),
@@ -849,6 +863,14 @@ impl UiState {
         c.value = Some(self.select_value(SelectId::Language));
         let c = s.add(ControlId::Select(SelectId::Theme), UiRole::ComboBox, self.name_of(MsgKey::FieldTheme));
         c.value = Some(self.select_value(SelectId::Theme));
+        if self.phone {
+            // A phone: its name, language and theme, the picture's quality and figures. The rest is a computer's
+            // (opening at login, receiving, the keyboard of a desktop, the devices it blocks).
+            let c = s.add(ControlId::Select(SelectId::Quality), UiRole::ComboBox, self.name_of(MsgKey::Quality));
+            c.value = Some(self.select_value(SelectId::Quality));
+            s.switch(ControlId::ShowStats, self.name_of(MsgKey::ShowStats), set.show_stats, None);
+            return;
+        }
         s.switch(ControlId::OpenAtLogin, self.name_of(MsgKey::OpenAtLogin), set.open_at_login, None);
         s.switch(
             ControlId::Receive,

@@ -37,6 +37,8 @@ mod host_files_tests;
 #[cfg(test)]
 mod notice_tests;
 #[cfg(test)]
+mod phone_tests;
+#[cfg(test)]
 mod shortcut_tests;
 #[cfg(test)]
 mod state_tests;

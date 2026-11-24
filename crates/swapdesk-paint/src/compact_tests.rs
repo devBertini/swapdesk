@@ -31,11 +31,13 @@ fn frame(state: &UiState, size: (f32, f32), ix: &Interaction) -> (Fixed, Output)
     (p, out)
 }
 
-/// The scenarios whose main window shows a pane of the compact layout (not the pairing screen, which has no bar).
+/// Every scenario with a main window, as a phone's own state (this device is the phone, with a phone's wording and
+/// only what a phone has) and as the mock's computer state at a phone's size (a host's screens, which a phone that
+/// is controlled will show).
 fn panes() -> impl Iterator<Item = (Scenario, UiState)> {
     Scenario::ALL
         .into_iter()
-        .map(|sc| (sc, sc.prepared_state()))
+        .flat_map(|sc| [(sc, sc.phone_state()), (sc, sc.prepared_state())])
         .filter(|(_, st)| st.windows().contains(&WindowKind::Main))
 }
 
@@ -79,7 +81,7 @@ fn every_scenario_fits_a_phone_with_its_controls_its_text_and_its_boxes() {
         let column = (w - 2.0 * MARGIN).min(COLUMN_MAX);
         let (left, right) = ((w - column) / 2.0, (w + column) / 2.0);
         for (sc, state) in panes() {
-            let what = format!("{} at {w}x{h}", sc.name());
+            let what = format!("{}{} at {w}x{h}", sc.name(), if state.on_phone() { " on a phone" } else { "" });
             let (p, out) = frame(&state, (w, h), &touched(0.0, 0));
             let overlay = state.incoming_session_open() || state.dialog(WindowKind::Main).is_some();
             let pane = state.screen() != Screen::Pairing && !overlay;

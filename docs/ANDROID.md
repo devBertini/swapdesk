@@ -317,7 +317,12 @@ The rule is one interface on every system (D37, F-UI-02). Three ways to honour i
    to the shared state what the desktop shells do, and what only Android can do comes back as asks (a select's
    choices as the system's list, the keyboard in a field, a page for the browser). The frame is built in a
    Choreographer callback, before the draw pass, so the native fields move in the same frame as the boxes drawn
-   under them. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
+   under them. **The phone's own state, as built (A3.4, D89):** the app shows these screens over its own service
+   from its first frame (`Shell.showLive`), in the phone's language and appearance; the shared state is told it is
+   a phone's (`UiState::set_phone`) and from then on says "este celular" where a computer says "este computador"
+   (one table of the texts a phone says differently, `strings.rs`) and leaves out what only a computer that
+   receives has: the pairing it opens itself, the grants for the other side, the settings of login, receiving, a
+   desktop's keyboard and blocked devices. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
    (IME included). Accessibility comes from the shared tree (`swapdesk_ui::a11y`) through AccessKit's Android adapter,
    which AccessKit lists ("implements the Java-based Android accessibility API") [S43], or the framework's
    `AccessibilityNodeProvider` (16) [S29] if that adapter does not fit. Keeps one set of screens, texts, tokens and

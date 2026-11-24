@@ -67,6 +67,8 @@ pub const DESKTOP: &str = "desktop-escritorio";
 pub const AIR: &str = "mac-air";
 /// A paired phone (docs/ANDROID.md): not in the common world, a scenario adds it.
 pub const PHONE: &str = "celular-ana";
+/// The name of this device in the scenarios shown as a phone shows them ([`Scenario::phone_state`]).
+pub const PHONE_NAME: &str = "Celular da sala";
 
 fn phone() -> DeviceView {
     DeviceView {
@@ -1368,6 +1370,21 @@ impl Scenario {
     pub fn prepared_state(self) -> UiState {
         let mut s = UiState::default();
         self.apply_to(&mut s);
+        s
+    }
+
+    /// The scenario as a phone shows it: the state is a phone's ([`UiState::set_phone`]) and this device is the
+    /// phone, by its own name.
+    pub fn phone_state(self) -> UiState {
+        let mut s = self.prepared_state();
+        s.set_phone(true);
+        if let Some(this) = &mut s.this {
+            this.name = PHONE_NAME.into();
+            this.os = Os::Android;
+        }
+        if let Some(settings) = &mut s.settings {
+            settings.name = PHONE_NAME.into();
+        }
         s
     }
 }

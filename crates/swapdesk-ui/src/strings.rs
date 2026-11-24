@@ -755,10 +755,73 @@ strings! {
     EndAskStay => "Continuar a sessão", "Stay in the session";
 }
 
+/// What a phone says differently (docs/ANDROID.md 5): where a computer says "this computer" of itself, where it
+/// explains a step only a computer takes, where a mouse clicks and a finger taps. A key that is not here reads the
+/// same on a phone. Each entry keeps the placeholders of its key.
+macro_rules! phone_strings {
+    ($($key:ident => $pt:literal, $en:literal;)*) => {
+        impl MsgKey {
+            /// The keys a phone has its own text for.
+            pub const ON_A_PHONE: &'static [MsgKey] = &[$(MsgKey::$key,)*];
+
+            /// The template of a key as a phone says it, when a phone says it differently.
+            pub const fn phone_template(self, lang: Language) -> Option<&'static str> {
+                match (self, lang) {
+                    $((MsgKey::$key, Language::PtBr) => Some($pt), (MsgKey::$key, Language::En) => Some($en),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+phone_strings! {
+    // Início
+    ReadyToReceive => "Pronto para controlar", "Ready to control";
+    HomePairBody => "O celular e o computador se conhecem uma vez, conferindo o mesmo código de 6 dígitos nas duas telas. No computador, abra “Parear este computador”; aqui, toque nele em Na rede.", "The phone and the computer get to know each other once, by checking the same 6-digit code on both screens. On the computer, open “Pair this computer”; here, tap it under “On the network”.";
+    HomeAddressHint => "Se o computador não aparece em Na rede, digite o IPv4 dele.", "If the computer does not show up under “On the network”, type its IPv4 address.";
+    AddressRefusedWhy => "Só endereços desta rede local servem: não o de outra rede, não o de loopback e não o deste celular.", "Only addresses on this local network work, not ones from another network, loopback addresses or this phone’s own.";
+    NoComputerBody => "Confira no computador: o Swapdesk está aberto e na mesma rede Wi-Fi que este celular. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the computer, check that Swapdesk is open and on the same Wi-Fi network as this phone. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
+    GuideBody => "1. Instale o Swapdesk no computador, na mesma rede Wi-Fi.\n2. Nele, abra “Parear este computador”. Aqui, toque nele em Na rede e em Parear; confira se o código é o mesmo nos dois.\n3. No computador, em Permissões, diga o que este celular pode fazer. Depois é só tocar em Controlar.", "1. Install Swapdesk on the computer, on the same Wi-Fi network.\n2. On it, open “Pair this computer”. Here, tap it under “On the network” and tap Pair. Check that both show the same code.\n3. On the computer, in Permissions, choose what this phone may do. Then tap Control.";
+
+    // A computer's page
+    DeviceCaptionThis => "Este celular", "This phone";
+    SwapNote => "É este celular que inicia a conexão.", "This phone starts the connection.";
+    PermsThereTitle => "Este celular pode, no {0}", "What this phone can do on {0}";
+    ThereNote => "Quem decide é o {0}.", "{0} decides.";
+    ConnectWhyForgotten => "O {0} não reconhece mais este celular. Pareie os dois de novo.", "{0} no longer knows this phone. Pair the two again.";
+
+    // Pairing
+    PairNotPairedBody => "Este computador ainda não está pareado com o celular. Para parear, abra “Parear este computador” no Swapdesk dele e toque em Parear aqui, com no máximo 2 minutos entre um e outro.", "This computer is not paired with the phone yet. To pair, open “Pair this computer” in its Swapdesk and tap Pair here, at most 2 minutes apart.";
+    PairWaitingTitle => "Esperando o computador", "Waiting for the computer";
+    PairDoneBody => "O celular e o computador agora confiam um no outro. No computador, a aba Permissões diz o que este celular pode fazer.", "The phone and the computer now trust each other. On the computer, the Permissions tab says what this phone may do.";
+    PairFailedBody => "Nada foi liberado. Abra o pareamento no computador e tente de novo.", "Nothing was allowed. Open pairing on the computer and try again.";
+
+    // Atividade and Ajustes
+    ActivitySub => "Cada conexão deste celular. O registro fica só aqui.", "Every connection from this phone. The log stays on this phone only.";
+    AuditControlledFromHere => "Controlado a partir deste celular", "Controlled from this phone";
+    SidebarThisComputer => "Este celular", "This phone";
+    NetworkHint => "Dados móveis e VPN ficam de fora", "Mobile data and VPN are left out";
+    NameNetworkHint => "Os computadores pareados veem este nome.", "Paired computers see this name.";
+}
+
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and
 /// `{n|one|other}` by the form the count in argument `n` takes in `lang` ([`is_one`]).
 pub fn text(lang: Language, msg: &Msg) -> String {
     fill(lang, msg.key.template(lang), &msg.args)
+}
+
+/// The template of `key` in `lang` as the device says it: a phone's own wording where it has one.
+pub fn template_on(lang: Language, phone: bool, key: MsgKey) -> &'static str {
+    match key.phone_template(lang) {
+        Some(template) if phone => template,
+        _ => key.template(lang),
+    }
+}
+
+/// [`text`] as the device says it ([`template_on`]).
+pub fn text_on(lang: Language, phone: bool, msg: &Msg) -> String {
+    fill(lang, template_on(lang, phone, msg.key), &msg.args)
 }
 
 /// Whether a count takes the singular form, by the CLDR cardinal rules (unicode.org/cldr/charts/latest/supplemental/
@@ -838,6 +901,28 @@ mod tests {
             }
         }
         assert!(MsgKey::ALL.len() > 200);
+    }
+
+    /// A phone's wording takes the arguments of the text it stands for, in both languages, and never repeats that
+    /// text; and a computer never gets it.
+    #[test]
+    fn what_a_phone_says_differently_keeps_its_keys_arguments() {
+        assert!(MsgKey::ON_A_PHONE.len() >= 15);
+        for key in MsgKey::ON_A_PHONE {
+            for lang in [Language::PtBr, Language::En] {
+                let phone = key.phone_template(lang).expect("listed");
+                assert!(!phone.is_empty() && phone != key.template(lang), "{key:?} in {lang:?}");
+                assert_eq!(placeholders(phone), placeholders(key.template(lang)), "{key:?} in {lang:?}");
+                assert_eq!(template_on(lang, true, *key), phone);
+                assert_eq!(template_on(lang, false, *key), key.template(lang));
+            }
+        }
+        // A key a phone says the same way.
+        assert_eq!(MsgKey::AppName.phone_template(Language::PtBr), None);
+        assert_eq!(template_on(Language::En, true, MsgKey::AppName), "Swapdesk");
+        let there = Msg::new(MsgKey::PermsThereTitle).with("MacBook");
+        assert_eq!(text_on(Language::PtBr, true, &there), "Este celular pode, no MacBook");
+        assert_eq!(text_on(Language::PtBr, false, &there), "Este computador pode, no MacBook");
     }
 
     #[test]
