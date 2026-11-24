@@ -7,13 +7,14 @@ def workspaceVersion = (rootProject.file("../Cargo.toml").text =~ /(?m)^version 
 
 android {
     namespace = "io.github.devbertini.swapdesk"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "io.github.devbertini.swapdesk"
-        // Android 11 (D82).
+        // Android 11 at least, built for Android 17 (docs/ANDROID.md 8.3): from that level the local network
+        // is a permission the person grants.
         minSdk = 30
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = workspaceVersion
     }

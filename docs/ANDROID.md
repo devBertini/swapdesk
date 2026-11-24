@@ -317,8 +317,9 @@ negative on the left), D51's centring, light and dark following the system, and 
 Android's main thread: no blocking call there, R-UI-8; the slow-operation threshold of R-UI-10 is the display's frame
 time, 16 ms at 60 Hz, 8 ms at 120 Hz).
 
-**Build (slice A1, D84).** `android/` is a plain Gradle project in Java (Android Gradle plugin 9.1.0 on Gradle 9.3.1,
-a JDK 17 or later, no AndroidX and no third-party Gradle plugin); it packs the APK and never calls cargo.
+**Build (slice A1, D84).** `android/` is a plain Gradle project in Java (Android Gradle plugin 9.2.1 on Gradle 9.4.1:
+API level 37 needs the plugin from 9.1.1 on, and 9.2 needs that Gradle, both read on the plugin's release page on
+24/11/2026; a JDK 17 or later, no AndroidX and no third-party Gradle plugin); it packs the APK and never calls cargo.
 `scripts/android/build-core.sh` builds `swapdesk-app-android` for each ABI with the NDK (`scripts/android/env.sh` holds
 the compiler, the archiver and the CMake toolchain for libopus), copies `libswapdesk_android.so` into the app's
 `jniLibs` and reads its alignment back. `scripts/android/check.sh [--apk]` is the Android gate: clippy of every
@@ -329,8 +330,10 @@ them the released APK carries is settled at the release slice (GUESS: `arm64-v8a
 A release build of the library uses the profile that unwinds (`release-service`), since a panic must reach Java as an
 exception and never end the app's process.
 
-**Proof without the phone (slice A1).** The project's own emulator image (Android 16, `x86_64`, with `arm64-v8a`
-through the image's translation) runs the app; the core says what it finds in the log (`adb logcat -s Swapdesk:I`).
+**Proof without the phone (slice A1).** The project's own emulator images run the app: Android 16 (`x86_64`, with
+`arm64-v8a` through the image's translation) and Android 17 with 16 KB memory pages, where the alignment is not only
+read but used and the local network permission exists. The core says what it finds in the log
+(`adb logcat -s Swapdesk:I`).
 The emulator's network is its own (10.0.2.0/24 behind the host): the computer side of a proof is a development
 instance of the service started with `--dev-loopback`, which the guest reaches at `10.0.2.2:<port>`, driven by
 `examples/cross_host_driver` on its UI pipe; that address is on-link in the guest's network, so the phone's own guard
