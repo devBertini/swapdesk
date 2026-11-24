@@ -90,6 +90,11 @@ pub struct Frame<'a> {
     pub video_under: bool,
     pub w: f32,
     pub h: f32,
+    /// Where a page of the main window starts its content. The design's top margin, 32.
+    pub page_top: f32,
+    /// Where a page's content may end: a card that stands alone in a page is centred between the page's header and
+    /// this line. The design's bottom margin, 40, above the window's edge.
+    pub page_floor: f32,
 }
 
 impl<'a> Frame<'a> {
@@ -111,6 +116,8 @@ impl<'a> Frame<'a> {
             video_under: false,
             w: size.0,
             h: size.1,
+            page_top: 32.0,
+            page_floor: size.1 - 40.0,
         }
     }
 

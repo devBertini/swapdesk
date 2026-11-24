@@ -255,9 +255,16 @@ const TIME_W: f32 = 84.0;
 const TIME_GAP: f32 = 14.0;
 
 fn home_main(f: &mut Frame) {
-    let (p, pal) = (f.p, f.pal);
     let a = area(f);
-    let mut y = 32.0;
+    let mut y = home_header(f, &a, f.page_top);
+    // The crash notice, the "no computer found" card or the plain empty line.
+    y += home_notices(f, &a, y);
+    home_cards(f, &a, y);
+}
+
+/// The header of Início: this computer, its state and its network. Returns where the page goes on.
+fn home_header(f: &mut Frame, a: &Area, mut y: f32) -> f32 {
+    let (p, pal) = (f.p, f.pal);
     let home = f.st.home();
 
     // Header: the 40 px computer icon, the name over the state line, the network pill at the right.
@@ -319,11 +326,12 @@ fn home_main(f: &mut Frame) {
     if below && (pill.is_some() || f.st.placeholder(DataKind::Network)) {
         y += 36.0 + 16.0;
     }
-    y += head_h + 28.0;
+    y + head_h + 28.0
+}
 
-    // The crash notice, the "no computer found" card or the plain empty line.
-    y += home_notices(f, &a, y);
-
+/// The cards of Início from `y` down. Returns where they end.
+fn home_cards(f: &mut Frame, a: &Area, mut y: f32) -> f32 {
+    let home = f.st.home();
     // The cards, as a list: two columns when the content is wide enough, one otherwise; each as tall as it needs.
     let cols = if a.cw >= 2.0 * CARD_MIN_W + CARD_GAP { 2 } else { 1 };
     let card_w = (a.cw - CARD_GAP * (cols as f32 - 1.0)) / cols as f32;
@@ -342,6 +350,7 @@ fn home_main(f: &mut Frame) {
         y += row_h + CARD_GAP;
         i += cols;
     }
+    y - CARD_GAP
 }
 
 /// The update card, the crash notice, the "no computer found" card or the empty line. Each is one card across the
@@ -603,13 +612,13 @@ fn area(f: &Frame) -> Area {
 /// What a page leaves under `y` (its header, its tabs) down to the bottom margin: where a card that stands alone in
 /// the page is centred (D51).
 fn room(f: &Frame, a: &Area, y: f32) -> Rect {
-    Rect::new(a.x, y, a.cw, (f.h - 40.0 - y).max(0.0))
+    Rect::new(a.x, y, a.cw, (f.page_floor - y).max(0.0))
 }
 
 fn devices_main(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
     let a = area(f);
-    let mut y = 32.0;
+    let mut y = f.page_top;
     if f.st.placeholder(DataKind::Devices) {
         skeleton_devices(f, &a);
         return;
@@ -748,7 +757,7 @@ fn devices_main(f: &mut Frame) {
 
 fn skeleton_devices(f: &mut Frame, a: &Area) {
     let p = f.p;
-    let mut y = 32.0;
+    let mut y = f.page_top;
     let title_h = p.label("A", text::H1).h;
     let body_h = p.label("A", text::BODY).h;
     f.block(Rect::new(a.x, y + 2.0, 280.0, title_h - 4.0), 6.0);
@@ -1113,7 +1122,7 @@ fn error_toast(f: &mut Frame) {
 fn activity_main(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
     let a = area(f);
-    let mut y = 32.0;
+    let mut y = f.page_top;
     // Header: title block grows, the export button sits at the end; main gap is 24 on this screen.
     let title = p.label(&f.t(MsgKey::ActivityTitle), text::H1);
     let sub = p.label_in(&f.t(MsgKey::ActivitySub), text::BODY, a.cw - 200.0, Align::Start);
@@ -1266,7 +1275,7 @@ enum SettingRow {
 fn settings_main(f: &mut Frame) {
     let (p, pal) = (f.p, f.pal);
     let a = area(f);
-    let y = 32.0;
+    let y = f.page_top;
     let title = p.label(&f.t(MsgKey::SettingsTitle), text::H1);
     let top = y + title.h + 28.0;
     let colw = (a.cw - 24.0) / 2.0;

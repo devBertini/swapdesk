@@ -114,7 +114,8 @@ impl Card<'_> {
             add(&mut h, m.before_bar, f.countdown_row_h());
         }
         if !self.buttons.is_empty() {
-            add(&mut h, m.before_actions, layout::BUTTON_H);
+            let inner = w - 2.0 * m.pad_x - 2.0 * p.hairline();
+            add(&mut h, m.before_actions, actions_height(f, inner, self.buttons));
         }
         2.0 * p.hairline() + 2.0 * m.pad_y + h
     }
@@ -190,10 +191,16 @@ impl Card<'_> {
             f.countdown_row((tx, y), tw, bar, colors);
         }
         if !self.buttons.is_empty() {
-            actions(f, ix, r.bottom() - bw - m.pad_y - layout::BUTTON_H, inner, self.buttons, dark);
+            let h = actions_height(f, inner, self.buttons);
+            actions(f, ix, r.bottom() - bw - m.pad_y - h, inner, self.buttons, dark);
         }
         r
     }
+}
+
+/// The height [`actions`] takes for `list` across `w`.
+pub fn actions_height(_f: &Frame, _w: f32, _list: &[(ControlId, String, Kind)]) -> f32 {
+    layout::BUTTON_H
 }
 
 /// The buttons of a card or a dialog as one group centred across `w`, in the order of the rule: the negative ones
