@@ -254,7 +254,7 @@ by one suffix (a change to the project's rules and lints, made in A1):
 | `swapdesk-codec-android` | `VideoDecoder` and `Renderer` in one: `AMediaCodec` decoding into the session surface's native window, `map_pointer` |
 | `swapdesk-audio-android` | `AudioSink` on AAudio |
 | `swapdesk-input-android` | the key and touch records from Java to `InputEvent`s (the C3 `InputGrabber` role); later `ClipboardProvider` |
-| `swapdesk-shell-android` | the Android `Painter` (section 5, interface), the edit slots, the accessibility bridge, the effects table |
+| `swapdesk-shell-android` | the Android `Painter` (section 5, interface): a recorder of frames, text laid out from Android's measures, the window's passes; the edit slots, the accessibility bridge, the effects table. Plain Rust |
 
 **C3 traits with an Android implementation in version 1:** `Clock`, `VideoDecoder`, `Renderer`, `AudioSink`,
 `InputGrabber`, `NetInterfaces`, `TraceSink`, `SecretStore`, and `SessionWatcher` for network changes and leaving the
@@ -304,10 +304,14 @@ computer appears to it.
 The rule is one interface on every system (D37, F-UI-02). Three ways to honour it on a phone:
 
 1. **The shared screens of `swapdesk-paint` painted on an Android canvas (recommended).** A Java `View` replays each
-   frame's paint operations, batched by Rust into one buffer per frame (GUESS: one JNI crossing per frame plus one per
-   new text label is cheap enough; measured against the frame time in A3), with `android.graphics.Canvas` and text
-   laid out by Android in the embedded Instrument Sans, returned to Rust as the `Label` handle and its size, cached.
-   Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
+   frame's paint operations, batched by Rust into one buffer per frame, on `android.graphics.Canvas`, with text
+   measured by Android in the embedded Instrument Sans. **As built (A3, D86):** Rust never calls into Java. The
+   screens measure every label while they paint, so a frame is painted against a cache of measures; a frame that met
+   a label the cache does not know is thrown away and comes back as the list of them, which Java measures in one go
+   (`StaticLayout` with simple breaks and no hyphenation, `TextUtils.ellipsize`) and hands back, and the frame is
+   painted again: one JNI crossing for a frame of text seen before, three to five for a new screen. Icons, arcs and
+   shadows are worked out in Rust by the routines Windows and the Mac draw with and reach Java as paths and plain
+   rounded rectangles, so the replay holds no geometry of its own. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
    (IME included). Accessibility comes from the shared tree (`swapdesk_ui::a11y`) through AccessKit's Android adapter,
    which AccessKit lists ("implements the Java-based Android accessibility API") [S43], or the framework's
    `AccessibilityNodeProvider` (16) [S29] if that adapter does not fit. Keeps one set of screens, texts, tokens and
@@ -336,7 +340,8 @@ API level 37 needs the plugin from 9.1.1 on, and 9.2 needs that Gradle, both rea
 the compiler, the archiver and the CMake toolchain for libopus), copies `libswapdesk_android.so` into the app's
 `jniLibs` and reads its alignment back. `scripts/android/check.sh [--apk]` is the Android gate: clippy of every
 `*-android` crate for both targets with warnings denied, the libraries, and with `--apk` the debug APK. It runs beside
-the desktop gate, never inside it: off Android those crates compile to nothing. The app's version is the workspace's,
+the desktop gate, never inside it: off Android the JNI and NDK parts of those crates compile to nothing (their plain
+Rust is the desktop gate's). The app's version is the workspace's,
 read from `Cargo.toml` by the Gradle script. ABIs: `arm64-v8a` for phones and `x86_64` for the emulator image; which of
 them the released APK carries is settled at the release slice (GUESS: `arm64-v8a` only; the owner's phone to confirm).
 A release build of the library uses the profile that unwinds (`release-service`), since a panic must reach Java as an
@@ -398,7 +403,7 @@ Tracked, not budgeted: the APK size of `arm64-v8a` (GUESS ≤ 15 MB), read from 
 | AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1]. **State (24/11/2026):** on both emulator images the discovery daemon is created when Java reports the first approved network and binds to it by the interface index Java reads (the app's trace says "discovery browses on [wlan0#16 10.0.2.16]"; a refresh that fails is said there too, where before it was silent), with the process bound to the Wi-Fi network; whether it finds a computer is owed to the phone (the emulator carries no multicast) |
 | AR3 | A VPN on the phone routes or blocks Swapdesk's traffic despite the socket binding | A1 repeats the handshake with a VPN app on (always-on and blocking modes) |
 | AR4 | Decode latency varies by device; the low-latency key is optional [S16] | A4 measures BA4 and BA3 on the owner's phone first |
-| AR5 | Painting through Java costs more than a frame at 120 Hz | A3 traces the UI thread per frame (R-UI-10) on the busiest screen |
+| AR5 | Painting through Java costs more than a frame at 120 Hz | A3 traces the UI thread per frame (R-UI-10) on the busiest screen. **State (24/11/2026, slice A3.1):** the view logs each traced frame (`FRAME lists= labels= paint_us= measure_us= replay_us= bytes= operations=`). On both emulator images (x86_64, software GPU; the desktop window of the mock fitted into the screen) a still frame of Ajustes, the screen with the most text (144 operations, 5.4 KB), costs 0.2 to 0.6 ms of Rust painting and 1 to 2.5 ms of replay on the main thread, with outliers up to 12 ms that the emulator's software renderer gives; the first frame of a new screen adds two lists of text (35 to 56 labels) measured in 14 to 33 ms, once. The same trace on the owner's phone, and of a scroll that brings new rows in, is owed (A3.3 and the hardening slice) |
 | AR6 | The compact layout is a design job of its own | before A3: captures of Início, a device's page and the session in the compact layout on the project's design canvas for the owner |
 | AR7 | The phone is useless with a 1.1.0 desktop (minor 3) | A0 ships to both computers before A1 reaches the phone |
 | AR8 | Android's developer verification is rolling out (Brazil from 30/09/2026 for the listed stores, global in 2027) and its rules still move [S32][S35] | register the package name before the first build leaves this machine (decision 8.4) |

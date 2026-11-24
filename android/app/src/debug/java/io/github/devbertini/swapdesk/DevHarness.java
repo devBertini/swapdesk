@@ -1,12 +1,14 @@
 package io.github.devbertini.swapdesk;
 
 import android.app.Activity;
+import android.content.pm.ActivityInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.util.Log;
+import android.view.View;
 import android.widget.TextView;
 
 import java.net.Inet4Address;
@@ -23,6 +25,10 @@ import java.net.Inet4Address;
  *     --es probe ADDRESS [--es probe_mode local|net|local+net]
  *                                      whether a pairing endpoint answers there
  *     --es harness "viewer ADDRESS"    the scripted viewer: add by address, pair, connect, forget
+ *     --es mock SCENARIO               a state of the design's mock on the shared screens, as the desktops' --mock
+ *         [--es fit 1]                 the desktop window of that state, whole, as large as the screen allows
+ *         [--es landscape 1]           with the screen held sideways
+ *         [--es frames N]              N frames painted in a row, each logged with what it cost (default 1)
  * </pre>
  */
 final class DevHarness {
@@ -36,10 +42,36 @@ final class DevHarness {
 
     private static native String run(String spec);
 
+    private static native String mock(String scenario);
+
     /** The development options the intent asks of the core, or none. */
     static String options(Activity activity) {
         String dev = activity.getIntent().getStringExtra("dev");
         return dev == null ? "" : dev;
+    }
+
+    /** The screen the intent asks for in place of the app's own: a state of the design's mock. Null when none. */
+    static View screen(Activity activity) {
+        String scenario = activity.getIntent().getStringExtra("mock");
+        if (scenario == null) {
+            return null;
+        }
+        if (activity.getIntent().getStringExtra("landscape") != null) {
+            activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        }
+        String said = mock(scenario);
+        Log.i(TAG, "MOCK " + scenario + " " + said);
+        if (!said.startsWith("OK ")) {
+            return null;
+        }
+        PaintView view = new PaintView(activity);
+        if (activity.getIntent().getStringExtra("fit") != null) {
+            String[] size = said.split(" ");
+            view.fit(Float.parseFloat(size[1]), Float.parseFloat(size[2]));
+        }
+        String frames = activity.getIntent().getStringExtra("frames");
+        view.trace(frames == null ? 1 : Integer.parseInt(frames));
+        return view;
     }
 
     /** Runs what the intent asks for, off the main thread, and logs each line of its report. */

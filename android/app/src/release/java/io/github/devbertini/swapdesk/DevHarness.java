@@ -1,6 +1,7 @@
 package io.github.devbertini.swapdesk;
 
 import android.app.Activity;
+import android.view.View;
 import android.widget.TextView;
 
 /**
@@ -15,4 +16,8 @@ final class DevHarness {
     }
 
     static void run(Activity activity, TextView status) {}
+
+    static View screen(Activity activity) {
+        return null;
+    }
 }

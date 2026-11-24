@@ -1,6 +1,21 @@
-//! The Android shell of the shared interface (docs/ANDROID.md 5): the `Painter` that replays each frame onto a
-//! canvas, the native text fields of the edit slots, the accessibility bridge and the effects table. Slice A3 fills
-//! it.
+//! The Android shell of the shared interface (docs/ANDROID.md 5): the screens of `swapdesk-paint`, the same ones
+//! Windows and the Mac paint, shown by a Java view that only replays what this crate recorded.
 //!
-//! Compiles to nothing off Android (the D29 pattern).
-#![cfg(target_os = "android")]
+//! * [`recorder`]: the `Painter` that writes a frame's operations into one buffer ([`canvas_ops`]);
+//! * [`text_measure`]: text measured by Android in one round trip per new label, never by a call from Rust into
+//!   Java;
+//! * [`phone_window`]: one window's passes: a frame, or the list of text it needs measured first.
+//!
+//! Plain Rust, built and tested on every host: the Java half (`PaintView`, `TextMeasurer`) follows the two formats.
+
+pub mod canvas_ops;
+pub mod phone_window;
+pub mod recorder;
+pub mod text_measure;
+
+#[cfg(test)]
+mod recorder_tests;
+
+pub use phone_window::{FrameCost, PASSES_MAX, PhoneWindow, Surface};
+pub use recorder::{Metrics, Recorder};
+pub use text_measure::{TextCache, TextKey};

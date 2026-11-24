@@ -1,11 +1,15 @@
 [package]
 name = "swapdesk-shell-android"
-description = "The Android shell of the shared interface: the `Painter` over a canvas replay, the edit slots, the accessibility bridge and the effects table (docs/ANDROID.md 5). Compiles to nothing off Android."
+description = "The Android shell of the shared interface: the `Painter` that records a frame for a canvas replay, text laid out from Android's measures, the edit slots, the accessibility bridge and the effects table (docs/ANDROID.md 5). Plain Rust, built and tested on every host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[dependencies]
+swapdesk-paint = { path = "../swapdesk-paint" }
+swapdesk-ui = { path = "../swapdesk-ui" }
 
 [lints]
 workspace = true

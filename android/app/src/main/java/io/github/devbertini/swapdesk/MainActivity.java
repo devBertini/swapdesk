@@ -72,6 +72,13 @@ public final class MainActivity extends Activity {
         status.setText("Swapdesk " + version + "\n" + started);
         Networks.start(this);
         DevHarness.run(this, status);
+        View screen = DevHarness.screen(this);
+        if (screen != null) {
+            FrameLayout holder = new FrameLayout(this);
+            holder.setFitsSystemWindows(true);
+            holder.addView(screen);
+            setContentView(holder);
+        }
     }
 
     @Override

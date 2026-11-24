@@ -949,9 +949,11 @@ dependencies = [
  "swapdesk-host",
  "swapdesk-ipc",
  "swapdesk-lan",
+ "swapdesk-paint",
  "swapdesk-platform",
  "swapdesk-proto",
  "swapdesk-session",
+ "swapdesk-shell-android",
  "swapdesk-sys-android",
  "swapdesk-trust",
  "swapdesk-ui",
@@ -1425,6 +1427,10 @@ dependencies = [
 [[package]]
 name = "swapdesk-shell-android"
 version = "1.1.0"
+dependencies = [
+ "swapdesk-paint",
+ "swapdesk-ui",
+]
 
 [[package]]
 name = "swapdesk-shell-mac"

@@ -1,6 +1,6 @@
 #!/bin/bash
-# The Android gate (docs/ANDROID.md): what the desktop gate cannot see, since the `*-android` crates compile to nothing
-# off Android. It is not part of the desktop gate or of its time budget.
+# The Android gate (docs/ANDROID.md): what the desktop gate cannot see, since the JNI and NDK parts of the `*-android`
+# crates compile to nothing off Android. It is not part of the desktop gate or of its time budget.
 #
 #   bash scripts/android/check.sh [--apk]
 #
