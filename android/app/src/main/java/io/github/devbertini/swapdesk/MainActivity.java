@@ -11,6 +11,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -24,11 +25,11 @@ public final class MainActivity extends Activity {
     private static final int LOCAL_NETWORK_FROM = 37;
     private static final String LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK";
     private static final int ASK_LOCAL_NETWORK = 1;
+    private static final String ASKED_LOCAL_NETWORK = "local_network_asked";
 
     private TextView status;
     private TextView notice;
     private Button openSettings;
-    private boolean asked;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -37,8 +38,11 @@ public final class MainActivity extends Activity {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setPadding(pad, pad, pad, pad);
-        // Android draws an app behind the bars of the system: the content keeps clear of them.
-        column.setFitsSystemWindows(true);
+        // Android draws an app behind the bars of the system: a frame keeps clear of them (it takes the bars as its
+        // own padding), and the column keeps its margins inside it.
+        FrameLayout frame = new FrameLayout(this);
+        frame.setFitsSystemWindows(true);
+        frame.addView(column);
         status = new TextView(this);
         notice = new TextView(this);
         notice.setPadding(0, pad, 0, pad / 2);
@@ -52,7 +56,7 @@ public final class MainActivity extends Activity {
         column.addView(status);
         column.addView(notice);
         column.addView(openSettings, wrap);
-        setContentView(column);
+        setContentView(frame);
 
         String version = Core.version();
         Log.i(TAG, "core " + version);
@@ -77,12 +81,17 @@ public final class MainActivity extends Activity {
         showLocalNetwork();
     }
 
-    /** Asks for the local network once, where it is a permission, and says what its refusal stops. */
+    /**
+     * Asks for the local network once, where it is a permission, and says what its refusal stops. Once means once:
+     * the answer is remembered across the restarts of this screen (a rotation, a change of language) and of the
+     * app, and after a refusal the way back is the settings of the system, never the question again.
+     */
     private void showLocalNetwork() {
         boolean needed = Build.VERSION.SDK_INT >= LOCAL_NETWORK_FROM;
         boolean granted = !needed || checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED;
+        boolean asked = getPreferences(MODE_PRIVATE).getBoolean(ASKED_LOCAL_NETWORK, false);
         if (needed && !granted && !asked) {
-            asked = true;
+            getPreferences(MODE_PRIVATE).edit().putBoolean(ASKED_LOCAL_NETWORK, true).apply();
             Log.i(TAG, "LOCAL_NETWORK asking");
             notice.setText(R.string.local_network_why);
             openSettings.setVisibility(View.GONE);
