@@ -35,7 +35,8 @@ pub fn run(spec: &str) -> String {
         return format!("HARNESS FAIL: {spec:?} is not \"viewer <address>\"");
     };
     let host = host.to_owned();
-    let Some((backend, dir)) = crate::app::app().as_ref().map(|a| (a.service.backend(), a.dir.join("harness"))) else {
+    let Some((backend, dir)) = crate::startup::app().as_ref().map(|a| (a.service.backend(), a.dir.join("harness")))
+    else {
         return "HARNESS FAIL: the core is not started".into();
     };
     let spawned = std::thread::Builder::new().name("swapdesk-harness".into()).spawn(move || {
@@ -46,7 +47,7 @@ pub fn run(spec: &str) -> String {
         }
         // The app has just started: the script begins once Java has reported a network the guard approves.
         let waited = Instant::now();
-        let approved = || approved_addrs(&crate::app::networks().list().unwrap_or_default());
+        let approved = || approved_addrs(&crate::startup::networks().list().unwrap_or_default());
         while approved().is_empty() {
             if waited.elapsed() > Duration::from_secs(15) {
                 return log("PHONE_RESULT FAIL no approved network after 15 s");

@@ -158,26 +158,38 @@ cloud. On Android it is kept this way:
   cellular, USB and any other transport are never approved (fail closed, as `swapdesk-lan` does). Android's own
   definition of the local network for its permission matches: a broadcast-capable interface "such as Wi-Fi or
   Ethernet, but excludes cellular (WWAN) or VPN connections" [S2].
-- **Sockets stay on the approved network.** Each socket Swapdesk opens is bound to the approved network with
-  `android_setsocknetwork` (API 23) before use, so "all data traffic on the socket ... will be sent on this Network,
-  irrespective of any process-wide network binding" [S3][S4]. Whether an always-on VPN set to block other traffic
-  still lets such a socket out is not verified: the guard then has no network to approve and says so.
+- **Sockets stay on the approved network.** Each QUIC socket is bound to the approved network that holds its address
+  with `android_setsocknetwork` (API 23) right after it is made, so "all data traffic on the socket ... will be sent
+  on this Network, irrespective of any process-wide network binding" [S3][S4]. It is one step in the one place every
+  QUIC socket is made (`swapdesk-lan` `set_after_bind`), and on Android a socket with no step, or on an address of
+  no approved network, is not made at all. The process as a whole is bound to the approved network as well
+  (`android_setprocnetwork`), for the discovery library's sockets, which cannot be handed one. Whether an always-on
+  VPN set to block other traffic still lets such a socket out is not verified: the guard then has no network to
+  approve and says so.
 - **On-link, own and loopback.** The subnet is the prefix of the approved network's IPv4 link address; the existing
   guard checks every peer against it, refuses loopback and the phone's own addresses, and sets TTL 1 on QUIC sockets
   (its read-back test runs on the device in A2).
 - **Local network permission.** Apps that target Android 17 (API 37) are blocked from the local network until the
-  person grants `ACCESS_LOCAL_NETWORK`, a runtime permission of the Nearby devices group; a refused UDP send fails
-  with `EPERM`, and `android_getnetworkblockedreason` names the cause on a socket [S1][S3]. Below target 37 the
-  `INTERNET` permission grants it implicitly and the app must not ask [S1]. The app asks at the first list of the
-  network and shows what is blocked when refused (F-AND-01).
+  person grants `ACCESS_LOCAL_NETWORK`, a runtime permission of the Nearby devices group [S1][S3]; below Android 17
+  the `INTERNET` permission grants it implicitly and nothing is asked [S1]. Proven on an Android 17 image (A2):
+  without the grant a QUIC handshake toward a computer gets no answer and no error (the packets are dropped in
+  silence, so the app reads the grant from Android and never infers it from a failed send), with it the handshake
+  completes, and a revoke stops it again; loopback needs no grant. The system's question reads "Allow Swapdesk to
+  find, connect to, and determine the relative position of nearby devices?". The app asks once, at its first start
+  (the first list of the network, F-AND-01); refused, it says what stops working with a button to the system's
+  settings of the app, and it never asks by itself again.
 - **Mobile data and Wi-Fi changes.** When Wi-Fi drops and the phone moves to mobile data, no network is approved:
   discovery stops and a live session pauses into "Reconectando" (F-NET-01), resuming when an approved network
   returns.
 - **No relay, no cloud, no account.** Unchanged. The phone announces nothing in version 1, so it is not visible on a
   network it visits (it listens on no port either).
-- **The emulator is not a LAN.** An emulated device sits behind a virtual router in `10.0.2.0/24` and the emulator
-  does not support IGMP [S45]; the guard refuses its peers as off-link, as it should. Discovery, pairing and sessions
-  are proven on a real device on the Wi-Fi; the emulator serves screens and unit-level checks.
+- **The emulator's network.** An emulated device has a Wi-Fi network `10.0.2.0/24` of its own behind the host, whose
+  loopback it reaches at `10.0.2.2`: that address is on-link, so the phone's guard approves it as any peer of its
+  Wi-Fi, and a development instance of the service started with `--dev-loopback` on the host accepts the guest as a
+  loopback peer. Two limits are the emulator's, not Swapdesk's: its own router is one hop, so QUIC sent with TTL 1
+  never reaches the host (a development build may raise the TTL, `ttl=2`; a release library has no such option),
+  and it does not support IGMP [S45], so discovery is proven on a real device on the Wi-Fi. Pairing and sessions
+  are proven on the emulator against a development instance.
 
 ### Threat model, sized to a phone
 
@@ -330,6 +342,25 @@ them the released APK carries is settled at the release slice (GUESS: `arm64-v8a
 A release build of the library uses the profile that unwinds (`release-service`), since a panic must reach Java as an
 exception and never end the app's process.
 
+**The app's start (slice A2).** Java does four small things and hands each to the core once: it unwraps the data
+key (32 random bytes that rest on disk only wrapped by a key of the Android Keystore; the core seals the device key,
+the trust store and the settings with it, AES-256-GCM with the file's name as associated data, so nothing calls
+back into Java to read a file), listens to `ConnectivityManager` and passes the whole list of networks at every
+change, asks for the local network where it is a permission, and starts the core (`Core.start`). The phone's service
+is assembled in `swapdesk-app-android` (`phone_service.rs`): a deviation from "one copy with the Mac", whose
+assembly also hosts, picks ports among the accounts of a machine and asks for an administrator; what the two share
+moved to `swapdesk-host` (the in-memory pipe, the file trace) beside the hub and the core. A phone that does not
+host is a device that only dials: the hub is told not to listen (`UiHub::set_listening`), the core receives
+nothing, and discovery starts without announcing, so no port is bound and no record is on the network before,
+while or after it pairs.
+
+**The development harness (cargo feature `dev-harness`).** A development library carries the self-test, the
+reachability probe and the scripted viewer of `swapdesk-crossdrive`, the one the cross-machine proofs run on a
+headless Mac: it adds a computer by address, pairs, opens a session, ends it and forgets the computer, confirming a
+pairing code only when its orchestrator hands it the other side's. Its Java half lives in the debug sources, the
+release sources hold a class that does nothing, the two libraries go to different folders that only their own APK
+packs, and the build refuses a release library that exports a harness symbol.
+
 **Proof without the phone (slice A1).** The project's own emulator images run the app: Android 16 (`x86_64`, with
 `arm64-v8a` through the image's translation) and Android 17 with 16 KB memory pages, where the alignment is not only
 read but used and the local network permission exists. The core says what it finds in the log
@@ -362,14 +393,14 @@ Tracked, not budgeted: the APK size of `arm64-v8a` (GUESS ≤ 15 MB), read from 
 | ID | Risk | What shows it early |
 |---|---|---|
 | AR1 | The dependency tree does not cross-compile or misbehaves on Android: `ring` (its page does not list Android as a target [S44]; not verified either way), `quinn`, `tokio`, `mdns-sd` and its `if-addrs`, libopus through CMake | **Spike A1**: build the core for `aarch64-linux-android` and run discovery plus one TLS handshake to the PC on the phone. Fallback for libopus: `opus-rs` (D16). **Result (24/11/2026):** every crate of the core cross-compiled for both targets at the first try and links into one library. On the emulator image the library of each ABI generated device keys (`ring`), completed a pinned-key session handshake over loopback with bytes both ways (`rustls`, `quinn`, `tokio`) and coded a frame with libopus; from the emulator a QUIC handshake completed with a desktop development instance's pairing endpoint, and timed out with pairing closed. Nothing needed a fallback. Still owed to the phone: discovery (`mdns-sd` on real Wi-Fi), the socket bound to the Wi-Fi network, and the same checks on its hardware |
-| AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1] |
+| AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1]. **State (24/11/2026):** the discovery daemon starts on both emulator images with the interface index Java reports and the process bound to the Wi-Fi network; whether it finds a computer is owed to the phone (the emulator carries no multicast) |
 | AR3 | A VPN on the phone routes or blocks Swapdesk's traffic despite the socket binding | A1 repeats the handshake with a VPN app on (always-on and blocking modes) |
 | AR4 | Decode latency varies by device; the low-latency key is optional [S16] | A4 measures BA4 and BA3 on the owner's phone first |
 | AR5 | Painting through Java costs more than a frame at 120 Hz | A3 traces the UI thread per frame (R-UI-10) on the busiest screen |
 | AR6 | The compact layout is a design job of its own | before A3: captures of Início, a device's page and the session in the compact layout on the project's design canvas for the owner |
 | AR7 | The phone is useless with a 1.1.0 desktop (minor 3) | A0 ships to both computers before A1 reaches the phone |
 | AR8 | Android's developer verification is rolling out (Brazil from 30/09/2026 for the listed stores, global in 2027) and its rules still move [S32][S35] | register the package name before the first build leaves this machine (decision 8.4) |
-| AR9 | The local network permission is refused, or its prompt is mistaken for location | A2 runs the refused path on an Android 17 device or image (the emulator's own network is not a LAN [S45]; that a refusal shows there is a GUESS) |
+| AR9 | The local network permission is refused, or its prompt is mistaken for location | A2 runs the refused path on an Android 17 device or image. **Result (24/11/2026):** proven on the Android 17 emulator image: refused, nothing reaches a computer and the app says so with the way to the settings; granted, pairing and a session work. The prompt names "nearby devices", not location |
 | AR10 | Google Play review of an accessibility service used for control; the policy page is silent on remote control [S14] | not met while the app stays off Google Play (decision 8.4); a declaration draft before any Play listing |
 
 ## 8. Decisions

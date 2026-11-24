@@ -23,7 +23,7 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_version<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// `Core.start(dir, dataKey, name, osVersion, dev)`: see [`crate::app::start`].
+/// `Core.start(dir, dataKey, name, osVersion, dev)`: see [`crate::startup::start`].
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_start<'caller>(
     mut env: EnvUnowned<'caller>,
@@ -37,13 +37,13 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_start<'caller>(
     env.with_env(|env| -> Result<_, Error> {
         let key = env.convert_byte_array(&key)?;
         let outcome =
-            crate::app::start(&dir.to_string(), &key, &name.to_string(), &os_version.to_string(), &dev.to_string());
+            crate::startup::start(&dir.to_string(), &key, &name.to_string(), &os_version.to_string(), &dev.to_string());
         JString::from_str(env, said(outcome))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// `Core.networks(facts)`: see [`crate::app::networks_changed`].
+/// `Core.networks(facts)`: see [`crate::startup::networks_changed`].
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_networks<'caller>(
     mut env: EnvUnowned<'caller>,
@@ -52,7 +52,7 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Core_networks<'caller>
 ) -> JString<'caller> {
     env.with_env(|env| -> Result<_, Error> {
         let facts = env.convert_byte_array(&facts)?;
-        JString::from_str(env, said(crate::app::networks_changed(&facts)))
+        JString::from_str(env, said(crate::startup::networks_changed(&facts)))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

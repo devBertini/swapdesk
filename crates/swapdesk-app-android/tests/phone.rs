@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use swapdesk_android::service::{PhoneParams, PhoneService};
+use swapdesk_android::phone_service::{PhoneParams, PhoneService};
 use swapdesk_crossdrive::Pump;
 use swapdesk_fakes::{FakeNetInterfaces, LogCapture, MemorySecretStore, MonotonicClock};
 use swapdesk_host::pipe::duplex;

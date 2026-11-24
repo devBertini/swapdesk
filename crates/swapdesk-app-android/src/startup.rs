@@ -16,7 +16,7 @@ use swapdesk_sys_android::network;
 use swapdesk_sys_android::sealed::{KEY_LEN, SealedStore};
 use swapdesk_ui::UiWaker;
 
-use crate::service::{PhoneParams, PhoneService};
+use crate::phone_service::{PhoneParams, PhoneService};
 
 /// The trace of the app: the file in its private folder, and the system log for a development build to follow.
 struct Tee(FileTrace, Logcat);
