@@ -5,5 +5,6 @@
 //! [`network`] is Android only and holds this crate's `unsafe` (the NDK's multinetwork calls). Everything else is
 //! plain Rust that builds and is tested on every host.
 
+pub mod facts;
 #[cfg(target_os = "android")]
 pub mod network;

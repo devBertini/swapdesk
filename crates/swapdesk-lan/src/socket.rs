@@ -2,10 +2,16 @@
 //!
 //! Only QUIC sockets get TTL 1, set with std's `UdpSocket::set_ttl` and read back. mDNS sockets belong to `mdns-sd`,
 //! which sends with TTL 255 (link-local multicast, RFC 6762); nothing in this crate touches them.
+//!
+//! A platform may add one step to every QUIC socket, right after it is bound ([`set_after_bind`]). Android needs it:
+//! there a socket is routed by the network it is bound to, not by its address, so a socket on the Wi-Fi address
+//! leaves through mobile data unless it is bound to the Wi-Fi network (docs/ANDROID.md 4). On Android a missing
+//! step fails the bind: no socket is better than one on the wrong network.
 
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::OnceLock;
 
 use swapdesk_platform::NetInterface;
 
@@ -38,14 +44,40 @@ impl From<io::Error> for SocketError {
     }
 }
 
-/// Binds a UDP socket and sets IP TTL 1, then reads the value back and fails if the system did not keep it. No guard
-/// check: the caller picks the address (tests bind loopback). Production code uses [`bind_quic_approved`].
+/// The platform's step on a QUIC socket that was just bound and given TTL 1: an error fails the bind.
+pub type AfterBind = Box<dyn Fn(&UdpSocket) -> io::Result<()> + Send + Sync>;
+
+static AFTER_BIND: OnceLock<AfterBind> = OnceLock::new();
+
+/// Installs the platform's step for every QUIC socket bound from now on. Once, at start: a second call installs
+/// nothing and returns `false`.
+pub fn set_after_bind(step: AfterBind) -> bool {
+    AFTER_BIND.set(step).is_ok()
+}
+
+/// Binds a UDP socket and sets IP TTL 1, then reads the value back and fails if the system did not keep it; then
+/// the platform's step, if one is installed. No guard check: the caller picks the address (tests bind loopback).
+/// Production code uses [`bind_quic_approved`].
 pub fn bind_quic_socket(addr: SocketAddrV4) -> io::Result<UdpSocket> {
+    bind_with(addr, AFTER_BIND.get(), cfg!(target_os = "android"))
+}
+
+/// [`bind_quic_socket`] with the step named: `required` makes a missing step an error.
+fn bind_with(addr: SocketAddrV4, step: Option<&AfterBind>, required: bool) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(SocketAddr::V4(addr))?;
     socket.set_ttl(QUIC_TTL)?;
     let got = socket.ttl()?;
     if got != QUIC_TTL {
         return Err(io::Error::other(format!("IP TTL reads back {got}, expected {QUIC_TTL}")));
+    }
+    match step {
+        Some(step) => step(&socket)?,
+        None if required => {
+            return Err(io::Error::other(
+                "this platform binds every QUIC socket to a network, and no step is installed",
+            ));
+        }
+        None => {}
     }
     Ok(socket)
 }
@@ -81,6 +113,26 @@ mod tests {
     fn a_quic_socket_has_ttl_1_read_back_from_the_system() {
         let s = bind_quic_socket(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         assert_eq!(s.ttl().unwrap(), 1);
+    }
+
+    /// docs/ANDROID.md 4: the platform's step runs on the socket once it has TTL 1, an error of the step fails the
+    /// bind, and where the step is required a missing one fails it too (no socket rather than one on any network).
+    #[test]
+    fn the_platforms_step_runs_after_the_ttl_and_fails_the_bind_closed() {
+        let loopback = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let step: AfterBind = Box::new(move |s| {
+            record.lock().unwrap().push((s.ttl()?, s.local_addr()?.ip().is_loopback()));
+            Ok(())
+        });
+        assert!(bind_with(loopback, Some(&step), true).is_ok());
+        assert_eq!(*seen.lock().unwrap(), vec![(1, true)], "once, on the bound socket, TTL already 1");
+
+        let refuse: AfterBind = Box::new(|_| Err(io::Error::other("no approved network")));
+        assert_eq!(bind_with(loopback, Some(&refuse), false).unwrap_err().to_string(), "no approved network");
+        assert!(bind_with(loopback, None, true).is_err(), "required and missing");
+        assert!(bind_with(loopback, None, false).is_ok(), "the desktops need none");
     }
 
     #[test]

@@ -1471,6 +1471,10 @@ dependencies = [
 [[package]]
 name = "swapdesk-sys-android"
 version = "1.1.0"
+dependencies = [
+ "swapdesk-lan",
+ "swapdesk-platform",
+]
 
 [[package]]
 name = "swapdesk-sys-mac"

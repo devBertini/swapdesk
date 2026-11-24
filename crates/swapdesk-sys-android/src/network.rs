@@ -8,6 +8,11 @@
 use std::io;
 use std::net::UdpSocket;
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
+
+use swapdesk_lan::socket::AfterBind;
+
+use crate::facts::Networks;
 
 /// `net_handle_t` of `android/multinetwork.h`.
 pub type NetHandle = u64;
@@ -37,4 +42,14 @@ pub fn bind_process(network: NetHandle) -> io::Result<()> {
     // SAFETY: the argument is passed by value and the call touches no memory of ours.
     let rc = unsafe { android_setprocnetwork(network) };
     if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+/// The step for `swapdesk_lan::socket::set_after_bind`: each QUIC socket is bound to the approved network that holds
+/// its address ([`Networks::binding_for`]), and a socket on any other address fails its bind.
+pub fn quic_binder(networks: Arc<Networks>) -> AfterBind {
+    Box::new(move |socket| match networks.binding_for(socket.local_addr()?) {
+        Ok(Some(handle)) => bind_socket(handle, socket),
+        Ok(None) => Ok(()),
+        Err(why) => Err(io::Error::other(why)),
+    })
 }

@@ -16,3 +16,7 @@ unsafe_op_in_unsafe_fn = "deny"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+[dependencies]
+swapdesk-lan = { path = "../swapdesk-lan" }
+swapdesk-platform = { path = "../swapdesk-platform" }
