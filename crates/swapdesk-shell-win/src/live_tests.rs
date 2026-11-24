@@ -1116,6 +1116,24 @@ impl crate::ViewerHost for KeysHost {
     }
 }
 
+/// Owner, 22/11/2026 (review H14): closing the session's window ended the session at once, copies and all. With a
+/// copy under way the close asks first and ends nothing; with nothing to stop it ends the session as before.
+#[test]
+fn closing_the_session_window_with_a_copy_under_way_asks_and_ends_nothing() {
+    let (busy, backend) = start_recording(Scenario::ExploradorCopiando.prepared_state());
+    // SAFETY: posts to our own window.
+    unsafe { PostMessageW(Some(viewer_window(&busy)), WM_CLOSE, WPARAM(0), LPARAM(0)) }.expect("post");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(backend.disconnects(), 0, "the copy was cut by closing the window");
+    drop(busy);
+
+    let (plain, backend) = start_recording(Scenario::Visualizador.prepared_state());
+    // SAFETY: posts to our own window.
+    unsafe { PostMessageW(Some(viewer_window(&plain)), WM_CLOSE, WPARAM(0), LPARAM(0)) }.expect("post");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(backend.disconnects(), 1, "with nothing to stop the close ends the session");
+}
+
 /// The viewer window of a running shell: the window of its thread that is neither the main one nor the banner.
 fn viewer_window(live: &Live) -> HWND {
     use windows::Win32::UI::WindowsAndMessaging::{

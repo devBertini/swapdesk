@@ -1128,11 +1128,9 @@ impl Shell {
     fn should_close(&self, sender: &NSWindow) -> bool {
         let is_viewer = self.viewer.borrow().as_ref().is_some_and(|v| std::ptr::eq(&*v.window, sender));
         if is_viewer {
-            // The close button ends the session through the service; the window goes when the session has.
-            let id = self.state.borrow().viewer_session().map(|s| s.id);
-            if let Some(session_id) = id {
-                self.send_commands(vec![Command::Disconnect { session_id }]);
-            }
+            // The close button is the toolbar's "Desconectar": with copies still to go or a terminal open the
+            // question comes first (FILES-UI.md 5 "Session end"); the window goes when the session has.
+            self.activate(ControlId::TbDisconnect);
             return false;
         }
         true

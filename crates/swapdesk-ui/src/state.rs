@@ -547,6 +547,9 @@ pub enum DialogKind {
     Consent,
     SwapConfirm,
     SwapAsk,
+    /// The person asked to end the session this computer controls another through while copies run or wait, or a
+    /// terminal is open: what stops is said first (FILES-UI.md 5 "Session end"; owner, 22/11/2026).
+    EndSession,
 }
 
 /// What `activate` hands back: windows to redraw, commands for the backend and an effect only the shell can do.
@@ -674,6 +677,8 @@ pub struct UiState {
     pub(crate) blocked_asked: bool,
     pub(crate) settings: Option<Settings>,
     pub(crate) drawer: Option<DrawerTab>,
+    /// The question of [`DialogKind::EndSession`] is on the session window.
+    pub(crate) end_ask: bool,
     pub(crate) chat: Vec<ChatView>,
     pub(crate) transfers: Vec<TransferView>,
     /// What the host banner says about files of the hosted session (FILES-UI.md 6).
@@ -845,6 +850,7 @@ impl UiState {
             blocked_asked: false,
             settings: None,
             drawer: None,
+            end_ask: false,
             chat: Vec::new(),
             transfers: Vec::new(),
             host_files: Default::default(),
@@ -1638,11 +1644,22 @@ impl UiState {
                 }
             }
             WindowKind::Viewer => match self.swap.as_ref().map(|s| &s.phase) {
+                // Asked while there was work to stop; once it is all done there is nothing left to ask about.
+                _ if self.end_ask && self.session_work() != (0, false) => Some(DialogKind::EndSession),
                 Some(SwapPhase::Confirm) => Some(DialogKind::SwapConfirm),
                 _ => None,
             },
             WindowKind::Banner => None,
         }
+    }
+
+    /// What ending the session now would stop: the items of the copy still to go (running, paused or waiting), and
+    /// whether a terminal is open or opening.
+    pub fn session_work(&self) -> (usize, bool) {
+        let copies =
+            self.copy_summary().filter(|c| !c.finished).map_or(0, |c| c.items_total.saturating_sub(c.items_done));
+        let terminal = matches!(self.term, TermPhase::Opening { .. } | TermPhase::Open { .. });
+        (copies, terminal)
     }
 
     /// True while the incoming-session dialog covers the main window.
@@ -2454,6 +2471,7 @@ impl UiState {
                 self.bar_collapsed = false;
                 self.quality = Quality::Auto;
                 self.drawer = None;
+                self.end_ask = false;
                 self.chat.clear();
                 self.transfers.clear();
                 self.copy_reset();

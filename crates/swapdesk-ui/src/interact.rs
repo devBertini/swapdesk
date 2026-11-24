@@ -1111,6 +1111,31 @@ impl UiState {
                     secondary: Some(self.name_of(MsgKey::ConsentDeny)),
                 }
             }
+            DialogKind::EndSession => {
+                let (copies, terminal) = self.session_work();
+                let n = crate::format::count(copies as u64);
+                let (title, body) = match (copies > 0, terminal) {
+                    (true, true) => (
+                        self.tm(&Msg::new(MsgKey::EndAskBothTitle).with(n.clone())),
+                        vec![
+                            self.tm(&Msg::new(MsgKey::EndAskCopiesBody).with(n)),
+                            self.name_of(MsgKey::EndAskTerminalBody),
+                        ],
+                    ),
+                    (true, false) => (
+                        self.tm(&Msg::new(MsgKey::EndAskCopiesTitle).with(n.clone())),
+                        vec![self.tm(&Msg::new(MsgKey::EndAskCopiesBody).with(n))],
+                    ),
+                    _ => (self.name_of(MsgKey::EndAskTerminalTitle), vec![self.name_of(MsgKey::EndAskTerminalBody)]),
+                };
+                DialogTexts {
+                    title,
+                    body,
+                    extra: None,
+                    primary: Some(self.name_of(MsgKey::Disconnect)),
+                    secondary: Some(self.name_of(MsgKey::EndAskStay)),
+                }
+            }
             DialogKind::SwapConfirm => {
                 let peer = self.swap_peer_name();
                 DialogTexts {
@@ -1542,6 +1567,12 @@ impl UiState {
         self.viewer_session().map(|s| s.id)
     }
 
+    /// The person closed the session's window or used the shortcut that ends the session: the same as the toolbar's
+    /// "Desconectar", question included.
+    pub fn end_viewer_session(&mut self) -> Activation {
+        self.activate(ControlId::TbDisconnect)
+    }
+
     /// The tabs of a paired device's page, in order: the conversation last, and only on the page of the device
     /// that controls this computer now.
     pub fn device_tabs(&self) -> Vec<(DeviceTab, MsgKey)> {
@@ -1813,6 +1844,13 @@ impl UiState {
                 if let Some(end) = self.connect_end.take() {
                     self.start_connect(end.device_id, end.intent.unwrap_or(Intent::Control), &mut a);
                 }
+            }
+            // Ending the session this computer controls another through, with copies still to go or a terminal
+            // open: what stops is said first, and the safe answer has the focus.
+            ControlId::TbDisconnect if !self.end_ask && self.session_work() != (0, false) => {
+                self.end_ask = true;
+                a.effect = Some(Effect::Focus(ControlId::DialogSecondary));
+                a.changed = Changed::VIEWER;
             }
             ControlId::ReconnectDisconnect | ControlId::TbDisconnect | ControlId::BannerDisconnect => {
                 let session = if id == ControlId::BannerDisconnect {
@@ -2124,6 +2162,12 @@ impl UiState {
                     let decision =
                         if primary { Decision::Accept { grants: i.request.preset } } else { Decision::Decline };
                     a.commands.push(Command::AnswerIncoming { request_id: i.request.request_id, decision });
+                }
+            }
+            DialogKind::EndSession => {
+                self.end_ask = false;
+                if let (true, Some(session_id)) = (primary, self.session_id()) {
+                    a.commands.push(Command::Disconnect { session_id });
                 }
             }
             DialogKind::SwapConfirm => {

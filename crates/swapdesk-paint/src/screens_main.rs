@@ -1823,6 +1823,8 @@ fn dialog(f: &mut Frame, kind: &DialogKind) {
         DialogKind::Elevation | DialogKind::ElevatedConfirm => icons::SHIELD.to_owned(),
         DialogKind::Consent => icons::terminal(),
         DialogKind::SwapConfirm | DialogKind::SwapAsk => icons::SWAP.to_owned(),
+        // Shown over the session window, never here.
+        DialogKind::EndSession => icons::FOLDER.to_owned(),
     };
     let cx = x + w / 2.0;
     p.fill_circle((cx, y + 22.0), 22.0, pal.link_tint);

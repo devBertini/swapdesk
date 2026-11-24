@@ -594,10 +594,11 @@ impl Shared {
     }
 
     /// The viewer's close button: the session ends through the service, the window goes when it has.
+    /// The session's window was closed: the same as the toolbar's "Desconectar", so with copies still to go or a
+    /// terminal open the question comes first (FILES-UI.md 5 "Session end").
     pub fn disconnect_viewer(self: &Rc<Self>) {
-        let id = self.state.borrow().viewer_session().map(|s| s.id);
-        if let Some(session_id) = id {
-            self.send_commands(vec![Command::Disconnect { session_id }]);
+        if let Some(viewer) = self.window(WindowKind::Viewer) {
+            self.activate(ControlId::TbDisconnect, &viewer);
         }
     }
 

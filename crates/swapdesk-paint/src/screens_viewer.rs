@@ -509,7 +509,9 @@ fn swap_confirm(f: &mut Frame, kind: &DialogKind) {
         if let Some(s) = &t.secondary {
             list.push((ControlId::DialogSecondary, s.clone(), Kind::Default));
         }
-        list.push((ControlId::DialogPrimary, pm.clone(), Kind::Primary));
+        // Ending the session is the destructive answer: in the danger style, never the prominent one.
+        let primary = if matches!(kind, DialogKind::EndSession) { Kind::Danger } else { Kind::Primary };
+        list.push((ControlId::DialogPrimary, pm.clone(), primary));
         card::actions(f, x, y, r.w - 64.0, &list, false);
     }
 }

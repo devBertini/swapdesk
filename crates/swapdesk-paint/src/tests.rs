@@ -153,6 +153,27 @@ fn the_controllers_page_paints_the_conversation_and_says_read_once() {
     assert!(out.edits.iter().any(|e| e.id == EditId::Chat), "the field to answer in");
 }
 
+/// The question before ending a session with work under way (FILES-UI.md 5; owner, 22/11/2026): its words, the
+/// safe answer on the left and "Desconectar" on the right, over the session window.
+#[test]
+fn the_question_before_ending_a_session_paints_its_words_and_both_answers() {
+    use swapdesk_ui::WindowKind::Viewer;
+    let state = Scenario::EncerrarComCopias.prepared_state();
+    let p = Fixed::default();
+    let ix = Interaction::default();
+    let out = paint(Frame::new(&p, &state, &ix, design_size(Viewer), true), Viewer);
+    let drawn = p.drawn.borrow().clone();
+    assert!(drawn.iter().any(|d| d.starts_with("Há ") && d.ends_with("em andamento")), "the title: {drawn:?}");
+    for text in ["Continuar a sessão", "Desconectar"] {
+        assert!(drawn.iter().any(|d| d == text), "{text:?} is drawn: {drawn:?}");
+    }
+    let place = |id: ControlId| out.widgets.iter().find(|w| w.id == id).map(|w| w.rect.x).expect("the button");
+    assert!(
+        place(ControlId::DialogSecondary) < place(ControlId::DialogPrimary),
+        "the safe answer on the left, the one that ends the session on the right"
+    );
+}
+
 #[test]
 fn the_banner_grows_by_one_line_when_it_has_a_files_line_and_draws_it_under_the_row() {
     use swapdesk_ui::WindowKind::Banner;

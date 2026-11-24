@@ -222,6 +222,7 @@ pub enum Scenario {
     /// The home page with the notice of a Public network: with no device page open the home is where it shows.
     InicioRedePublica,
     ConversaAnfitriao,
+    EncerrarComCopias,
     Dispositivos,
     DispositivosEscuro,
     Permissoes,
@@ -332,11 +333,12 @@ pub enum Scenario {
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 70] = [
+    pub const ALL: [Scenario; 71] = [
         Scenario::Inicio,
         Scenario::InicioEscuro,
         Scenario::InicioRedePublica,
         Scenario::ConversaAnfitriao,
+        Scenario::EncerrarComCopias,
         Scenario::Dispositivos,
         Scenario::DispositivosEscuro,
         Scenario::Permissoes,
@@ -412,6 +414,7 @@ impl Scenario {
             Scenario::InicioEscuro => "inicio-escuro",
             Scenario::InicioRedePublica => "inicio-rede-publica",
             Scenario::ConversaAnfitriao => "conversa-anfitriao",
+            Scenario::EncerrarComCopias => "encerrar-com-copias",
             Scenario::Dispositivos => "dispositivos",
             Scenario::DispositivosEscuro => "dispositivos-escuro",
             Scenario::Permissoes => "permissoes",
@@ -493,6 +496,9 @@ impl Scenario {
             Scenario::InicioRedePublica => "new: Início with the notice of a Public network (review of 22/11/2026, H6)",
             Scenario::ConversaAnfitriao => {
                 "new: the conversation with the controller on its page, opened by the banner's chat button (owner, 22/11/2026)"
+            }
+            Scenario::EncerrarComCopias => {
+                "new: the question before ending a session with copies under way (FILES-UI.md 5; owner, 22/11/2026)"
             }
             Scenario::Dispositivos => "1. Dispositivos (Main.dc.html)",
             Scenario::DispositivosEscuro => "1. Dispositivos escuro (MainEscuro.dc.html)",
@@ -1065,6 +1071,12 @@ impl Scenario {
             ],
             // The banner offers "Inverter" only toward a machine of this OS (Windows here): the Desktop.
             Scenario::Banner => vec![Event(Self::host_session_to(DESKTOP))],
+            // "Desconectar" (or the window's close button) pressed while the copy of ExploradorCopiando runs.
+            Scenario::EncerrarComCopias => {
+                let mut v = Scenario::ExploradorCopiando.script();
+                v.push(Activate(ControlId::TbDisconnect));
+                v
+            }
             // The controlled computer's side of a chat: the banner's button brought the main window here.
             Scenario::ConversaAnfitriao => vec![
                 Event(Self::host_session_to(MAC)),
@@ -1758,6 +1770,7 @@ mod tests {
             (Scenario::InicioEscuro, Screen::Home, &[Main]),
             (Scenario::InicioRedePublica, Screen::Home, &[Main]),
             (Scenario::ConversaAnfitriao, Screen::Devices, &[Main, Banner]),
+            (Scenario::EncerrarComCopias, Screen::Devices, &[Main, Viewer]),
             (Scenario::Dispositivos, Screen::Devices, &[Main]),
             (Scenario::DispositivosEscuro, Screen::Devices, &[Main]),
             (Scenario::Permissoes, Screen::Devices, &[Main]),

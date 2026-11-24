@@ -740,6 +740,13 @@ strings! {
     // A session with the device is open already (owner's report of 22/11/2026: pressing "Controlar" then met the
     // session itself and read "já está em outra sessão"): the device's page leads back to it.
     SessionBack => "Voltar à sessão", "Back to the session";
+    // Ending a session with work under way asks first (FILES-UI.md 5; owner, 22/11/2026).
+    EndAskCopiesTitle => "Há {0} {0|transferência|transferências} em andamento", "{0} {0|transfer is|transfers are} under way";
+    EndAskTerminalTitle => "O terminal está aberto", "The terminal is open";
+    EndAskBothTitle => "Há {0} {0|transferência|transferências} em andamento e o terminal está aberto", "{0} {0|transfer is|transfers are} under way and the terminal is open";
+    EndAskCopiesBody => "Se desconectar agora, {0|ela para|elas param}. O que já chegou fica guardado e continua se você copiar os mesmos arquivos de novo.", "If you disconnect now, {0|it stops|they stop}. What has arrived is kept and goes on if you copy the same files again.";
+    EndAskTerminalBody => "Se desconectar agora, o terminal fecha e o que estiver rodando nele para.", "If you disconnect now, the terminal closes and what runs in it stops.";
+    EndAskStay => "Continuar a sessão", "Stay in the session";
 }
 
 /// The text of `msg` in `lang`, with `{n}` replaced by the arguments (a missing argument becomes empty) and

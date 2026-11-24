@@ -1209,6 +1209,65 @@ fn the_banners_chat_button_opens_the_main_window_on_the_conversation_with_the_co
     assert!(!has_chat_tab(&h));
 }
 
+/// Owner, 22/11/2026 (review H14 and F8, FILES-UI.md 5 "Session end"): ending the session with copies still to go
+/// stopped them at once, without a word. It asks first, with the safe answer in focus.
+#[test]
+fn ending_a_session_with_copies_under_way_asks_first() {
+    let mut s = Scenario::ExploradorCopiando.prepared_state();
+    let (copies, terminal) = s.session_work();
+    assert!(copies > 0 && !terminal, "the scenario has a copy under way: {copies} {terminal}");
+    assert_eq!(s.dialog(WindowKind::Viewer), None);
+
+    let a = s.activate(ControlId::TbDisconnect);
+    assert!(a.commands.is_empty(), "nothing is ended yet: {:?}", a.commands);
+    assert_eq!(a.effect, Some(Effect::Focus(ControlId::DialogSecondary)), "the safe answer has the focus");
+    assert_eq!(s.dialog(WindowKind::Viewer), Some(DialogKind::EndSession));
+    let t = s.dialog_texts(&DialogKind::EndSession);
+    assert_eq!(t.title, format!("Há {copies} transferências em andamento"));
+    assert_eq!(
+        t.body,
+        vec![
+            "Se desconectar agora, elas param. O que já chegou fica guardado e continua se você copiar os mesmos \
+             arquivos de novo."
+        ]
+    );
+    assert_eq!((t.secondary.as_deref(), t.primary.as_deref()), (Some("Continuar a sessão"), Some("Desconectar")));
+
+    // "Continuar a sessão": the question goes, the session and its copies stay.
+    let stay = s.activate(ControlId::DialogSecondary);
+    assert!(stay.commands.is_empty());
+    assert_eq!(s.dialog(WindowKind::Viewer), None);
+    assert!(s.viewer_session().is_some());
+
+    // Closing the window or the shortcut asks the same question; "Desconectar" ends the session.
+    assert!(s.end_viewer_session().commands.is_empty());
+    assert_eq!(s.dialog(WindowKind::Viewer), Some(DialogKind::EndSession));
+    let end = s.activate(ControlId::DialogPrimary);
+    assert_eq!(end.commands, vec![Command::Disconnect { session_id: 1 }]);
+    assert_eq!(s.dialog(WindowKind::Viewer), None);
+}
+
+/// The same question for a terminal that is open, and none at all when nothing would stop.
+#[test]
+fn ending_a_session_asks_for_an_open_terminal_and_not_when_nothing_would_stop() {
+    let mut t = Scenario::Terminal.prepared_state();
+    assert_eq!(t.session_work(), (0, true), "the scenario has a terminal open");
+    assert!(t.activate(ControlId::TbDisconnect).commands.is_empty());
+    let texts = t.dialog_texts(&DialogKind::EndSession);
+    assert_eq!(texts.title, "O terminal está aberto");
+    assert_eq!(texts.body, vec!["Se desconectar agora, o terminal fecha e o que estiver rodando nele para."]);
+
+    let mut plain = Scenario::Visualizador.prepared_state();
+    assert_eq!(plain.session_work(), (0, false));
+    let a = plain.activate(ControlId::TbDisconnect);
+    assert_eq!(a.commands, vec![Command::Disconnect { session_id: 1 }], "nothing to ask about: it ends at once");
+    assert_eq!(plain.dialog(WindowKind::Viewer), None);
+
+    // The person at a controlled computer ends the session from the banner without a question.
+    let mut hosted = Scenario::Banner.prepared_state();
+    assert_eq!(hosted.activate(ControlId::BannerDisconnect).commands, vec![Command::Disconnect { session_id: 2 }]);
+}
+
 /// The conversation is offered only on the page of the device that controls this computer now.
 #[test]
 fn only_the_controllers_page_has_the_conversation() {
