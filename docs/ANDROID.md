@@ -324,7 +324,8 @@ The rule is one interface on every system (D37, F-UI-02). Three ways to honour i
    with the other two by hand (it breaks D37), and Compose brings Kotlin and AndroidX into the APK. Not recommended.
 
 **What a phone-sized layout changes** (decision 8.7; inside `swapdesk-paint`, leaving Windows and the Mac as they
-are): below a width class (GUESS 600 dp) the screens take a compact layout: one pane at a time (the sidebar's list,
+are): a touched main window smaller than the smallest window a desktop shell allows (900 by 620 DIPs; D87, in place
+of the 600 dp this note first guessed) takes a compact layout: one pane at a time (the sidebar's lists on Início,
 then the device's page pushed over it, with back), the session as the whole screen with the toolbar folded to its
 handle (F-UI-05) at the top edge; every touch target at least 48 dp by 48 dp, as Android recommends [S28]; hover
 hints (D42) become a long press; context menus (F-FILE-07) open on a long press; the files explorer shows one
@@ -443,7 +444,18 @@ banner the controller cannot reach.
 
 **8.7 The phone's layout.** A compact layout inside the shared screens: the rule "same layout on every system" reads
 "same screens, tokens, texts and behaviour; the layout follows the window's width class"; the desktop's layout does
-not change. To change it: the width class and the compact arrangement live in `swapdesk-paint` alone.
+not change. To change it: the width class and the compact arrangement live in `swapdesk-paint` alone. **As built
+(slice A3.2, D87):** the class is not a width of its own but the desktop's own minimum: a main window that is touched
+(`Interaction::touch`, which only the phone's shell sets) and smaller than `layout::MIN_W` by `layout::MIN_H` is
+compact, so a phone is, upright and sideways, a tablet takes the desktop layout, and a window on Windows or the Mac
+never changes, whatever its size. The arrangement: a bar 56 high (the logo and Ajustes on the first pane, the way back
+and "Renomear" on a computer's page), under it one column of at most 560 that scrolls as a whole; Início carries the
+sidebar's two lists as panels of rows; a computer's two actions share the width under its name; what stands side by
+side on a desktop (the strip's columns, the two panels, the permissions, the columns of Ajustes, a card's buttons
+that do not fit, the choices of a request) is stacked; a setting's field or list goes under its label; Atividade is
+rows of one height, laid out only when in sight. Every control takes a finger on 48 by 48 at least
+(`Widget::touch`, `input::hit_touch`), and nothing that scrolled under the bar is touched through it. The captures
+of every scenario at 360 by 740 are written by the Windows renderer under `test-results/phone-shots/`.
 
 **8.8 Machine-level reach and entry without a prompt from a phone.** "Elevar controle" after Android's confirmation
 of the phone's owner (the screen-lock credential, API 30) [S24], asked every time; the administrator terminal is not

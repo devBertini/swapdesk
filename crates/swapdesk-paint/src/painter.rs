@@ -33,6 +33,11 @@ impl Rect {
     pub fn center(&self) -> (f32, f32) {
         (self.x + self.w / 2.0, self.y + self.h / 2.0)
     }
+    /// What both rectangles cover; with no width or no height when they do not meet.
+    pub fn intersect(&self, o: Rect) -> Rect {
+        let (x, y) = (self.x.max(o.x), self.y.max(o.y));
+        Rect::new(x, y, (self.right().min(o.right()) - x).max(0.0), (self.bottom().min(o.bottom()) - y).max(0.0))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

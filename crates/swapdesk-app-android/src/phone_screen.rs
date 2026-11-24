@@ -28,9 +28,15 @@ thread_local! {
     static SCREEN: RefCell<Screen> = RefCell::new(Screen {
         window: PhoneWindow::new(),
         state: None,
-        ix: Interaction::default(),
+        ix: touched(),
         mono: (0.93, 0.24),
     });
+}
+
+/// A phone's screen is touched: its controls take a finger on 48 DIPs at least, and at a phone's size the main
+/// window takes the compact layout (`swapdesk_paint::is_compact`).
+fn touched() -> Interaction {
+    Interaction { touch: true, ..Interaction::default() }
 }
 
 /// The ascent and descent of the phone's monospaced face, as fractions of its size.
@@ -44,7 +50,7 @@ pub fn set_mono_metrics(ascent: f32, descent: f32) {
 pub fn show(state: UiState) {
     SCREEN.with_borrow_mut(|s| {
         s.state = Some(state);
-        s.ix = Interaction::default();
+        s.ix = touched();
     });
 }
 
@@ -123,6 +129,9 @@ mod tests {
         let ops = frame(2400, 1080, 1.5);
         let texts = ops.iter().filter(|o| matches!(o, Op::Text { .. })).count();
         assert!(texts > 10 && cost().lists >= 1 && cost().labels >= texts / 2, "{texts} runs, {:?}", cost());
+        // 1600 by 720 DIPs is a desktop's size: the sidebar is there, with its two navigation rows.
+        let said = |ops: &[Op], what: &str| ops.iter().any(|o| matches!(o, Op::Text { text, .. } if text == what));
+        assert!(said(&ops, "Início") && said(&ops, "Ajustes"), "the desktop layout on a large screen");
         // Nothing is drawn outside the view: every fill starts inside it.
         for op in &ops {
             if let Op::FillRect(r, _) = op {
@@ -132,7 +141,9 @@ mod tests {
         // The same view again costs no measure; another density measures anew.
         let _ = frame(2400, 1080, 1.5);
         assert_eq!(cost(), FrameCost::default());
-        let _ = frame(1080, 2400, 2.625);
+        // A phone held upright is 411 DIPs wide: the compact layout, where a computer's page has no sidebar.
+        let phone = frame(1080, 2400, 2.625);
         assert!(cost().lists >= 1);
+        assert!(!said(&phone, "Início") && !said(&phone, "Ajustes") && said(&phone, "Controlar"), "the compact layout");
     }
 }

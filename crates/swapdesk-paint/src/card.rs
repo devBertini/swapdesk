@@ -198,14 +198,46 @@ impl Card<'_> {
     }
 }
 
+/// The gap between the buttons of a stacked group.
+const STACK_GAP: f32 = 10.0;
+
+/// Whether the buttons of `list` go one above the other: in the compact layout, when they do not fit side by side.
+fn stacked(f: &Frame, w: f32, list: &[(ControlId, String, Kind)]) -> bool {
+    let total = list.iter().map(|(_, label, kind)| f.button_width(label, *kind)).sum::<f32>()
+        + ACTIONS_GAP * list.len().saturating_sub(1) as f32;
+    f.compact && list.len() > 1 && total > w
+}
+
 /// The height [`actions`] takes for `list` across `w`.
-pub fn actions_height(_f: &Frame, _w: f32, _list: &[(ControlId, String, Kind)]) -> f32 {
-    layout::BUTTON_H
+pub fn actions_height(f: &Frame, w: f32, list: &[(ControlId, String, Kind)]) -> f32 {
+    if stacked(f, w, list) {
+        list.len() as f32 * layout::BUTTON_H + (list.len() - 1) as f32 * STACK_GAP
+    } else {
+        layout::BUTTON_H
+    }
 }
 
 /// The buttons of a card or a dialog as one group centred across `w`, in the order of the rule: the negative ones
-/// on the left, the positive ones (`Kind::Primary`) on the right. `dark` draws them for a dark card.
+/// on the left, the positive ones (`Kind::Primary`) on the right. `dark` draws them for a dark card. In the compact
+/// layout a group that does not fit side by side is stacked, each button across `w`: the positive ones on top, the
+/// way out at the bottom.
 pub fn actions(f: &mut Frame, x: f32, y: f32, w: f32, list: &[(ControlId, String, Kind)], dark: bool) {
+    if stacked(f, w, list) {
+        // The row's order (negative first, positive last) from the bottom up.
+        let mut order: Vec<&(ControlId, String, Kind)> = list.iter().collect();
+        order.sort_by_key(|b| b.2 == Kind::Primary);
+        let mut by = y;
+        for (id, label, kind) in order.into_iter().rev() {
+            let r = Rect::new(x, by, w, layout::BUTTON_H);
+            if dark {
+                dark_button(f, *id, r, label);
+            } else {
+                f.button(*id, r, *kind, label, false);
+            }
+            by += layout::BUTTON_H + STACK_GAP;
+        }
+        return;
+    }
     let mut list: Vec<&(ControlId, String, Kind)> = list.iter().collect();
     list.sort_by_key(|b| b.2 == Kind::Primary);
     let widths: Vec<f32> = list.iter().map(|(_, label, kind)| f.button_width(label, *kind)).collect();

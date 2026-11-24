@@ -21,15 +21,26 @@ pub struct Interaction {
     /// Which scrolling content of the main window `scroll` belongs to (the `scroll_key` of the last frame's
     /// [`Output`]): another one starts at its top.
     pub scroll_key: u8,
+    /// The window is touched, not pointed at (a phone): every control takes a finger on at least 48 by 48 DIPs, and
+    /// a main window smaller than the smallest a desktop shell allows takes the compact layout.
+    pub touch: bool,
 }
 
 /// Where a control ended up in the last frame, for hit testing, the focus ring and the accessibility bounds.
 #[derive(Clone, Copy, Debug)]
 pub struct Widget {
     pub id: ControlId,
+    /// The control as it is drawn.
     pub rect: Rect,
     pub radius: f32,
+    /// Where a finger takes it ([`crate::input::hit_touch`]). The same as `rect` in a window that is pointed at; in
+    /// one that is touched, at least [`TOUCH_MIN`] on each side around the middle of `rect`, and nothing outside the
+    /// scrolled page the control belongs to (empty when it is scrolled out of sight).
+    pub touch: Rect,
 }
+
+/// The smallest side of a touch target, in DIPs (Android's guidance for touch targets).
+pub const TOUCH_MIN: f32 = 48.0;
 
 /// A native text input the window must place over the drawn field.
 #[derive(Clone, Debug)]
@@ -63,6 +74,9 @@ pub struct Output {
     /// The hint on screen and the control it is about, in DIPs: the card under the hovered button of the session
     /// bar that says what the button does.
     pub hint: Option<(ControlId, Rect)>,
+    /// The part of a compact main window its page scrolls in, under the bar, in DIPs: a drag there moves
+    /// `Interaction::scroll`, and a native text field shows only inside it.
+    pub page_view: Option<Rect>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +109,11 @@ pub struct Frame<'a> {
     /// Where a page's content may end: a card that stands alone in a page is centred between the page's header and
     /// this line. The design's bottom margin, 40, above the window's edge.
     pub page_floor: f32,
+    /// The compact layout of the main window (`screens_compact`): one pane at a time under a bar, for a touched
+    /// window smaller than the smallest a desktop shell allows. Set by [`crate::paint`].
+    pub compact: bool,
+    /// Controls registered while this is set take a finger only inside it: the page that scrolls under its bar.
+    pub touch_clip: Option<Rect>,
 }
 
 impl<'a> Frame<'a> {
@@ -118,6 +137,8 @@ impl<'a> Frame<'a> {
             h: size.1,
             page_top: 32.0,
             page_floor: size.1 - 40.0,
+            compact: false,
+            touch_clip: None,
         }
     }
 
@@ -126,7 +147,19 @@ impl<'a> Frame<'a> {
     }
 
     pub fn register(&mut self, id: ControlId, rect: Rect, radius: f32) {
-        self.out.widgets.push(Widget { id, rect, radius });
+        let touch = if self.ix.touch { self.touch_target(rect) } else { rect };
+        self.out.widgets.push(Widget { id, rect, radius, touch });
+    }
+
+    /// Where a finger takes a control drawn at `rect`: see [`Widget::touch`].
+    fn touch_target(&self, rect: Rect) -> Rect {
+        let grow = |from: f32, len: f32| {
+            if len >= TOUCH_MIN { (from, len) } else { (from - (TOUCH_MIN - len) / 2.0, TOUCH_MIN) }
+        };
+        let (x, w) = grow(rect.x, rect.w);
+        let (y, h) = grow(rect.y, rect.h);
+        let target = Rect::new(x, y, w, h);
+        self.touch_clip.map_or(target, |clip| target.intersect(clip))
     }
 
     pub fn hovered(&self, id: ControlId) -> bool {
@@ -238,10 +271,20 @@ impl<'a> Frame<'a> {
         self.register(id, r, 11.0);
     }
 
-    /// An 18 px checkbox with its label to the right; the whole row (min-height 32) is the hit box.
+    /// The height of the row [`Self::checkbox`] draws for `s` in `width`: 32, or in the compact layout as tall as its
+    /// wrapped label needs.
+    pub fn checkbox_height(&self, width: f32, s: &str) -> f32 {
+        if !self.compact {
+            return 32.0;
+        }
+        (self.p.label_in(s, text::BODY, (width - 28.0).max(40.0), Align::Start).h + 12.0).max(32.0)
+    }
+
+    /// An 18 px checkbox with its label to the right; the whole row (min-height 32) is the hit box. In the compact
+    /// layout the label wraps inside `width` and the row grows with it ([`Self::checkbox_height`]).
     pub fn checkbox(&mut self, id: ControlId, x: f32, y: f32, width: f32, on: bool, s: &str) {
         let (p, pal) = (self.p, self.pal);
-        let row = Rect::new(x, y, width, 32.0);
+        let row = Rect::new(x, y, width, self.checkbox_height(width, s));
         let box_r = Rect::new(x, y + 7.0, 18.0, 18.0);
         if on {
             p.fill_rrect(box_r, 4.0, pal.link);
@@ -250,8 +293,15 @@ impl<'a> Frame<'a> {
             p.bordered(box_r, 4.0, pal.soft, pal.surface);
             p.fill_rrect(box_r.inset(p.hairline() * 1.5), 3.0, pal.surface);
         }
-        let l = p.label(s, text::BODY);
-        p.draw(&l, x + 18.0 + 10.0, y + (32.0 - l.h) / 2.0, pal.ink);
+        let l = if self.compact {
+            p.label_in(s, text::BODY, (width - 28.0).max(40.0), Align::Start)
+        } else {
+            p.label(s, text::BODY)
+        };
+        // One line is centred on the 32 px row; a wrapped label (the compact layout) starts where one line would.
+        let dy = (32.0 - l.h) / 2.0;
+        let dy = if self.compact && dy < 5.0 { 6.0 } else { dy };
+        p.draw(&l, x + 18.0 + 10.0, y + dy, pal.ink);
         self.register(id, row, 6.0);
     }
 

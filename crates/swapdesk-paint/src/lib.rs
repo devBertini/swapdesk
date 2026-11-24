@@ -9,6 +9,7 @@ mod font;
 pub mod grid;
 pub mod input;
 mod painter;
+mod screens_compact;
 mod screens_explorer;
 mod screens_main;
 mod screens_viewer;
@@ -19,18 +20,27 @@ mod view;
 pub use font::{INSTRUMENT_SANS, face_metrics, label_height, line_box};
 pub use painter::{Align, Label, Painter, Rect, rrect_path};
 pub use screens_viewer::{banner_size, banner_size_for};
-pub use view::{EditSlot, Frame, Interaction, Kind, Output, Widget, button_style, finish, icons};
+pub use view::{EditSlot, Frame, Interaction, Kind, Output, TOUCH_MIN, Widget, button_style, finish, icons};
 
 use swapdesk_ui::WindowKind;
 
 /// Paints the window `kind` of the frame's state and returns what the frame registered (with the focus ring drawn).
 pub fn paint(mut frame: Frame<'_>, kind: WindowKind) -> Output {
+    frame.compact = kind == WindowKind::Main && frame.ix.touch && is_compact((frame.w, frame.h));
     match kind {
         WindowKind::Main => screens_main::paint(&mut frame),
         WindowKind::Viewer => screens_viewer::paint_viewer(&mut frame),
         WindowKind::Banner => screens_viewer::paint_banner(&mut frame),
     }
     finish(frame, kind == WindowKind::Viewer)
+}
+
+/// Whether a touched main window of this size, in DIPs, takes the compact layout: it is smaller than the smallest
+/// window a desktop shell allows (`layout::MIN_W` by `layout::MIN_H`), the size the desktop layout was drawn down to.
+/// A phone is, upright and sideways; a tablet is not. A window that is pointed at never takes it, at any size.
+pub fn is_compact(size: (f32, f32)) -> bool {
+    use swapdesk_ui::tokens::layout;
+    size.0 < layout::MIN_W || size.1 < layout::MIN_H
 }
 
 /// Where a frame put things, one line each, rounded to 1/100 DIP: the controls, the text inputs, the video and the
@@ -66,5 +76,7 @@ pub fn design_size(kind: WindowKind) -> (f32, f32) {
     }
 }
 
+#[cfg(test)]
+mod compact_tests;
 #[cfg(test)]
 mod tests;

@@ -70,6 +70,37 @@ fn every_scenario_renders_to_a_png_and_every_control_has_a_place() {
     std::fs::write(dir.join("INDEX.txt"), written.join("\n")).expect("index");
 }
 
+/// The compact layout (a phone, `swapdesk_paint::is_compact`) drawn by the real drawing code: every scenario of the
+/// main window at a phone's size and density, written under `test-results/phone-shots/` for the design canvas. The
+/// rules of the layout are tested in `swapdesk-paint` (`compact_tests`); here the picture is not blank and the
+/// screen registers no control the state does not know.
+#[test]
+fn every_main_scenario_renders_at_a_phones_size() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-results/phone-shots");
+    std::fs::create_dir_all(&dir).expect("shots dir");
+    let phone = (360.0, 740.0);
+    assert!(swapdesk_paint::is_compact(phone));
+    let ix = Interaction { touch: true, ..Interaction::default() };
+    let mut written = 0;
+    for sc in Scenario::ALL {
+        let state = sc.prepared_state();
+        if !state.windows().contains(&WindowKind::Main) {
+            continue;
+        }
+        let r = render(&state, WindowKind::Main, phone, 2.0, &ix).unwrap_or_else(|e| panic!("{}: {e}", sc.name()));
+        assert!(r.distinct_colors() > 3, "{} looks blank", sc.name());
+        assert_eq!((r.width, r.height), (720, 1480), "{}", sc.name());
+        r.save_png(&dir.join(format!("{}.png", sc.name()))).unwrap_or_else(|e| panic!("{}: {e}", sc.name()));
+        std::fs::write(dir.join(format!("{}.layout.txt", sc.name())), swapdesk_paint::layout_dump(&r.output))
+            .expect("layout dump");
+        let known: Vec<_> = state.controls(WindowKind::Main).into_iter().map(|c| c.id).collect();
+        let extra: Vec<_> = r.output.widgets.iter().filter(|w| !known.contains(&w.id)).map(|w| w.id).collect();
+        assert!(extra.is_empty(), "{}: controls the state does not list: {extra:?}", sc.name());
+        written += 1;
+    }
+    assert!(written >= 30, "wrote {written}");
+}
+
 #[test]
 fn the_address_field_sits_in_the_pair_card_on_the_home_and_the_sidebar_holds_only_navigation() {
     use swapdesk_ui::EditId;

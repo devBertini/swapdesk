@@ -90,10 +90,15 @@ impl Fake {
 
 /// Paints until a frame comes, answering each list of needs as Java would. Returns the frame, the layout it
 /// registered and how many times the window was painted.
-fn frame(window: &mut PhoneWindow, state: &UiState, on: Surface, android: Fake) -> (Vec<u8>, String, usize) {
-    let ix = Interaction::default();
+fn frame(
+    window: &mut PhoneWindow,
+    state: &UiState,
+    ix: &Interaction,
+    on: Surface,
+    android: Fake,
+) -> (Vec<u8>, String, usize) {
     for pass in 1..=PASSES_MAX + 1 {
-        let bytes = window.paint(METRICS, state, &ix, on);
+        let bytes = window.paint(METRICS, state, ix, on);
         if bytes[0] == FRAME {
             let layout = layout_dump(window.output().expect("a frame leaves what it registered"));
             return (bytes, layout, pass);
@@ -192,34 +197,53 @@ impl Painter for Direct {
     }
 }
 
+/// The windows a scenario is recorded as: each of its windows at the design's size, at the density of a desktop and
+/// of a phone, and its main window as a phone shows it, touched and compact, upright and sideways.
+fn surfaces(state: &UiState) -> Vec<(Surface, Interaction)> {
+    let mut out = Vec::new();
+    for kind in state.windows() {
+        for scale in [1.0f32, 2.625] {
+            out.push((Surface { kind, size: design_size(kind), scale, offscreen: true }, Interaction::default()));
+        }
+        if kind == WindowKind::Main {
+            for (size, scale) in [((411.0, 891.0), 2.625f32), ((800.0, 360.0), 3.0)] {
+                assert!(swapdesk_paint::is_compact(size));
+                let ix = Interaction { touch: true, ..Interaction::default() };
+                out.push((Surface { kind, size, scale, offscreen: true }, ix));
+            }
+        }
+    }
+    out
+}
+
 /// For every scenario of every window, at the density of a desktop and of a phone, and with fake Androids near and
 /// far from the size a label gets before it is measured: a frame comes, a second paint gives the same frame at once,
 /// the layout it registers and every run of text it draws are those of a painter that measures on the spot, and its
-/// clips are balanced. With the near Android a new screen costs two or three passes.
+/// clips are balanced. With the near Android a new screen costs two or three passes, and with any of them four at
+/// most.
 #[test]
 fn text_from_lists_of_measures_is_what_measuring_on_the_spot_draws_for_every_scenario() {
     let androids = [NEAR, Fake { advance: 0.3, words: true }, Fake { advance: 0.9, words: true }];
     let mut most = 0;
     for (which, android) in androids.into_iter().enumerate() {
-        for scale in [1.0f32, 2.625] {
+        {
             for sc in Scenario::ALL {
                 let state = sc.prepared_state();
-                for kind in state.windows() {
-                    let what = format!("{} {kind:?} at {scale}, Android {which}", sc.name());
-                    let on = Surface { kind, size: design_size(kind), scale, offscreen: true };
+                for (on, ix) in surfaces(&state) {
+                    let (kind, scale) = (on.kind, on.scale);
+                    let what = format!("{} {kind:?} {:?} at {scale}, Android {which}", sc.name(), on.size);
                     let mut window = PhoneWindow::new();
-                    let (bytes, layout, passes) = frame(&mut window, &state, on, android);
+                    let (bytes, layout, passes) = frame(&mut window, &state, &ix, on, android);
                     assert!(!window.cost().forced && window.cost().lists == passes - 1, "{what}: {:?}", window.cost());
                     most = most.max(passes);
                     if which == 0 {
                         assert!((2..=3).contains(&passes), "{what}: {passes} passes for a new screen");
                     }
-                    let (again, _, second) = frame(&mut window, &state, on, android);
+                    let (again, _, second) = frame(&mut window, &state, &ix, on, android);
                     assert_eq!((second, &again), (1, &bytes), "{what}: the same frame at once");
                     assert_eq!(window.cost(), FrameCost::default(), "{what}: nothing measured for it");
 
                     let direct = Direct { scale, android, texts: RefCell::new(Vec::new()) };
-                    let ix = Interaction::default();
                     let expected = swapdesk_paint::paint(Frame::new(&direct, &state, &ix, on.size, true), kind);
                     assert_eq!(layout, layout_dump(&expected), "{what}");
 
@@ -240,7 +264,8 @@ fn text_from_lists_of_measures_is_what_measuring_on_the_spot_draws_for_every_sce
             }
         }
     }
-    assert!(most <= 3, "the slowest screen took {most} passes");
+    // A label whose width another label is laid out against adds a pass: the compact pages have such chains.
+    assert!(most <= 4, "the slowest screen took {most} passes");
 }
 
 fn recorded(scale: f32, paint: impl FnOnce(&Recorder)) -> Vec<Op> {
@@ -406,7 +431,7 @@ fn text_is_drawn_run_by_run_from_a_whole_pixel_baseline() {
 fn a_whole_screen_keeps_its_fills_on_whole_pixels() {
     let state = Scenario::Dispositivos.prepared_state();
     let on = Surface { kind: WindowKind::Main, size: design_size(WindowKind::Main), scale: 2.625, offscreen: true };
-    let (bytes, ..) = frame(&mut PhoneWindow::new(), &state, on, NEAR);
+    let (bytes, ..) = frame(&mut PhoneWindow::new(), &state, &Interaction::default(), on, NEAR);
     let ops = decode(&bytes).unwrap();
     let whole = |v: &f32| v.fract() == 0.0;
     let mut texts = 0;
@@ -446,7 +471,7 @@ fn a_frame_comes_even_when_the_measures_do_not() {
     assert!(window.cost().forced && window.known_labels() == 0, "{:?}", window.cost());
     assert!(texts_of(&forced) > 10, "the text is drawn at its rough size");
     // The refusal is not held against the next frame, which measures as usual.
-    let (measured, _, passes) = frame(&mut window, &state, on, NEAR);
+    let (measured, _, passes) = frame(&mut window, &state, &ix, on, NEAR);
     assert!(passes > 1 && !window.cost().forced && window.known_labels() > 10);
     assert!(texts_of(&measured) >= texts_of(&forced), "every label is still drawn, now measured");
 

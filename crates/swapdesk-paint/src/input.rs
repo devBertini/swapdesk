@@ -10,6 +10,22 @@ pub fn hit_test(widgets: &[Widget], x: f32, y: f32) -> Option<ControlId> {
     widgets.iter().rev().find(|w| w.rect.contains(x, y)).map(|w| w.id)
 }
 
+/// The control a finger at `(x, y)` takes, in a window that is touched. A touch inside a control's own box is that
+/// control's (the one drawn last when two overlap). Outside every box it goes to the control whose touch target it is
+/// in, and of several to the one whose box is nearest: targets grown to 48 DIPs may overlap, boxes decide.
+pub fn hit_touch(widgets: &[Widget], x: f32, y: f32) -> Option<ControlId> {
+    let reached = |w: &&Widget| w.touch.contains(x, y);
+    if let Some(w) = widgets.iter().rev().filter(reached).find(|w| w.rect.contains(x, y)) {
+        return Some(w.id);
+    }
+    let away = |w: &Widget| {
+        let dx = (w.rect.x - x).max(x - w.rect.right()).max(0.0);
+        let dy = (w.rect.y - y).max(y - w.rect.bottom()).max(0.0);
+        dx * dx + dy * dy
+    };
+    widgets.iter().filter(reached).min_by(|a, b| away(a).total_cmp(&away(b))).map(|w| w.id)
+}
+
 /// The controls of window `kind` that can take the focus now, in Tab order: focusable, enabled and drawn in the last
 /// frame (`widgets`).
 pub fn tab_order(state: &UiState, kind: WindowKind, widgets: &[Widget]) -> Vec<ControlId> {
@@ -59,7 +75,8 @@ mod key_target_tests {
         // The device page: "Controlar" is there, and has the focus.
         let page = Scenario::Dispositivos.prepared_state();
         let control = ControlId::Control;
-        let widget = |id| Widget { id, rect: Rect::new(0.0, 0.0, 10.0, 10.0), radius: 0.0 };
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let widget = |id| Widget { id, rect, radius: 0.0, touch: rect };
         let shown = [widget(control)];
         let order = tab_order(&page, WindowKind::Main, &shown);
         assert_eq!(key_target(&order, Some(control)), Some(control));

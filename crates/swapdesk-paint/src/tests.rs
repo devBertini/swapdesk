@@ -29,6 +29,10 @@ pub(crate) struct Fixed {
     pub(crate) styled: RefCell<Vec<(String, TextStyle)>>,
     /// The ink of every text drawn, in the order of `drawn`.
     pub(crate) inks: RefCell<Vec<Color>>,
+    /// Where every text drawn starts and ends along its line, with the text.
+    pub(crate) spans: RefCell<Vec<(f32, f32, String)>>,
+    /// The narrowest box any text was laid out in, with the text.
+    pub(crate) narrowest: RefCell<Option<(f32, String)>>,
 }
 
 impl Fixed {
@@ -94,6 +98,10 @@ impl Painter for Fixed {
             self.centred_made.borrow_mut().push((text.to_owned(), max_w, st.size));
         }
         self.styled.borrow_mut().push((text.to_owned(), st));
+        let mut narrowest = self.narrowest.borrow_mut();
+        if !text.is_empty() && narrowest.as_ref().is_none_or(|(w, _)| max_w < *w) {
+            *narrowest = Some((max_w, text.to_owned()));
+        }
         let one_line = text.chars().count() as f32 * st.size * 0.55;
         let lines = if ellipsis || one_line <= max_w { 1.0 } else { (one_line / max_w).ceil() };
         Label::new(one_line.min(max_w), lines * st.size * st.line, st.size, text.to_owned())
@@ -103,6 +111,7 @@ impl Painter for Fixed {
         self.drawn.borrow_mut().push(text.clone());
         self.inks.borrow_mut().push(ink);
         self.placed.borrow_mut().push((x, y, l.h));
+        self.spans.borrow_mut().push((x, x + l.w, text.clone()));
         if let Some((_, box_w, size)) = self.centred_made.borrow().iter().find(|(t, ..)| t == text) {
             self.centred.borrow_mut().push((text.clone(), x + box_w / 2.0, *size));
         }
@@ -275,7 +284,7 @@ fn a_label_hands_back_only_the_handle_type_it_was_made_with() {
 // ----- input -----
 
 fn widget(id: ControlId, x: f32, y: f32, w: f32, h: f32) -> Widget {
-    Widget { id, rect: Rect::new(x, y, w, h), radius: 0.0 }
+    Widget { id, rect: Rect::new(x, y, w, h), radius: 0.0, touch: Rect::new(x, y, w, h) }
 }
 
 #[test]
