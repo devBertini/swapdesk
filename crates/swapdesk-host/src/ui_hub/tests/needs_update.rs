@@ -122,3 +122,45 @@ fn a_close_at_the_first_pairing_message_reads_as_needs_an_update_only_on_a_phone
         assert_ne!(pair_error_code(&e, Os::Android), ApiCode::NeedsUpdate, "{e}");
     }
 }
+
+/// The fourth way to a dial: a wake that ends in a connect. The computer was asleep, so nothing was known of its
+/// build and the phone may wake it; the record it comes back with says minor 2, and the connect that follows the
+/// wake dials nothing. (Without the rule in the connect itself, the phone dialled and the computer answered.)
+#[test]
+fn a_wake_that_finds_an_old_computer_does_not_connect() {
+    let pc = Machine::new("sala");
+    let phone = Machine::build_as(
+        "celular",
+        FakeNetInterfaces::windows_typical(),
+        true,
+        None,
+        swapdesk_proto::PROTO_MINOR,
+        true,
+    );
+    let (phone, sent) = super::extras::sleeper_of(phone, &pc);
+    pc.pin(&phone, ALL);
+    phone.hub.set_console_session(Some(1));
+    let mut up = phone.client(info(false));
+    let list = listed(&mut up);
+    assert_eq!((list[0].status.clone(), list[0].wakeable, list[0].needs_update), (DeviceStatus::Asleep, true, false));
+    let heard = pc.audit.entries().len();
+
+    let req = up.request(UiOp::Wake { device_id: pc.hex(), intent: Intent::Control });
+    let ReplyBody::SessionId(wake_id) = up.reply(req, 26).expect("the attempt starts") else { panic!() };
+    wait_for("the magic packet", || (!lock(&sent).is_empty()).then_some(()));
+    phone.sees_minor(&pc, false, 2);
+    let why = up.notify("the end of the waking entry", |n| match n {
+        Notify::Session { session_id, state: SessionState::NotOpened { why }, .. } if *session_id == wake_id => {
+            Some(*why)
+        }
+        _ => None,
+    });
+    assert_eq!(why, swapdesk_ipc::ConnectWhy::Failed, "nothing was dialled, so nobody answered");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(pc.audit.entries().len(), heard, "{:?}", pc.audit.entries());
+    assert!(listed(&mut up)[0].needs_update, "and its page says why");
+
+    drop(up);
+    phone.finish();
+    pc.finish();
+}

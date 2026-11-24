@@ -502,7 +502,11 @@ const MAC: [u8; 6] = [0x3C, 0x52, 0x82, 0xAA, 0xBB, 0xCC];
 
 /// A machine on `windows_typical` interfaces whose paired device `other` is asleep: its MAC and last address stored.
 pub(super) fn sleeper(other: &Machine) -> (Machine, Sent) {
-    let m = Machine::with_interfaces("sala", FakeNetInterfaces::windows_typical());
+    sleeper_of(Machine::with_interfaces("sala", FakeNetInterfaces::windows_typical()), other)
+}
+
+/// [`sleeper`] for a machine the test built (on `windows_typical` interfaces).
+pub(super) fn sleeper_of(m: Machine, other: &Machine) -> (Machine, Sent) {
     m.pin(other, CV);
     m.trust
         .update(|s| {

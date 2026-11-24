@@ -285,7 +285,7 @@ minor 3 with `Bye { UNSUPPORTED_VERSION }` in place of the `HelloAck` that would
 device's system needs a minor (`Os::min_minor`, 3 for a phone, 0 for a computer) and there is evidence that the other
 is below it, which is the minor its record carries now or what it said in an authenticated exchange. A computer that
 is away and never spoke is not known to be old. `PairStart`, `Connect` and the grants sync refuse such a device with
-`ApiCode::NeedsUpdate` before anything is dialled, and its record says `needs_update`, which the screens show in place
+`ApiCode::NeedsUpdate` before anything is dialled (the connect that follows a wake ends as not opened), and its record says `needs_update`, which the screens show in place
 of its status and of every button that would dial. At a typed address the pairing is tried; the initiator names the
 older build's close at its first message `TrustError::PeerTooOld` (for the codes `PROTOCOL_VIOLATION` and
 `UNSUPPORTED_VERSION`, with no `PairResult` before it), counts no failure toward the lockout, and the phone's dialog

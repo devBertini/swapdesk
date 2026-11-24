@@ -691,6 +691,12 @@ impl Hub {
         intent: Intent,
     ) -> Result<(), ConnectWhy> {
         let device_hex = device_id_hex(&id);
+        // Every connect ends here, also the one a wake starts once the device is back, which never passed
+        // `connect`'s check (and whose record, with its minor, is only there now): nothing is dialled toward a
+        // device that could not read what this one sends (`Hub::needs_update`).
+        if self.needs_update(&id) {
+            return Err(ConnectWhy::Failed);
+        }
         let addr = self.address_of(&id).ok_or(ConnectWhy::Unreachable)?;
         let core = self.core().ok_or(ConnectWhy::Failed)?;
         let rt = self.rt().ok_or(ConnectWhy::Failed)?.clone();

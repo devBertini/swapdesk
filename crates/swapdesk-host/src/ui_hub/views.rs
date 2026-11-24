@@ -541,8 +541,8 @@ impl Hub {
     /// Whether nothing may be dialled toward `id` because its Swapdesk is older than this device's system needs
     /// (`Os::min_minor`: a phone needs minor 3, a computer nothing, so a computer's hub never says so). Only on
     /// evidence: the minor its record carries now, or what it said in an authenticated exchange. A device that is
-    /// away and never spoke is not known to be old. The screens say "needs an update"; pairing, a connect and the
-    /// grants sync all ask here before they dial.
+    /// away and never spoke is not known to be old. The screens say "needs an update"; pairing, a connect (also
+    /// the one that follows a wake) and the grants sync all ask here before they dial.
     pub fn needs_update(&self, id: &DeviceId) -> bool {
         self.too_old(id, self.minor_hint(id))
     }
