@@ -5,6 +5,13 @@
          (docs/ANDROID.md 4), not by this permission. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Which networks the phone has and what they are (Wi-Fi, a VPN, mobile data): the guard's facts. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- From Android 17 the local network is a permission the person grants (asked at the first list of the
+         network, docs/ANDROID.md 4); without it nothing Swapdesk sends leaves the phone. Older versions ignore it. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+
     <application
         android:allowBackup="false"
         android:extractNativeLibs="false"

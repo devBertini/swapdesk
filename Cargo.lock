@@ -945,8 +945,10 @@ dependencies = [
  "jni",
  "quinn",
  "swapdesk-audio",
+ "swapdesk-lan",
  "swapdesk-platform",
  "swapdesk-proto",
+ "swapdesk-sys-android",
  "swapdesk-trust",
  "tokio",
 ]

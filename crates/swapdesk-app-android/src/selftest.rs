@@ -3,13 +3,15 @@
 //! (`rustls` and `quinn` on `tokio`), and the audio codec (libopus, built by the NDK's CMake).
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use swapdesk_audio::{FRAME_SAMPLES, FRAME_VALUES, FrameDecoder, FrameEncoder};
+use swapdesk_lan::socket::bind_quic_socket;
 use swapdesk_platform::SecretStore;
 use swapdesk_proto::Os;
+use swapdesk_sys_android::network::{NetHandle, bind_socket};
 use swapdesk_trust::tls::{SERVER_NAME, pairing_client_config};
 use swapdesk_trust::{
     Identity, PairedDevice, TrustHandle, accept_session, connect_session, device_id, endpoint_from_socket,
@@ -72,25 +74,61 @@ pub fn run() -> String {
     out
 }
 
-/// Development harness: whether a Swapdesk pairing endpoint answers at `addr` from this device (a computer has one
-/// only while "Parear este computador" is open). `PROBE ANSWERED` says the QUIC handshake completed, which needs
-/// packets both ways; `PROBE TIMEOUT` that nothing came back. Nothing of the pairing ceremony is started.
-pub fn probe(addr: &str) -> String {
-    let Ok(to) = addr.parse::<SocketAddr>() else { return format!("PROBE FAIL: {addr:?} is not an address") };
+/// Development harness: whether a Swapdesk pairing endpoint answers from this device (a computer has one only while
+/// "Parear este computador" is open). `spec` is the address, then optionally `local=<IPv4>` (the socket is the
+/// production one: bound to that address of this device with TTL 1, read back), `net=<handle>` (the socket is bound
+/// to that Android network) and `ttl=<hops>` (the harness's own override of the TTL). `PROBE ANSWERED` says the QUIC handshake completed, which needs packets both
+/// ways; `PROBE TIMEOUT` that nothing came back. Nothing of the pairing ceremony is started.
+pub fn probe(spec: &str) -> String {
+    let mut words = spec.split_whitespace();
+    let Some(Ok(to)) = words.next().map(str::parse::<SocketAddr>) else {
+        return format!("PROBE FAIL: {spec:?} does not start with an address");
+    };
+    let (mut local, mut network, mut ttl) = (None, None, None);
+    for word in words {
+        if let Some(Ok(hops)) = word.strip_prefix("ttl=").map(str::parse::<u32>) {
+            ttl = Some(hops);
+            continue;
+        }
+        if let Some(Ok(ip)) = word.strip_prefix("local=").map(str::parse::<Ipv4Addr>) {
+            local = Some(ip);
+        } else if let Some(Ok(handle)) = word.strip_prefix("net=").map(str::parse::<i64>) {
+            // Java's handle is a signed long with the same bits as the NDK's `net_handle_t`.
+            network = Some(handle as NetHandle);
+        } else {
+            return format!("PROBE FAIL: {word:?} is none of local=<IPv4>, net=<handle>, ttl=<hops>");
+        }
+    }
     let attempt = async {
         let me = Identity::generate(0).map_err(said("a key"))?;
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(said("a socket"))?;
+        let (socket, mut how) = match local {
+            Some(ip) => {
+                let socket = bind_quic_socket(SocketAddrV4::new(ip, 0)).map_err(said("the socket with TTL 1"))?;
+                (socket, format!("from {ip} with TTL 1"))
+            }
+            None => {
+                (UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(said("a socket"))?, "from any address".to_owned())
+            }
+        };
+        // The harness alone may send with another TTL, to tell a path that drops TTL 1 from one that is closed.
+        if let Some(hops) = ttl {
+            socket.set_ttl(hops).map_err(said("the TTL"))?;
+            how.push_str(&format!(", TTL changed to {hops}"));
+        }
+        if let Some(handle) = network {
+            bind_socket(handle, &socket).map_err(said("the network binding"))?;
+            how.push_str(", bound to its network");
+        }
         let client = endpoint_from_socket(socket, None).map_err(said("the endpoint"))?;
         let config = pairing_client_config(&me).map_err(said("the pairing configuration"))?;
         let connecting = client.connect_with(config, to, SERVER_NAME).map_err(said("the dial"))?;
         Ok::<_, String>(match tokio::time::timeout(PROBE_LIMIT, connecting).await {
-            Err(_) => format!("PROBE TIMEOUT: nothing answered at {to} in {} s", PROBE_LIMIT.as_secs()),
+            Err(_) => format!("PROBE TIMEOUT: nothing answered at {to} in {} s ({how})", PROBE_LIMIT.as_secs()),
             Ok(Ok(conn)) => {
-                let from = conn.local_ip().map_or_else(|| "this device".to_owned(), |ip| ip.to_string());
                 conn.close(0u32.into(), b"");
-                format!("PROBE ANSWERED: the pairing endpoint at {to} completed the handshake with {from}")
+                format!("PROBE ANSWERED: the pairing endpoint at {to} completed the handshake ({how})")
             }
-            Ok(Err(e)) => format!("PROBE REFUSED: {to} answered and the handshake failed ({e})"),
+            Ok(Err(e)) => format!("PROBE REFUSED: {to} answered and the handshake failed: {e} ({how})"),
         })
     };
     match tokio::runtime::Builder::new_current_thread().enable_all().build() {

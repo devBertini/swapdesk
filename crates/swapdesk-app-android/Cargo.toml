@@ -29,7 +29,9 @@ crate-type = ["cdylib", "rlib"]
 jni.workspace = true
 quinn.workspace = true
 swapdesk-audio = { path = "../swapdesk-audio" }
+swapdesk-lan = { path = "../swapdesk-lan" }
 swapdesk-platform = { path = "../swapdesk-platform" }
 swapdesk-proto = { path = "../swapdesk-proto" }
+swapdesk-sys-android = { path = "../swapdesk-sys-android" }
 swapdesk-trust = { path = "../swapdesk-trust" }
 tokio.workspace = true

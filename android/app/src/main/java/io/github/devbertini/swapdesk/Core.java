@@ -18,9 +18,11 @@ final class Core {
     static native String selfTest();
 
     /**
-     * Development harness: whether a Swapdesk pairing endpoint answers at {@code address} ("10.0.2.2:47851") from
-     * this device. One line: "PROBE ANSWERED", "PROBE REFUSED", "PROBE TIMEOUT" or "PROBE FAIL", each with its
-     * reason. Never on the main thread.
+     * Development harness: whether a Swapdesk pairing endpoint answers from this device. {@code spec} is the
+     * address ("10.0.2.2:47851"), then optionally " local=IPv4" (the production socket: on that address of this
+     * device, TTL 1) and " net=handle" (bound to that network, {@code Network.getNetworkHandle()}). One line:
+     * "PROBE ANSWERED", "PROBE REFUSED", "PROBE TIMEOUT" or "PROBE FAIL", each with its reason. Never on the main
+     * thread.
      */
-    static native String probe(String address);
+    static native String probe(String spec);
 }
