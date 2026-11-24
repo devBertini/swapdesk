@@ -7,8 +7,9 @@
 # 1. `cargo clippy` of every `*-android` crate for both Android targets, warnings denied, without and with the
 #    development harness;
 # 2. scripts/android/build-core.sh: the development library for both ABIs, its 16 KB alignment read back;
-# 3. with --apk: `gradlew assembleDebug` (JAVA_HOME names a JDK 17 or later, ANDROID_HOME the SDK). Gradle runs without
-#    a daemon (android/gradle.properties), so the build leaves no process behind.
+# 3. with --apk: `gradlew assembleDebug` (JAVA_HOME names a JDK 17 or later, ANDROID_HOME the SDK), and the APK is
+#    checked for code the app did not name. Gradle runs without a daemon (android/gradle.properties), so the build
+#    leaves no process behind.
 # The exit code is the first failure's.
 set -u
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,5 +49,11 @@ bash scripts/android/build-core.sh || exit $?
 if [ "$apk" -eq 1 ]; then
   echo "== gradlew assembleDebug"
   sh android/gradlew -p android assembleDebug || exit $?
+  # The app is Java only and names no library: an APK that carries Kotlin's standard library got it from the build
+  # plugin's defaults (android/gradle.properties turns that off), which would ship code nobody chose.
+  apk=android/app/build/outputs/apk/debug/app-debug.apk
+  extra="$(unzip -l "$apk" | grep -c ' kotlin/')"
+  [ "$extra" -eq 0 ] || { echo "check.sh: the APK carries $extra file(s) of the Kotlin library" >&2; exit 1; }
+  echo "== the APK carries no library the app did not name"
 fi
 echo "== android check passed"

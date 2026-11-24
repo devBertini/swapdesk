@@ -83,6 +83,8 @@ pub struct DnsSdPresence {
     listener: Listener,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    /// Why the last [`Presence::refresh`] failed, until one succeeds.
+    refresh_error: Mutex<Option<String>>,
 }
 
 impl DnsSdPresence {
@@ -117,7 +119,17 @@ impl DnsSdPresence {
                 })
                 .map_err(|e| DiscoveryError::Mdns(format!("thread: {e}")))?
         };
-        Ok(Self { discovery, peers, listener, stop, worker: Some(worker) })
+        Ok(Self { discovery, peers, listener, stop, worker: Some(worker), refresh_error: Mutex::new(None) })
+    }
+
+    /// What discovery runs on now: the approved addresses its daemon is bound to (none: it browses nothing), or why
+    /// its last refresh after a network change failed. For the trace of whoever started it: a refresh itself says
+    /// nothing.
+    pub fn status(&self) -> Result<Vec<swapdesk_lan::guard::ApprovedAddr>, String> {
+        match lock(&self.refresh_error).clone() {
+            Some(why) => Err(why),
+            None => Ok(self.discovery.applied()),
+        }
     }
 }
 
@@ -256,7 +268,7 @@ impl Presence for DnsSdPresence {
     }
 
     fn refresh(&self) {
-        let _ = self.discovery.refresh();
+        *lock(&self.refresh_error) = self.discovery.refresh().err().map(|e| e.to_string());
     }
 
     fn set_listener(&self, f: Arc<dyn Fn() + Send + Sync>) {

@@ -243,8 +243,8 @@ CMake: section 7), `swapdesk-ipc`, `swapdesk-files` (the phone brings its own `F
 Not built for Android: every `*-win` and `*-mac` crate, the service and helper binaries, `swapdesk-measure`,
 `swapdesk-crossdrive`, `swapdesk-release-tools`.
 
-**New crates**, each compiling to nothing off Android (the D29 pattern, so the desktop gate and its 10-minute budget
-do not change), and named `*-android` so the workspace rule that only `*-win` and `*-mac` crates hold `unsafe` grows
+**New crates**, whose Android-only parts (the JNI entry points, the NDK calls) compile to nothing off Android (the
+D29 pattern) while their plain Rust is built and tested on every host by the desktop gate, and named `*-android` so the workspace rule that only `*-win` and `*-mac` crates hold `unsafe` grows
 by one suffix (a change to the project's rules and lints, made in A1):
 
 | Crate | Holds |
@@ -340,7 +340,9 @@ the desktop gate, never inside it: off Android those crates compile to nothing. 
 read from `Cargo.toml` by the Gradle script. ABIs: `arm64-v8a` for phones and `x86_64` for the emulator image; which of
 them the released APK carries is settled at the release slice (GUESS: `arm64-v8a` only; the owner's phone to confirm).
 A release build of the library uses the profile that unwinds (`release-service`), since a panic must reach Java as an
-exception and never end the app's process.
+exception and never end the app's process. The APK carries the app's own classes and its library and nothing else:
+the build plugin would add the Kotlin standard library to a Java-only app by default (about 2 MB), which
+`android/gradle.properties` turns off and the Android gate checks.
 
 **The app's start (slice A2).** Java does four small things and hands each to the core once: it unwraps the data
 key (32 random bytes that rest on disk only wrapped by a key of the Android Keystore; the core seals the device key,
@@ -393,7 +395,7 @@ Tracked, not budgeted: the APK size of `arm64-v8a` (GUESS ≤ 15 MB), read from 
 | ID | Risk | What shows it early |
 |---|---|---|
 | AR1 | The dependency tree does not cross-compile or misbehaves on Android: `ring` (its page does not list Android as a target [S44]; not verified either way), `quinn`, `tokio`, `mdns-sd` and its `if-addrs`, libopus through CMake | **Spike A1**: build the core for `aarch64-linux-android` and run discovery plus one TLS handshake to the PC on the phone. Fallback for libopus: `opus-rs` (D16). **Result (24/11/2026):** every crate of the core cross-compiled for both targets at the first try and links into one library. On the emulator image the library of each ABI generated device keys (`ring`), completed a pinned-key session handshake over loopback with bytes both ways (`rustls`, `quinn`, `tokio`) and coded a frame with libopus; from the emulator a QUIC handshake completed with a desktop development instance's pairing endpoint, and timed out with pairing closed. Nothing needed a fallback. Still owed to the phone: discovery (`mdns-sd` on real Wi-Fi), the socket bound to the Wi-Fi network, and the same checks on its hardware |
-| AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1]. **State (24/11/2026):** the discovery daemon starts on both emulator images with the interface index Java reports and the process bound to the Wi-Fi network; whether it finds a computer is owed to the phone (the emulator carries no multicast) |
+| AR2 | `getifaddrs` on Android 11 and later shows only interfaces with an IP address [S7], and `mdns-sd`'s interface handling may expect more | A1 prints what `if-addrs` returns on the phone; fallback: hand `mdns-sd` the approved network's interface, or the `NsdManager` picker [S1]. **State (24/11/2026):** on both emulator images the discovery daemon is created when Java reports the first approved network and binds to it by the interface index Java reads (the app's trace says "discovery browses on [wlan0#16 10.0.2.16]"; a refresh that fails is said there too, where before it was silent), with the process bound to the Wi-Fi network; whether it finds a computer is owed to the phone (the emulator carries no multicast) |
 | AR3 | A VPN on the phone routes or blocks Swapdesk's traffic despite the socket binding | A1 repeats the handshake with a VPN app on (always-on and blocking modes) |
 | AR4 | Decode latency varies by device; the low-latency key is optional [S16] | A4 measures BA4 and BA3 on the owner's phone first |
 | AR5 | Painting through Java costs more than a frame at 120 Hz | A3 traces the UI thread per frame (R-UI-10) on the busiest screen |

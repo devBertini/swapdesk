@@ -83,6 +83,9 @@ pub struct PhoneService {
     backend: Arc<ServiceBackend>,
     identity: Arc<Identity>,
     trust: Arc<TrustHandle>,
+    /// The running discovery, when there is one, to say what it is bound to.
+    discovery: Option<Arc<DnsSdPresence>>,
+    trace: Arc<dyn TraceSink>,
 }
 
 impl PhoneService {
@@ -113,6 +116,7 @@ impl PhoneService {
         let audit = Arc::new(
             FileAuditLog::open(&dir, wall.unix_ms(), Arc::clone(&trace)).map_err(|e| format!("activity log: {e}"))?,
         );
+        let mut running_discovery = None;
         let presence: Arc<dyn Presence> = if discovery {
             let own =
                 Txt { name: settings.name.clone(), os: Os::Android, fingerprint: identity.device_id(), pairing: false };
@@ -122,7 +126,11 @@ impl PhoneService {
                 own,
                 DnsSdConfig { announce: false, ..DnsSdConfig::default() },
             ) {
-                Ok(p) => Arc::new(p),
+                Ok(p) => {
+                    let p = Arc::new(p);
+                    running_discovery = Some(Arc::clone(&p));
+                    p
+                }
                 Err(e) => {
                     trace.log(Level::Warn, "app", format_args!("discovery is off: {e}"));
                     Arc::new(NoPresence)
@@ -175,7 +183,19 @@ impl PhoneService {
         let backend =
             ServiceBackend::start_with_sink(client_end.reader, client_end.writer, waker, std::process::id(), sink)
                 .map_err(|e| format!("hub handshake: {e}"))?;
-        Ok(Self { hub, cancel, core: Some(core), serve: Some(serve), backend: Arc::new(backend), identity, trust })
+        let service = Self {
+            hub,
+            cancel,
+            core: Some(core),
+            serve: Some(serve),
+            backend: Arc::new(backend),
+            identity,
+            trust,
+            discovery: running_discovery,
+            trace,
+        };
+        service.say_discovery();
+        Ok(service)
     }
 
     /// The C6 backend the interface talks to.
@@ -198,6 +218,24 @@ impl PhoneService {
     /// The phone's networks changed (Java reported a new list): the core and discovery follow.
     pub fn network_changed(&self) {
         self.hub.network_changed();
+        self.say_discovery();
+    }
+
+    /// One trace line of what discovery runs on: a refresh that fails says nothing by itself, and a phone whose
+    /// discovery is bound to nothing lists no computer.
+    fn say_discovery(&self) {
+        let Some(discovery) = &self.discovery else { return };
+        match discovery.status() {
+            Ok(bound) if bound.is_empty() => {
+                self.trace.log(Level::Info, "app", format_args!("discovery waits for an approved network"));
+            }
+            Ok(bound) => {
+                let on: Vec<String> =
+                    bound.iter().map(|a| format!("{}#{} {}", a.if_name, a.if_index, a.addr)).collect();
+                self.trace.log(Level::Info, "app", format_args!("discovery browses on [{}]", on.join(", ")));
+            }
+            Err(why) => self.trace.log(Level::Warn, "app", format_args!("discovery did not follow the network: {why}")),
+        }
     }
 
     /// Every address this phone listens on: the session endpoints and the pairing endpoints. Empty while it does not
