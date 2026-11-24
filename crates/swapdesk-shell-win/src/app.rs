@@ -879,7 +879,8 @@ mod effect_tests {
     #[test]
     fn every_effect_has_a_handler_and_the_context_menu_waits_for_a_person() {
         let all = every_effect();
-        assert_eq!(all.len(), 14);
+        assert_eq!(all.len(), 15);
+        assert_eq!(handling(&Effect::ShowMain), Handling::Immediate);
         for e in &all {
             // Deciding is the handler's table; the modal ones are exactly those `dispatch` queues.
             let _ = handling(e);
