@@ -47,6 +47,12 @@ final class Shell {
      */
     static native String showLive(String language, boolean dark);
 
+    /**
+     * What Android says about the local network now: 0 allowed (or a system that does not ask), 1 the system's
+     * question is on the screen, 2 refused. The screens show their notice for 1 and 2.
+     */
+    static native void localNetwork(int state);
+
     /** Whether something the screens show is still on its way from the service. */
     static native boolean waitsForData();
 

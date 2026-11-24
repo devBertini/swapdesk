@@ -3,8 +3,8 @@
 
 use crate::mock::{PHONE_NAME, Scenario};
 use crate::{
-    Command, ControlId, DeviceTab, EditId, MsgKey, NetworkStatus, Os, Permission, Ready, SelectId, UiEvent, UiState,
-    WindowKind,
+    Command, ControlId, DeviceTab, EditId, Effect, LocalNetwork, MsgKey, NetworkStatus, NoticeKind, Os, Permission,
+    Ready, SelectId, UiEvent, UiState, WindowKind,
 };
 
 fn ids(state: &UiState) -> Vec<ControlId> {
@@ -129,4 +129,56 @@ fn a_network_that_comes_or_goes_asks_again_what_this_device_is_ready_for() {
     let mut fresh = UiState::default();
     let _ = fresh.apply(network(Some("10.0.2.16")));
     assert!(fresh.take_followups().is_empty());
+}
+
+/// F-AND-01: from Android 17 the local network is a permission. While the system's question is on the screen the
+/// first pane says why it is asked and offers nothing; refused, it says what stops working and offers the app's
+/// page in the system's settings; allowed, it says nothing. The notice stands before every other.
+#[test]
+fn a_phone_without_the_local_network_says_so_first_and_offers_the_systems_settings() {
+    let mut phone = Scenario::Inicio.phone_state();
+    assert_eq!(phone.local_network(), LocalNetwork::Allowed);
+    assert!(!phone.notices().contains(&NoticeKind::LocalNetwork));
+    assert!(phone.set_local_network(LocalNetwork::Allowed).is_none(), "told again, nothing changes");
+
+    assert!(!phone.set_local_network(LocalNetwork::Asking).is_none());
+    assert_eq!(phone.notices().first(), Some(&NoticeKind::LocalNetwork));
+    let (title, body, button) = phone.notice_texts(NoticeKind::LocalNetwork);
+    assert_eq!(title, "O Swapdesk funciona só na rede local");
+    assert!(body.contains("o Android pede a sua permissão") && button.is_empty());
+    assert!(!ids(&phone).contains(&ControlId::Notice(NoticeKind::LocalNetwork)), "a question of the system, no button");
+    // The phone is ready for nothing meanwhile, and says so where it said it was ready.
+    assert_eq!(
+        (phone.home().status.as_deref(), phone.home().ready),
+        (Some("Esperando a permissão de rede local"), false)
+    );
+    assert!(says(&phone, "O Swapdesk funciona só na rede local"));
+
+    let _ = phone.set_local_network(LocalNetwork::Refused);
+    let (title, body, button) = phone.notice_texts(NoticeKind::LocalNetwork);
+    assert_eq!((title.as_str(), button.as_str()), ("Rede local não permitida", "Abrir os ajustes do app"));
+    assert!(body.contains("não encontra nem alcança nenhum computador"));
+    assert!(ids(&phone).contains(&ControlId::Notice(NoticeKind::LocalNetwork)));
+    assert_eq!((phone.home().status.as_deref(), phone.home().ready), (Some("Sem acesso à rede local"), false));
+    // Before the first-run guide and everything else of the pane.
+    let order: Vec<String> = phone.controls(WindowKind::Main).into_iter().map(|c| c.label).collect();
+    let at = |text: &str| order.iter().position(|l| l == text).unwrap_or_else(|| panic!("{text} is not said"));
+    assert!(at("Rede local não permitida") < at("Parear"), "{order:?}");
+    let act = phone.activate(ControlId::Notice(NoticeKind::LocalNetwork));
+    assert_eq!(act.effect, Some(Effect::OpenWebPage));
+    let page = phone.take_web_page().expect("a page of the system");
+    assert_eq!(page, crate::state::ANDROID_APP_SETTINGS);
+    assert!(crate::state::openable_page(&page));
+    // The notice stays until Android says the answer changed.
+    assert_eq!(phone.notices().first(), Some(&NoticeKind::LocalNetwork));
+    let _ = phone.set_local_network(LocalNetwork::Allowed);
+    assert!(!phone.notices().contains(&NoticeKind::LocalNetwork));
+    assert_eq!((phone.home().status.as_deref(), phone.home().ready), (Some("Pronto para controlar"), true));
+
+    // On a computer's page too: nothing there works without the network.
+    let mut page = Scenario::Dispositivos.phone_state();
+    let _ = page.set_local_network(LocalNetwork::Refused);
+    let on_page = ids(&page);
+    assert!(on_page.contains(&ControlId::Notice(NoticeKind::LocalNetwork)));
+    assert!(!on_page.contains(&ControlId::EditGrants), "the notice takes the page's content");
 }

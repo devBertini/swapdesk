@@ -15,7 +15,7 @@ use swapdesk_sys_android::logcat::Logcat;
 use swapdesk_sys_android::network;
 use swapdesk_sys_android::sealed::{KEY_LEN, SealedStore};
 use swapdesk_ui::prefs::FilePrefs;
-use swapdesk_ui::{Language, UiState};
+use swapdesk_ui::{Language, LocalNetwork, UiState};
 
 use crate::phone_service::{PhoneParams, PhoneService};
 
@@ -136,12 +136,38 @@ pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> 
 pub fn show_live(language: &str, dark: bool) -> Result<String, String> {
     let app = app();
     let app = app.as_ref().ok_or("the core is not running")?;
+    if crate::phone_screen::is_live() {
+        // A new activity of the same process: the screen goes on from where it was.
+        return Ok("shown again".into());
+    }
     let language = if language.to_ascii_lowercase().starts_with("pt") { Language::PtBr } else { Language::En };
     let mut state = UiState::new(language, dark);
     state.set_phone(true);
     state.load_prefs(Box::new(FilePrefs::in_dir(&app.dir)));
-    crate::phone_screen::show(state, app.service.backend());
+    crate::phone_screen::show(state, app.service.backend(), true);
     Ok("shown".into())
+}
+
+/// `Shell.localNetwork`: what Android says about the local network now: 0 allowed (or a system that does not ask),
+/// 1 the system's question is on the screen, 2 refused. The screens show their notice, and when the answer turns
+/// to allowed the service looks at the network again: what it sent before was dropped without a word.
+pub fn local_network(code: i32) {
+    let now = match code {
+        1 => LocalNetwork::Asking,
+        2 => LocalNetwork::Refused,
+        _ => LocalNetwork::Allowed,
+    };
+    let was = crate::phone_screen::with_shell(|shell| {
+        let was = shell.state().local_network();
+        shell.set_local_network(now);
+        was
+    });
+    if now == LocalNetwork::Allowed
+        && was.is_some_and(|was| was != now)
+        && let Some(app) = app().as_ref()
+    {
+        app.service.network_changed();
+    }
 }
 
 /// `Core.networks`: Java's newest list of networks. The guard reads it from now on, the process is bound to the

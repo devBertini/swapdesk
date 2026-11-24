@@ -108,6 +108,23 @@ pub enum NoticeKind {
     ReceiveFolder,
     /// The last run of Swapdesk ended in a panic (D12): shown once, first.
     Crash,
+    /// A phone that Android does not let reach the local network ([`LocalNetwork`]): nothing else works until it
+    /// does, so it comes before every other notice.
+    LocalNetwork,
+}
+
+/// What Android says about the local network, which from Android 17 is a permission the person grants
+/// (docs/ANDROID.md 4). The phone's shell tells the state; a computer's state stays `Allowed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocalNetwork {
+    /// Granted, or a system that does not ask.
+    #[default]
+    Allowed,
+    /// The system's question is on the screen: the notice says why it is asked, and has no button.
+    Asking,
+    /// Refused: the notice says what stops working, and its button opens the app's settings in the system's, the
+    /// only place the answer can change (the question is put once).
+    Refused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -743,6 +760,8 @@ pub struct UiState {
     pub(crate) swap_left_s: u16,
     /// The crash notice is showing (D12).
     pub(crate) crash_notice: bool,
+    /// A phone's local network permission ([`UiState::set_local_network`]).
+    pub(crate) local_network: LocalNetwork,
     /// Seconds the device list has been answered and empty (F20): the "no computer found" card shows at 10.
     pub(crate) empty_s: u16,
     /// The machine's updater (UPDATES.md 10); `None` while unknown or when the service has none (a development
@@ -790,8 +809,13 @@ pub const MAC_INPUT_MONITORING_SETTINGS: &str =
 pub const MAC_SCREEN_RECORDING_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
+/// Android's page of this app in the system's settings (`Settings.ACTION_APPLICATION_DETAILS_SETTINGS`), where
+/// its permissions are: not an address, a name the phone's shell knows.
+pub const ANDROID_APP_SETTINGS: &str = "android-settings:this-app";
+
 /// The system pages [`Effect::OpenWebPage`] may open besides an `https://` page. Nothing else is handed to the system.
 pub const SYSTEM_PAGES: &[&str] = &[
+    ANDROID_APP_SETTINGS,
     WINDOWS_NETWORK_SETTINGS,
     MAC_FILES_AND_FOLDERS_SETTINGS,
     MAC_ACCESSIBILITY_SETTINGS,
@@ -895,6 +919,7 @@ impl UiState {
             pair_confirming: false,
             swap_left_s: 0,
             crash_notice: false,
+            local_network: LocalNetwork::Allowed,
             update: None,
             update_confirm: false,
             update_rate: 0,
@@ -1590,10 +1615,11 @@ impl UiState {
 
     /// Which notices to show in place of the selected device's content.
     pub fn notices(&self) -> Vec<NoticeKind> {
-        let crash = self.crash_notice.then_some(NoticeKind::Crash);
-        let Some(net) = &self.network else { return crash.into_iter().collect() };
+        // Without the local network a phone reaches nothing: its notice stands first, also before the crash's.
+        let local = (self.local_network != LocalNetwork::Allowed).then_some(NoticeKind::LocalNetwork);
+        let crash = local.into_iter().chain(self.crash_notice.then_some(NoticeKind::Crash));
+        let Some(net) = &self.network else { return crash.collect() };
         crash
-            .into_iter()
             .chain(net.notices.iter().map(|n| match n {
                 Notice::PublicNetwork => NoticeKind::Public,
                 Notice::FirewallBlocks => NoticeKind::Firewall,
@@ -1610,6 +1636,16 @@ impl UiState {
     /// standard account's confirmation says Windows will ask for an administrator's name and password (D56).
     pub fn set_admin_account(&mut self, admin: bool) {
         self.admin_account = admin;
+    }
+
+    /// What Android says about the local network now ([`LocalNetwork`]); the phone's shell calls it at every
+    /// change.
+    pub fn set_local_network(&mut self, now: LocalNetwork) -> Changed {
+        if std::mem::replace(&mut self.local_network, now) == now { Changed::NONE } else { Changed::MAIN }
+    }
+
+    pub fn local_network(&self) -> LocalNetwork {
+        self.local_network
     }
 
     pub fn show_crash_notice(&mut self) {

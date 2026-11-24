@@ -367,6 +367,11 @@ pub(crate) fn home_cards(f: &mut Frame, a: &Area, mut y: f32) -> f32 {
 pub(crate) fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
     let (p, pal) = (f.p, f.pal);
     let mut used = 0.0;
+    // A phone that may not reach the local network: nothing below works without it, so it says so first.
+    if f.st.notices().first() == Some(&NoticeKind::LocalNetwork) {
+        let at = Rect::new(a.x, y + used, a.cw, 0.0);
+        used += notice_card(f, Look::Inline, NoticeKind::LocalNetwork, at).h + 20.0;
+    }
     // UPDATES.md 10.1: the update card comes first.
     if let Some(u) = f.st.update_card() {
         use swapdesk_ui::update_card::UpdIcon;
@@ -421,7 +426,7 @@ pub(crate) fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
     }
     // Every notice, the crash first. A notice of the network (a Public network, a firewall that blocks) explains
     // why no computer is listed, and with none listed this page is the only one there is.
-    for kind in f.st.notices() {
+    for kind in f.st.notices().into_iter().filter(|k| *k != NoticeKind::LocalNetwork) {
         used += notice_card(f, Look::Inline, kind, Rect::new(a.x, y + used, a.cw, 0.0)).h + 20.0;
     }
     if f.st.no_computer_card() {
@@ -1143,7 +1148,7 @@ fn history(f: &mut Frame, a: &Area, y: f32, d: &DeviceView) -> f32 {
 
 fn notice_icon(kind: NoticeKind) -> String {
     match kind {
-        NoticeKind::Public | NoticeKind::Firewall => icons::WIFI.to_owned(),
+        NoticeKind::Public | NoticeKind::Firewall | NoticeKind::LocalNetwork => icons::WIFI.to_owned(),
         NoticeKind::Service => icons::lock(),
         NoticeKind::MacPerms | NoticeKind::ReceiveFolder => icons::SHIELD.to_owned(),
         NoticeKind::Crash => icons::SHIELD_ALERT.to_owned(),
@@ -1155,13 +1160,11 @@ fn notice_icon(kind: NoticeKind) -> String {
 fn notice_card(f: &mut Frame, look: Look, kind: NoticeKind, r: Rect) -> Rect {
     let pal = f.pal;
     let (title, body, button) = f.st.notice_texts(kind);
-    let (tint, ink) = if matches!(kind, NoticeKind::MacPerms | NoticeKind::ReceiveFolder) {
-        (pal.link_tint, pal.link)
-    } else {
-        (pal.danger_tint, pal.danger)
-    };
+    // A notice that waits (the system's question is on the screen) is not an alarm.
+    let calm = matches!(kind, NoticeKind::MacPerms | NoticeKind::ReceiveFolder) || button.is_empty();
+    let (tint, ink) = if calm { (pal.link_tint, pal.link) } else { (pal.danger_tint, pal.danger) };
     let icon = notice_icon(kind);
-    let buttons = [(ControlId::Notice(kind), button, Kind::Primary)];
+    let buttons = notice_buttons(kind, button);
     let c = Card {
         look,
         icon: Some(Icon::Circle(tint, ink, &icon)),
@@ -1177,9 +1180,14 @@ fn notice_card(f: &mut Frame, look: Look, kind: NoticeKind, r: Rect) -> Rect {
 /// The height [`notice_card`] takes at width `w`.
 fn notice_card_height(f: &Frame, look: Look, kind: NoticeKind, w: f32) -> f32 {
     let (title, body, button) = f.st.notice_texts(kind);
-    let buttons = [(ControlId::Notice(kind), button, Kind::Primary)];
+    let buttons = notice_buttons(kind, button);
     Card { look, icon: Some(Icon::Spinner), title: Some(&title), body: Some(&body), bar: None, buttons: &buttons }
         .height(f, w)
+}
+
+/// The button of a notice; none when the notice has no text for one (`UiState::notice_texts`).
+fn notice_buttons(kind: NoticeKind, button: String) -> Vec<(ControlId, String, Kind)> {
+    if button.is_empty() { Vec::new() } else { vec![(ControlId::Notice(kind), button, Kind::Primary)] }
 }
 
 /// The notices that take a device page's content, centred in `room` (D51): one is a card alone; several stand side

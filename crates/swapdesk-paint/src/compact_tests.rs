@@ -4,7 +4,7 @@
 
 use swapdesk_ui::mock::Scenario;
 use swapdesk_ui::tokens::layout;
-use swapdesk_ui::{ControlId, Nav, Screen, UiState, WindowKind};
+use swapdesk_ui::{ControlId, LocalNetwork, Nav, NoticeKind, Screen, UiState, WindowKind};
 
 use crate::card;
 use crate::input::{hit_test, hit_touch};
@@ -264,4 +264,32 @@ fn what_stands_side_by_side_on_a_desktop_is_stacked_on_a_phone() {
     let language = rect(&settings, ControlId::Select(swapdesk_ui::SelectId::Language));
     let theme = rect(&settings, ControlId::Select(swapdesk_ui::SelectId::Theme));
     assert!(language.w > column - 60.0 && language.x == theme.x && theme.y > language.bottom() + 20.0, "{language:?}");
+}
+
+/// F-AND-01: a phone that may not reach the local network says so at the top of its first pane, in a card across
+/// the column, with its button when there is one; every phone size holds it.
+#[test]
+fn the_local_network_notice_is_the_first_card_of_a_phones_first_pane() {
+    for (w, h) in PHONES {
+        for (now, button) in [(LocalNetwork::Refused, true), (LocalNetwork::Asking, false)] {
+            let mut state = Scenario::Inicio.phone_state();
+            let _ = state.set_local_network(now);
+            let (p, out) = frame(&state, (w, h), &touched(0.0, 0));
+            let what = format!("{now:?} at {w}x{h}");
+            let notice = out.widgets.iter().find(|wd| wd.id == ControlId::Notice(NoticeKind::LocalNetwork));
+            assert_eq!(notice.is_some(), button, "{what}");
+            let (title, ..) = state.notice_texts(NoticeKind::LocalNetwork);
+            let texts = p.drawn.borrow();
+            let said = texts.iter().position(|t| *t == title).unwrap_or_else(|| panic!("{what}: the notice is drawn"));
+            // Before the lists and the cards under it.
+            let paired = texts.iter().position(|t| t == "Pareados").expect("the list of paired computers");
+            assert!(said < paired, "{what}: the notice comes first");
+            if let Some(wd) = notice {
+                assert!(wd.rect.x >= MARGIN - 0.01 && wd.rect.right() <= w - MARGIN + 0.01, "{what}: {:?}", wd.rect);
+            }
+            for (x, end, text) in p.spans.borrow().iter() {
+                assert!(*x >= -0.5 && *end <= w + 0.5, "{what}: {text:?} is drawn from {x} to {end}");
+            }
+        }
+    }
 }

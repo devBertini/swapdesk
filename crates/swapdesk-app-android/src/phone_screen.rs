@@ -19,12 +19,15 @@ const SIDE_MAX: i32 = 16_384;
 
 struct Screen {
     shell: Option<PhoneShell>,
+    /// The shell is the app's own, over its service; not a development mock.
+    live: bool,
     /// The monospaced face's ascent and descent as Java read them; Menlo's until then.
     mono: (f32, f32),
 }
 
 thread_local! {
-    static SCREEN: RefCell<Screen> = const { RefCell::new(Screen { shell: None, mono: (0.93, 0.24) }) };
+    static SCREEN: RefCell<Screen> =
+        const { RefCell::new(Screen { shell: None, live: false, mono: (0.93, 0.24) }) };
 }
 
 /// The ascent and descent of the phone's monospaced face, as fractions of its size.
@@ -35,10 +38,21 @@ pub fn set_mono_metrics(ascent: f32, descent: f32) {
 }
 
 /// Shows `state` from the next frame on, with `backend` behind it, and sends what a shell sends when it starts.
-pub fn show(state: UiState, backend: Arc<dyn UiBackend>) {
+/// `live` says it is the app's own state over its service ([`is_live`]).
+pub fn show(state: UiState, backend: Arc<dyn UiBackend>, live: bool) {
     let mut shell = PhoneShell::new(state, backend);
     shell.start();
-    SCREEN.with_borrow_mut(|s| s.shell = Some(shell));
+    SCREEN.with_borrow_mut(|s| {
+        s.shell = Some(shell);
+        s.live = live;
+    });
+}
+
+/// Whether the screen shows the app's own state over its service. Android makes a new activity for the same
+/// process (the person came back to the app; a change the manifest does not take itself): the state it finds is
+/// the one it left, with the pairing or the page that was on the screen.
+pub fn is_live() -> bool {
+    SCREEN.with(|s| s.try_borrow().is_ok_and(|s| s.live && s.shell.is_some()))
 }
 
 /// Runs `f` on the shell, when there is one. A call that arrives while another is under way on this thread (the
@@ -123,7 +137,9 @@ mod tests {
     fn the_screen_is_empty_until_there_is_a_state_and_then_paints_it_at_the_views_size() {
         assert_eq!(paint(1080, 2400, 2.625), vec![FRAME], "nothing to show yet");
         assert!(with_shell(|_| ()).is_none() && measured(&[]).is_err() && cost() == FrameCost::default());
-        show(Scenario::Dispositivos.prepared_state(), Arc::new(Silent));
+        assert!(!is_live());
+        show(Scenario::Dispositivos.prepared_state(), Arc::new(Silent), false);
+        assert!(!is_live(), "a mock is not the app's own state");
         set_mono_metrics(0.9, 0.3);
         set_mono_metrics(f32::NAN, 0.3);
 
@@ -164,5 +180,7 @@ mod tests {
                 .is_some_and(|o| o.widgets.iter().any(|w| w.id == ControlId::NavSettings)))
             .unwrap_or(false)
         );
+        show(Scenario::Inicio.phone_state(), Arc::new(Silent), true);
+        assert!(is_live());
     }
 }

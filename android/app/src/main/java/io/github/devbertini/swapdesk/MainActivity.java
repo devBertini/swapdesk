@@ -139,10 +139,12 @@ public final class MainActivity extends Activity {
             Log.i(TAG, "LOCAL_NETWORK asking");
             notice.setText(R.string.local_network_why);
             openSettings.setVisibility(View.GONE);
+            tellScreens(1);
             requestPermissions(new String[] {LOCAL_NETWORK}, ASK_LOCAL_NETWORK);
             return;
         }
         Log.i(TAG, "LOCAL_NETWORK " + (!needed ? "not_needed" : granted ? "granted" : "refused"));
+        tellScreens(granted ? 0 : 2);
         notice.setText(granted ? "" : getString(R.string.local_network_refused));
         notice.setVisibility(granted ? View.GONE : View.VISIBLE);
         openSettings.setVisibility(granted ? View.GONE : View.VISIBLE);
@@ -153,6 +155,14 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(request, permissions, results);
         if (request == ASK_LOCAL_NETWORK) {
             showLocalNetwork();
+        }
+    }
+
+    /** The shared screens show the notice of the local network themselves ({@link Shell#localNetwork}). */
+    private void tellScreens(int localNetwork) {
+        if (screen != null) {
+            Shell.localNetwork(localNetwork);
+            screen.requestFrame();
         }
     }
 

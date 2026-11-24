@@ -449,11 +449,9 @@ impl UiState {
     pub(crate) fn crash_and_empty_controls(&self, s: &mut Specs) {
         // Every notice, the crash first: a notice of the network explains why no computer is listed, and with none
         // listed the home is the only page there is.
-        for k in self.notices() {
-            let (title, body, button) = self.notice_texts(k);
-            s.heading(2, title);
-            s.text(UiRole::Text, body);
-            s.button(ControlId::Notice(k), button);
+        // The notice of the local network stands at the top of the home, before these (`home_controls`).
+        for k in self.notices().into_iter().filter(|k| *k != NoticeKind::LocalNetwork) {
+            self.notice_controls(s, k);
         }
         if self.no_computer_card() {
             s.heading(2, self.name_of(MsgKey::NoComputerTitle));
@@ -515,10 +513,7 @@ impl UiState {
         let notices = self.notices();
         if !notices.is_empty() {
             for k in notices {
-                let (title, body, button) = self.notice_texts(k);
-                s.heading(2, title);
-                s.text(UiRole::Text, body);
-                s.button(ControlId::Notice(k), button);
+                self.notice_controls(s, k);
             }
             return;
         }
@@ -611,10 +606,31 @@ impl UiState {
             .unwrap_or_default()
     }
 
-    /// Title, body and button of a notice card.
+    /// A notice card as controls: its title, its text and, when it has one, its button.
+    pub(crate) fn notice_controls(&self, s: &mut Specs, kind: NoticeKind) {
+        let (title, body, button) = self.notice_texts(kind);
+        s.heading(2, title);
+        s.text(UiRole::Text, body);
+        if !button.is_empty() {
+            s.button(ControlId::Notice(kind), button);
+        }
+    }
+
+    /// Title, body and button of a notice card. An empty button is none: the notice waits for something that is
+    /// not a button of Swapdesk (the system's own question).
     pub fn notice_texts(&self, kind: NoticeKind) -> (String, String, String) {
         let label = self.network.as_ref().map(|n| n.label.clone()).unwrap_or_default();
         match kind {
+            NoticeKind::LocalNetwork if self.local_network == crate::state::LocalNetwork::Asking => (
+                self.name_of(MsgKey::NoticeLocalNetAskTitle),
+                self.name_of(MsgKey::NoticeLocalNetAskBody),
+                String::new(),
+            ),
+            NoticeKind::LocalNetwork => (
+                self.name_of(MsgKey::NoticeLocalNetRefusedTitle),
+                self.name_of(MsgKey::NoticeLocalNetRefusedBody),
+                self.name_of(MsgKey::NoticeLocalNetButton),
+            ),
             NoticeKind::Public => (
                 self.name_of(MsgKey::NoticePublicTitle),
                 self.tm(&Msg::new(MsgKey::NoticePublicBody).with(label)),
@@ -1846,6 +1862,11 @@ impl UiState {
                 NoticeKind::Crash => {
                     self.crash_notice = false;
                     a.effect = Some(Effect::OpenLogs);
+                }
+                NoticeKind::LocalNetwork => {
+                    // The question was put once; the answer changes only in the system's settings of the app.
+                    self.web_page = Some(crate::state::ANDROID_APP_SETTINGS.to_owned());
+                    a.effect = Some(Effect::OpenWebPage);
                 }
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),

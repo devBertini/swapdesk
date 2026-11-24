@@ -33,6 +33,8 @@ pub enum Ask {
     SubmitEdit { edit: EditId, clear: bool },
     /// Open this page in the phone's browser.
     OpenPage(String),
+    /// Open this app's page in the system's settings, where its permissions are.
+    OpenAppSettings,
     /// Something the phone does not do yet, for the app's log.
     Note(String),
 }
@@ -44,6 +46,7 @@ pub mod ask {
     pub const SUBMIT_EDIT: u8 = 3;
     pub const OPEN_PAGE: u8 = 4;
     pub const NOTE: u8 = 5;
+    pub const OPEN_APP_SETTINGS: u8 = 6;
     /// No choice of a menu is marked.
     pub const NONE_SELECTED: u16 = u16::MAX;
 }
@@ -352,6 +355,12 @@ impl PhoneShell {
         self.state.set_clock(swapdesk_ui::format::Clock { now_ms, utc_offset_min });
     }
 
+    /// What Android says about the local network now (`UiState::set_local_network`).
+    pub fn set_local_network(&mut self, now: swapdesk_ui::LocalNetwork) {
+        let changed = self.state.set_local_network(now);
+        self.note_change(changed);
+    }
+
     /// The system's light or dark appearance.
     pub fn set_dark(&mut self, dark: bool) {
         let changed = self.state.set_dark(dark);
@@ -416,12 +425,12 @@ impl PhoneShell {
                 self.dirty = true;
             }
             Handling::Submit(edit) => self.asks.push(Ask::SubmitEdit { edit, clear: edit == EditId::Chat }),
-            Handling::OpenWebPage => {
-                if let Some(page) = self.state.take_web_page().filter(|p| openable_page(p) && p.starts_with("https://"))
-                {
-                    self.asks.push(Ask::OpenPage(page));
-                }
-            }
+            Handling::OpenWebPage => match self.state.take_web_page().filter(|p| openable_page(p)) {
+                Some(page) if page == swapdesk_ui::state::ANDROID_APP_SETTINGS => self.asks.push(Ask::OpenAppSettings),
+                Some(page) if page.starts_with("https://") => self.asks.push(Ask::OpenPage(page)),
+                // A page of another system's settings: no notice of a phone asks for one.
+                _ => {}
+            },
             Handling::Later(what) => self.asks.push(Ask::Note(format!("not built yet: {what}"))),
             Handling::NotOnAPhone(what) => self.asks.push(Ask::Note(format!("not on a phone: {what}"))),
         }
@@ -438,6 +447,7 @@ impl PhoneShell {
     ///   3 submit edit: u8 field, u8 clear (0 or 1)
     ///   4 open page:   the address (u16 length, UTF-8)
     ///   5 note:        the text (u16 length, UTF-8)
+    ///   6 open the app's page in the system's settings: nothing more
     /// ```
     pub fn take_asks(&mut self) -> Vec<u8> {
         let asks = std::mem::take(&mut self.asks);
@@ -472,6 +482,7 @@ impl PhoneShell {
                     w.u8(ask::NOTE);
                     w.str(text);
                 }
+                Ask::OpenAppSettings => w.u8(ask::OPEN_APP_SETTINGS),
             }
         }
         w.0

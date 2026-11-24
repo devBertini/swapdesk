@@ -17,11 +17,15 @@
         android:extractNativeLibs="false"
         android:label="Swapdesk"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-        <!-- adjustResize: when the keyboard shows, the screen keeps clear of it (it takes the keyboard as an inset)
+        <!-- configChanges: the screens are painted for the view's size and appearance at every frame, so the phone
+             turned sideways, a split screen or the dark theme change nothing of the activity: it is not made again,
+             and what is on the screen (a pairing code) stays.
+             adjustResize: when the keyboard shows, the screen keeps clear of it (it takes the keyboard as an inset)
              and scrolls the field being typed in into sight. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboard|keyboardHidden|navigation|fontScale|layoutDirection|locale"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -62,8 +62,8 @@ import java.util.TimeZone;
  *
  * <p>The asks ({@code PhoneShell::take_asks}): u8 count, then per ask a u8 code and: 1 a list of choices (u16
  * selected or 0xFFFF, u16 count, the choices); 2 the keyboard in a field (u8 field); 3 a field's text to the core
- * (u8 field, u8 clear afterwards); 4 a page for the browser (its address); 5 a note for the log (its text). A
- * string is its u16 length and its UTF-8 bytes.
+ * (u8 field, u8 clear afterwards); 4 a page for the browser (its address); 5 a note for the log (its text); 6 the
+ * app's page in the system's settings (nothing more). A string is its u16 length and its UTF-8 bytes.
  */
 final class PaintView extends FrameLayout {
     private static final String TAG = "Swapdesk";
@@ -97,6 +97,7 @@ final class PaintView extends FrameLayout {
     private static final int ASK_SUBMIT_EDIT = 3;
     private static final int ASK_OPEN_PAGE = 4;
     private static final int ASK_NOTE = 5;
+    private static final int ASK_OPEN_APP_SETTINGS = 6;
 
     private final Activity activity;
     private final Fonts fonts;
@@ -339,7 +340,11 @@ final class PaintView extends FrameLayout {
     private void second() {
         followSystem();
         Shell.tick();
-        acted();
+        runAsks();
+        // A second that changed nothing on the screen paints nothing.
+        if (Shell.wantsFrame()) {
+            requestFrame();
+        }
         postDelayed(everySecond, 1000);
     }
 
@@ -521,6 +526,11 @@ final class PaintView extends FrameLayout {
                         break;
                     case ASK_NOTE:
                         Log.i(TAG, "ASK " + string(in, asks));
+                        break;
+                    case ASK_OPEN_APP_SETTINGS:
+                        Log.i(TAG, "ASK the app's settings");
+                        activity.startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", activity.getPackageName(), null)));
                         break;
                     default:
                         throw new IllegalStateException("ask " + code + " is not one this build knows");

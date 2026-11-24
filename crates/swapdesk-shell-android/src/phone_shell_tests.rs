@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use swapdesk_paint::Rect;
 use swapdesk_ui::mock::Scenario;
-use swapdesk_ui::{Command, ControlId, EditId, Nav, SelectId, Ticket, UiBackend, UiEvent, UiState};
+use swapdesk_ui::{
+    Command, ControlId, EditId, LocalNetwork, Nav, NoticeKind, SelectId, Ticket, UiBackend, UiEvent, UiState,
+};
 
 use crate::canvas_ops::{FRAME, Reader};
 use crate::phone_shell::{Ask, PhoneShell, ask, edit_code, edit_of};
@@ -261,4 +263,28 @@ fn what_the_phone_does_not_do_yet_is_said_not_swallowed() {
     let mut r = Reader(&bytes);
     assert_eq!((r.u8().unwrap(), r.u8().unwrap()), (1, ask::NOTE));
     assert!(r.str().unwrap().contains("A7") && r.0.is_empty());
+}
+
+/// F-AND-01 on the phone's shell: the refused notice's button asks Android for the app's page in its settings, and
+/// the notice goes when Android says the local network is allowed.
+#[test]
+fn the_local_network_notice_asks_android_for_the_apps_settings() {
+    let (mut shell, backend) = shell_of(Scenario::Inicio.phone_state());
+    shell.set_local_network(LocalNetwork::Refused);
+    assert!(shell.wants_frame());
+    settle(&mut shell);
+    tap(&mut shell, ControlId::Notice(NoticeKind::LocalNetwork));
+    assert_eq!(shell.asks(), [Ask::OpenAppSettings]);
+    assert_eq!(shell.take_asks(), vec![1, ask::OPEN_APP_SETTINGS]);
+    assert!(backend.sent.lock().unwrap().is_empty(), "nothing of it is the service's");
+
+    shell.set_local_network(LocalNetwork::Asking);
+    settle(&mut shell);
+    let placed = |shell: &PhoneShell| {
+        shell.output().unwrap().widgets.iter().any(|w| w.id == ControlId::Notice(NoticeKind::LocalNetwork))
+    };
+    assert!(!placed(&shell), "while the system asks, the notice has no button");
+    shell.set_local_network(LocalNetwork::Allowed);
+    settle(&mut shell);
+    assert!(!placed(&shell) && shell.state().notices().is_empty());
 }

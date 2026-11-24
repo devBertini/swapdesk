@@ -77,6 +77,13 @@ impl UiState {
             ),
             None => (None, None, true),
         };
+        // A phone that may not reach the local network is ready for nothing, whatever its network is.
+        let (status, ready) = match (self.local_network(), status) {
+            (crate::state::LocalNetwork::Allowed, status) => (status, ready),
+            (_, None) => (None, ready),
+            (crate::state::LocalNetwork::Asking, Some(_)) => (Some(self.t(MsgKey::ReadyLocalNetAsking)), false),
+            (crate::state::LocalNetwork::Refused, Some(_)) => (Some(self.t(MsgKey::ReadyLocalNetRefused)), false),
+        };
         let network = self.network().map(|n| NetworkChip {
             text: match &n.address {
                 Some(a) => self.tm(&Msg::new(MsgKey::NetworkLine).with(n.label.clone()).with(a.clone())),
@@ -132,6 +139,10 @@ impl UiState {
         }
         if let Some(chip) = &home.network {
             s.text(UiRole::Text, chip.text.clone());
+        }
+        // A phone that may not reach the local network says so before everything else.
+        if self.notices().first() == Some(&crate::state::NoticeKind::LocalNetwork) {
+            self.notice_controls(s, crate::state::NoticeKind::LocalNetwork);
         }
         // The update card comes first on Início (UPDATES.md 10.1).
         if let Some(c) = self.update_card() {

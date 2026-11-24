@@ -302,6 +302,14 @@ strings! {
     NoticeCrashTitle => "O Swapdesk fechou inesperadamente", "Swapdesk closed unexpectedly";
     NoticeCrashBody => "O registro do que aconteceu ficou na pasta de logs. Para relatar o problema, anexe esse arquivo.", "A record of what happened is in the logs folder. To report the problem, attach that file.";
     NoticeCrashButton => "Abrir a pasta de logs", "Open logs folder";
+    // A phone, from Android 17: the local network is a permission the person grants (docs/ANDROID.md 4).
+    NoticeLocalNetAskTitle => "O Swapdesk funciona só na rede local", "Swapdesk works only on your local network";
+    NoticeLocalNetAskBody => "Para encontrar e controlar seus computadores, o Android pede a sua permissão para alcançar os dispositivos desta rede.", "To find and control your computers, Android asks for your permission to reach the devices on this network.";
+    NoticeLocalNetRefusedTitle => "Rede local não permitida", "Local network not allowed";
+    NoticeLocalNetRefusedBody => "Sem a permissão de rede local, o Swapdesk não encontra nem alcança nenhum computador. Nada sai do seu celular.", "Without the local network permission, Swapdesk cannot find or reach any computer. Nothing leaves your phone.";
+    ReadyLocalNetAsking => "Esperando a permissão de rede local", "Waiting for the local network permission";
+    ReadyLocalNetRefused => "Sem acesso à rede local", "No access to the local network";
+    NoticeLocalNetButton => "Abrir os ajustes do app", "Open the app’s settings";
     NoComputerTitle => "Nenhum computador encontrado", "No computer found";
     NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e na mesma rede Wi-Fi ou cabo que este. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the other computer, check that Swapdesk is open and on the same Wi-Fi or cable as this one. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
     NoComputerButton => "Adicionar por endereço", "Add by address";

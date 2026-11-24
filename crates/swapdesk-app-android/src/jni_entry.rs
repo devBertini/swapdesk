@@ -239,6 +239,20 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_showLive<'caller
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `Shell.localNetwork(state)`: see [`crate::startup::local_network`]. Main thread only.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_localNetwork<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    state: jint,
+) {
+    env.with_env(|_| -> Result<_, Error> {
+        crate::startup::local_network(state);
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `Shell.drain()`: the backend has news (the waker posted). Main thread only.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_drain<'caller>(
@@ -355,7 +369,7 @@ mod dev {
                 Some(scenario) => {
                     // The mock's own backend answers from its script, as behind the desktops' `--mock`.
                     let backend = swapdesk_ui::mock::MockBackend::new(crate::ui_waker::waker());
-                    crate::phone_screen::show(scenario.prepared_state(), std::sync::Arc::new(backend));
+                    crate::phone_screen::show(scenario.prepared_state(), std::sync::Arc::new(backend), false);
                     let (w, h) = swapdesk_paint::design_size(swapdesk_ui::WindowKind::Main);
                     format!("OK {w} {h}")
                 }
@@ -409,6 +423,12 @@ mod dev {
                 }
                 if let Some(this) = st.this_device() {
                     let _ = write!(s, " ready={:?}", this.ready);
+                }
+                let _ = write!(s, " local={:?}", st.local_network());
+                // The first notice as the screens word it: its title, its text and its button.
+                if let Some(kind) = st.notices().first() {
+                    let (title, body, button) = st.notice_texts(*kind);
+                    let _ = write!(s, " notice=[{title};;{body};;{button}]");
                 }
                 if let Some(out) = shell.output() {
                     for w in &out.widgets {
