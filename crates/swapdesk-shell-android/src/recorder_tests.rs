@@ -16,22 +16,22 @@ use crate::canvas_ops::{Op, argb, decode, flag};
 use crate::text_measure::{Measured, Run, TextCache, TextKey, decode_needs, encode_measured};
 use crate::{FrameCost, Metrics, PASSES_MAX, PhoneWindow, Recorder, Surface};
 
-const METRICS: Metrics = Metrics { ascent: 0.97, descent: 0.25, mono_ascent: 0.9, mono_descent: 0.3 };
+pub(crate) const METRICS: Metrics = Metrics { ascent: 0.97, descent: 0.25, mono_ascent: 0.9, mono_descent: 0.3 };
 
 /// Android in the tests: every character is `advance` of the size wide, an ellipsized line is cut to fit, the
 /// semi-bold start of a label is a run of its own, and a line breaks where it is full, or at the last space before
 /// that when `words` is set.
 #[derive(Clone, Copy)]
-struct Fake {
+pub(crate) struct Fake {
     advance: f32,
     words: bool,
 }
 
 /// Close to the size a label gets before it is measured.
-const NEAR: Fake = Fake { advance: 0.55, words: false };
+pub(crate) const NEAR: Fake = Fake { advance: 0.55, words: false };
 
 impl Fake {
-    fn measure(self, key: &TextKey) -> Measured {
+    pub(crate) fn measure(self, key: &TextKey) -> Measured {
         let advance = f32::from_bits(key.size_px) * self.advance;
         let chars: Vec<(usize, char)> = key.text.chars().enumerate().collect();
         let fit = ((key.max_w_px as f32 / advance).floor() as usize).max(1);

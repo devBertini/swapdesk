@@ -311,7 +311,13 @@ The rule is one interface on every system (D37, F-UI-02). Three ways to honour i
    (`StaticLayout` with simple breaks and no hyphenation, `TextUtils.ellipsize`) and hands back, and the frame is
    painted again: one JNI crossing for a frame of text seen before, three to five for a new screen. Icons, arcs and
    shadows are worked out in Rust by the routines Windows and the Mac draw with and reach Java as paths and plain
-   rounded rectangles, so the replay holds no geometry of its own. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
+   rounded rectangles, so the replay holds no geometry of its own. **Input, as built (A3.3, D88):** Android
+   recognises the gestures (`GestureDetector`, `OverScroller`: its own slop and its own fling) and tells the Rust
+   shell (`PhoneShell`) what the finger did: pressed here, tapped here, dragged the pane by so much; the shell does
+   to the shared state what the desktop shells do, and what only Android can do comes back as asks (a select's
+   choices as the system's list, the keyboard in a field, a page for the browser). The frame is built in a
+   Choreographer callback, before the draw pass, so the native fields move in the same frame as the boxes drawn
+   under them. Text inputs are native `EditText` fields placed in the edit slots the screens report, as on Windows and the Mac
    (IME included). Accessibility comes from the shared tree (`swapdesk_ui::a11y`) through AccessKit's Android adapter,
    which AccessKit lists ("implements the Java-based Android accessibility API") [S43], or the framework's
    `AccessibilityNodeProvider` (16) [S29] if that adapter does not fit. Keeps one set of screens, texts, tokens and

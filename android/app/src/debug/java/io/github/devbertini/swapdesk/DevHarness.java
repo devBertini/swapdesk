@@ -8,7 +8,6 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.util.Log;
-import android.view.View;
 import android.widget.TextView;
 
 import java.net.Inet4Address;
@@ -29,6 +28,8 @@ import java.net.Inet4Address;
  *         [--es fit 1]                 the desktop window of that state, whole, as large as the screen allows
  *         [--es landscape 1]           with the screen held sideways
  *         [--es frames N]              N frames painted in a row, each logged with what it cost (default 1)
+ *                                      and, after every frame that changed it, a STATE line: the pane, what is
+ *                                      over it, and where each control is (for taps sent with adb)
  * </pre>
  */
 final class DevHarness {
@@ -44,14 +45,19 @@ final class DevHarness {
 
     private static native String mock(String scenario);
 
+    private static native String state();
+
     /** The development options the intent asks of the core, or none. */
     static String options(Activity activity) {
         String dev = activity.getIntent().getStringExtra("dev");
         return dev == null ? "" : dev;
     }
 
-    /** The screen the intent asks for in place of the app's own: a state of the design's mock. Null when none. */
-    static View screen(Activity activity) {
+    /**
+     * The screen the intent asks for in place of the app's own: a state of the design's mock, with the mock's own
+     * backend behind it, so taps, lists and fields answer as they do behind the desktops' --mock. Null when none.
+     */
+    static PaintView screen(Activity activity) {
         String scenario = activity.getIntent().getStringExtra("mock");
         if (scenario == null) {
             return null;
@@ -65,12 +71,25 @@ final class DevHarness {
             return null;
         }
         PaintView view = new PaintView(activity);
+        view.keepScenario();
         if (activity.getIntent().getStringExtra("fit") != null) {
             String[] size = said.split(" ");
             view.fit(Float.parseFloat(size[1]), Float.parseFloat(size[2]));
         }
         String frames = activity.getIntent().getStringExtra("frames");
         view.trace(frames == null ? 1 : Integer.parseInt(frames));
+        // For a script that drives the screen by real touches (adb): after a frame that changed it, where the
+        // screen is and where its controls are, in the screen's own pixels.
+        String[] last = {""};
+        view.afterFrame(() -> {
+            String now = state();
+            if (!now.equals(last[0])) {
+                last[0] = now;
+                int[] origin = new int[2];
+                view.getLocationOnScreen(origin);
+                Log.i(TAG, "STATE origin=" + origin[0] + "," + origin[1] + " " + now);
+            }
+        });
         return view;
     }
 

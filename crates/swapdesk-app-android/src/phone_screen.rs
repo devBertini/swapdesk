@@ -1,14 +1,15 @@
-//! The phone's screen: the state the app shows and the window that paints it (`swapdesk-shell-android`), held on the
-//! thread that calls in, which on Android is the main thread of the app (every call of `Shell` comes from the view).
+//! The phone's screen: the shell that shows the state (`swapdesk_shell_android::PhoneShell`), held on the thread that
+//! calls in, which on Android is the main thread of the app (every call of `Shell` comes from the view or from the
+//! main Looper).
 //!
-//! Plain Rust: the desktop gate builds and tests it; `jni_entry` only carries bytes in and out.
+//! Plain Rust: the desktop gate builds and tests it; `jni_entry` only carries values in and out.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
-use swapdesk_paint::Interaction;
 use swapdesk_shell_android::canvas_ops::FRAME;
-use swapdesk_shell_android::{FrameCost, Metrics, PhoneWindow, Surface};
-use swapdesk_ui::{UiState, WindowKind};
+use swapdesk_shell_android::{FrameCost, Metrics, PhoneShell};
+use swapdesk_ui::{UiBackend, UiState};
 
 /// The densities a frame is painted at: Android's go from 0.75 to 4, and a development view that fits a desktop
 /// window into the phone's screen may go below.
@@ -17,26 +18,13 @@ const DENSITY: std::ops::RangeInclusive<f32> = 0.25..=8.0;
 const SIDE_MAX: i32 = 16_384;
 
 struct Screen {
-    window: PhoneWindow,
-    state: Option<UiState>,
-    ix: Interaction,
+    shell: Option<PhoneShell>,
     /// The monospaced face's ascent and descent as Java read them; Menlo's until then.
     mono: (f32, f32),
 }
 
 thread_local! {
-    static SCREEN: RefCell<Screen> = RefCell::new(Screen {
-        window: PhoneWindow::new(),
-        state: None,
-        ix: touched(),
-        mono: (0.93, 0.24),
-    });
-}
-
-/// A phone's screen is touched: its controls take a finger on 48 DIPs at least, and at a phone's size the main
-/// window takes the compact layout (`swapdesk_paint::is_compact`).
-fn touched() -> Interaction {
-    Interaction { touch: true, ..Interaction::default() }
+    static SCREEN: RefCell<Screen> = const { RefCell::new(Screen { shell: None, mono: (0.93, 0.24) }) };
 }
 
 /// The ascent and descent of the phone's monospaced face, as fractions of its size.
@@ -46,12 +34,17 @@ pub fn set_mono_metrics(ascent: f32, descent: f32) {
     }
 }
 
-/// Shows `state` from the next frame on.
-pub fn show(state: UiState) {
-    SCREEN.with_borrow_mut(|s| {
-        s.state = Some(state);
-        s.ix = touched();
-    });
+/// Shows `state` from the next frame on, with `backend` behind it, and sends what a shell sends when it starts.
+pub fn show(state: UiState, backend: Arc<dyn UiBackend>) {
+    let mut shell = PhoneShell::new(state, backend);
+    shell.start();
+    SCREEN.with_borrow_mut(|s| s.shell = Some(shell));
+}
+
+/// Runs `f` on the shell, when there is one. A call that arrives while another is under way on this thread (the
+/// state calling back into the view) is dropped.
+pub fn with_shell<R>(f: impl FnOnce(&mut PhoneShell) -> R) -> Option<R> {
+    SCREEN.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.shell.as_mut().map(f)))
 }
 
 /// One pass of a frame for a view of `width_px` by `height_px` at `density` device pixels per DIP: the frame to
@@ -59,28 +52,26 @@ pub fn show(state: UiState) {
 /// size that is no screen, the frame is empty.
 pub fn paint(width_px: i32, height_px: i32, density: f32) -> Vec<u8> {
     let sized = (1..=SIDE_MAX).contains(&width_px) && (1..=SIDE_MAX).contains(&height_px) && DENSITY.contains(&density);
+    if !sized {
+        return vec![FRAME];
+    }
     SCREEN.with_borrow_mut(|s| {
-        let Screen { window, state, ix, mono } = s;
-        let Some(state) = state.as_ref().filter(|_| sized) else { return vec![FRAME] };
-        let on = Surface {
-            kind: WindowKind::Main,
-            size: (width_px as f32 / density, height_px as f32 / density),
-            scale: density,
-            // Until the text inputs are native fields over the drawn ones (slice A3.3), their values are drawn.
-            offscreen: true,
-        };
-        window.paint(Metrics::new(mono.0, mono.1), state, ix, on)
+        let metrics = Metrics::new(s.mono.0, s.mono.1);
+        match s.shell.as_mut() {
+            Some(shell) => shell.paint(metrics, width_px as f32, height_px as f32, density),
+            None => vec![FRAME],
+        }
     })
 }
 
 /// Java's answer to the last list of text to measure.
 pub fn measured(answer: &[u8]) -> Result<usize, &'static str> {
-    SCREEN.with_borrow_mut(|s| s.window.measured(answer))
+    with_shell(|shell| shell.measured(answer)).unwrap_or(Err("no screen to measure for"))
 }
 
 /// What the last frame cost.
 pub fn cost() -> FrameCost {
-    SCREEN.with_borrow(|s| s.window.cost())
+    with_shell(|shell| shell.cost()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -88,8 +79,21 @@ mod tests {
     use swapdesk_shell_android::canvas_ops::{NEEDS, Op, decode};
     use swapdesk_shell_android::text_measure::{Measured, Run, decode_needs, encode_measured};
     use swapdesk_ui::mock::Scenario;
+    use swapdesk_ui::{Command, ControlId, Nav, Ticket, UiEvent};
 
     use super::*;
+
+    /// A backend that answers nothing.
+    struct Silent;
+
+    impl UiBackend for Silent {
+        fn send(&self, _: Command) -> Ticket {
+            Ticket(1)
+        }
+        fn drain(&self) -> Vec<UiEvent> {
+            Vec::new()
+        }
+    }
 
     /// What the view does: paint, measure what is asked, paint again, until a frame.
     fn frame(width_px: i32, height_px: i32, density: f32) -> Vec<Op> {
@@ -118,7 +122,8 @@ mod tests {
     #[test]
     fn the_screen_is_empty_until_there_is_a_state_and_then_paints_it_at_the_views_size() {
         assert_eq!(paint(1080, 2400, 2.625), vec![FRAME], "nothing to show yet");
-        show(Scenario::Dispositivos.prepared_state());
+        assert!(with_shell(|_| ()).is_none() && measured(&[]).is_err() && cost() == FrameCost::default());
+        show(Scenario::Dispositivos.prepared_state(), Arc::new(Silent));
         set_mono_metrics(0.9, 0.3);
         set_mono_metrics(f32::NAN, 0.3);
 
@@ -145,5 +150,19 @@ mod tests {
         let phone = frame(1080, 2400, 2.625);
         assert!(cost().lists >= 1);
         assert!(!said(&phone, "Início") && !said(&phone, "Ajustes") && said(&phone, "Controlar"), "the compact layout");
+
+        // The shell is the one the view's calls reach: back leaves the computer's page.
+        assert_eq!(
+            with_shell(|shell| (shell.takes_back(), shell.back(), shell.state().nav())),
+            Some((true, true, Nav::Home))
+        );
+        let home = frame(1080, 2400, 2.625);
+        assert!(said(&home, "Swapdesk") && !said(&home, "Controlar"), "the first pane");
+        assert!(
+            with_shell(|shell| shell
+                .output()
+                .is_some_and(|o| o.widgets.iter().any(|w| w.id == ControlId::NavSettings)))
+            .unwrap_or(false)
+        );
     }
 }

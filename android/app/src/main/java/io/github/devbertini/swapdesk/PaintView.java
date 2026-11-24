@@ -1,25 +1,45 @@
 package io.github.devbertini.swapdesk;
 
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.BlendMode;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.net.Uri;
+import android.os.Build;
 import android.text.TextPaint;
 import android.util.Log;
-import android.view.View;
+import android.view.Choreographer;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
+import android.widget.FrameLayout;
+import android.widget.OverScroller;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.TimeZone;
 
 /**
- * The view of the shared screens. It decides nothing about what a screen looks like: the core paints the screen
- * into a buffer of operations, in device pixels, and this view replays them on its canvas (crates/
- * swapdesk-shell-android, {@code canvas_ops}, whose {@code decode} this follows field for field; every number
- * little-endian, a colour {@code 0xAARRGGBB}, a rectangle x, y, width, height):
+ * The view of the shared screens. It decides nothing about what a screen looks like or does: the core paints the
+ * screen into a buffer of operations, in device pixels, and this view replays them on its canvas; a finger's tap
+ * and drag go to the core as what they are (Android recognises them, with its own slop and fling), and what only
+ * Android can do comes back as asks (a list of choices, the keyboard in a field, a page in the browser).
+ *
+ * <p>A frame is built before the draw pass (a Choreographer callback), so the native text fields ({@link Fields})
+ * move in the same frame as the boxes drawn under them.
+ *
+ * <p>The frame (crates/swapdesk-shell-android, {@code canvas_ops}, whose {@code decode} this follows field for
+ * field; every number little-endian, a colour {@code 0xAARRGGBB}, a rectangle x, y, width, height):
  *
  * <pre>
  *  1 clear            colour
@@ -39,8 +59,13 @@ import java.nio.charset.StandardCharsets;
  * 14 text             baseline start x y, colour, f32 size, u16 weight, f32 tracking (ems), u8 flags,
  *                     u16 length, the text (UTF-8)
  * </pre>
+ *
+ * <p>The asks ({@code PhoneShell::take_asks}): u8 count, then per ask a u8 code and: 1 a list of choices (u16
+ * selected or 0xFFFF, u16 count, the choices); 2 the keyboard in a field (u8 field); 3 a field's text to the core
+ * (u8 field, u8 clear afterwards); 4 a page for the browser (its address); 5 a note for the log (its text). A
+ * string is its u16 length and its UTF-8 bytes.
  */
-final class PaintView extends View {
+final class PaintView extends FrameLayout {
     private static final String TAG = "Swapdesk";
 
     private static final int FRAME = 0;
@@ -67,26 +92,69 @@ final class PaintView extends View {
     private static final int SEG_CUBIC = 2;
     private static final int SEG_CLOSE = 3;
 
+    private static final int ASK_MENU = 1;
+    private static final int ASK_FOCUS_EDIT = 2;
+    private static final int ASK_SUBMIT_EDIT = 3;
+    private static final int ASK_OPEN_PAGE = 4;
+    private static final int ASK_NOTE = 5;
+
+    private final Activity activity;
     private final Fonts fonts;
     private final TextMeasurer measurer;
+    private final Fields fields;
     private final TextPaint text = Fonts.paint();
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private DashPathEffect dashes;
     private float dashesWidth;
 
+    private final GestureDetector gestures;
+    private final OverScroller fling;
+    /** The control under the finger shows as pressed. */
+    private boolean pressed;
+    /** The touch that is down started where the pane scrolls. */
+    private boolean scrolls;
+
+    /** The last frame the core painted, replayed at every draw. */
+    private byte[] frame;
+    private boolean frameQueued;
+    private final Choreographer.FrameCallback onFrame = nanos -> {
+        frameQueued = false;
+        buildFrame();
+    };
+    private final Runnable everySecond = this::second;
+    private boolean ticking;
+    /** Android 13 and later: registered while the back gesture is the app's to answer. */
+    private Object backCallback;
+    private boolean backRegistered;
+    /** The canvas colour of the last frame: what shows behind the system's bars. */
+    private int ground = Color.TRANSPARENT;
+
+    /** The screens follow the phone's clock and its light or dark appearance. Off for a development mock. */
+    private boolean followsSystem = true;
     /** Development only: the size in DIPs of a desktop window to fit into the view, or 0 for the phone's own. */
     private float fitWidth;
     private float fitHeight;
     /** Development only: how many more frames are painted and logged with what they cost. */
     private int traced;
+    /** Development only: run after every frame. */
+    private Runnable afterFrame;
 
-    PaintView(Context context) {
-        super(context);
+    PaintView(Activity activity) {
+        super(activity);
+        this.activity = activity;
+        setWillNotDraw(false);
+        Shell.attach();
         fonts = new Fonts(Shell.font());
         measurer = new TextMeasurer(fonts);
         float[] mono = fonts.monoMetrics();
         Shell.monoMetrics(mono[0], mono[1]);
+        fields = new Fields(this, fonts, this::acted);
+        fling = new OverScroller(activity);
+        gestures = new GestureDetector(activity, new Touch());
+        // A hold is not a gesture of its own yet (context menus come with the files): a finger held and lifted
+        // where it went down is a tap, as on any Android button.
+        gestures.setIsLongpressEnabled(false);
     }
 
     /** Development only: shows a window of this size in DIPs whole, as large as the view allows. */
@@ -98,52 +166,381 @@ final class PaintView extends View {
     /** Development only: paints this many frames in a row and logs what each cost. */
     void trace(int frames) {
         traced = frames;
-        invalidate();
+        requestFrame();
     }
 
-    @Override
-    protected void onDraw(Canvas canvas) {
+    /** Development only: runs this after every frame the core painted. */
+    void afterFrame(Runnable hook) {
+        afterFrame = hook;
+    }
+
+    /** Development only: a mock keeps its own clock and theme, so its pictures compare with the desktops'. */
+    void keepScenario() {
+        followsSystem = false;
+    }
+
+    // ----- frames -----
+
+    /** Asks for a frame at the next vsync; many requests before it make one frame. */
+    void requestFrame() {
+        if (!frameQueued) {
+            frameQueued = true;
+            Choreographer.getInstance().postFrameCallback(onFrame);
+        }
+    }
+
+    /** After something was done to the core (a tap, back, a choice, a field's text): its asks, then the screen. */
+    private void acted() {
+        runAsks();
+        requestFrame();
+    }
+
+    private float density() {
+        if (fitWidth > 0f && fitHeight > 0f) {
+            return Math.min(getWidth() / fitWidth, getHeight() / fitHeight);
+        }
+        return getResources().getDisplayMetrics().density;
+    }
+
+    /** Has the core paint a frame for the view as it is now, places the text fields over it and draws it. */
+    private void buildFrame() {
+        if (getWidth() <= 0 || getHeight() <= 0) {
+            return;
+        }
         long start = System.nanoTime();
-        float density = getResources().getDisplayMetrics().density;
+        if (!fling.isFinished() && fling.computeScrollOffset()) {
+            Shell.scrollTo(fling.getCurrY());
+        }
+        float density = density();
         int width = getWidth();
         int height = getHeight();
         if (fitWidth > 0f && fitHeight > 0f) {
-            density = Math.min(width / fitWidth, height / fitHeight);
             width = Math.round(fitWidth * density);
             height = Math.round(fitHeight * density);
         }
         long measuring = 0;
-        byte[] frame = Shell.paint(width, height, density);
-        for (int list = 0; frame.length > 0 && frame[0] != FRAME && list < LISTS_MAX; list++) {
-            long from = System.nanoTime();
-            byte[] answer;
-            try {
-                answer = measurer.measure(frame);
-            } catch (RuntimeException e) {
-                // A list that does not read: the core is told so (an empty answer) and gives its frame as it is.
-                Log.w(TAG, "MEASURE the list did not read: " + e);
-                answer = new byte[0];
+        byte[] painted = null;
+        // A field under the keyboard is scrolled into sight: one more paint when that moved the pane.
+        for (int attempt = 0; attempt < 2; attempt++) {
+            painted = Shell.paint(width, height, density);
+            for (int list = 0; painted.length > 0 && painted[0] != FRAME && list < LISTS_MAX; list++) {
+                long from = System.nanoTime();
+                byte[] answer;
+                try {
+                    answer = measurer.measure(painted);
+                } catch (RuntimeException e) {
+                    // A list that does not read: the core is told so (an empty answer) and gives its frame as it is.
+                    Log.w(TAG, "MEASURE the list did not read: " + e);
+                    answer = new byte[0];
+                }
+                measuring += System.nanoTime() - from;
+                String said = Shell.measured(answer);
+                if (!said.isEmpty()) {
+                    Log.w(TAG, "MEASURE " + said);
+                }
+                painted = Shell.paint(width, height, density);
             }
-            measuring += System.nanoTime() - from;
-            String said = Shell.measured(answer);
-            if (!said.isEmpty()) {
-                Log.w(TAG, "MEASURE " + said);
+            int typing = fields.focused();
+            if (typing == 0 || !Shell.reveal(typing)) {
+                break;
             }
-            frame = Shell.paint(width, height, density);
         }
-        long painted = System.nanoTime();
-        int operations = frame.length > 0 && frame[0] == FRAME ? replay(canvas, frame) : -1;
+        if (painted.length > 0 && painted[0] == FRAME) {
+            frame = painted;
+            fields.place(Shell.edits());
+            followGround();
+            followBack();
+            if (afterFrame != null) {
+                afterFrame.run();
+            }
+        }
+        invalidate();
         if (traced > 0) {
             traced--;
-            long end = System.nanoTime();
-            Log.i(TAG, "FRAME " + Shell.cost() + " paint_us=" + (painted - start - measuring) / 1000 + " measure_us="
-                    + measuring / 1000 + " replay_us=" + (end - painted) / 1000 + " bytes=" + frame.length
-                    + " operations=" + operations + " view=" + width + "x" + height + " density=" + density);
+            Log.i(TAG, "FRAME " + Shell.cost() + " paint_us=" + (System.nanoTime() - start - measuring) / 1000
+                    + " measure_us=" + measuring / 1000 + " bytes=" + painted.length + " view=" + width + "x" + height
+                    + " density=" + density);
+        }
+        if (traced > 0 || !fling.isFinished() || Shell.wantsFrame()) {
+            requestFrame();
+        }
+    }
+
+    @Override
+    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+        requestFrame();
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        if (frame == null) {
+            // The first draw came before the first frame callback.
+            buildFrame();
+        }
+        if (frame != null) {
+            long start = System.nanoTime();
+            int operations = replay(canvas, frame);
             if (traced > 0) {
-                postInvalidateOnAnimation();
+                Log.i(TAG, "REPLAY replay_us=" + (System.nanoTime() - start) / 1000 + " operations=" + operations);
             }
         }
     }
+
+    // ----- the phone around the screens -----
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        Shell.onNews(this::acted);
+        followSystem();
+        if (!ticking) {
+            ticking = true;
+            postDelayed(everySecond, 1000);
+        }
+        requestFrame();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        Shell.onNews(null);
+        removeCallbacks(everySecond);
+        ticking = false;
+        if (backRegistered && Build.VERSION.SDK_INT >= 33) {
+            activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
+            backRegistered = false;
+        }
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration config) {
+        super.onConfigurationChanged(config);
+        followSystem();
+        requestFrame();
+    }
+
+    private void second() {
+        followSystem();
+        Shell.tick();
+        acted();
+        postDelayed(everySecond, 1000);
+    }
+
+    /** The phone's clock and its light or dark appearance, for the screens. */
+    private void followSystem() {
+        if (!followsSystem) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Shell.setClock(now, TimeZone.getDefault().getOffset(now) / 60_000);
+        int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        Shell.setDark(night == Configuration.UI_MODE_NIGHT_YES);
+    }
+
+    /** What shows behind the system's bars is the screen's own ground, and the bars' icons are read on it. */
+    private void followGround() {
+        if (frame.length < 6 || frame[1] != CLEAR) {
+            return;
+        }
+        int color = ByteBuffer.wrap(frame, 2, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        if (color == ground) {
+            return;
+        }
+        ground = color;
+        ((android.view.View) getParent()).setBackgroundColor(color);
+        boolean light = Color.luminance(color) > 0.5f;
+        int bars = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+        android.view.WindowInsetsController controller = activity.getWindow().getInsetsController();
+        if (controller != null) {
+            controller.setSystemBarsAppearance(light ? bars : 0, bars);
+        }
+    }
+
+    /** Android's back gesture: the app's while the core takes it, the system's on the first pane. */
+    boolean back() {
+        if (!Shell.back()) {
+            return false;
+        }
+        acted();
+        return true;
+    }
+
+    /**
+     * From Android 13 the system asks before the gesture ends whether the app answers it: the callback is
+     * registered only while the core takes the gesture, so on the first pane the system shows its own way home.
+     */
+    private void followBack() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        boolean takes = Shell.takesBack();
+        if (takes == backRegistered) {
+            return;
+        }
+        OnBackInvokedDispatcher dispatcher = activity.getOnBackInvokedDispatcher();
+        if (backCallback == null) {
+            backCallback = (OnBackInvokedCallback) this::back;
+        }
+        if (takes) {
+            dispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    (OnBackInvokedCallback) backCallback);
+        } else {
+            dispatcher.unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
+        }
+        backRegistered = takes;
+    }
+
+    // ----- a finger -----
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        gestures.onTouchEvent(event);
+        int action = event.getActionMasked();
+        if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) && pressed) {
+            // The finger came up after it left the place of a tap.
+            Shell.cancel();
+            pressed = false;
+            requestFrame();
+        }
+        return true;
+    }
+
+    private final class Touch extends GestureDetector.SimpleOnGestureListener {
+        @Override
+        public boolean onDown(MotionEvent event) {
+            fling.forceFinished(true);
+            pressed = false;
+            scrolls = Shell.scrollsAt(event.getX(), event.getY());
+            return true;
+        }
+
+        @Override
+        public void onShowPress(MotionEvent event) {
+            // Only once the finger has stayed: a drag that scrolls does not flash what it started on.
+            press(event);
+        }
+
+        @Override
+        public boolean onSingleTapUp(MotionEvent event) {
+            press(event);
+            Shell.release(event.getX(), event.getY());
+            pressed = false;
+            acted();
+            return true;
+        }
+
+        @Override
+        public boolean onScroll(MotionEvent down, MotionEvent event, float dx, float dy) {
+            if (pressed) {
+                Shell.cancel();
+                pressed = false;
+                requestFrame();
+            }
+            if (scrolls && Shell.scrollBy(dy)) {
+                requestFrame();
+            }
+            return true;
+        }
+
+        @Override
+        public boolean onFling(MotionEvent down, MotionEvent event, float vx, float vy) {
+            if (scrolls) {
+                fling.fling(0, Math.round(Shell.scrollOffset()), 0, Math.round(-vy), 0, 0, 0,
+                        Math.round(Shell.scrollMax()));
+                requestFrame();
+            }
+            return true;
+        }
+
+        private void press(MotionEvent event) {
+            if (!pressed) {
+                Shell.press(event.getX(), event.getY());
+                pressed = true;
+                requestFrame();
+            }
+        }
+    }
+
+    // ----- what only Android can do -----
+
+    private void runAsks() {
+        byte[] asks = Shell.takeAsks();
+        if (asks.length < 2) {
+            return;
+        }
+        try {
+            ByteBuffer in = ByteBuffer.wrap(asks).order(ByteOrder.LITTLE_ENDIAN);
+            for (int count = in.get() & 0xFF; count > 0; count--) {
+                int code = in.get() & 0xFF;
+                switch (code) {
+                    case ASK_MENU: {
+                        int selected = in.getShort() & 0xFFFF;
+                        String[] choices = new String[in.getShort() & 0xFFFF];
+                        for (int i = 0; i < choices.length; i++) {
+                            choices[i] = string(in, asks);
+                        }
+                        choose(choices, selected < choices.length ? selected : -1);
+                        break;
+                    }
+                    case ASK_FOCUS_EDIT:
+                        fields.focus(in.get() & 0xFF);
+                        break;
+                    case ASK_SUBMIT_EDIT: {
+                        int field = in.get() & 0xFF;
+                        fields.submit(field, in.get() != 0);
+                        break;
+                    }
+                    case ASK_OPEN_PAGE:
+                        open(string(in, asks));
+                        break;
+                    case ASK_NOTE:
+                        Log.i(TAG, "ASK " + string(in, asks));
+                        break;
+                    default:
+                        throw new IllegalStateException("ask " + code + " is not one this build knows");
+                }
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "ASKS did not read: " + e);
+        }
+    }
+
+    /** A select's choices, as the system's list over the screen; closing it without a choice is an answer too. */
+    private void choose(String[] choices, int selected) {
+        boolean[] answered = {false};
+        new AlertDialog.Builder(activity)
+                .setSingleChoiceItems(choices, selected, (dialog, which) -> {
+                    answered[0] = true;
+                    dialog.dismiss();
+                    Shell.chose(which);
+                    acted();
+                })
+                .setOnDismissListener(dialog -> {
+                    if (!answered[0]) {
+                        Shell.chose(-1);
+                    }
+                })
+                .show();
+    }
+
+    private void open(String page) {
+        try {
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(page)));
+        } catch (ActivityNotFoundException e) {
+            Log.w(TAG, "ASK no app opens the page");
+        }
+    }
+
+    private static String string(ByteBuffer in, byte[] from) {
+        int length = in.getShort() & 0xFFFF;
+        String text = new String(from, in.position(), length, StandardCharsets.UTF_8);
+        in.position(in.position() + length);
+        return text;
+    }
+
+    // ----- the replay -----
 
     /** Replays a frame. Returns how many operations it held, or -1 when it did not read to its end. */
     private int replay(Canvas canvas, byte[] frame) {
@@ -274,9 +671,7 @@ final class PaintView extends View {
                         int weight = in.getShort() & 0xFFFF;
                         float tracking = in.getFloat();
                         int flags = in.get() & 0xFF;
-                        int length = in.getShort() & 0xFFFF;
-                        String run = new String(frame, in.position(), length, StandardCharsets.UTF_8);
-                        in.position(in.position() + length);
+                        String run = string(in, frame);
                         fonts.apply(text, size, weight, tracking, flags);
                         text.setColor(color);
                         canvas.drawText(run, x, y, text);

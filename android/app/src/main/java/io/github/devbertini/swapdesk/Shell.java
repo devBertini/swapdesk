@@ -1,15 +1,26 @@
 package io.github.devbertini.swapdesk;
 
+import android.os.Handler;
+import android.os.Looper;
+
 /**
- * The shared screens, painted by the Rust core (crates/swapdesk-app-android, {@code phone_screen}): the same ones
- * Windows and the Mac show. Every method is called from the main thread, where the core keeps the screen.
+ * The shared screens and the shell around them, in the Rust core (crates/swapdesk-app-android,
+ * {@code phone_screen}; crates/swapdesk-shell-android, {@code PhoneShell}): the same screens Windows and the Mac
+ * show. Every native method is called from the main thread, where the core keeps the screen. Points and lengths
+ * are device pixels of the view.
  */
 final class Shell {
     static {
         System.loadLibrary("swapdesk_android");
     }
 
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static Runnable news;
+
     private Shell() {}
+
+    /** Lets the core call {@link #wake()}: it keeps this class. Once, before the first frame. */
+    static native void attach();
 
     /** The interface's face, Instrument Sans (a variable font), which the core carries for every system. */
     static native byte[] font();
@@ -29,4 +40,89 @@ final class Shell {
 
     /** What the last frame cost, for the trace: {@code lists=N labels=N forced=0|1}. */
     static native String cost();
+
+    /** Whether the screen is behind the state: a frame is wanted. */
+    static native boolean wantsFrame();
+
+    /** A finger is down at this point and stays: the control under it shows as pressed. */
+    static native void press(float x, float y);
+
+    /** The finger came up where it went down: a tap on what is under it. */
+    static native void release(float x, float y);
+
+    /** The touch became a drag or was taken away: nothing stays pressed. */
+    static native void cancel();
+
+    /** Whether a drag that starts at this point moves the pane. */
+    static native boolean scrollsAt(float x, float y);
+
+    /** Moves the pane by {@code dy} (a finger moving up scrolls down). Returns whether it moved. */
+    static native boolean scrollBy(float dy);
+
+    /** Puts the pane at {@code y} from its top, inside its range. Returns whether it moved. */
+    static native boolean scrollTo(float y);
+
+    /** The pane's offset. */
+    static native float scrollOffset();
+
+    /** The pane's largest offset. */
+    static native float scrollMax();
+
+    /** Whether Android's back gesture is the app's to answer now (not on the first pane with nothing over it). */
+    static native boolean takesBack();
+
+    /** Android's back gesture. False when it is the system's. */
+    static native boolean back();
+
+    /** A second went by. */
+    static native void tick();
+
+    /** The core has news: applies them. Called by {@link #wake()}'s post. */
+    static native void drain();
+
+    /** The phone's time and its offset from UTC in minutes, for what the screens say about time. */
+    static native void setClock(long nowMs, int utcOffsetMin);
+
+    /** The system's light or dark appearance. */
+    static native void setDark(boolean dark);
+
+    /**
+     * What only Android can do, queued since the last call (crates/swapdesk-shell-android,
+     * {@code PhoneShell::take_asks}; {@link PaintView} runs it).
+     */
+    static native byte[] takeAsks();
+
+    /** The native text fields of the last frame ({@code PhoneShell::edits}; {@link Fields} reads it). */
+    static native byte[] edits();
+
+    /** Scrolls the pane so that a text field is in sight (the keyboard took part of the screen). Whether it moved. */
+    static native boolean reveal(int field);
+
+    /** The text of a native field, when it acts. */
+    static native void submitEdit(int field, String text);
+
+    /** The answer to a list of choices; a negative index when it was closed without one. */
+    static native void chose(int index);
+
+    /**
+     * Called by the core from any of its threads when it has news (its one call into Java, crates/
+     * swapdesk-app-android, {@code ui_waker}): the main thread drains them and tells the screen.
+     */
+    @SuppressWarnings("unused") // called from Rust by name: keep the name and the signature
+    static void wake() {
+        MAIN.post(Shell::woken);
+    }
+
+    private static void woken() {
+        drain();
+        Runnable listener = news;
+        if (listener != null) {
+            listener.run();
+        }
+    }
+
+    /** Who is told, on the main thread, after news were applied; null for nobody. */
+    static void onNews(Runnable listener) {
+        news = listener;
+    }
 }

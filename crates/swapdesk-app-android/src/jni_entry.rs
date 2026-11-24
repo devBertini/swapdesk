@@ -8,7 +8,7 @@
 use jni::EnvUnowned;
 use jni::errors::{Error, ThrowRuntimeExAndDefault};
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jfloat, jint};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 
 fn said(result: Result<String, String>) -> String {
     result.unwrap_or_else(|why| format!("ERROR {why}"))
@@ -116,6 +116,166 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_measured<'caller
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `Shell.attach()`: keeps the class for the waker's call into `Shell.wake()` (see `crate::ui_waker`). Main thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_attach<'caller>(
+    mut env: EnvUnowned<'caller>,
+    class: JClass<'caller>,
+) {
+    env.with_env(|env| -> Result<_, Error> { crate::ui_waker::attach(env, &class) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// A native method of `Shell` that only calls the phone's shell (`swapdesk_shell_android::PhoneShell`) and hands a
+/// plain value back: `$default` when there is no shell yet. Main thread only, like every method of `Shell`.
+macro_rules! shell_call {
+    ($(#[$doc:meta])* $java:ident($($arg:ident: $ty:ty),*) -> $ret:ty, $default:expr, |$shell:ident| $body:expr) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "system" fn $java<'caller>(
+            mut env: EnvUnowned<'caller>,
+            _class: JClass<'caller>,
+            $($arg: $ty),*
+        ) -> $ret {
+            env.with_env(|_| -> Result<_, Error> {
+                Ok(crate::phone_screen::with_shell(|$shell| $body).unwrap_or($default))
+            })
+            .resolve::<ThrowRuntimeExAndDefault>()
+        }
+    };
+}
+
+shell_call!(
+    /// `Shell.press(x, y)`: a finger is down and stays, at this point of the view in device pixels.
+    Java_io_github_devbertini_swapdesk_Shell_press(x: jfloat, y: jfloat) -> (), (), |shell| shell.press(x, y)
+);
+shell_call!(
+    /// `Shell.release(x, y)`: the finger came up where it went down: a tap.
+    Java_io_github_devbertini_swapdesk_Shell_release(x: jfloat, y: jfloat) -> (), (), |shell| shell.release(x, y)
+);
+shell_call!(
+    /// `Shell.cancel()`: the touch became a drag or was taken away.
+    Java_io_github_devbertini_swapdesk_Shell_cancel() -> (), (), |shell| shell.cancel()
+);
+shell_call!(
+    /// `Shell.scrollsAt(x, y)`: whether a drag that starts here moves the pane.
+    Java_io_github_devbertini_swapdesk_Shell_scrollsAt(x: jfloat, y: jfloat) -> jboolean, false, |shell| shell
+        .scrolls_at(x, y)
+);
+shell_call!(
+    /// `Shell.scrollBy(dy)`: moves the pane by `dy` device pixels; whether it moved.
+    Java_io_github_devbertini_swapdesk_Shell_scrollBy(dy: jfloat) -> jboolean, false, |shell| shell.scroll_by(dy)
+);
+shell_call!(
+    /// `Shell.scrollTo(y)`: puts the pane at `y` device pixels from its top; whether it moved.
+    Java_io_github_devbertini_swapdesk_Shell_scrollTo(y: jfloat) -> jboolean, false, |shell| shell.scroll_to(y)
+);
+shell_call!(
+    /// `Shell.scrollOffset()`: the pane's offset, in device pixels.
+    Java_io_github_devbertini_swapdesk_Shell_scrollOffset() -> jfloat, 0.0, |shell| shell.scroll_range().0
+);
+shell_call!(
+    /// `Shell.scrollMax()`: the pane's largest offset, in device pixels.
+    Java_io_github_devbertini_swapdesk_Shell_scrollMax() -> jfloat, 0.0, |shell| shell.scroll_range().1
+);
+shell_call!(
+    /// `Shell.reveal(field)`: scrolls the pane so that a text field is in sight; whether it moved.
+    Java_io_github_devbertini_swapdesk_Shell_reveal(field: jint) -> jboolean, false, |shell| u8::try_from(field)
+        .ok()
+        .and_then(swapdesk_shell_android::phone_shell::edit_of)
+        .is_some_and(|edit| shell.reveal(edit))
+);
+shell_call!(
+    /// `Shell.takesBack()`: whether Android's back gesture is the app's to answer now.
+    Java_io_github_devbertini_swapdesk_Shell_takesBack() -> jboolean, false, |shell| shell.takes_back()
+);
+shell_call!(
+    /// `Shell.back()`: Android's back gesture; false when it is the system's.
+    Java_io_github_devbertini_swapdesk_Shell_back() -> jboolean, false, |shell| shell.back()
+);
+shell_call!(
+    /// `Shell.tick()`: a second went by.
+    Java_io_github_devbertini_swapdesk_Shell_tick() -> (), (), |shell| shell.tick()
+);
+shell_call!(
+    /// `Shell.wantsFrame()`: whether the screen is behind the state.
+    Java_io_github_devbertini_swapdesk_Shell_wantsFrame() -> jboolean, false, |shell| shell.wants_frame()
+);
+shell_call!(
+    /// `Shell.chose(index)`: the answer to a list of choices; a negative index when it was closed without one.
+    Java_io_github_devbertini_swapdesk_Shell_chose(index: jint) -> (), (), |shell| shell
+        .chose(usize::try_from(index).ok())
+);
+shell_call!(
+    /// `Shell.setClock(nowMs, utcOffsetMin)`: the phone's time and its offset from UTC.
+    Java_io_github_devbertini_swapdesk_Shell_setClock(now_ms: jlong, utc_offset_min: jint) -> (), (), |shell| shell
+        .set_clock(u64::try_from(now_ms).unwrap_or(0), utc_offset_min)
+);
+shell_call!(
+    /// `Shell.setDark(dark)`: the system's appearance.
+    Java_io_github_devbertini_swapdesk_Shell_setDark(dark: jboolean) -> (), (), |shell| shell.set_dark(dark)
+);
+
+/// `Shell.drain()`: the backend has news (the waker posted). Main thread only.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_drain<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) {
+    env.with_env(|_| -> Result<_, Error> {
+        // First: news that arrives while this drains posts again.
+        crate::ui_waker::waker().drained();
+        let _ = crate::phone_screen::with_shell(|shell| shell.drain());
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Shell.takeAsks()`: what only Android can do, queued since the last call (`PhoneShell::take_asks`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_takeAsks<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> JByteArray<'caller> {
+    env.with_env(|env| -> Result<_, Error> {
+        let asks = crate::phone_screen::with_shell(|shell| shell.take_asks()).unwrap_or_else(|| vec![0]);
+        env.byte_array_from_slice(&asks)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Shell.edits()`: the native text fields of the last frame (`PhoneShell::edits`); empty with no screen.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_edits<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> JByteArray<'caller> {
+    env.with_env(|env| -> Result<_, Error> {
+        let edits = crate::phone_screen::with_shell(|shell| shell.edits()).unwrap_or_default();
+        env.byte_array_from_slice(&edits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Shell.submitEdit(field, text)`: the text of a native field, when it acts (`PhoneShell::submit_edit`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_submitEdit<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    field: jint,
+    text: JString<'caller>,
+) {
+    env.with_env(|_| -> Result<_, Error> {
+        let text: String = text.to_string();
+        let edit = u8::try_from(field).ok().and_then(swapdesk_shell_android::phone_shell::edit_of);
+        if let Some(edit) = edit {
+            let _ = crate::phone_screen::with_shell(|shell| shell.submit_edit(edit, text));
+        }
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `Shell.cost()`: what the last frame cost, for the trace: `lists=N labels=N forced=0|1`. Main thread only.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_cost<'caller>(
@@ -170,12 +330,60 @@ mod dev {
             let name: String = scenario.to_string();
             let said = match swapdesk_ui::mock::Scenario::from_name(&name) {
                 Some(scenario) => {
-                    crate::phone_screen::show(scenario.prepared_state());
+                    // The mock's own backend answers from its script, as behind the desktops' `--mock`.
+                    let backend = swapdesk_ui::mock::MockBackend::new(crate::ui_waker::waker());
+                    crate::phone_screen::show(scenario.prepared_state(), std::sync::Arc::new(backend));
                     let (w, h) = swapdesk_paint::design_size(swapdesk_ui::WindowKind::Main);
                     format!("OK {w} {h}")
                 }
                 None => format!("ERROR no scenario named {name}"),
             };
+            JString::from_str(env, said)
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+    }
+
+    /// `DevHarness.state()`: where the screen is, for a script that drives it by real touches: the pane, the
+    /// computer whose page it is, the pane's offset and range, what stands over it, how many computers are listed,
+    /// how many commands went to the backend, and every control of the last frame with the middle of its box in
+    /// device pixels of the view. Main thread.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_devbertini_swapdesk_DevHarness_state<'caller>(
+        mut env: EnvUnowned<'caller>,
+        _class: JClass<'caller>,
+    ) -> JString<'caller> {
+        env.with_env(|env| -> Result<_, Error> {
+            use std::fmt::Write as _;
+            let said = crate::phone_screen::with_shell(|shell| {
+                let st = shell.state();
+                let (offset, max) = shell.scroll_range();
+                let over = if st.incoming_session_open() {
+                    "request"
+                } else if st.dialog(swapdesk_ui::WindowKind::Main).is_some() {
+                    "dialog"
+                } else if st.pairing().is_some() {
+                    "pairing"
+                } else {
+                    "-"
+                };
+                let mut s = format!(
+                    "nav={:?} device={} scroll={offset:.0}/{max:.0} over={over} dark={} computers={} renaming={}                      sent={}",
+                    st.nav(),
+                    st.selected_device().map_or("-", |d| d.name.as_str()),
+                    st.dark(),
+                    st.devices().len(),
+                    st.renaming().is_some(),
+                    shell.commands_sent(),
+                );
+                if let Some(out) = shell.output() {
+                    for w in &out.widgets {
+                        let (x, y) = w.rect.center();
+                        let _ = write!(s, " | {:?}@{:.0},{:.0}", w.id, x * shell.density(), y * shell.density());
+                    }
+                }
+                s
+            })
+            .unwrap_or_else(|| "no screen".to_owned());
             JString::from_str(env, said)
         })
         .resolve::<ThrowRuntimeExAndDefault>()

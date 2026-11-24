@@ -3,6 +3,7 @@ package io.github.devbertini.swapdesk;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -10,6 +11,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -30,6 +32,8 @@ public final class MainActivity extends Activity {
     private TextView status;
     private TextView notice;
     private Button openSettings;
+    /** The shared screens, once they are what the app shows. */
+    private PaintView screen;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,12 +76,31 @@ public final class MainActivity extends Activity {
         status.setText("Swapdesk " + version + "\n" + started);
         Networks.start(this);
         DevHarness.run(this, status);
-        View screen = DevHarness.screen(this);
+        screen = DevHarness.screen(this);
         if (screen != null) {
+            // The screens keep clear of the system's bars, of a cutout and of the keyboard: the holder takes them
+            // as its padding, and shows the screen's own ground behind them.
             FrameLayout holder = new FrameLayout(this);
-            holder.setFitsSystemWindows(true);
+            holder.setOnApplyWindowInsetsListener((view, insets) -> {
+                Insets around = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+                        | WindowInsets.Type.ime());
+                view.setPadding(around.left, around.top, around.right, around.bottom);
+                return WindowInsets.CONSUMED;
+            });
             holder.addView(screen);
             setContentView(holder);
+        }
+    }
+
+    /**
+     * Android 11 and 12 tell the back gesture this way; from Android 13 the screen registers a callback while the
+     * gesture is the app's ({@link PaintView}).
+     */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (screen == null || !screen.back()) {
+            super.onBackPressed();
         }
     }
 

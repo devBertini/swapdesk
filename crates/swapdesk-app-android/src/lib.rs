@@ -17,6 +17,8 @@ pub mod phone_service;
 pub mod selftest;
 #[cfg(target_os = "android")]
 mod startup;
+#[cfg(target_os = "android")]
+mod ui_waker;
 
 /// The version the app shows and logs: the workspace's version and the protocol it speaks.
 pub fn version() -> String {
