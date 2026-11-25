@@ -63,6 +63,31 @@ fn io_failed(e: io::Error) -> ErrorCode {
     }
 }
 
+/// How long a file another program holds open alone is waited for: a scanner reads a file that was just written
+/// and lets it go within milliseconds.
+const HELD_TRIES: u32 = 10;
+const HELD_PAUSE: Duration = Duration::from_millis(20);
+
+/// Opens `path` to read, waiting a moment while another program holds it without sharing (Windows: a sharing or
+/// lock violation, which a virus scanner causes on a file that was just written).
+fn open_held_briefly(path: &Path) -> io::Result<File> {
+    let mut tries = 0;
+    loop {
+        match File::open(path) {
+            Err(e) if held_by_another(&e) && tries + 1 < HELD_TRIES => {
+                tries += 1;
+                std::thread::sleep(HELD_PAUSE);
+            }
+            r => return r,
+        }
+    }
+}
+
+/// ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33).
+fn held_by_another(e: &io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+}
+
 fn mtime_of(meta: &Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -263,11 +288,19 @@ impl Fs for LocalFs {
 
     fn meta_read(&self, dir: &Path, name: &str) -> Result<Option<Vec<u8>>, ErrorCode> {
         let path = file_path(dir, name, Kind::Meta)?;
-        let Ok(m) = std::fs::symlink_metadata(&path) else { return Ok(None) };
+        let m = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_failed(e)),
+        };
         if is_reparse(&m) || !m.is_file() {
             return Ok(None);
         }
-        let Ok(f) = File::open(&path) else { return Ok(None) };
+        let f = match open_held_briefly(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_failed(e)),
+        };
         let mut buf = Vec::new();
         f.take(META_READ_MAX as u64).read_to_end(&mut buf).map_err(io_failed)?;
         Ok(Some(buf))

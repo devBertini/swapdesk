@@ -97,10 +97,12 @@ impl Incoming {
             if pm.is_reparse || !pm.is_file {
                 return Err(ErrorCode::IoFailed);
             }
-            if let Ok(Some(mm)) = fs.stat_file(dir, name, Kind::Meta)
+            // A record that cannot be read now is not a record that is not there: the transfer fails and the
+            // partial file stays for the next try, rather than the verified bytes being thrown away.
+            if let Some(mm) = fs.stat_file(dir, name, Kind::Meta)?
                 && !mm.is_reparse
                 && mm.is_file
-                && let Ok(Some(bytes)) = fs.meta_read(dir, name)
+                && let Some(bytes) = fs.meta_read(dir, name)?
                 && let Some(committed) = parse_meta(&bytes, size, mtime_ms)
             {
                 resume = Some(committed.min(pm.len).min(size));
@@ -472,6 +474,47 @@ pub(crate) mod tests {
         std::fs::write(dir.join("a.bin.swapdesk-meta"), m).unwrap();
         let rx = Incoming::open(&dir, "a.bin", 100, 1).unwrap();
         assert_eq!(rx.resume_from(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Holds `path` open the way a virus scanner may, sharing nothing, until `for_ms` passed.
+    #[cfg(windows)]
+    fn hold_alone(path: &Path, for_ms: u64) -> std::thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(for_ms));
+            drop(f);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_meta_record_another_program_holds_for_a_moment_is_waited_for_and_the_transfer_resumes() {
+        let dir = temp_dir("heldmeta");
+        let mut rx = Incoming::open(&dir, "a.bin", 100, 1).unwrap();
+        rx.write(0, &[7u8; 40]).unwrap();
+        rx.suspend();
+        let held = hold_alone(&dir.join("a.bin.swapdesk-meta"), 60);
+        let rx = Incoming::open(&dir, "a.bin", 100, 1).unwrap();
+        assert_eq!(rx.resume_from(), 40);
+        held.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_meta_record_that_cannot_be_read_fails_the_try_and_keeps_the_partial_file() {
+        let dir = temp_dir("lockedmeta");
+        let mut rx = Incoming::open(&dir, "a.bin", 100, 1).unwrap();
+        rx.write(0, &[7u8; 40]).unwrap();
+        rx.suspend();
+        let held = hold_alone(&dir.join("a.bin.swapdesk-meta"), 1_500);
+        assert_eq!(Incoming::open(&dir, "a.bin", 100, 1).err(), Some(ErrorCode::IoFailed));
+        assert_eq!(std::fs::metadata(dir.join("a.bin.swapdesk-part")).unwrap().len(), 40, "the partial file stays");
+        held.join().unwrap();
+        // Once the other program let go, the next try resumes.
+        assert_eq!(Incoming::open(&dir, "a.bin", 100, 1).unwrap().resume_from(), 40);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
