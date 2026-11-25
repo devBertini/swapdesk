@@ -8,6 +8,7 @@
 use swapdesk_paint::{Frame, Interaction, Output};
 use swapdesk_ui::{UiState, WindowKind};
 
+use crate::access_nodes::Drawn;
 use crate::canvas_ops::FRAME;
 use crate::recorder::{Metrics, Recorder};
 use crate::text_measure::{TextCache, TextKey, encode_needs};
@@ -47,6 +48,8 @@ pub struct PhoneWindow {
     labels: usize,
     refused: bool,
     last: Option<Output>,
+    /// The labels the last frame drew.
+    drawn: Vec<Drawn>,
     cost: FrameCost,
 }
 
@@ -73,6 +76,7 @@ impl PhoneWindow {
         (self.lists, self.labels, self.refused) = (0, 0, false);
         self.pending.clear();
         self.last = Some(output);
+        self.drawn = recorder.take_drawn();
         let bytes = recorder.finish();
         debug_assert_eq!(bytes.first(), Some(&FRAME));
         bytes
@@ -90,6 +94,11 @@ impl PhoneWindow {
     /// What the last frame registered: controls, text inputs, scroll.
     pub fn output(&self) -> Option<&Output> {
         self.last.as_ref()
+    }
+
+    /// The labels the last frame drew, in their order, each with the part of it that shows (DIPs).
+    pub fn drawn(&self) -> &[Drawn] {
+        &self.drawn
     }
 
     /// What the last frame cost.

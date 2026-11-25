@@ -16,6 +16,7 @@ use swapdesk_ui::{
     Activation, Changed, Command, ControlId, EditId, Nav, Screen, SelectId, UiBackend, UiState, WindowKind,
 };
 
+use crate::access_nodes::{self, Ids};
 use crate::canvas_ops::{FRAME, Writer, argb};
 use crate::phone_effects::{Handling, handling};
 use crate::phone_window::{FrameCost, PhoneWindow, Surface};
@@ -86,6 +87,8 @@ pub struct PhoneShell {
     dirty: bool,
     /// How many commands went to the backend.
     sent: u64,
+    /// Android's virtual ids of the controls (`crate::access_nodes`).
+    access_ids: Ids,
 }
 
 impl PhoneShell {
@@ -100,6 +103,7 @@ impl PhoneShell {
             asks: Vec::new(),
             dirty: true,
             sent: 0,
+            access_ids: Ids::default(),
         }
     }
 
@@ -500,6 +504,39 @@ impl PhoneShell {
             }
         }
         w.0
+    }
+
+    /// What a screen reader finds on the last frame, for the Java view's provider (`access_nodes::encode`).
+    pub fn access(&mut self) -> Vec<u8> {
+        let built = self.access_built();
+        let (scroll, max) = self.scroll_range();
+        access_nodes::encode(&built.nodes, scroll / self.density, max / self.density, self.density)
+    }
+
+    /// The nodes of the last frame, and the texts it did not place (the tests).
+    pub fn access_built(&mut self) -> access_nodes::Built {
+        let Some(out) = self.window.output() else { return access_nodes::Built::default() };
+        let specs = self.state.controls(WindowKind::Main);
+        access_nodes::build(&specs, out, self.window.drawn(), self.ix.focus, &mut self.access_ids)
+    }
+
+    /// A screen reader's click on a node of the last list: the control is activated as a tap activates it (a text
+    /// field takes the keyboard). False for a node that is not on the screen any more.
+    pub fn access_click(&mut self, id: i32) -> bool {
+        let Some(control) = self.access_ids.control(id) else { return false };
+        let shown = self.window.output().is_some_and(|out| out.widgets.iter().any(|w| w.id == control));
+        if !shown {
+            return false;
+        }
+        self.dirty = true;
+        match control {
+            ControlId::Edit(edit) => self.asks.push(Ask::FocusEdit(edit)),
+            id => {
+                self.ix.focus = Some(id);
+                self.activate(id);
+            }
+        }
+        true
     }
 
     /// The asks queued, without taking them (the tests).

@@ -120,6 +120,12 @@ final class Shell {
     /** The native text fields of the last frame ({@code PhoneShell::edits}; {@link Fields} reads it). */
     static native byte[] edits();
 
+    /** What a screen reader finds on the last frame ({@code PhoneShell::access}; {@link Access} reads it). */
+    static native byte[] access();
+
+    /** A screen reader's click on a node of the last list: what a tap on it does. False when it left the screen. */
+    static native boolean accessClick(int id);
+
     /** Scrolls the pane so that a text field is in sight (the keyboard took part of the screen). Whether it moved. */
     static native boolean reveal(int field);
 

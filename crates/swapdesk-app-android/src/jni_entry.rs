@@ -201,6 +201,10 @@ shell_call!(
         .is_some_and(|edit| shell.reveal(edit))
 );
 shell_call!(
+    /// `Shell.accessClick(id)`: a screen reader's click on a node of the last list (`PhoneShell::access_click`).
+    Java_io_github_devbertini_swapdesk_Shell_accessClick(id: jint) -> jboolean, false, |shell| shell.access_click(id)
+);
+shell_call!(
     /// `Shell.takesBack()`: whether Android's back gesture is the app's to answer now.
     Java_io_github_devbertini_swapdesk_Shell_takesBack() -> jboolean, false, |shell| shell.takes_back()
 );
@@ -322,6 +326,19 @@ pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_edits<'caller>(
     env.with_env(|env| -> Result<_, Error> {
         let edits = crate::phone_screen::with_shell(|shell| shell.edits()).unwrap_or_default();
         env.byte_array_from_slice(&edits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `Shell.access()`: what a screen reader finds on the last frame (`PhoneShell::access`; `Access` reads it).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_devbertini_swapdesk_Shell_access<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> JByteArray<'caller> {
+    env.with_env(|env| -> Result<_, Error> {
+        let list = crate::phone_screen::with_shell(|shell| shell.access()).unwrap_or_default();
+        env.byte_array_from_slice(&list)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

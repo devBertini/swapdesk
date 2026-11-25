@@ -27,6 +27,8 @@ import java.net.Inet4Address;
  *     --es mock SCENARIO               a state of the design's mock on the shared screens, as the desktops' --mock
  *         [--es fit 1]                 the desktop window of that state, whole, as large as the screen allows
  *         [--es landscape 1]           with the screen held sideways
+ *     --es access "click:LABEL~scroll~scrollback"
+ *                                      acts on the screen as a screen reader does (an ACCESS line per step)
  *     --es add ADDRESS[:PORT]          on the app's own screens: adds the computer at that address (the port is
  *                                      a development instance's; the screens' address field takes none)
  *         [--es frames N]              N frames painted in a row, each logged with what it cost (default 1)
@@ -117,6 +119,10 @@ final class DevHarness {
                 Log.i(TAG, "STATE origin=" + origin[0] + "," + origin[1] + " " + now);
             }
         });
+        String steps = activity.getIntent().getStringExtra("access");
+        if (steps != null) {
+            view.postDelayed(() -> accessSteps(view, steps.split("~"), 0), 2500);
+        }
         String address = activity.getIntent().getStringExtra("add");
         if (address != null) {
             view.postDelayed(() -> {
@@ -125,6 +131,34 @@ final class DevHarness {
                 view.requestFrame();
             }, 1500);
         }
+    }
+
+    /**
+     * Acts on the screen as a screen reader does, one step every 1.5 s: {@code click:LABEL} clicks the node of that
+     * label, {@code scroll} and {@code scrollback} scroll the pane. Each step logs an ACCESS line.
+     */
+    private static void accessSteps(PaintView view, String[] steps, int at) {
+        if (at >= steps.length) {
+            Log.i(TAG, "ACCESS done");
+            return;
+        }
+        String step = steps[at];
+        if (step.startsWith("click:")) {
+            String label = step.substring("click:".length());
+            int node = view.accessNode(label);
+            boolean ok = node >= 0
+                    && view.accessAction(node, android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK);
+            Log.i(TAG, "ACCESS click node=" + node + " ok=" + ok + " label=" + label);
+        } else if (step.equals("scroll") || step.equals("scrollback")) {
+            view.accessNode("");
+            int action = step.equals("scroll") ? android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    : android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+            boolean ok = view.accessAction(android.view.accessibility.AccessibilityNodeProvider.HOST_VIEW_ID, action);
+            Log.i(TAG, "ACCESS " + step + " ok=" + ok);
+        } else {
+            Log.i(TAG, "ACCESS unknown step " + step);
+        }
+        view.postDelayed(() -> accessSteps(view, steps, at + 1), 1500);
     }
 
     /** Runs what the intent asks for, off the main thread, and logs each line of its report. */

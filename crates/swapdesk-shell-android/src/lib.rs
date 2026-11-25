@@ -5,11 +5,13 @@
 //! * [`text_measure`]: text measured by Android in one round trip per new label, never by a call from Rust into
 //!   Java;
 //! * [`phone_window`]: one window's passes: a frame, or the list of text it needs measured first.
+//! * [`access_nodes`]: what a screen reader finds on the last frame, as a list for the view's node provider;
 //! * [`phone_shell`]: the shell around the shared state (a finger's press, release and drag, the way back, the
 //!   backend, the asks only Android can answer), with [`phone_effects`] as its table of effects.
 //!
 //! Plain Rust, built and tested on every host: the Java half (`PaintView`, `TextMeasurer`) follows the two formats.
 
+pub mod access_nodes;
 pub mod canvas_ops;
 pub mod phone_effects;
 pub mod phone_shell;
@@ -17,6 +19,8 @@ pub mod phone_window;
 pub mod recorder;
 pub mod text_measure;
 
+#[cfg(test)]
+mod access_nodes_tests;
 #[cfg(test)]
 mod phone_shell_tests;
 #[cfg(test)]

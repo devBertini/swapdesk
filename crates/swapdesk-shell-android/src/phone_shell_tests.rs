@@ -16,7 +16,7 @@ use crate::text_measure::{Measured, decode_needs, encode_measured};
 
 /// A backend that keeps what it was sent and answers nothing.
 #[derive(Default)]
-struct Recording {
+pub(crate) struct Recording {
     sent: Mutex<Vec<Command>>,
 }
 
@@ -32,9 +32,9 @@ impl UiBackend for Recording {
 }
 
 /// A phone 360 by 740 DIPs at two device pixels each.
-const PHONE: (f32, f32, f32) = (720.0, 1480.0, 2.0);
+pub(crate) const PHONE: (f32, f32, f32) = (720.0, 1480.0, 2.0);
 
-fn shell_of(state: UiState) -> (PhoneShell, Arc<Recording>) {
+pub(crate) fn shell_of(state: UiState) -> (PhoneShell, Arc<Recording>) {
     let backend = Arc::new(Recording::default());
     let mut shell = PhoneShell::new(state, backend.clone());
     settle(&mut shell);
@@ -42,7 +42,7 @@ fn shell_of(state: UiState) -> (PhoneShell, Arc<Recording>) {
 }
 
 /// Paints until a frame comes, answering each list of text as Android would.
-fn settle(shell: &mut PhoneShell) {
+pub(crate) fn settle(shell: &mut PhoneShell) {
     for _ in 0..8 {
         let bytes = shell.paint(METRICS, PHONE.0, PHONE.1, PHONE.2);
         if bytes[0] == FRAME {

@@ -68,6 +68,11 @@ final class Fields {
         screen.addView(layer, new FrameLayout.LayoutParams(0, 0));
     }
 
+    /** The native field of a code, or null when the last frame has none. */
+    EditText field(int code) {
+        return fields.get(code);
+    }
+
     /** Puts the fields where the last frame drew their boxes. Nothing moves when nothing changed. */
     void place(byte[] slots) {
         if (slots.length == 0 || Arrays.equals(slots, placed)) {

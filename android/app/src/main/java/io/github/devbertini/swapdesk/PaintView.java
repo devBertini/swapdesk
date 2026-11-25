@@ -19,6 +19,7 @@ import android.util.Log;
 import android.view.Choreographer;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.widget.FrameLayout;
 import android.widget.OverScroller;
 import android.window.OnBackInvokedCallback;
@@ -70,6 +71,8 @@ final class PaintView extends FrameLayout {
     private static final String TAG = "Swapdesk";
 
     private static final int FRAME = 0;
+    /** The narrowest pane the compact layout is made for, in DIPs (swapdesk-paint's compact tests start there). */
+    private static final float NARROWEST = 320f;
     /** The core gives a frame after six lists of text at most; this view never asks more often than that. */
     private static final int LISTS_MAX = 8;
 
@@ -105,6 +108,7 @@ final class PaintView extends FrameLayout {
     private final Fonts fonts;
     private final TextMeasurer measurer;
     private final Fields fields;
+    private final Access access;
     private final TextPaint text = Fonts.paint();
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -159,6 +163,7 @@ final class PaintView extends FrameLayout {
         float[] mono = fonts.monoMetrics();
         Shell.monoMetrics(mono[0], mono[1]);
         fields = new Fields(this, fonts, this::acted);
+        access = new Access(this, fields::field);
         fling = new OverScroller(activity);
         gestures = new GestureDetector(activity, new Touch());
         // A hold is not a gesture of its own yet (context menus come with the files): a finger held and lifted
@@ -209,11 +214,19 @@ final class PaintView extends FrameLayout {
         }
     }
 
+    /**
+     * Device pixels per DIP of the frame. The phone's text size (Android's font scale, set by the person in the
+     * system's settings) enlarges the whole screen, text and the room around it alike, as far as the pane keeps
+     * {@link #NARROWEST} DIPs of width: the screens are laid out in DIPs, so a larger text alone would not fit them.
+     */
     private float density() {
         if (fitWidth > 0f && fitHeight > 0f) {
             return Math.min(getWidth() / fitWidth, getHeight() / fitHeight);
         }
-        return getResources().getDisplayMetrics().density;
+        float base = getResources().getDisplayMetrics().density;
+        float scale = getResources().getConfiguration().fontScale;
+        float room = getWidth() / base / NARROWEST;
+        return base * Math.max(1f, Math.min(scale, room));
     }
 
     /** Has the core paint a frame for the view as it is now, places the text fields over it and draws it. */
@@ -262,6 +275,9 @@ final class PaintView extends FrameLayout {
         if (painted.length > 0 && painted[0] == FRAME) {
             frame = painted;
             fields.place(Shell.edits());
+            if (access.listening()) {
+                access.update(Shell.access());
+            }
             followGround();
             followBack();
             if (afterFrame != null) {
@@ -278,6 +294,32 @@ final class PaintView extends FrameLayout {
         if (traced > 0 || !fling.isFinished() || Shell.wantsFrame()) {
             requestFrame();
         }
+    }
+
+    @Override
+    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        return access;
+    }
+
+    @Override
+    public boolean dispatchHoverEvent(MotionEvent event) {
+        return access.hover(event) || super.dispatchHoverEvent(event);
+    }
+
+    /** After a screen reader acted on a node: its asks, then the screen, as after a tap. */
+    void accessActed() {
+        acted();
+    }
+
+    /** Development only: the reader's node of this label, or -1 (the list is read now if no reader listens). */
+    int accessNode(String label) {
+        access.update(Shell.access());
+        return access.find(label);
+    }
+
+    /** Development only: an action on a node, as a reader sends it. */
+    boolean accessAction(int node, int action) {
+        return access.performAction(node, action, null);
     }
 
     @Override

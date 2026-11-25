@@ -11,6 +11,7 @@ use swapdesk_paint::svg::{self, Seg};
 use swapdesk_paint::{Align, INSTRUMENT_SANS, Label, Painter, Rect, face_metrics, label_height, line_box};
 use swapdesk_ui::tokens::{Color, TextStyle};
 
+use crate::access_nodes::Drawn;
 use crate::canvas_ops::{FRAME, Op, Writer, argb, flag};
 use crate::text_measure::{Measured, Run, TextCache, TextKey};
 
@@ -43,6 +44,8 @@ impl Metrics {
 
 /// A label as it will be drawn: its lines, each with where it starts (DIPs from the label's left) and its runs.
 struct Laid {
+    /// The label's whole text, as it was laid out (before a trim with an ellipsis).
+    text: String,
     lines: Vec<(f32, Vec<Run>)>,
     /// In DIPs.
     line_h: f32,
@@ -58,18 +61,34 @@ pub struct Recorder<'a> {
     metrics: Metrics,
     texts: &'a TextCache,
     out: RefCell<Writer>,
+    /// The clips in force, in DIPs, each already cut to the one before.
+    clips: RefCell<Vec<Rect>>,
+    /// The labels drawn, in their order, for the accessibility tree (`crate::access_nodes`).
+    drawn: RefCell<Vec<Drawn>>,
 }
 
 impl<'a> Recorder<'a> {
     pub fn new(scale: f32, metrics: Metrics, texts: &'a TextCache) -> Self {
         let mut out = Writer::default();
         out.u8(FRAME);
-        Self { scale, metrics, texts, out: RefCell::new(out) }
+        Self {
+            scale,
+            metrics,
+            texts,
+            out: RefCell::new(out),
+            clips: RefCell::new(Vec::new()),
+            drawn: RefCell::new(Vec::new()),
+        }
     }
 
     /// The frame's buffer.
     pub fn finish(self) -> Vec<u8> {
         self.out.into_inner().0
+    }
+
+    /// The labels the frame drew so far, in their order, each with the part of it that shows.
+    pub fn take_drawn(&self) -> Vec<Drawn> {
+        std::mem::take(&mut *self.drawn.borrow_mut())
     }
 
     fn push(&self, op: Op) {
@@ -179,10 +198,14 @@ impl Painter for Recorder<'_> {
     }
 
     fn push_clip(&self, r: Rect) {
+        let mut clips = self.clips.borrow_mut();
+        let cut = clips.last().map_or(r, |top| top.intersect(r));
+        clips.push(cut);
         self.push(Op::PushClip(self.snapped(r)));
     }
 
     fn pop_clip(&self) {
+        self.clips.borrow_mut().pop();
         self.push(Op::PopClip);
     }
 
@@ -221,6 +244,7 @@ impl Painter for Recorder<'_> {
             .collect();
         let count = lines.len().max(1) as f32;
         let laid = Laid {
+            text: text.to_owned(),
             lines,
             line_h,
             size_px: st.size * scale,
@@ -234,6 +258,10 @@ impl Painter for Recorder<'_> {
     /// The first baseline lands on a whole device pixel; along the line the runs keep their measured widths.
     fn draw(&self, l: &Label, x: f32, y: f32, c: Color) {
         let Some(laid) = l.handle::<Laid>() else { return };
+        let left = laid.lines.iter().map(|(dx, _)| *dx).fold(f32::INFINITY, f32::min);
+        let at = Rect::new(x + if left.is_finite() { left } else { 0.0 }, y, l.w, l.h);
+        let shows = self.clips.borrow().last().map_or(at, |clip| clip.intersect(at));
+        self.drawn.borrow_mut().push(Drawn { text: laid.text.clone(), rect: shows });
         let first = self.px(y + l.baseline).round();
         for (i, (dx, runs)) in laid.lines.iter().enumerate() {
             let mut pen = self.px(x + dx);
