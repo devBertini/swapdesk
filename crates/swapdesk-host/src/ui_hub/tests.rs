@@ -603,6 +603,30 @@ fn this_device_network_devices_and_the_manual_address() {
     other.finish();
 }
 
+/// F-FIND-05: "Buscar" asks the presence for one search; a typed address is kept in `manual.bin` (loopback never)
+/// and given to the search as a hint with the last addresses of the paired devices.
+#[test]
+fn buscar_searches_once_and_typed_and_paired_addresses_are_kept_as_hints() {
+    let m = Machine::with_interfaces("sala", FakeNetInterfaces::windows_typical());
+    let mut ui = m.client(info(false));
+    assert_eq!(m.presence.searches(), 0);
+    assert!(matches!(ui.call(UiOp::SearchDevices), Ok(ReplyBody::Done)));
+    assert_eq!(m.presence.searches(), 1);
+    let typed = device_of(ui.call(UiOp::AddByAddress { ipv4: "10.9.9.9".into() }));
+    assert_eq!(typed.name, "10.9.9.9");
+    assert_eq!(m.presence.probe_hints(), vec![Ipv4Addr::new(10, 9, 9, 9)]);
+    let kept = super::store::load_manual(&*m.secrets);
+    assert_eq!(
+        kept.iter().map(|k| (k.addr, k.session_port)).collect::<Vec<_>>(),
+        vec![(Ipv4Addr::new(10, 9, 9, 9), 47820)]
+    );
+    let _ = ui.call(UiOp::AddByAddress { ipv4: "127.0.0.1:47830".into() });
+    assert_eq!(super::store::load_manual(&*m.secrets).len(), 1, "a loopback address is never kept");
+    assert_eq!(m.presence.searches(), 1, "adding an address starts no search");
+    drop(ui);
+    m.finish();
+}
+
 #[test]
 fn the_production_shape_refuses_loopback_and_own_and_takes_any_other_network() {
     let m = Machine::build("sala", FakeNetInterfaces::windows_typical(), false);

@@ -179,6 +179,7 @@ impl UiState {
             match card {
                 HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
                     s.heading(2, title.clone());
+                    s.button(ControlId::SearchDevices, self.search_label());
                     s.text(UiRole::Text, body.clone());
                     if let Some(button) = button {
                         s.button(ControlId::PairThisComputer, button.clone());

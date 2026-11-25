@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Android gives no socket of any kind without it. Swapdesk stays on the local network by its own guard
-         (docs/ANDROID.md 4), not by this permission. -->
+    <!-- Android gives no socket of any kind without it. Swapdesk reaches computers on any network (D93); who may
+         enter is decided by pairing and the pinned keys, not by this permission. -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The multicast lock (MainActivity): without it the phone's Wi-Fi drops the mDNS answers of the computers. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Which networks the phone has and what they are (Wi-Fi, a VPN, mobile data): the guard's facts. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

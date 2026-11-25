@@ -625,7 +625,7 @@ fn what_stands_alone_is_centred_with_its_text_and_its_buttons_on_one_axis() {
         (Scenario::EstadoPermissoesMac, Main, page, vec![ControlId::Notice(NoticeKind::MacPerms)]),
         (Scenario::EstadoPastaRecebimentoMac, Main, page, vec![ControlId::Notice(NoticeKind::ReceiveFolder)]),
         (Scenario::EstadoFechouInesperado, Main, page, vec![ControlId::Notice(NoticeKind::Crash)]),
-        (Scenario::EstadoNenhumComputador, Main, page, vec![ControlId::NoComputerAddress]),
+        (Scenario::EstadoNenhumComputador, Main, page, vec![ControlId::NoComputerSearch, ControlId::NoComputerAddress]),
         (Scenario::EstadoNaoPareado, Main, page, vec![]),
         (Scenario::Historico, Main, page, vec![]),
         (Scenario::AtividadeVazia, Main, page, vec![]),

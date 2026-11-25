@@ -265,6 +265,33 @@ impl Wire for PeerPorts {
     }
 }
 
+/// `manual.bin` in an account's folder: the computers added by address, one `a.b.c.d:port` per line.
+pub const MANUAL_NAME: &str = "manual.bin";
+
+/// Loads `manual.bin`; a missing or unreadable one is empty, and a line that does not read is skipped. Loopback
+/// addresses (development) are never kept.
+pub(crate) fn load_manual(secrets: &dyn SecretStore) -> Vec<super::views::Manual> {
+    let Ok(Some(bytes)) = secrets.load(MANUAL_NAME) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out: Vec<super::views::Manual> = Vec::new();
+    for line in text.lines() {
+        let Ok(sa) = line.trim().parse::<std::net::SocketAddrV4>() else { continue };
+        let m = super::views::Manual { addr: *sa.ip(), session_port: sa.port() };
+        if !m.addr.is_loopback() && sa.port() != 0 && !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out.truncate(16);
+    out
+}
+
+/// Writes `manual.bin` (loopback addresses left out).
+pub(crate) fn store_manual(secrets: &dyn SecretStore, manual: &[super::views::Manual]) -> Result<(), String> {
+    let text: String =
+        manual.iter().filter(|m| !m.addr.is_loopback()).map(|m| format!("{}:{}\n", m.addr, m.session_port)).collect();
+    secrets.store(MANUAL_NAME, text.as_bytes()).map_err(|e| e.to_string())
+}
+
 /// Loads `peers.bin`; a missing or unreadable one is empty (it is only a hint for dialling).
 pub fn load_peer_ports(secrets: &dyn SecretStore) -> PeerPorts {
     match secrets.load(PEER_PORTS_NAME) {

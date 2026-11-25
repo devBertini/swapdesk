@@ -101,6 +101,32 @@ fn the_card_action_focuses_the_address_field() {
     assert!(a.commands.is_empty());
 }
 
+/// F-FIND-05: "Buscar de novo" (the "no computer found" card, before "Adicionar por endereço") asks the service for one
+/// search, says "Buscando…" for three seconds, and a press meanwhile asks for nothing more; "Buscar" stands on Parear.
+#[test]
+fn buscar_asks_one_search_and_says_buscando_while_it_runs() {
+    let mut s = Scenario::EstadoNenhumComputador.prepared_state();
+    let names = |s: &UiState| -> Vec<(ControlId, String)> {
+        s.controls(WindowKind::Main).iter().map(|c| (c.id, c.label.clone())).collect()
+    };
+    let on_screen = names(&s);
+    let search = on_screen.iter().position(|(id, _)| *id == ControlId::NoComputerSearch).expect("Buscar on the card");
+    let address = on_screen.iter().position(|(id, _)| *id == ControlId::NoComputerAddress).unwrap();
+    assert!(search < address, "Buscar comes before Adicionar por endereço");
+    assert_eq!(on_screen[search].1, "Buscar de novo");
+    let a = s.activate(ControlId::NoComputerSearch);
+    assert_eq!(a.commands, vec![Command::SearchDevices]);
+    assert!(names(&s).iter().any(|(id, n)| *id == ControlId::NoComputerSearch && n == "Buscando…"));
+    assert!(s.activate(ControlId::NoComputerSearch).commands.is_empty(), "nothing more while it runs");
+    for _ in 0..3 {
+        s.tick();
+    }
+    assert!(names(&s).iter().all(|(id, n)| *id != ControlId::NoComputerSearch || n == "Buscar de novo"));
+    assert_eq!(s.activate(ControlId::NoComputerSearch).commands, vec![Command::SearchDevices], "and again after it");
+    let home = Scenario::Inicio.prepared_state();
+    assert!(names(&home).iter().any(|(id, n)| *id == ControlId::SearchDevices && n == "Buscar"), "on Parear too");
+}
+
 #[test]
 fn the_new_texts_are_exact_in_both_languages() {
     use crate::strings::{MsgKey, text};
@@ -120,6 +146,15 @@ fn the_new_texts_are_exact_in_both_languages() {
     assert_eq!(t(MsgKey::NoComputerTitle, Language::PtBr), "Nenhum computador encontrado");
     assert_eq!(t(MsgKey::NoComputerButton, Language::PtBr), "Adicionar por endereço");
     assert!(t(MsgKey::NoComputerBody, Language::PtBr).ends_with("use Adicionar por endereço com o IP dele."));
+    assert_eq!(t(MsgKey::SearchAgain, Language::PtBr), "Buscar de novo");
+    assert_eq!(
+        (t(MsgKey::SearchDevices, Language::PtBr), t(MsgKey::SearchingDevices, Language::PtBr)),
+        ("Buscar".into(), "Buscando…".into())
+    );
+    assert_eq!(
+        (t(MsgKey::SearchDevices, Language::En), t(MsgKey::SearchingDevices, Language::En)),
+        ("Search".into(), "Searching…".into())
+    );
     assert_eq!(t(MsgKey::NoComputerTitle, Language::En), "No computer found");
     assert_eq!(t(MsgKey::NoComputerButton, Language::En), "Add by address");
     assert!(t(MsgKey::NoComputerBody, Language::En).ends_with("use Add by address with its IP."));

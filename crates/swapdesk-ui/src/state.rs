@@ -801,6 +801,8 @@ pub struct UiState {
     pub(crate) stopped: Option<Stopped>,
     /// Seconds the device list has been answered and empty (F20): the "no computer found" card shows at 10.
     pub(crate) empty_s: u16,
+    /// Seconds left of the search "Buscar" started (F-FIND-05): "Buscando…" while above 0.
+    pub(crate) search_s: u8,
     /// The machine's updater (UPDATES.md 10); `None` while unknown or when the service has none (a development
     /// instance).
     pub(crate) update: Option<crate::api::UpdateInfo>,
@@ -973,6 +975,7 @@ impl UiState {
             os_request: Vec::new(),
             os_wait: None,
             empty_s: 0,
+            search_s: 0,
             rename: None,
         }
     }
@@ -2120,6 +2123,19 @@ impl UiState {
         commands
     }
 
+    /// How long "Buscando…" shows after "Buscar": a search asks every address within about two seconds.
+    pub(crate) const SEARCH_S: u8 = 3;
+
+    /// The label of "Buscar": "Buscando…" while a search runs.
+    pub fn search_label(&self) -> String {
+        self.t(if self.search_s > 0 { MsgKey::SearchingDevices } else { MsgKey::SearchDevices })
+    }
+
+    /// The label of "Buscar de novo" on the "no computer found" card: "Buscando…" while a search runs.
+    pub fn search_again_label(&self) -> String {
+        self.t(if self.search_s > 0 { MsgKey::SearchingDevices } else { MsgKey::SearchAgain })
+    }
+
     /// One second passed: counts every countdown down by one and fails the commands that waited too long (R-UI-7).
     pub fn tick(&mut self) -> Changed {
         // The download's rate over the last second, for its time left.
@@ -2134,6 +2150,12 @@ impl UiState {
             self.update_prev_done = Some(*done);
         }
         let mut changed = self.copy_tick();
+        if self.search_s > 0 {
+            self.search_s -= 1;
+            if self.search_s == 0 {
+                changed = changed.union(Changed::MAIN);
+            }
+        }
         if self.devices.is_empty()
             && self.fetch(DataKind::Devices) == Fetch::Ready
             && self.empty_s < Self::NO_COMPUTER_AFTER_S

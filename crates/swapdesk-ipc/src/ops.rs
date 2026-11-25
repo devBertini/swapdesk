@@ -15,6 +15,9 @@ type CResult<T> = core::result::Result<T, CodecError>;
 pub enum UiOp {
     GetThisDevice,
     GetNetwork,
+    /// Op 62: "Buscar": search the networks for computers once by direct probe (F-FIND-05). `Done` at once; what is
+    /// found arrives as `DevicesChanged`.
+    SearchDevices,
     ListDevices,
     AddByAddress {
         ipv4: String,
@@ -280,12 +283,18 @@ impl UiOp {
             Self::UnblockDevice { .. } => 59,
             Self::ListBlocked => 60,
             Self::SetViewSize { .. } => 61,
+            Self::SearchDevices => 62,
         }
     }
 
     pub(crate) fn put_body(&self, w: &mut Writer) -> CResult<()> {
         match self {
-            Self::GetThisDevice | Self::GetNetwork | Self::ListDevices | Self::GetSettings | Self::ListBlocked => {}
+            Self::GetThisDevice
+            | Self::GetNetwork
+            | Self::ListDevices
+            | Self::GetSettings
+            | Self::ListBlocked
+            | Self::SearchDevices => {}
             Self::BlockDevice { ipv4, name } => {
                 w.put_str(ipv4, MAX_IPV4)?;
                 w.put_str(name, MAX_NAME)?;
@@ -412,6 +421,7 @@ impl UiOp {
         Ok(match op {
             1 => Self::GetThisDevice,
             2 => Self::GetNetwork,
+            62 => Self::SearchDevices,
             3 => Self::ListDevices,
             4 => Self::AddByAddress { ipv4: r.str(MAX_IPV4)? },
             5 => Self::PairOpen { device_id: <Option<String>>::get(r, MAX_NAME)? },
@@ -609,7 +619,9 @@ impl ReplyBody {
             48 => Self::Volumes(crate::files::VolumesView::get(&mut r, 0)?),
             51 => Self::Update(crate::types::UpdateView::get(&mut r, 0)?),
             58..=60 => Self::Blocked(<Vec<BlockedView>>::get(&mut r, MAX_BLOCKED)?),
-            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=57 | 61 => Self::Done,
+            6..=10 | 12..=18 | 20 | 23 | 25 | 28..=30 | 33 | 34 | 37 | 39 | 43..=45 | 50 | 52..=57 | 61 | 62 => {
+                Self::Done
+            }
             other => return Err(IpcError::Codec(unknown_op(other))),
         };
         r.finish()?;

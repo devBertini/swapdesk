@@ -442,7 +442,10 @@ pub(crate) fn home_notices(f: &mut Frame, a: &Area, y: f32) -> f32 {
         // F20: discovery found nothing for 10 s; the action focuses the address field.
         let (title, body, button) =
             (f.t(MsgKey::NoComputerTitle), f.t(MsgKey::NoComputerBody), f.t(MsgKey::NoComputerButton));
-        let buttons = [(ControlId::NoComputerAddress, button, Kind::Primary)];
+        let buttons = [
+            (ControlId::NoComputerSearch, f.st.search_again_label(), Kind::Default),
+            (ControlId::NoComputerAddress, button, Kind::Primary),
+        ];
         let c = Card {
             look: Look::Inline,
             icon: Some(Icon::Circle(pal.link_tint, pal.link, icons::WIFI)),
@@ -553,8 +556,23 @@ fn paint_card(f: &mut Frame, card: &HomeCard, r: Rect, avail: f32) {
     f.panel(r, pal.surface);
     match card {
         HomeCard::Pair { title, body, button, address_label, address_hint, add } => {
-            let t = p.label_ellipsis(title, text::H2, inner);
+            // "Buscar" is an inline link at the right of the title, as "Ver tudo" is on the activity card.
+            let search = f.st.search_label();
+            let link = p.label(&search, text::NAME);
+            let t = p.label_ellipsis(title, text::H2, inner - link.w - 12.0);
             p.draw(&t, x, y, pal.ink);
+            let lx = x + inner - link.w;
+            let ly = y + (t.h - link.h) / 2.0;
+            p.draw(&link, lx, ly, pal.link);
+            let content = p.content_height(text::NAME);
+            // At least 40 px tall, so a finger finds it on the phone.
+            let hit_h = content.max(40.0);
+            let link_box = Rect::new(lx, ly + (link.h - hit_h) / 2.0, link.w, hit_h);
+            if f.hovered(ControlId::SearchDevices) {
+                let under = ly + (link.h - content) / 2.0 + content;
+                p.fill_rect(Rect::new(lx, under - 1.5, link.w, bw), pal.link);
+            }
+            f.register(ControlId::SearchDevices, link_box, 0.0);
             y += t.h + 16.0;
             y += f.para(body, text::BODY, x, y, inner, pal.soft, Align::Start) + 16.0;
             if let Some(button) = button {

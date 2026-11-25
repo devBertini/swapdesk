@@ -763,6 +763,8 @@ impl From<MsgKey> for Msg {
 pub enum Command {
     GetThisDevice,
     GetNetwork,
+    /// "Buscar": search the networks for computers once (F-FIND-05).
+    SearchDevices,
     ListDevices,
     AddByAddress {
         ipv4: String,
@@ -1056,6 +1058,7 @@ impl core::fmt::Debug for Command {
         match self {
             Self::GetThisDevice => f.write_str("GetThisDevice"),
             Self::GetNetwork => f.write_str("GetNetwork"),
+            Self::SearchDevices => f.write_str("SearchDevices"),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::AddByAddress { ipv4 } => dbg_fields!("AddByAddress", ipv4),
             Self::PairOpen { device_id } => dbg_fields!("PairOpen", device_id),

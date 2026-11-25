@@ -650,6 +650,7 @@ pub fn route(c: &a::Command) -> Route {
     Route::Op(match c {
         C::GetThisDevice => O::GetThisDevice,
         C::GetNetwork => O::GetNetwork,
+        C::SearchDevices => O::SearchDevices,
         C::ListDevices => O::ListDevices,
         C::AddByAddress { ipv4 } => O::AddByAddress { ipv4: ipv4.clone() },
         C::PairOpen { device_id } => O::PairOpen { device_id: device_id.clone() },

@@ -240,6 +240,10 @@ impl Hub {
             UiOp::ListBlocked => Ok(ReplyBody::Blocked(self.blocked_views())),
             UiOp::GetThisDevice => Ok(ReplyBody::ThisDevice(self.this_device())),
             UiOp::GetNetwork => Ok(ReplyBody::Network(self.network_status())),
+            UiOp::SearchDevices => {
+                self.search_devices();
+                Ok(ReplyBody::Done)
+            }
             UiOp::ListDevices => Ok(ReplyBody::Devices(self.device_views())),
             UiOp::AddByAddress { ipv4 } => self.add_by_address(&ipv4).map(ReplyBody::Device),
             UiOp::PairOpen { device_id } => self.pair_open(conn, device_id).map(ReplyBody::PairingId),
@@ -363,6 +367,10 @@ impl Hub {
             manual.push(m);
             if manual.len() > MAX_MANUAL {
                 manual.remove(0);
+            }
+            if !ip.is_loopback() {
+                // Kept across restarts, so the address stays listed and probed (a lost write keeps it until then).
+                let _ = super::store::store_manual(&*self.p.secrets, &manual);
             }
         }
         self.devices_changed();

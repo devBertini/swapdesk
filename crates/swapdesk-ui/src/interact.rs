@@ -97,6 +97,10 @@ pub enum ControlId {
     Notice(NoticeKind),
     /// The "no computer found" card's action: focus the address field (F20).
     NoComputerAddress,
+    /// "Buscar": one search of the networks (F-FIND-05), the link of the Parear card.
+    SearchDevices,
+    /// "Buscar de novo", the button of the "no computer found" card (a screen holds each id once).
+    NoComputerSearch,
     /// The first-run guide's "Pular" and "Entendi" (B16): both close it for good.
     GuideSkip,
     GuideDone,
@@ -460,6 +464,7 @@ impl UiState {
         if self.no_computer_card() {
             s.heading(2, self.name_of(MsgKey::NoComputerTitle));
             s.text(UiRole::Text, self.name_of(MsgKey::NoComputerBody));
+            s.button(ControlId::NoComputerSearch, self.search_again_label());
             s.button(ControlId::NoComputerAddress, self.name_of(MsgKey::NoComputerButton));
         } else if self.devices.is_empty() && self.fetch(DataKind::Devices) == Fetch::Ready {
             s.text(UiRole::Text, self.name_of(MsgKey::EmptyDevices));
@@ -1912,6 +1917,13 @@ impl UiState {
                 NoticeKind::NotStarted => {}
             },
             ControlId::NoComputerAddress => a.effect = Some(Effect::FocusEdit(EditId::Address)),
+            // A press while a search runs does nothing: the one running answers it.
+            ControlId::SearchDevices | ControlId::NoComputerSearch if self.search_s > 0 => {}
+            ControlId::SearchDevices | ControlId::NoComputerSearch => {
+                self.search_s = Self::SEARCH_S;
+                a.commands.push(Command::SearchDevices);
+                a.changed = Changed::MAIN;
+            }
             ControlId::GuideSkip | ControlId::GuideDone => a.changed = self.close_guide(),
             ControlId::Update(action) => self.activate_update(action, &mut a),
             ControlId::WakeCancel | ControlId::ConnectCancel => {

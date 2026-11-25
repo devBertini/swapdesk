@@ -28,7 +28,7 @@ last slice (decision 8.6).
 | ID | Flow | Criteria |
 |---|---|---|
 | F-AND-01 | First run and permissions | When the app starts for the first time, it shall ask for each Android permission only at the step that needs it, say why in the app's own words (pt-BR, en), and when a permission is refused shall show what stops working and a button to the system's settings for the app (the Android form of F-FIND-04). |
-| F-AND-02 | LAN guard on the phone | When the phone's networks change, Swapdesk shall approve only a Wi-Fi or Ethernet network that is not a VPN, never a cellular one, bind every socket it opens to that network, send QUIC with TTL 1, and refuse any peer that is not on-link in that network's subnet, loopback or the phone's own address (F-FIND-02 on Android, section 4). |
+| F-AND-02 | The guard on the phone | When the phone's networks change, Swapdesk shall approve every network that is up (Wi-Fi and Ethernet first, then a VPN and mobile data, D93), bind every socket it opens to the network that holds its address, send QUIC with TTL 64, and refuse only loopback, multicast, broadcast and the phone's own addresses (F-FIND-02 on Android, section 4). |
 | F-AND-03 | Find and pair | When the phone is on an approved network, it shall list the Swapdesk computers there within 5 s (GUESS, as F-FIND-01) and pair with one by the SAS ceremony of PROTOCOL.md 3 (F-PAIR-01 to F-PAIR-04 unchanged), the phone as the initiator. When a computer's record says a protocol minor below 3, the phone shall list it as "needs an update" and start no pairing or session with it. When the person types an address (F-FIND-03), the phone shall try it, and when the computer there ends the pairing because it does not know an Android peer, shall say that the computer needs an update. |
 | F-AND-04 | Session | When the person taps "Controlar" or "Assistir" on a paired computer, the phone shall run the connect wait of D46 (R-UI-13) and enter as a desktop viewer does (prompted, or without a prompt where the computer stored `UNATTENDED` for this phone, F-PERM-03 and D52), resume a lost link without a new prompt inside B5 (F-NET-01, D72), offer "Elevar controle" after Android's confirmation of the phone's owner (decision 8.8), and offer "Voltar à sessão" instead of a second connection (F-SESS-06). |
 | F-AND-05 | The picture | When a session is active, the phone shall show the computer's display decoded by the system's H.264 decoder straight into a surface, fitted to the screen with pinch to zoom and drag to pan, with "Escolher tela" and the quality presets (F-VIEW-02, F-VIEW-03), ask the host to encode at the size shown (F-VIEW-06), ask for a keyframe and rebuild its decoder when frames give no picture (F-VIEW-04, F-VIEW-11), inside BA2 and BA4. |
@@ -147,12 +147,19 @@ API levels are Android's API levels; "v1" is the main flow (slices A0 to A7); "L
 | Traces and audit | The own `TraceSink` and the audit log in the app's private storage, same formats; "Exportar registro" through `ACTION_CREATE_DOCUMENT`, which never overwrites [S20]; the viewer's failure trace (decode, present) as on the desktops. | `ACTION_CREATE_DOCUMENT` [S20] | the person's pick | v1 |
 | Update | On Google Play only Play updates the app: "An app distributed via Google Play may not modify, replace, or update itself ... using any method other than Google Play's update mechanism" [S38] (quoted as two fragments the page reader returned), and `REQUEST_INSTALL_PACKAGES` "may not be used to perform self updates" [S37]. Outside Play, the D53 signed-manifest check can tell the person a version exists and open the release page; Android's installer and its rules for unregistered apps then apply [S35]. | none (notice); `REQUEST_INSTALL_PACKAGES` (23) only outside Play [S2] | the person installs | Later (notice outside Play); Play: none |
 
-## 4. LAN-only guard and threat model
+## 4. The guard and threat model
 
 ### The guard on Android
 
-The rule is the desktop's (D36, F-FIND-02): physical Ethernet or Wi-Fi only, peers on-link, hop limit 1, no relay or
-cloud. On Android it is kept this way:
+Since D93 (25/11/2026) Swapdesk works on any network, and the paragraphs below that describe the LAN-only rule of D36
+(physical Ethernet or Wi-Fi only, peers on-link, hop limit 1) are history: every network that is up is approved, Wi-Fi
+and Ethernet first, then a VPN and mobile data; a peer is taken on-link or behind routers; QUIC is sent with TTL 64;
+each socket is still bound to the network that holds its address. Discovery (D94): the app holds a Wi-Fi multicast
+lock while it is in front (`CHANGE_WIFI_MULTICAST_STATE`; without it "the Wifi stack filters out packets not
+explicitly addressed to this device", developer.android.com `WifiManager.MulticastLock`, read 25/11/2026), and it
+searches by direct probe (F-FIND-05) when it opens and when the person presses "Buscar". From inside the emulator the
+probe reaches the computers of the host's network through the emulator's NAT (the home ranges of the search), which
+mDNS never does. No relay or cloud. The history:
 
 - **Which networks count.** The phone's networks come from `ConnectivityManager` callbacks with their capabilities
   and link properties, the higher-level API Android points apps to instead of `getifaddrs` or netlink [S7]. A network

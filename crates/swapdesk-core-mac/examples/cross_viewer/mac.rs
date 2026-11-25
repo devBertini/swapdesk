@@ -270,7 +270,7 @@ fn run(
         match DnsSdPresence::start(
             Arc::new(swapdesk_net_mac::MacNetInterfaces),
             own,
-            DnsSdConfig { service_port: SWAP_PORTS.0, ..DnsSdConfig::default() },
+            DnsSdConfig { service_port: SWAP_PORTS.0, probe_port: None, ..DnsSdConfig::default() },
         ) {
             Ok(p) => Arc::new(p),
             Err(e) => return Err(format!("the swap proof needs discovery, which did not start: {e}")),

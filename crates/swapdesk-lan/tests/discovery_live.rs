@@ -105,7 +105,7 @@ fn mdns_port(n: u16) -> u16 {
 }
 
 fn config(mdns_port: u16, service_port: u16) -> Config {
-    Config { mdns_port, service_port, ..Config::default() }
+    Config { mdns_port, service_port, probe_port: None, ..Config::default() }
 }
 
 /// docs/ANDROID.md 4: a device that only dials (a phone that does not host) starts with its record withdrawn. It

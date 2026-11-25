@@ -10,6 +10,7 @@
 
 pub mod discovery;
 pub mod guard;
+pub mod probe;
 pub mod socket;
 pub mod txt;
 pub mod wol;

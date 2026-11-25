@@ -429,8 +429,53 @@ impl Hub {
 
     /// `DevicesChanged` with the list as it is now.
     pub fn devices_changed(&self) {
+        self.p.presence.set_probe_hints(self.probe_hints());
         let list = self.device_views();
         self.notify(Notify::DevicesChanged(list));
+    }
+
+    /// "Buscar" (F-FIND-05): one search, and one trace line of what it did once it ends (within 10 s).
+    pub(crate) fn search_devices(self: &Arc<Self>) {
+        let before = self.p.presence.search_status().map(|(n, _)| n);
+        self.p.presence.search();
+        let Some(before) = before else { return };
+        let weak = Arc::downgrade(self);
+        let _ = std::thread::Builder::new().name("swapdesk-search-trace".into()).spawn(move || {
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let Some(hub) = weak.upgrade() else { return };
+                if let Some((done, r)) = hub.p.presence.search_status()
+                    && done > before
+                {
+                    hub.log(
+                        Level::Info,
+                        format_args!(
+                            "search: asked {} addresses, {} replies, {} devices{}",
+                            r.asked,
+                            r.replies,
+                            r.found,
+                            r.error.map(|e| format!(" ({e})")).unwrap_or_default()
+                        ),
+                    );
+                    return;
+                }
+            }
+        });
+    }
+
+    /// The typed addresses, then the last addresses of the paired devices (F-FIND-05).
+    pub(crate) fn probe_hints(&self) -> Vec<std::net::Ipv4Addr> {
+        let mut hints: Vec<std::net::Ipv4Addr> = lock(&self.manual).iter().map(|m| m.addr).collect();
+        let paired: Vec<std::net::Ipv4Addr> = self.p.trust.read(|s| {
+            s.devices.iter().flat_map(|d| d.last_addrs.iter().map(|a| std::net::Ipv4Addr::from(*a))).collect()
+        });
+        for a in paired {
+            if !hints.contains(&a) {
+                hints.push(a);
+            }
+        }
+        hints.retain(|a| !a.is_loopback());
+        hints
     }
 
     /// A session went live in either role: apply "keep awake", and the device list shows the peer on the network
@@ -502,7 +547,7 @@ impl UiHub {
             pairing: pairing::PairState::default(),
             incoming: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
-            manual: Mutex::new(Vec::new()),
+            manual: Mutex::new(store::load_manual(&*params_secrets)),
             learned: Mutex::new(HashMap::new()),
             minors: Mutex::new(peer_minor::PeerMinors::default()),
             peer_writes: Mutex::new(grants_sync::PeerWrites::default()),

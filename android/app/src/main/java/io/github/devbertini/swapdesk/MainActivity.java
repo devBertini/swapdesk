@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -49,6 +50,11 @@ public final class MainActivity extends Activity {
     private Button openSettings;
     /** The shared screens, once they are what the app shows. */
     private PaintView screen;
+    /**
+     * Held while the app is in front: without it the Wi-Fi of a phone drops the multicast datagrams addressed to
+     * it, and the mDNS answers of the computers never reach the app (docs/ANDROID.md 4).
+     */
+    private WifiManager.MulticastLock multicast;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -162,9 +168,34 @@ public final class MainActivity extends Activity {
             // No core: nothing asks Android for anything, or its dialog would open over the card.
             return;
         }
+        holdMulticast(true);
         // Also on the way back from the settings of the system, where the person may have changed the answers.
         tellScreenLock();
         showLocalNetwork();
+    }
+
+    @Override
+    protected void onPause() {
+        holdMulticast(false);
+        super.onPause();
+    }
+
+    /** Takes or lets go of the multicast lock; a phone without Wi-Fi has none to take. */
+    private void holdMulticast(boolean on) {
+        if (multicast == null) {
+            WifiManager wifi = getApplicationContext().getSystemService(WifiManager.class);
+            if (wifi == null) {
+                return;
+            }
+            multicast = wifi.createMulticastLock("swapdesk-mdns");
+            multicast.setReferenceCounted(false);
+        }
+        if (on && !multicast.isHeld()) {
+            multicast.acquire();
+        } else if (!on && multicast.isHeld()) {
+            multicast.release();
+        }
+        Log.i(TAG, "MULTICAST_LOCK " + (multicast.isHeld() ? "held" : "released"));
     }
 
     /**

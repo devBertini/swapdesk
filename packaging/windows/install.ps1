@@ -75,7 +75,7 @@ $ServiceText    = 'Swapdesk remote desktop service (LAN only): trust store, sess
 $FirewallGroup  = 'Swapdesk'
 $RuleSession    = 'Swapdesk-UDP-Session-Pairing'
 $RuleMdns       = 'Swapdesk-UDP-mDNS'
-$PortsSession   = '47820-47883'      # ACCOUNTS.md 5.5: 32 accounts, a session and a pairing port each
+$PortsSession   = '47819-47883'      # the direct probe on 47819 (D94), then ACCOUNTS.md 5.5: 32 accounts, a session and a pairing port each
 $PortMdns       = 5353
 $ShortcutName   = 'Swapdesk.lnk'
 $SasKey         = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -479,13 +479,15 @@ try {
         $old = @(Get-NetFirewallRule -Group $FirewallGroup -ErrorAction SilentlyContinue)
         if ($old.Count -gt 0) { $old | Remove-NetFirewallRule }
     }
-    Step ("New-NetFirewallRule {0}: inbound UDP {1} for {2}, profiles Private and Domain, remote LocalSubnet" -f $RuleSession, ($PortsSession -join ','), $ServiceExe) {
-        New-NetFirewallRule -Name $RuleSession -DisplayName ('Swapdesk session and pairing (UDP {0})' -f ($PortsSession -join ', ')) -Group $FirewallGroup `
-            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $PortsSession -Program $ServiceExe -Profile Private, Domain -RemoteAddress LocalSubnet -Enabled True | Out-Null
+    # D93: any network. Who enters is decided by pairing and the pinned keys, not by the firewall.
+    Step ("New-NetFirewallRule {0}: inbound UDP {1} for {2}, every profile, any remote address" -f $RuleSession, ($PortsSession -join ','), $ServiceExe) {
+        New-NetFirewallRule -Name $RuleSession -DisplayName ('Swapdesk probe, session and pairing (UDP {0})' -f ($PortsSession -join ', ')) -Group $FirewallGroup `
+            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $PortsSession -Program $ServiceExe -Profile Any -RemoteAddress Any -Enabled True | Out-Null
     }
-    Step ("New-NetFirewallRule {0}: inbound UDP {1} (mDNS) for {2}, profiles Private and Domain, remote LocalSubnet" -f $RuleMdns, $PortMdns, $ServiceExe) {
+    # mDNS is link-local multicast: only the local subnet ever sends it, on any profile.
+    Step ("New-NetFirewallRule {0}: inbound UDP {1} (mDNS) for {2}, every profile, remote LocalSubnet" -f $RuleMdns, $PortMdns, $ServiceExe) {
         New-NetFirewallRule -Name $RuleMdns -DisplayName ('Swapdesk discovery (mDNS, UDP {0})' -f $PortMdns) -Group $FirewallGroup `
-            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $PortMdns -Program $ServiceExe -Profile Private, Domain -RemoteAddress LocalSubnet -Enabled True | Out-Null
+            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $PortMdns -Program $ServiceExe -Profile Any -RemoteAddress LocalSubnet -Enabled True | Out-Null
     }
 
     # ---- 6. SoftwareSASGeneration

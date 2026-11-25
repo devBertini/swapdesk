@@ -51,11 +51,20 @@ pub struct Config {
     /// Whether the own record is announced from the start (the default). A device that only dials starts with
     /// `false`: it browses, and its record is never on the network, not even for the moment before it is withdrawn.
     pub announce: bool,
+    /// The UDP port of the direct probe (F-FIND-05): answered there while announced, and asked there of other
+    /// devices. `None`: no probe (tests of mDNS alone).
+    pub probe_port: Option<u16>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { mdns_port: MDNS_PORT, service_port: SESSION_PORT, minor: swapdesk_proto::PROTO_MINOR, announce: true }
+        Self {
+            mdns_port: MDNS_PORT,
+            service_port: SESSION_PORT,
+            minor: swapdesk_proto::PROTO_MINOR,
+            announce: true,
+            probe_port: Some(crate::probe::PROBE_PORT),
+        }
     }
 }
 
@@ -191,6 +200,62 @@ impl Events {
     }
 }
 
+/// Where a peer was heard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    Mdns,
+    Probe,
+}
+
+/// Joins what mDNS and the direct probe hear of each peer into one event stream: a peer is found while either hears
+/// it (with the links of both, mDNS's record first) and lost only when neither does.
+pub(crate) struct Merger {
+    events: Arc<Events>,
+    heard: Mutex<HashMap<[u8; FINGERPRINT_BYTES], Heard>>,
+}
+
+/// What mDNS and the probe each hold of one peer.
+type Heard = (Option<Peer>, Option<Peer>);
+
+impl Merger {
+    fn new(events: Arc<Events>) -> Self {
+        Self { events, heard: Mutex::new(HashMap::new()) }
+    }
+
+    pub(crate) fn set(&self, source: Source, fp: [u8; FINGERPRINT_BYTES], peer: Option<Peer>) {
+        let mut heard = lock(&self.heard);
+        if peer.is_some() && !heard.contains_key(&fp) && heard.len() >= MAX_PEERS {
+            return;
+        }
+        let slot = heard.entry(fp).or_insert((None, None));
+        match source {
+            Source::Mdns => slot.0 = peer,
+            Source::Probe => slot.1 = peer,
+        }
+        let merged = match (&slot.0, &slot.1) {
+            (None, None) => None,
+            (Some(p), None) | (None, Some(p)) => Some(p.clone()),
+            (Some(m), Some(q)) => {
+                let mut p = m.clone();
+                for l in &q.links {
+                    if !p.links.iter().any(|x| x.remote == l.remote) {
+                        p.links.push(l.clone());
+                    }
+                }
+                Some(p)
+            }
+        };
+        if merged.is_none() {
+            heard.remove(&fp);
+        }
+        drop(heard);
+        self.events.push(match merged {
+            Some(p) => DiscoveryEvent::Found(p),
+            None => DiscoveryEvent::Lost { fingerprint: fp },
+        });
+    }
+}
+
 pub struct Discovery {
     nets: Arc<dyn NetInterfaces>,
     config: Config,
@@ -200,6 +265,12 @@ pub struct Discovery {
     generation: Arc<AtomicU64>,
     /// How many daemons were started: one at the start, one more per change of the approved addresses.
     daemons: AtomicU64,
+    merger: Arc<Merger>,
+    /// The reply the probe responder sends: the own record while announced, `None` while withdrawn.
+    reply: Arc<Mutex<Option<Vec<u8>>>>,
+    prober_shared: Arc<crate::probe::ProberShared>,
+    prober: Option<crate::probe::Prober>,
+    responder: Option<crate::probe::Responder>,
 }
 
 fn instance_name(fp: &[u8; FINGERPRINT_BYTES]) -> String {
@@ -228,14 +299,36 @@ impl Discovery {
     /// Starts the daemon on the approved interfaces, announces `own` and starts browsing.
     pub fn start(nets: Arc<dyn NetInterfaces>, own: Txt, config: Config) -> Result<Self, DiscoveryError> {
         own.encode().map_err(DiscoveryError::Txt)?;
-        let d = Self {
+        let events = Arc::new(Events::default());
+        let own_fp = own.fingerprint;
+        let mut d = Self {
             nets,
             config,
             state: Mutex::new(State { own, announced: config.announce, applied: Vec::new(), engine: None }),
-            events: Arc::new(Events::default()),
+            merger: Arc::new(Merger::new(Arc::clone(&events))),
+            events,
             generation: Arc::new(AtomicU64::new(0)),
             daemons: AtomicU64::new(0),
+            reply: Arc::new(Mutex::new(None)),
+            prober_shared: Arc::default(),
+            prober: None,
+            responder: None,
         };
+        d.update_reply();
+        if let Some(port) = config.probe_port {
+            // Where the port is taken this machine is not found by probe, and it still browses and probes others.
+            d.responder = crate::probe::Responder::start(port, Arc::clone(&d.reply)).ok();
+            d.prober = Some(
+                crate::probe::Prober::start(
+                    Arc::clone(&d.nets),
+                    own_fp,
+                    port,
+                    Arc::clone(&d.merger),
+                    Arc::clone(&d.prober_shared),
+                )
+                .map_err(|e| DiscoveryError::Mdns(format!("thread: {e}")))?,
+            );
+        }
         let list = d.nets.list().map_err(DiscoveryError::Platform)?;
         {
             let mut st = lock(&d.state);
@@ -267,6 +360,7 @@ impl Discovery {
         }
         st.own.pairing = on;
         let (own, approved) = (st.own.clone(), st.announced_on());
+        self.set_reply(st.announced, &own);
         match st.engine.as_mut() {
             Some(engine) => engine.register(&own, &approved, self.config.service_port, self.config.minor),
             None => Ok(()),
@@ -281,10 +375,46 @@ impl Discovery {
         }
         st.announced = on;
         let (own, approved) = (st.own.clone(), st.announced_on());
+        self.set_reply(st.announced, &own);
         match st.engine.as_mut() {
             Some(engine) => engine.register(&own, &approved, self.config.service_port, self.config.minor),
             None => Ok(()),
         }
+    }
+
+    /// Addresses each search asks, with their /24: the computers the user typed or paired with, so one on another
+    /// network is found again by the next search (F-FIND-05). Changing them starts no search.
+    pub fn set_probe_hints(&self, hints: Vec<Ipv4Addr>) {
+        *lock(&self.prober_shared.hints) = hints;
+    }
+
+    /// Searches the networks once by direct probe (the person pressed "Buscar"; one more search runs when discovery
+    /// starts). mDNS goes on as always.
+    pub fn search(&self) {
+        self.prober_shared.search();
+    }
+
+    /// Direct-probe searches finished so far (diagnostics and tests).
+    pub fn searches_done(&self) -> u64 {
+        self.prober_shared.searches_done()
+    }
+
+    /// What the last direct-probe search did (for the trace).
+    pub fn last_search(&self) -> crate::probe::SearchReport {
+        self.prober_shared.last_search()
+    }
+
+    fn set_reply(&self, announced: bool, own: &Txt) {
+        *lock(&self.reply) =
+            if announced { crate::probe::reply(own, self.config.service_port, self.config.minor) } else { None };
+    }
+
+    fn update_reply(&self) {
+        let (announced, own) = {
+            let st = lock(&self.state);
+            (st.announced, st.own.clone())
+        };
+        self.set_reply(announced, &own);
     }
 
     /// Whether the record is announced now.
@@ -323,6 +453,7 @@ impl Discovery {
             &announce_on,
             Arc::clone(&self.nets),
             &self.events,
+            &self.merger,
             &self.generation,
         )?;
         self.daemons.fetch_add(1, Ordering::SeqCst);
@@ -337,6 +468,8 @@ impl Discovery {
     }
 
     fn stop(&mut self) {
+        self.prober = None;
+        self.responder = None;
         let engine = lock(&self.state).engine.take();
         match engine {
             Some(e) => e.stop(true, Duration::from_secs(2)),
@@ -361,6 +494,7 @@ impl Engine {
         announce_on: &[ApprovedAddr],
         nets: Arc<dyn NetInterfaces>,
         events: &Arc<Events>,
+        merger: &Arc<Merger>,
         generation: &Arc<AtomicU64>,
     ) -> Result<Self, DiscoveryError> {
         let daemon = ServiceDaemon::new_with_port(config.mdns_port).map_err(mdns)?;
@@ -374,10 +508,11 @@ impl Engine {
         let last = Arc::new(AtomicBool::new(false));
         let own_fp = own.fingerprint;
         let spawned = {
-            let (events, generation, last) = (Arc::clone(events), Arc::clone(generation), Arc::clone(&last));
+            let (events, merger, generation, last) =
+                (Arc::clone(events), Arc::clone(merger), Arc::clone(generation), Arc::clone(&last));
             std::thread::Builder::new()
                 .name("swapdesk-discovery".into())
-                .spawn(move || run_worker(browse, nets, own_fp, &events, &generation, &last))
+                .spawn(move || run_worker(browse, nets, own_fp, &events, &merger, &generation, &last))
         };
         let worker = match spawned {
             Ok(w) => w,
@@ -481,6 +616,7 @@ fn run_worker(
     nets: Arc<dyn NetInterfaces>,
     own_fp: [u8; FINGERPRINT_BYTES],
     events: &Events,
+    merger: &Merger,
     generation: &Arc<AtomicU64>,
     last: &AtomicBool,
 ) {
@@ -494,7 +630,7 @@ fn run_worker(
                 let entries: Vec<(&str, &[u8])> =
                     rs.txt_properties.iter().map(|p| (p.key(), p.val().unwrap_or(&[]))).collect();
                 let Ok(txt) = Txt::decode(&entries) else {
-                    drop_known(&mut known, &rs.fullname, events);
+                    drop_known(&mut known, &rs.fullname, merger);
                     continue;
                 };
                 let minor = read_minor(&entries);
@@ -515,7 +651,7 @@ fn run_worker(
                 }
                 links.sort_by_key(|l| (l.if_index, u32::from(l.remote)));
                 if links.is_empty() || rs.port == 0 {
-                    drop_known(&mut known, &rs.fullname, events);
+                    drop_known(&mut known, &rs.fullname, merger);
                     continue;
                 }
                 // A new name past the bound is not remembered and not reported (a LAN host can make up names).
@@ -523,9 +659,9 @@ fn run_worker(
                     continue;
                 }
                 known.insert(rs.fullname.clone(), txt.fingerprint);
-                events.push(DiscoveryEvent::Found(Peer { txt, port: rs.port, minor, links }));
+                merger.set(Source::Mdns, txt.fingerprint, Some(Peer { txt, port: rs.port, minor, links }));
             }
-            ServiceEvent::ServiceRemoved(_, fullname) => drop_known(&mut known, &fullname, events),
+            ServiceEvent::ServiceRemoved(_, fullname) => drop_known(&mut known, &fullname, merger),
             _ => {}
         }
     }
@@ -534,14 +670,14 @@ fn run_worker(
     } else {
         // This daemon was replaced: what it knew is unknown until the new one finds it again.
         for (_, fingerprint) in known.drain() {
-            events.push(DiscoveryEvent::Lost { fingerprint });
+            merger.set(Source::Mdns, fingerprint, None);
         }
     }
 }
 
-fn drop_known(known: &mut HashMap<String, [u8; FINGERPRINT_BYTES]>, fullname: &str, events: &Events) {
+fn drop_known(known: &mut HashMap<String, [u8; FINGERPRINT_BYTES]>, fullname: &str, merger: &Merger) {
     if let Some(fingerprint) = known.remove(fullname) {
-        events.push(DiscoveryEvent::Lost { fingerprint });
+        merger.set(Source::Mdns, fingerprint, None);
     }
 }
 

@@ -298,6 +298,17 @@ pub fn route_to_typed(list: &[NetInterface], remote: Ipv4Addr) -> Result<TypedRo
     Ok(TypedRoute { local: first.addr, remote, on_link: false })
 }
 
+/// The link a reply of a direct probe (F-FIND-05) came over: the approved address [`route_to_typed`] picks for
+/// `remote`, with its interface. Refused for what `route_to_typed` refuses.
+pub fn link_for_route(list: &[NetInterface], remote: Ipv4Addr) -> Result<PeerLink, Refusal> {
+    let route = route_to_typed(list, remote)?;
+    approved_addrs(list)
+        .iter()
+        .find(|a| a.addr == route.local)
+        .map(|a| link(a, remote))
+        .ok_or(Refusal::UnknownLocalAddress)
+}
+
 /// F-FIND-03: validates an address typed by the user. IPv4 literal only (no name, no port); surrounding spaces are
 /// ignored. Any network (D93): see [`route_to_typed`].
 pub fn validate_manual(list: &[NetInterface], text: &str) -> Result<TypedRoute, ManualError> {

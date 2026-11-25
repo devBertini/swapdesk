@@ -56,6 +56,15 @@ pub trait Presence: Send + Sync {
     fn alternate(&self, _device: &DeviceId) -> Option<SocketAddrV4> {
         None
     }
+    /// Addresses the direct probe asks by name (F-FIND-05): the computers typed by address and the last addresses of
+    /// the paired ones, so a computer on another network is listed again without anyone typing it.
+    fn set_probe_hints(&self, _hints: Vec<Ipv4Addr>) {}
+    /// "Buscar": one search of the networks by direct probe (F-FIND-05).
+    fn search(&self) {}
+    /// The searches finished so far and what the last one did, for the trace (`None`: no direct probe).
+    fn search_status(&self) -> Option<(u64, swapdesk_lan::probe::SearchReport)> {
+        None
+    }
 }
 
 /// No discovery: nobody is ever seen.
@@ -290,6 +299,15 @@ impl Presence for DnsSdPresence {
     fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
         lock(&self.peers).alternate(device)
     }
+    fn set_probe_hints(&self, hints: Vec<Ipv4Addr>) {
+        self.discovery.set_probe_hints(hints);
+    }
+    fn search(&self) {
+        self.discovery.search();
+    }
+    fn search_status(&self) -> Option<(u64, swapdesk_lan::probe::SearchReport)> {
+        Some((self.discovery.searches_done(), self.discovery.last_search()))
+    }
 }
 
 impl Drop for DnsSdPresence {
@@ -313,9 +331,23 @@ pub struct FakePresence {
     contacts: Mutex<Vec<(DeviceId, SocketAddrV4)>>,
     /// Where each device's newest record says it is, when the test scripts one that waits aside.
     alternates: Mutex<HashMap<DeviceId, SocketAddrV4>>,
+    /// The probe hints the hub gave last.
+    hints: Mutex<Vec<Ipv4Addr>>,
+    /// Searches the hub asked for.
+    searches: std::sync::atomic::AtomicU32,
 }
 
 impl FakePresence {
+    /// The probe hints the hub gave last.
+    pub fn probe_hints(&self) -> Vec<Ipv4Addr> {
+        lock(&self.hints).clone()
+    }
+
+    /// Searches the hub asked for.
+    pub fn searches(&self) -> u32 {
+        self.searches.load(Ordering::SeqCst)
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::default()
     }
@@ -374,6 +406,12 @@ impl Presence for FakePresence {
     fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
         lock(&self.alternates).get(device).copied()
     }
+    fn set_probe_hints(&self, hints: Vec<Ipv4Addr>) {
+        *lock(&self.hints) = hints;
+    }
+    fn search(&self) {
+        self.searches.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// The presence of one account on a machine with several: the records of this machine's other accounts are not
@@ -412,6 +450,15 @@ impl Presence for FilteredPresence {
     }
     fn alternate(&self, device: &DeviceId) -> Option<SocketAddrV4> {
         self.inner.alternate(device)
+    }
+    fn set_probe_hints(&self, hints: Vec<Ipv4Addr>) {
+        self.inner.set_probe_hints(hints);
+    }
+    fn search(&self) {
+        self.inner.search();
+    }
+    fn search_status(&self) -> Option<(u64, swapdesk_lan::probe::SearchReport)> {
+        self.inner.search_status()
     }
 }
 

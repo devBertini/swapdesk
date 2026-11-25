@@ -325,8 +325,11 @@ strings! {
     NotStartedBody => "Nada foi apagado. Feche o Swapdesk e abra de novo. Se continuar assim, reinicie o celular.", "Nothing was erased. Close Swapdesk and open it again. If it stays like this, restart the phone.";
     NoticeLocalNetButton => "Abrir os ajustes do app", "Open the app’s settings";
     NoComputerTitle => "Nenhum computador encontrado", "No computer found";
-    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto. A busca automática encontra os computadores da mesma rede; se ele está em outra rede, numa VPN ou atrás de um roteador que isola os dispositivos, use Adicionar por endereço com o IP dele.", "On the other computer, check that Swapdesk is open. The automatic search finds computers on the same network; if it is on another network, on a VPN or behind a router that isolates devices, use Add by address with its IP.";
+    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e atualizado. Se ele está numa rede que a busca não alcança, use Adicionar por endereço com o IP dele.", "On the other computer, check that Swapdesk is open and up to date. If it is on a network the search does not reach, use Add by address with its IP.";
     NoComputerButton => "Adicionar por endereço", "Add by address";
+    SearchDevices => "Buscar", "Search";
+    SearchingDevices => "Buscando…", "Searching…";
+    SearchAgain => "Buscar de novo", "Search again";
     NoticeServiceButton => "Abrir Ajustes do Sistema", "Open System Settings";
     NoticeMacPermsOne => "Falta 1 permissão no Mac", "1 permission is missing on the Mac";
     NoticeMacPermsMany => "Faltam {0} permissões no Mac", "{0} permissions are missing on the Mac";
@@ -805,7 +808,7 @@ phone_strings! {
     HomePairBody => "O celular e o computador se conhecem uma vez, conferindo o mesmo código de 6 dígitos nas duas telas. No computador, abra “Parear este computador”; aqui, toque nele em Na rede.", "The phone and the computer get to know each other once, by checking the same 6-digit code on both screens. On the computer, open “Pair this computer”; here, tap it under “On the network”.";
     HomeAddressHint => "Se o computador não aparece em Na rede, digite o IPv4 dele.", "If the computer does not show up under “On the network”, type its IPv4 address.";
     AddressRefusedWhy => "Esse endereço não é de um computador: é o deste celular, um de loopback ou um de broadcast.", "That address is not a computer’s: it is this phone’s own, a loopback address or a broadcast address.";
-    NoComputerBody => "Confira no computador: o Swapdesk está aberto. A busca automática encontra os computadores da mesma rede; se ele está em outra rede, numa VPN ou atrás de um roteador que isola os dispositivos, use Adicionar por endereço com o IP dele.", "On the computer, check that Swapdesk is open. The automatic search finds computers on the same network; if it is on another network, on a VPN or behind a router that isolates devices, use Add by address with its IP.";
+    NoComputerBody => "Confira no computador: o Swapdesk está aberto e atualizado. Se ele está numa rede que a busca não alcança, use Adicionar por endereço com o IP dele.", "On the computer, check that Swapdesk is open and up to date. If it is on a network the search does not reach, use Add by address with its IP.";
     GuideBody => "1. Instale o Swapdesk no computador.\n2. Nele, abra “Parear este computador”. Aqui, toque nele em Na rede e em Parear; confira se o código é o mesmo nos dois.\n3. No computador, em Permissões, diga o que este celular pode fazer. Depois é só tocar em Controlar.", "1. Install Swapdesk on the computer.\n2. On it, open “Pair this computer”. Here, tap it under “On the network” and tap Pair. Check that both show the same code.\n3. On the computer, in Permissions, choose what this phone may do. Then tap Control.";
 
     // A computer's page

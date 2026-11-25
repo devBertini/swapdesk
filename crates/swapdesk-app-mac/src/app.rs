@@ -206,11 +206,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Arc::clone(&clock),
         Arc::clone(&trace),
     );
-    // A scratch run is a development instance: the system picks the ports (a Mac that runs its own Swapdesk keeps
-    // 47820/47821), and the self-test does not announce itself on the network. The host drive keeps the real ports:
-    // the viewer adds this Mac by its address, which means port 47820.
+    // A scratch run is a development instance: it takes the first free pair from 47830 (a Mac that runs its own
+    // Swapdesk keeps 47820/47821), a real pair, so its record announces the port it listens on and the pairing port
+    // is the next one, as discovery assumes; the system picks them only when none is free. The self-test does not
+    // announce itself on the network. The host drive keeps the real ports: the viewer adds this Mac by its address,
+    // which means port 47820.
     if options.use_scratch() && options.drive_host.is_none() {
-        params.ports = Some((0, 0));
+        let free = |port: u16| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok();
+        params.ports = Some(
+            swapdesk_host::accounts::first_free_pair((47830, 47831), swapdesk_host::accounts::MAC_SLOTS, free)
+                .unwrap_or((0, 0)),
+        );
     }
     params.discovery = options.selftest.is_none();
     // The network's changes come from SystemConfiguration's dynamic store, once per burst, without a timer.
