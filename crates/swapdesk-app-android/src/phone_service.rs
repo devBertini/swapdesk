@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use swapdesk_host::pipe;
 use swapdesk_host::service::{ServiceConfig, ServiceCore, ServiceDeps};
 use swapdesk_host::ui_hub::{
-    ConnInfo, DevOptions, DnsSdPresence, FileAuditLog, HubParams, NoHooks, NoPresence, Presence, UiHub, load_settings,
+    ConnInfo, DevOptions, DnsSdPresence, FileAuditLog, HubParams, MachineSettings, NoHooks, NoPresence, Presence,
+    SETTINGS_NAME, UiHub,
 };
 use swapdesk_ipc::{ApiCode, FrameReader, FrameWriter, Handshake};
 use swapdesk_lan::discovery::Config as DnsSdConfig;
@@ -127,6 +128,19 @@ fn stored(what: &str, e: &swapdesk_trust::TrustError) -> StartError {
     }
 }
 
+/// The phone's settings record (`settings.bin`), or the defaults when there is none. Classified as the identity
+/// and the trust store are ([`stored`]): a record the sealed store cannot open, or one that does not decode, will
+/// not load the next time either.
+fn phone_settings(secrets: &dyn SecretStore, default_name: &str) -> Result<MachineSettings, StartError> {
+    use swapdesk_proto::Wire;
+    use swapdesk_trust::TrustError;
+    match secrets.load(SETTINGS_NAME) {
+        Ok(Some(bytes)) => MachineSettings::decode(&bytes).map_err(|e| stored("settings", &TrustError::Codec(e))),
+        Ok(None) => Ok(MachineSettings::new(default_name)),
+        Err(e) => Err(stored("settings", &TrustError::Secret(e))),
+    }
+}
+
 impl PhoneService {
     /// Starts the core and the hub and connects a backend to the hub; `sink` receives the viewer's media.
     pub fn start(
@@ -140,7 +154,7 @@ impl PhoneService {
         let identity =
             Arc::new(Identity::load_or_create(&*secrets, wall.unix_ms()).map_err(|e| stored("identity", &e))?);
         let trust = TrustHandle::open(Arc::clone(&secrets)).map_err(|e| stored("trust store", &e))?;
-        let settings = load_settings(&*secrets, &default_name)?;
+        let settings = phone_settings(&*secrets, &default_name)?;
 
         let deps = ServiceDeps {
             identity: Arc::clone(&identity),

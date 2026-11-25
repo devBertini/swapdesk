@@ -281,6 +281,14 @@ fn a_stored_record_that_does_not_read_stops_the_start_as_unreadable() {
     assert!(matches!(stopped, Some(StartError::Unreadable(_))), "{stopped:?}");
     assert_eq!(secrets.load("identity.bin").unwrap().as_deref(), Some(&[7u8, 7, 7][..]), "nothing was replaced");
 
+    // The settings record is one of the records the app stored: one that does not decode is unreadable too.
+    let folder = Folder::new("unreadable-settings");
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.store("settings.bin", &[9, 9]).expect("a record that is no settings");
+    let stopped = PhoneService::start(params(&folder, secrets.clone()), Arc::new(NoWake), None).err();
+    assert!(matches!(stopped, Some(StartError::Unreadable(_))), "{stopped:?}");
+    assert_eq!(secrets.load("settings.bin").unwrap().as_deref(), Some(&[9u8, 9][..]), "nothing was replaced");
+
     let folder = Folder::new("unanswering");
     let stopped = PhoneService::start(params(&folder, Arc::new(Unanswering)), Arc::new(NoWake), None).err();
     assert!(matches!(stopped, Some(StartError::Failed(_))), "{stopped:?}");

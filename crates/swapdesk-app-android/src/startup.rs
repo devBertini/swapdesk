@@ -90,6 +90,26 @@ fn after_bind(dev: &Dev) -> AfterBind {
     }
 }
 
+/// The TTL the socket step was installed with: the step is the process's, so a start that failed after it was
+/// installed leaves it in place, and the next start (the person came back) finds it.
+static STEP_TTL: OnceLock<Option<u32>> = OnceLock::new();
+
+/// Installs the socket step once per process; a later start with the same options takes the one installed.
+fn install_socket_step(dev: &Dev) -> Result<(), StartError> {
+    if let Some(ttl) = STEP_TTL.get() {
+        return if *ttl == dev.ttl {
+            Ok(())
+        } else {
+            Err(StartError::Failed("the socket step was installed with other development options".into()))
+        };
+    }
+    if !set_after_bind(after_bind(dev)) {
+        return Err(StartError::Failed("the socket step was already installed".into()));
+    }
+    let _ = STEP_TTL.set(dev.ttl);
+    Ok(())
+}
+
 /// `Core.start`: opens the sealed store with `key` in `<dir>/secrets`, the trace in `dir`, and starts the service.
 /// A second call starts nothing.
 pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> Result<String, StartError> {
@@ -106,9 +126,7 @@ pub fn start(dir: &str, key: &[u8], name: &str, os_version: &str, dev: &str) -> 
         Arc::new(SealedStore::open(&dir.join("secrets"), key).map_err(|e| format!("the secret store: {}", e.detail))?);
     let file = FileTrace::open(&dir, "trace.log", Level::Debug, DEFAULT_CAP).map_err(|e| format!("the trace: {e}"))?;
     let trace: Arc<dyn TraceSink> = Arc::new(Tee(file, Logcat { max_level: Level::Info }));
-    if !set_after_bind(after_bind(&dev)) {
-        return Err(StartError::Failed("the socket step was already installed".into()));
-    }
+    install_socket_step(&dev)?;
     let service = PhoneService::start(
         PhoneParams {
             default_name: name.to_owned(),

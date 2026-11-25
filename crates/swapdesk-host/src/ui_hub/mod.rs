@@ -55,7 +55,7 @@ use extras::{Entry, HubExtras, PendingSwap, WakeSetup};
 use host_ui::HubHostUi;
 pub use presence::{DnsSdPresence, FakePresence, NoPresence, Presence, PresencePeer};
 use queue::UiQueue;
-pub use store::{AuditLog, FileAuditLog, MachineSettings, load_settings, store_settings};
+pub use store::{AuditLog, FileAuditLog, MachineSettings, SETTINGS_NAME, load_settings, store_settings};
 
 /// What the hub asks of the machine beyond the C3 traits. Every method has a do-nothing default.
 pub trait SystemHooks: Send + Sync {
