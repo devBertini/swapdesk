@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use quinn::Endpoint;
 use swapdesk_ipc::{ApiCode, Notify, PairingState, Text};
-use swapdesk_lan::guard::{approved_addrs, check_incoming, find_on_link};
-use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
+use swapdesk_lan::guard::{TypedRoute, approved_addrs, check_incoming, route_to_typed};
+use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_for, bind_quic_socket};
 use swapdesk_platform::{Level, NetInterface};
 use swapdesk_proto::{ErrorCode, Sas};
 use swapdesk_trust::{
@@ -498,11 +498,12 @@ impl Hub {
         }
         let (ip, pair_port, expect) = self.pair_target(device_id)?;
         let manual = device_id.starts_with(MANUAL_PREFIX);
-        let local = if self.allow_loopback() && ip.is_loopback() {
-            Ipv4Addr::LOCALHOST
+        let route = if self.allow_loopback() && ip.is_loopback() {
+            TypedRoute { local: Ipv4Addr::LOCALHOST, remote: ip, on_link: true }
         } else {
+            // Any network the person typed (D93).
             let list = self.p.interfaces.list().map_err(|_| ApiCode::Refused)?;
-            find_on_link(&list, ip).map_err(|_| ApiCode::Refused)?.local
+            route_to_typed(&list, ip).map_err(|_| ApiCode::Refused)?
         };
         let ctx = self.pairing_context();
         let me = Arc::clone(self);
@@ -510,8 +511,7 @@ impl Hub {
             // This screen, not just pairing mode: a later screen of this machine is not this task's to drive.
             let still_open = || me.mode.is_open() && lock(&me.pairing.inner).id == Some(pairing_id);
             let result = async {
-                let socket =
-                    bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(|e| TrustError::Tls(e.to_string()))?;
+                let socket = bind_quic_for(&route).map_err(|e| TrustError::Tls(e.to_string()))?;
                 let endpoint = endpoint_from_socket(socket, None)?;
                 let addr = SocketAddr::V4(SocketAddrV4::new(ip, pair_port));
                 // The other machine's pairing endpoint exists only while its own pairing is open, and its person

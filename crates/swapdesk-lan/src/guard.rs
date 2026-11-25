@@ -262,11 +262,39 @@ pub fn find_on_link(list: &[NetInterface], remote: Ipv4Addr) -> Result<PeerLink,
     result
 }
 
+/// How this machine reaches an address the person typed (D93): the approved interface address to send from, and
+/// whether the peer is on-link there. An off-link peer is reached through the router, so its socket needs a TTL that
+/// crosses it ([`crate::socket::ROUTED_TTL`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedRoute {
+    pub local: Ipv4Addr,
+    pub remote: Ipv4Addr,
+    pub on_link: bool,
+}
+
+/// The route to an address the person typed or a paired device's address (D93: the person may type any address,
+/// on this network or another). Refused only what cannot be another computer: 0.0.0.0, loopback, multicast,
+/// broadcast, this machine's own addresses, and the network or broadcast address of an approved subnet. On-link in
+/// an approved subnet goes out of that interface; anything else out of the first approved address (the network the
+/// router of this machine sits on), and an error when no approved interface has an address.
+pub fn route_to_typed(list: &[NetInterface], remote: Ipv4Addr) -> Result<TypedRoute, Refusal> {
+    check_class(list, remote)?;
+    let approved = approved_addrs(list);
+    for a in &approved {
+        if in_subnet(remote, a.addr, a.prefix) {
+            check_subnet(a, remote)?;
+            return Ok(TypedRoute { local: a.addr, remote, on_link: true });
+        }
+    }
+    let first = approved.first().ok_or(Refusal::UnknownLocalAddress)?;
+    Ok(TypedRoute { local: first.addr, remote, on_link: false })
+}
+
 /// F-FIND-03: validates an address typed by the user. IPv4 literal only (no name, no port); surrounding spaces are
-/// ignored.
-pub fn validate_manual(list: &[NetInterface], text: &str) -> Result<PeerLink, ManualError> {
+/// ignored. Any network (D93): see [`route_to_typed`].
+pub fn validate_manual(list: &[NetInterface], text: &str) -> Result<TypedRoute, ManualError> {
     let ip: Ipv4Addr = text.trim().parse().map_err(|_| ManualError::Syntax)?;
-    find_on_link(list, ip).map_err(ManualError::Refused)
+    route_to_typed(list, ip).map_err(ManualError::Refused)
 }
 
 #[cfg(test)]
@@ -418,15 +446,19 @@ mod tests {
         let list = typical();
         assert_eq!(validate_manual(&list, " 192.168.1.50 ").unwrap().remote, Ipv4Addr::new(192, 168, 1, 50));
         let refused = |s: &str| validate_manual(&list, s).unwrap_err();
-        assert_eq!(refused("192.168.2.50"), ManualError::Refused(Refusal::OffLink));
-        assert_eq!(refused("8.8.8.8"), ManualError::Refused(Refusal::OffLink));
+        // Another network is the person's choice (D93): reached through the router, from the first approved address.
+        let routed = |s: &str| validate_manual(&list, s).unwrap();
+        assert!(!routed("192.168.2.50").on_link);
+        assert_eq!(routed("8.8.8.8").local, approved_addrs(&list)[0].addr);
+        assert!(!routed("172.29.0.8").on_link, "an address in the WSL subnet still goes out of an approved one");
+        assert!(!routed("10.8.0.9").on_link, "and one in the VPN subnet");
+        assert!(routed(" 192.168.1.50 ").on_link);
+        assert_eq!(refused("192.168.1.255"), ManualError::Refused(Refusal::Broadcast));
+        assert_eq!(refused("224.0.0.251"), ManualError::Refused(Refusal::Multicast));
         assert_eq!(refused("127.0.0.1"), ManualError::Refused(Refusal::Loopback));
         assert_eq!(refused("192.168.1.21"), ManualError::Refused(Refusal::OwnAddress));
         assert_eq!(refused("192.168.1.20"), ManualError::Refused(Refusal::OwnAddress));
         assert_eq!(refused("0.0.0.0"), ManualError::Refused(Refusal::Unspecified));
-        // An address inside the WSL or VPN subnet is refused with the reason.
-        assert_eq!(refused("172.29.0.8"), ManualError::Refused(Refusal::InterfaceNotApproved(IfKind::Virtual)));
-        assert_eq!(refused("10.8.0.9"), ManualError::Refused(Refusal::InterfaceNotApproved(IfKind::Vpn)));
         for bad in [
             "",
             "   ",
@@ -440,6 +472,6 @@ mod tests {
         ] {
             assert_eq!(refused(bad), ManualError::Syntax, "{bad:?}");
         }
-        assert!(refused("192.168.2.50").to_string().contains("off-link"));
+        assert!(refused("192.168.1.21").to_string().contains("own address"));
     }
 }

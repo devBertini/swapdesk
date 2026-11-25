@@ -17,8 +17,22 @@ use swapdesk_platform::NetInterface;
 
 use crate::guard::{ApprovedAddr, approved_addrs};
 
-/// IP TTL of every QUIC datagram: one hop, never past the router.
+/// IP TTL of every QUIC datagram to a peer on this network: one hop, never past the router.
 pub const QUIC_TTL: u32 = 1;
+
+/// IP TTL of a socket to an address the person typed on another network (D93): the usual default of the systems, so
+/// the datagrams cross the routers between.
+pub const ROUTED_TTL: u32 = 64;
+
+/// A QUIC socket for a dial to `route`: TTL 1 on-link ([`bind_quic_socket`]), raised to [`ROUTED_TTL`] when the peer
+/// is on another network.
+pub fn bind_quic_for(route: &crate::guard::TypedRoute) -> io::Result<UdpSocket> {
+    let socket = bind_quic_socket(SocketAddrV4::new(route.local, 0))?;
+    if !route.on_link {
+        socket.set_ttl(ROUTED_TTL)?;
+    }
+    Ok(socket)
+}
 
 #[derive(Debug)]
 pub enum SocketError {

@@ -87,7 +87,7 @@ fn a_refused_address_shows_why_and_only_a_bare_ipv4_is_sent() {
     s.apply(UiEvent::Reply { ticket: t, result: Err(ApiError::new(ApiCode::Refused)) });
     let e = s.error().expect("the refusal is shown").clone();
     let text = s.error_text(&e);
-    assert!(text.contains("Recusado") && text.contains("rede local"), "{text}");
+    assert!(text.contains("Recusado") && text.contains("loopback"), "{text}");
 }
 
 #[test]

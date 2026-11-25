@@ -42,8 +42,8 @@ use std::time::Duration;
 use quinn::{Endpoint, Incoming};
 use swapdesk_extras::chat::{ChatEntry, ChatError};
 use swapdesk_ipc::{IpcRole, Message as Ipc};
-use swapdesk_lan::guard::{Refusal, check_incoming, find_on_link};
-use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_socket};
+use swapdesk_lan::guard::{Refusal, TypedRoute, check_incoming, route_to_typed};
+use swapdesk_lan::socket::{bind_quic_all_approved, bind_quic_for, bind_quic_socket};
 use swapdesk_platform::{Level, NetInterfaces};
 use swapdesk_proto::GrantsSync;
 use swapdesk_proto::{Intent, PermissionSet};
@@ -194,12 +194,12 @@ impl Connector {
     ) -> Result<(Endpoint, swapdesk_trust::Spki, PermissionSet), ConnectError> {
         let d = &self.dialer;
         let SocketAddr::V4(v4) = addr else { return Err(ConnectError::NotIpv4) };
-        let local = if d.allow_loopback && v4.ip().is_loopback() {
+        let route = if d.allow_loopback && v4.ip().is_loopback() {
             // Development only. A session with this machine's own endpoint is still refused (PROTOCOL.md 1).
             if d.listeners.addrs().contains(&addr) {
                 return Err(ConnectError::Refused(Refusal::OwnAddress));
             }
-            Ipv4Addr::LOCALHOST
+            TypedRoute { local: Ipv4Addr::LOCALHOST, remote: *v4.ip(), on_link: true }
         } else {
             let read = std::time::Instant::now();
             let list = crate::netcache::list_warm_async(&d.interfaces)
@@ -209,13 +209,14 @@ impl Connector {
                 Level::Debug,
                 format_args!("dial {addr}: interface list read in {} ms", read.elapsed().as_millis()),
             );
-            find_on_link(&list, *v4.ip()).map_err(ConnectError::Refused)?.local
+            // A paired device's address on any network (D93): on-link with TTL 1, otherwise through the router.
+            route_to_typed(&list, *v4.ip()).map_err(ConnectError::Refused)?
         };
         let (spki, stored) = d
             .trust
             .read(|s| s.devices.iter().find(|p| p.device_id == device).map(|p| (p.spki, p.grants_here)))
             .ok_or(ConnectError::UnknownDevice)?;
-        let socket = bind_quic_socket(SocketAddrV4::new(local, 0)).map_err(ConnectError::Socket)?;
+        let socket = bind_quic_for(&route).map_err(ConnectError::Socket)?;
         let endpoint = endpoint_from_socket(socket, None)
             .map_err(|e| ConnectError::Socket(std::io::Error::other(e.to_string())))?;
         Ok((endpoint, spki, stored))
