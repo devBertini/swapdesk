@@ -48,7 +48,7 @@ pub fn wake_route(list: &[NetInterface], last_addr: Ipv4Addr) -> Result<WakeRout
 mod tests {
     use super::*;
     use swapdesk_fakes::FakeNetInterfaces;
-    use swapdesk_platform::{IfKind, NetInterfaces};
+    use swapdesk_platform::NetInterfaces;
 
     #[test]
     fn magic_packet_is_six_ff_then_the_mac_sixteen_times() {
@@ -94,15 +94,12 @@ mod tests {
     }
 
     #[test]
-    fn route_refuses_off_link_own_loopback_and_virtual_addresses() {
+    fn route_refuses_off_link_own_and_loopback_addresses() {
         let list = FakeNetInterfaces::windows_typical().list().unwrap();
         assert_eq!(wake_route(&list, Ipv4Addr::new(192, 168, 7, 7)), Err(Refusal::OffLink));
         assert_eq!(wake_route(&list, Ipv4Addr::new(192, 168, 1, 21)), Err(Refusal::OwnAddress));
         assert_eq!(wake_route(&list, Ipv4Addr::LOCALHOST), Err(Refusal::Loopback));
-        assert_eq!(
-            wake_route(&list, Ipv4Addr::new(172, 29, 0, 9)),
-            Err(Refusal::InterfaceNotApproved(IfKind::Virtual))
-        );
-        assert_eq!(wake_route(&list, Ipv4Addr::new(10, 8, 0, 9)), Err(Refusal::InterfaceNotApproved(IfKind::Vpn)));
+        // A broadcast reaches only its own link, on any network (D93): the WSL and VPN subnets are links too.
+        assert_eq!(wake_route(&list, Ipv4Addr::new(172, 29, 0, 9)).unwrap().local, Ipv4Addr::new(172, 29, 0, 1));
     }
 }

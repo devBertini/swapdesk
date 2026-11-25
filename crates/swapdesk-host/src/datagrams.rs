@@ -183,11 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn a_neighbour_on_the_approved_subnet_passes_and_every_other_source_is_dropped() {
+    fn any_network_passes_and_own_loopback_and_unknown_arrivals_are_dropped() {
         let (_trust, _table, guard) = setup(HashMap::new());
         let local = Some(IpAddr::V4(LOCAL));
         assert!(guard.allows(ip(20), local), "a neighbour in the subnet of the approved interface");
-        assert!(!guard.allows(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), local), "off-link");
+        assert!(guard.allows(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), local), "behind a router (D93)");
         assert!(!guard.allows(IpAddr::V4(Ipv4Addr::LOCALHOST), local), "loopback");
         assert!(!guard.allows(ip(10), local), "this machine's own address");
         assert!(!guard.allows(ip(20), Some(ip(99))), "arrived on an address of no interface");
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pairing_filter_drops_blocked_sources_and_whatever_is_off_the_hub_s_links() {
+    fn the_pairing_filter_drops_blocked_sources_and_unknown_arrivals() {
         let mac = [2, 0x11, 0x22, 0x33, 0x44, 0x55];
         let trust = TrustHandle::open(Arc::new(MemorySecretStore::new())).unwrap();
         let table: Arc<dyn NeighborTable> =
@@ -222,7 +222,7 @@ mod tests {
         let keep = pairing_datagrams(nets, Arc::clone(&trust), Arc::clone(&neighbors), false);
         let local = Some(IpAddr::V4(LOCAL));
         assert!(keep(ip(20), local));
-        assert!(!keep(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), local), "off-link");
+        assert!(keep(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), local), "behind a router (D93)");
         assert!(!keep(ip(20), None), "no arrival address");
         trust.update(|s| s.blocked.push([192, 168, 1, 21])).unwrap();
         assert!(!keep(ip(21), local), "a blocked address");

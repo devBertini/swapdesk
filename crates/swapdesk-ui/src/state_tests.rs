@@ -1776,7 +1776,7 @@ fn controlar_shows_the_connect_card_at_once_and_sends_one_connect() {
     assert_eq!(card.phase, WaitPhase::Connecting);
     assert_eq!(card.icon, WaitIcon::Clock);
     assert_eq!(card.title, format!("Conectando ao {}", mac_name(&s)));
-    assert_eq!(card.body, "Abrindo a conexão pela rede local.");
+    assert_eq!(card.body, "Abrindo a conexão.");
     assert_eq!(card.bar, Some(WaitBar { fraction: 0.0, text: None }), "the track alone while there is no deadline");
     assert_eq!(
         card.buttons,
@@ -1924,7 +1924,10 @@ fn each_why_reads_its_own_line() {
     assert_eq!(lines[3], name("O {0} já está em outra sessão. Tente de novo quando ela terminar."));
     assert_eq!(lines[4], name("O {0} não reconhece mais este computador. Pareie os dois de novo."));
     assert_eq!(lines[5], name("O {0} não permite esta conexão."));
-    assert_eq!(lines[6], name("O {0} não respondeu pela rede. Confira se ele está ligado e nesta mesma rede."));
+    assert_eq!(
+        lines[6],
+        name("O {0} não respondeu pela rede. Confira se ele está ligado e se o endereço dele é alcançável daqui.")
+    );
     assert_eq!(lines[7], "Erro interno.");
     let mut sorted = lines.clone();
     sorted.sort();
@@ -2491,7 +2494,7 @@ fn the_home_shows_the_name_the_state_the_network_chip_and_the_two_cards() {
     assert_eq!(h.status.as_deref(), Some("Pronto para receber"));
     assert!(h.ready);
     let chip = h.network.expect("chip");
-    assert_eq!(chip.text, "Só na rede local: Wi-Fi Casa, 192.168.0.12");
+    assert_eq!(chip.text, "Rede: Wi-Fi Casa, 192.168.0.12");
     assert!(!chip.warn);
     assert_eq!(h.cards.len(), 2);
     let crate::home::HomeCard::Recent { lines, .. } = &h.cards[1] else { panic!("recent card") };

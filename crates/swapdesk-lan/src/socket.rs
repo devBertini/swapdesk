@@ -1,6 +1,7 @@
-//! Socket setup for the QUIC endpoints (F-FIND-02: "When a QUIC packet is sent, Swapdesk shall send it with IP TTL 1").
+//! Socket setup for the QUIC endpoints. Since D93 every QUIC datagram is sent with TTL 64, so it crosses routers
+//! (F-FIND-02 sent it with TTL 1 before).
 //!
-//! Only QUIC sockets get TTL 1, set with std's `UdpSocket::set_ttl` and read back. mDNS sockets belong to `mdns-sd`,
+//! Only QUIC sockets get their TTL here, set with std's `UdpSocket::set_ttl` and read back. mDNS sockets belong to `mdns-sd`,
 //! which sends with TTL 255 (link-local multicast, RFC 6762); nothing in this crate touches them.
 //!
 //! A platform may add one step to every QUIC socket, right after it is bound ([`set_after_bind`]). Android needs it:
@@ -17,21 +18,13 @@ use swapdesk_platform::NetInterface;
 
 use crate::guard::{ApprovedAddr, approved_addrs};
 
-/// IP TTL of every QUIC datagram to a peer on this network: one hop, never past the router.
-pub const QUIC_TTL: u32 = 1;
+/// IP TTL of every QUIC datagram: the systems' usual default, so a datagram crosses the routers to a peer on another
+/// network (D93; it was 1, one hop, before).
+pub const QUIC_TTL: u32 = 64;
 
-/// IP TTL of a socket to an address the person typed on another network (D93): the usual default of the systems, so
-/// the datagrams cross the routers between.
-pub const ROUTED_TTL: u32 = 64;
-
-/// A QUIC socket for a dial to `route`: TTL 1 on-link ([`bind_quic_socket`]), raised to [`ROUTED_TTL`] when the peer
-/// is on another network.
+/// A QUIC socket for a dial to `route`, from its local address.
 pub fn bind_quic_for(route: &crate::guard::TypedRoute) -> io::Result<UdpSocket> {
-    let socket = bind_quic_socket(SocketAddrV4::new(route.local, 0))?;
-    if !route.on_link {
-        socket.set_ttl(ROUTED_TTL)?;
-    }
-    Ok(socket)
+    bind_quic_socket(SocketAddrV4::new(route.local, 0))
 }
 
 #[derive(Debug)]
@@ -58,7 +51,7 @@ impl From<io::Error> for SocketError {
     }
 }
 
-/// The platform's step on a QUIC socket that was just bound and given TTL 1: an error fails the bind.
+/// The platform's step on a QUIC socket that was just bound and given its TTL: an error fails the bind.
 pub type AfterBind = Box<dyn Fn(&UdpSocket) -> io::Result<()> + Send + Sync>;
 
 static AFTER_BIND: OnceLock<AfterBind> = OnceLock::new();
@@ -69,7 +62,7 @@ pub fn set_after_bind(step: AfterBind) -> bool {
     AFTER_BIND.set(step).is_ok()
 }
 
-/// Binds a UDP socket and sets IP TTL 1, then reads the value back and fails if the system did not keep it; then
+/// Binds a UDP socket and sets the IP TTL (QUIC_TTL), then reads the value back and fails if the system did not keep it; then
 /// the platform's step, if one is installed. No guard check: the caller picks the address (tests bind loopback).
 /// Production code uses [`bind_quic_approved`].
 pub fn bind_quic_socket(addr: SocketAddrV4) -> io::Result<UdpSocket> {
@@ -97,7 +90,7 @@ fn bind_with(addr: SocketAddrV4, step: Option<&AfterBind>, required: bool) -> io
 }
 
 /// Binds a QUIC socket to one approved interface address. The address must be in the approved list of `list`
-/// (so 0.0.0.0, loopback and virtual or VPN addresses fail) and the socket has TTL 1.
+/// (so 0.0.0.0, loopback and virtual or VPN addresses fail) and the socket has the QUIC TTL.
 pub fn bind_quic_approved(list: &[NetInterface], local: SocketAddrV4) -> Result<UdpSocket, SocketError> {
     if !approved_addrs(list).iter().any(|a| a.addr == *local.ip()) {
         return Err(SocketError::NotApproved(*local.ip()));
@@ -124,12 +117,12 @@ mod tests {
     use swapdesk_platform::NetInterfaces;
 
     #[test]
-    fn a_quic_socket_has_ttl_1_read_back_from_the_system() {
+    fn a_quic_socket_has_its_ttl_read_back_from_the_system() {
         let s = bind_quic_socket(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        assert_eq!(s.ttl().unwrap(), 1);
+        assert_eq!(s.ttl().unwrap(), QUIC_TTL);
     }
 
-    /// docs/ANDROID.md 4: the platform's step runs on the socket once it has TTL 1, an error of the step fails the
+    /// docs/ANDROID.md 4: the platform's step runs on the socket once it has its TTL, an error of the step fails the
     /// bind, and where the step is required a missing one fails it too (no socket rather than one on any network).
     #[test]
     fn the_platforms_step_runs_after_the_ttl_and_fails_the_bind_closed() {
@@ -141,7 +134,7 @@ mod tests {
             Ok(())
         });
         assert!(bind_with(loopback, Some(&step), true).is_ok());
-        assert_eq!(*seen.lock().unwrap(), vec![(1, true)], "once, on the bound socket, TTL already 1");
+        assert_eq!(*seen.lock().unwrap(), vec![(QUIC_TTL, true)], "once, on the bound socket, TTL already set");
 
         let refuse: AfterBind = Box::new(|_| Err(io::Error::other("no approved network")));
         assert_eq!(bind_with(loopback, Some(&refuse), false).unwrap_err().to_string(), "no approved network");
@@ -150,25 +143,19 @@ mod tests {
     }
 
     #[test]
-    fn setting_ttl_1_on_a_quic_socket_leaves_other_sockets_alone() {
+    fn setting_the_ttl_on_a_quic_socket_leaves_other_sockets_alone() {
         let other = UdpSocket::bind("127.0.0.1:0").unwrap();
         let before = other.ttl().unwrap();
         assert_ne!(before, 1, "the system default is not 1");
         let quic = bind_quic_socket(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        assert_eq!(quic.ttl().unwrap(), 1);
+        assert_eq!(quic.ttl().unwrap(), QUIC_TTL);
         assert_eq!(other.ttl().unwrap(), before);
     }
 
     #[test]
     fn the_guarded_bind_refuses_unapproved_addresses_before_binding() {
         let list = FakeNetInterfaces::windows_typical().list().unwrap();
-        for ip in [
-            Ipv4Addr::UNSPECIFIED,
-            Ipv4Addr::LOCALHOST,
-            Ipv4Addr::new(172, 29, 0, 1),
-            Ipv4Addr::new(10, 8, 0, 6),
-            Ipv4Addr::new(192, 168, 1, 99),
-        ] {
+        for ip in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 99)] {
             let r = bind_quic_approved(&list, SocketAddrV4::new(ip, 0));
             assert!(matches!(r, Err(SocketError::NotApproved(a)) if a == ip), "{ip}");
         }
@@ -180,6 +167,7 @@ mod tests {
         // The fake addresses are not on this PC, so each bind fails, but there is one attempt per approved address.
         let results = bind_quic_all_approved(&list, 0);
         let names: Vec<&str> = results.iter().map(|(a, _)| a.if_name.as_str()).collect();
-        assert_eq!(names, ["Ethernet", "Wi-Fi"]);
+        assert_eq!(&names[..2], ["Ethernet", "Wi-Fi"]);
+        assert_eq!(names.len(), approved_addrs(&list).len());
     }
 }

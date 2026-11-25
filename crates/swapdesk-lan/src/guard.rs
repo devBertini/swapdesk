@@ -2,15 +2,15 @@
 //! may talk to. Pure functions over a snapshot of `NetInterface`s, so the same rules run on the fakes and on the
 //! real list.
 //!
-//! Rules, all IPv4 (v1):
-//! - An interface is approved when it is up and its kind is physical Ethernet or Wi-Fi. Virtual (Hyper-V, WSL,
-//!   Docker), VPN, tunnel, loopback and unknown kinds are never approved.
-//! - An address of an approved interface is usable when it is a unicast address with a prefix of 1 to 30 bits (a /0
-//!   would make everything "on-link"; /31 and /32 hold no ordinary peer). Link-local 169.254/16 is allowed: two
+//! Rules, all IPv4 (v1). Any network (D93, owner 25/11/2026: Swapdesk works on whatever network the person is on):
+//! - An interface is approved when it is up and is not loopback: Ethernet, Wi-Fi, a VPN, a virtual adapter, a
+//!   tunnel, a phone's mobile data.
+//! - An address of an approved interface is usable when it is a unicast address with a prefix of 1 to 32 bits (a /0
+//!   would make everything "on-link"; a VPN or mobile data often has a /32, and its peers are all behind it). Link-local 169.254/16 is allowed: two
 //!   machines joined by one cable have no other address.
-//! - A peer is accepted only when it is on-link in the subnet of the approved interface it arrived on, is not that
-//!   subnet's network or broadcast address, and is not loopback, unspecified, multicast, broadcast or one of this
-//!   machine's own addresses (on any interface, approved or not).
+//! - A peer is accepted on any network, on-link or through routers, when it is not loopback, unspecified, multicast,
+//!   broadcast, one of this machine's own addresses, or the network or broadcast address of a subnet it is on-link
+//!   in. The on-link test still serves Wake-on-LAN (a broadcast reaches only the link) and the choice of interface.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
@@ -121,20 +121,23 @@ fn kind_is_physical(kind: IfKind) -> bool {
     matches!(kind, IfKind::Ethernet | IfKind::WiFi)
 }
 
-/// True when the interface itself may carry Swapdesk traffic (physical Ethernet or Wi-Fi, up).
+/// True when the interface itself may carry Swapdesk traffic: up and not loopback (D93).
 pub fn is_approved(i: &NetInterface) -> bool {
-    i.up && kind_is_physical(i.kind)
+    i.up && i.kind != IfKind::Loopback
 }
 
 fn usable_local(addr: Ipv4Addr, prefix: u8) -> bool {
     !(addr.is_loopback() || addr.is_unspecified() || addr.is_multicast() || addr.is_broadcast())
-        && (1..=30).contains(&prefix)
+        && (1..=32).contains(&prefix)
 }
 
 /// Every usable address of every approved interface.
+/// Ethernet and Wi-Fi first, then the rest, each in the list's order.
 pub fn approved_addrs(list: &[NetInterface]) -> Vec<ApprovedAddr> {
-    list.iter()
-        .filter(|i| is_approved(i))
+    let mut sorted: Vec<&NetInterface> = list.iter().filter(|i| is_approved(i)).collect();
+    sorted.sort_by_key(|i| !kind_is_physical(i.kind));
+    sorted
+        .into_iter()
         .flat_map(|i| {
             i.ipv4.iter().filter(|(a, p)| usable_local(*a, *p)).map(|(a, p)| ApprovedAddr {
                 if_index: i.index,
@@ -184,7 +187,8 @@ fn check_subnet(a: &ApprovedAddr, remote: Ipv4Addr) -> Result<(), Refusal> {
         return Err(Refusal::OffLink);
     }
     let net = Ipv4Addr::from(u32::from(a.addr) & u32::from(a.netmask()));
-    if remote == net || remote == a.broadcast() {
+    // A /31 holds two hosts and no broadcast (RFC 3021); a /32 holds only this machine.
+    if a.prefix <= 30 && (remote == net || remote == a.broadcast()) {
         return Err(Refusal::Broadcast);
     }
     Ok(())
@@ -202,7 +206,8 @@ fn v4(ip: IpAddr) -> Result<Ipv4Addr, Refusal> {
 }
 
 /// The incoming-connection check (before the TLS handshake): `local_ip` is quinn's `Incoming::local_ip()`, `remote`
-/// the peer's source address. The peer must be on-link in the subnet of the approved interface that owns `local_ip`.
+/// the peer's source address. Any network (D93): the peer may be on-link or behind routers; `local_ip` must be an
+/// address of an approved interface.
 pub fn check_incoming(list: &[NetInterface], local_ip: IpAddr, remote: IpAddr) -> Result<PeerLink, Refusal> {
     let remote = v4(remote)?;
     let local = v4(local_ip)?;
@@ -215,12 +220,14 @@ pub fn check_incoming(list: &[NetInterface], local_ip: IpAddr, remote: IpAddr) -
         .into_iter()
         .find(|a| a.if_index == owner.index && a.addr == local)
         .ok_or(Refusal::InterfaceNotApproved(owner.kind))?;
-    check_subnet(&addr, remote)?;
-    Ok(link(&addr, remote))
+    match check_subnet(&addr, remote) {
+        Ok(()) | Err(Refusal::OffLink) => Ok(link(&addr, remote)),
+        Err(e) => Err(e),
+    }
 }
 
-/// The check for a peer found by mDNS: `arrival_if_index` is the interface the answer arrived on. The peer must be
-/// on-link in a subnet of that approved interface.
+/// The check for a peer found by mDNS: `arrival_if_index` is the interface the answer arrived on, which must be
+/// approved. Any network (D93): an announced address behind a router is taken too.
 pub fn check_discovered(list: &[NetInterface], arrival_if_index: u32, remote: IpAddr) -> Result<PeerLink, Refusal> {
     let remote = v4(remote)?;
     check_class(list, remote)?;
@@ -228,15 +235,16 @@ pub fn check_discovered(list: &[NetInterface], arrival_if_index: u32, remote: Ip
     if !is_approved(iface) {
         return Err(Refusal::InterfaceNotApproved(if iface.up { iface.kind } else { IfKind::Other }));
     }
-    let mut result = Err(Refusal::OffLink);
-    for a in approved_addrs(list).iter().filter(|a| a.if_index == arrival_if_index) {
+    let on_iface: Vec<ApprovedAddr> =
+        approved_addrs(list).into_iter().filter(|a| a.if_index == arrival_if_index).collect();
+    for a in &on_iface {
         match check_subnet(a, remote) {
             Ok(()) => return Ok(link(a, remote)),
             Err(Refusal::OffLink) => {}
-            Err(e) => result = Err(e),
+            Err(e) => return Err(e),
         }
     }
-    result
+    on_iface.first().map(|a| link(a, remote)).ok_or(Refusal::InterfaceNotApproved(iface.kind))
 }
 
 /// The approved interface whose subnet holds `remote`, whatever interface the packet arrived on (used for a typed
@@ -312,15 +320,14 @@ mod tests {
     }
 
     #[test]
-    fn only_physical_ethernet_and_wifi_are_approved() {
+    fn every_network_but_loopback_is_approved_ethernet_and_wifi_first() {
         let list = typical();
         let addrs = approved_addrs(&list);
         let names: Vec<&str> = addrs.iter().map(|a| a.if_name.as_str()).collect();
-        assert_eq!(names, ["Ethernet", "Wi-Fi"]);
-        assert_eq!(approved_indexes(&list), [4, 7]);
+        assert_eq!(&names[..2], ["Ethernet", "Wi-Fi"], "physical first: {names:?}");
+        assert!(addrs.iter().any(|a| a.kind == IfKind::Vpn) && addrs.iter().any(|a| a.kind == IfKind::Virtual));
         for i in &list {
-            let expect = matches!(i.name.as_str(), "Ethernet" | "Wi-Fi");
-            assert_eq!(is_approved(i), expect, "{}", i.name);
+            assert_eq!(is_approved(i), i.up && i.kind != IfKind::Loopback, "{}", i.name);
         }
     }
 
@@ -328,7 +335,8 @@ mod tests {
     fn a_down_interface_is_not_approved() {
         let mut list = typical();
         list.iter_mut().find(|i| i.name == "Wi-Fi").unwrap().up = false;
-        assert_eq!(approved_indexes(&list), [4]);
+        assert!(!approved_indexes(&list).contains(&7));
+        assert!(approved_indexes(&list).contains(&4));
     }
 
     #[test]
@@ -343,20 +351,19 @@ mod tests {
     }
 
     #[test]
-    fn refuses_connections_that_arrived_on_virtual_vpn_and_tunnel_interfaces() {
+    fn accepts_connections_on_virtual_and_vpn_interfaces() {
         let list = typical();
-        // vEthernet (WSL) 172.29.0.1/20, Default Switch 172.24.32.1/20, VPN 10.8.0.6/24.
-        let cases = [
-            (ip(172, 29, 0, 1), ip(172, 29, 0, 7), IfKind::Virtual),
-            (ip(172, 24, 32, 1), ip(172, 24, 32, 9), IfKind::Virtual),
-            (ip(10, 8, 0, 6), ip(10, 8, 0, 20), IfKind::Vpn),
-        ];
-        for (local, remote, kind) in cases {
-            assert_eq!(check_incoming(&list, local, remote), Err(Refusal::InterfaceNotApproved(kind)), "{local}");
+        // vEthernet (WSL) 172.29.0.1/20, Default Switch 172.24.32.1/20, VPN 10.8.0.6/24: any network (D93).
+        for (local, remote) in [
+            (ip(172, 29, 0, 1), ip(172, 29, 0, 7)),
+            (ip(172, 24, 32, 1), ip(172, 24, 32, 9)),
+            (ip(10, 8, 0, 6), ip(10, 8, 0, 20)),
+        ] {
+            assert!(check_incoming(&list, local, remote).is_ok(), "{local}");
         }
-        assert_eq!(check_discovered(&list, 15, ip(172, 29, 0, 7)), Err(Refusal::InterfaceNotApproved(IfKind::Virtual)));
-        assert_eq!(check_discovered(&list, 20, ip(10, 8, 0, 20)), Err(Refusal::InterfaceNotApproved(IfKind::Vpn)));
-        // The tunnel has no IPv4 address at all, and index 22 is no approved interface.
+        assert!(check_discovered(&list, 15, ip(172, 29, 0, 7)).is_ok());
+        assert!(check_discovered(&list, 20, ip(10, 8, 0, 20)).is_ok());
+        // The tunnel has no IPv4 address at all: nothing on it can answer.
         assert_eq!(
             check_discovered(&list, 22, ip(192, 168, 1, 50)),
             Err(Refusal::InterfaceNotApproved(IfKind::Tunnel))
@@ -364,12 +371,13 @@ mod tests {
     }
 
     #[test]
-    fn refuses_off_link_peers() {
+    fn accepts_peers_behind_routers() {
         let list = typical();
-        assert_eq!(check_incoming(&list, ip(192, 168, 1, 21), ip(192, 168, 2, 5)), Err(Refusal::OffLink));
-        assert_eq!(check_incoming(&list, ip(192, 168, 1, 21), ip(8, 8, 8, 8)), Err(Refusal::OffLink));
-        // Arrived on Wi-Fi (192.168.1.0/24) but the peer is in another private range.
-        assert_eq!(check_discovered(&list, 7, ip(10, 0, 0, 5)), Err(Refusal::OffLink));
+        let routed = check_incoming(&list, ip(192, 168, 1, 21), ip(192, 168, 2, 5)).unwrap();
+        assert_eq!((routed.local, routed.remote), (Ipv4Addr::new(192, 168, 1, 21), Ipv4Addr::new(192, 168, 2, 5)));
+        assert!(check_incoming(&list, ip(192, 168, 1, 21), ip(8, 8, 8, 8)).is_ok());
+        // Announced on Wi-Fi (192.168.1.0/24) with an address of another range.
+        assert_eq!(check_discovered(&list, 7, ip(10, 0, 0, 5)).unwrap().local, Ipv4Addr::new(192, 168, 1, 21));
     }
 
     #[test]
@@ -405,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_or_host_prefix_never_makes_everything_on_link() {
+    fn a_zero_prefix_never_makes_everything_on_link_and_a_host_prefix_holds_only_this_machine() {
         let mut list = typical();
         let wifi = list.iter_mut().find(|i| i.name == "Wi-Fi").unwrap();
         wifi.ipv4 = vec![(Ipv4Addr::new(192, 168, 1, 21), 0)];
@@ -413,7 +421,10 @@ mod tests {
         assert!(check_incoming(&list, ip(192, 168, 1, 21), ip(8, 8, 8, 8)).is_err());
         let wifi = list.iter_mut().find(|i| i.name == "Wi-Fi").unwrap();
         wifi.ipv4 = vec![(Ipv4Addr::new(192, 168, 1, 21), 32)];
-        assert!(approved_addrs(&list).iter().all(|a| a.if_name != "Wi-Fi"));
+        // A /32 (a VPN, mobile data) is usable: every peer of it is behind a router.
+        assert!(approved_addrs(&list).iter().any(|a| a.if_name == "Wi-Fi"));
+        let routed = check_incoming(&list, ip(192, 168, 1, 21), ip(8, 8, 8, 8)).unwrap();
+        assert_eq!(routed.prefix, 32);
     }
 
     #[test]
@@ -450,8 +461,8 @@ mod tests {
         let routed = |s: &str| validate_manual(&list, s).unwrap();
         assert!(!routed("192.168.2.50").on_link);
         assert_eq!(routed("8.8.8.8").local, approved_addrs(&list)[0].addr);
-        assert!(!routed("172.29.0.8").on_link, "an address in the WSL subnet still goes out of an approved one");
-        assert!(!routed("10.8.0.9").on_link, "and one in the VPN subnet");
+        assert!(routed("172.29.0.8").on_link, "the WSL network is a network too");
+        assert!(routed("10.8.0.9").on_link, "and the VPN");
         assert!(routed(" 192.168.1.50 ").on_link);
         assert_eq!(refused("192.168.1.255"), ManualError::Refused(Refusal::Broadcast));
         assert_eq!(refused("224.0.0.251"), ManualError::Refused(Refusal::Multicast));

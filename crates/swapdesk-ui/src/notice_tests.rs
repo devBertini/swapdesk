@@ -119,10 +119,10 @@ fn the_new_texts_are_exact_in_both_languages() {
     assert_eq!(t(MsgKey::NoticeCrashButton, Language::En), "Open logs folder");
     assert_eq!(t(MsgKey::NoComputerTitle, Language::PtBr), "Nenhum computador encontrado");
     assert_eq!(t(MsgKey::NoComputerButton, Language::PtBr), "Adicionar por endereço");
-    assert!(t(MsgKey::NoComputerBody, Language::PtBr).ends_with("ou os dois estão em redes diferentes."));
+    assert!(t(MsgKey::NoComputerBody, Language::PtBr).ends_with("use Adicionar por endereço com o IP dele."));
     assert_eq!(t(MsgKey::NoComputerTitle, Language::En), "No computer found");
     assert_eq!(t(MsgKey::NoComputerButton, Language::En), "Add by address");
-    assert!(t(MsgKey::NoComputerBody, Language::En).ends_with("or the two are on different networks."));
+    assert!(t(MsgKey::NoComputerBody, Language::En).ends_with("use Add by address with its IP."));
 }
 
 /// The Mac notices' buttons must reach something that acts: the real backend answers a command it has no op for

@@ -285,40 +285,40 @@ mod tests {
         ]
     }
 
-    /// F-AND-02: only a Wi-Fi or Ethernet network that is not a VPN is approved; mobile data never is, and a VPN is a
-    /// VPN whatever it runs over.
+    /// Any network (D93): Wi-Fi first, then mobile data and a VPN; a VPN is a VPN whatever it runs over.
     #[test]
-    fn only_wifi_and_ethernet_that_are_not_a_vpn_are_approved() {
+    fn every_network_is_approved_wifi_first() {
         let networks = Networks::new();
         assert!(approved_addrs(&networks.list().unwrap()).is_empty(), "before the first report nothing is approved");
         assert!(networks.set(phone_at_home()));
         let approved = approved_addrs(&networks.list().unwrap());
-        assert_eq!(approved.len(), 1);
+        assert_eq!(approved.len(), 3);
         // Called by its kind, as the screens show it, not by the kernel's name of its interface.
         assert_eq!((approved[0].if_name.as_str(), approved[0].addr, approved[0].prefix), ("Wi-Fi", WIFI, 24));
+        assert!(approved.iter().any(|a| a.addr == CELL) && approved.iter().any(|a| a.addr == VPN));
 
         let kinds: Vec<IfKind> = phone_at_home().iter().map(NetworkFacts::kind).collect();
         assert_eq!(kinds, [IfKind::Other, IfKind::WiFi, IfKind::Vpn]);
         assert_eq!(net(1, 1, transport::ETHERNET, "eth0", &[]).kind(), IfKind::Ethernet);
         assert_eq!(net(1, 1, transport::OTHER, "bt-pan", &[]).kind(), IfKind::Other);
         assert_eq!(net(1, 1, transport::VPN | transport::ETHERNET, "tun1", &[]).kind(), IfKind::Vpn);
-        assert_eq!(net(1, 1, 0, "unknown", &[]).kind(), IfKind::Other, "no transport named: not approved");
+        assert_eq!(net(1, 1, 0, "unknown", &[]).kind(), IfKind::Other);
     }
 
-    /// A socket is bound to the network that holds its address, and only when the guard approves that network.
+    /// A socket is bound to the network that holds its address.
     #[test]
     fn a_socket_is_bound_to_the_approved_network_that_holds_its_address() {
         let networks = Networks::new();
         networks.set(phone_at_home());
         assert_eq!(networks.handle_for(WIFI), Some(0x65_0000_0001));
-        assert_eq!(networks.handle_for(CELL), None, "mobile data");
-        assert_eq!(networks.handle_for(VPN), None, "a VPN");
+        assert_eq!(networks.handle_for(CELL), Some(0x64_0000_0001), "mobile data");
+        assert_eq!(networks.handle_for(VPN), Some(0x66_0000_0001), "a VPN");
         assert_eq!(networks.handle_for(Ipv4Addr::new(192, 168, 1, 99)), None, "not an address of this phone");
         assert_eq!(networks.process_network(), Some(0x65_0000_0001));
     }
 
-    /// The step on every QUIC socket: the Wi-Fi socket is bound to the Wi-Fi network, a loopback socket is left
-    /// alone, and a socket on any other address is refused (the wildcard address too: it names no network).
+    /// The step on every QUIC socket: each socket is bound to the network of its address, a loopback socket is left
+    /// alone, and a socket on no network's address is refused (the wildcard address too: it names no network).
     #[test]
     fn a_quic_socket_is_bound_left_alone_or_refused_by_its_address() {
         let networks = Networks::new();
@@ -326,22 +326,23 @@ mod tests {
         let at = |ip: Ipv4Addr| SocketAddr::from((ip, 50000));
         assert_eq!(networks.binding_for(at(WIFI)), Ok(Some(0x65_0000_0001)));
         assert_eq!(networks.binding_for(at(Ipv4Addr::LOCALHOST)), Ok(None));
-        for refused in [CELL, VPN, Ipv4Addr::UNSPECIFIED] {
+        assert_eq!(networks.binding_for(at(CELL)), Ok(Some(0x64_0000_0001)));
+        for refused in [Ipv4Addr::new(192, 168, 1, 99), Ipv4Addr::UNSPECIFIED] {
             assert!(networks.binding_for(at(refused)).is_err(), "{refused}");
         }
         assert!(networks.binding_for("[::1]:50000".parse().unwrap()).is_err());
     }
 
-    /// When Wi-Fi drops and the phone moves to mobile data, no network is approved (docs/ANDROID.md 4).
+    /// When Wi-Fi drops, the phone goes on over mobile data (D93).
     #[test]
-    fn with_wifi_gone_nothing_is_approved() {
+    fn with_wifi_gone_mobile_data_carries_on() {
         let networks = Networks::new();
         networks.set(phone_at_home());
         let only_cell: Vec<NetworkFacts> = phone_at_home().into_iter().filter(|n| n.name == "rmnet_data0").collect();
         assert!(networks.set(only_cell.clone()));
         assert!(!networks.set(only_cell), "the same list again is no change");
-        assert!(approved_addrs(&networks.list().unwrap()).is_empty());
-        assert_eq!((networks.handle_for(WIFI), networks.process_network()), (None, None));
+        assert_eq!(approved_addrs(&networks.list().unwrap()).len(), 1);
+        assert_eq!((networks.handle_for(WIFI), networks.process_network()), (None, Some(0x64_0000_0001)));
     }
 
     /// With Wi-Fi and Ethernet both approved, each socket goes to its own network and the process to the Wi-Fi.

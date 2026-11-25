@@ -14,7 +14,7 @@ use swapdesk_lan::discovery::{Config, Discovery, DiscoveryEvent, Peer};
 use swapdesk_lan::guard::approved_addrs;
 use swapdesk_lan::txt::Txt;
 use swapdesk_net_win::WindowsNetInterfaces;
-use swapdesk_platform::{IfKind, NetInterface, NetInterfaces, Result};
+use swapdesk_platform::{NetInterface, NetInterfaces, Result};
 use swapdesk_proto::Os;
 
 /// The real list, optionally altered for the instance that plays "another machine".
@@ -22,7 +22,7 @@ struct Nets {
     real: WindowsNetInterfaces,
     /// Replace this address by that one on every interface (a test changes it to play a DHCP change).
     rewrite: Mutex<Option<(Ipv4Addr, Ipv4Addr)>>,
-    /// Pretend every physical interface is virtual (nothing may be announced).
+    /// Pretend every interface is down (nothing may be announced).
     all_virtual: bool,
 }
 
@@ -30,8 +30,8 @@ impl NetInterfaces for Nets {
     fn list(&self) -> Result<Vec<NetInterface>> {
         let mut list = self.real.list()?;
         for i in &mut list {
-            if self.all_virtual && matches!(i.kind, IfKind::Ethernet | IfKind::WiFi) {
-                i.kind = IfKind::Virtual;
+            if self.all_virtual {
+                i.up = false;
             }
             if let Some((from, to)) = *self.rewrite.lock().unwrap() {
                 for (a, _) in &mut i.ipv4 {
@@ -209,7 +209,7 @@ fn nothing_is_announced_or_browsed_when_no_interface_is_approved() {
     let Some((real, fake)) = setup() else { return };
     let port = mdns_port(2);
     let a = Discovery::start(real_nets(), txt("Alpha", 0xA1, Os::Windows), config(port, 47820)).unwrap();
-    // B sees the same PC but every physical interface looks virtual: the guard approves nothing.
+    // B sees the same PC but every interface looks down: the guard approves nothing.
     let b_nets: Arc<dyn NetInterfaces> =
         Arc::new(Nets { real: WindowsNetInterfaces, rewrite: Mutex::new(Some((real, fake))), all_virtual: true });
     let b = Discovery::start(b_nets, txt("Beta", 0xB2, Os::Windows), config(port, 47822)).unwrap();

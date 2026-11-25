@@ -144,7 +144,7 @@ fn a_phone_without_the_local_network_says_so_first_and_offers_the_systems_settin
     assert!(!phone.set_local_network(LocalNetwork::Asking).is_none());
     assert_eq!(phone.notices().first(), Some(&NoticeKind::LocalNetwork));
     let (title, body, button) = phone.notice_texts(NoticeKind::LocalNetwork);
-    assert_eq!(title, "O Swapdesk funciona só na rede local");
+    assert_eq!(title, "O Swapdesk precisa da permissão de rede local");
     assert!(body.contains("o Android pede a sua permissão") && button.is_empty());
     assert!(!ids(&phone).contains(&ControlId::Notice(NoticeKind::LocalNetwork)), "a question of the system, no button");
     // The phone is ready for nothing meanwhile, and says so where it said it was ready.
@@ -152,7 +152,7 @@ fn a_phone_without_the_local_network_says_so_first_and_offers_the_systems_settin
         (phone.home().status.as_deref(), phone.home().ready),
         (Some("Esperando a permissão de rede local"), false)
     );
-    assert!(says(&phone, "O Swapdesk funciona só na rede local"));
+    assert!(says(&phone, "O Swapdesk precisa da permissão de rede local"));
 
     let _ = phone.set_local_network(LocalNetwork::Refused);
     let (title, body, button) = phone.notice_texts(NoticeKind::LocalNetwork);

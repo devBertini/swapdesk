@@ -38,8 +38,8 @@ strings! {
     SidebarNavLabel => "Dispositivos", "Devices";
     NavHome => "Início", "Home";
     NavSettings => "Ajustes", "Settings";
-    NetworkLine => "Só na rede local: {0}, {1}", "Local network only: {0}, {1}";
-    NetworkLineNoAddress => "Só na rede local: {0}", "Local network only: {0}";
+    NetworkLine => "Rede: {0}, {1}", "Network: {0}, {1}";
+    NetworkLineNoAddress => "Rede: {0}", "Network: {0}";
     NoNetwork => "Sem rede", "No network";
     PairThisComputer => "Parear este computador", "Pair this computer";
     ReadyToReceive => "Pronto para receber", "Ready to receive";
@@ -308,7 +308,7 @@ strings! {
     NoticeCrashBody => "O registro do que aconteceu ficou na pasta de logs. Para relatar o problema, anexe esse arquivo.", "A record of what happened is in the logs folder. To report the problem, attach that file.";
     NoticeCrashButton => "Abrir a pasta de logs", "Open logs folder";
     // A phone, from Android 17: the local network is a permission the person grants (docs/ANDROID.md 4).
-    NoticeLocalNetAskTitle => "O Swapdesk funciona só na rede local", "Swapdesk works only on your local network";
+    NoticeLocalNetAskTitle => "O Swapdesk precisa da permissão de rede local", "Swapdesk needs the local network permission";
     NoticeLocalNetAskBody => "Para encontrar e controlar seus computadores, o Android pede a sua permissão para alcançar os dispositivos desta rede.", "To find and control your computers, Android asks for your permission to reach the devices on this network.";
     NoticeLocalNetRefusedTitle => "Rede local não permitida", "Local network not allowed";
     NoticeLocalNetRefusedBody => "Sem a permissão de rede local, o Swapdesk não encontra nem alcança nenhum computador. Nada sai do seu celular.", "Without the local network permission, Swapdesk cannot find or reach any computer. Nothing leaves your phone.";
@@ -325,7 +325,7 @@ strings! {
     NotStartedBody => "Nada foi apagado. Feche o Swapdesk e abra de novo. Se continuar assim, reinicie o celular.", "Nothing was erased. Close Swapdesk and open it again. If it stays like this, restart the phone.";
     NoticeLocalNetButton => "Abrir os ajustes do app", "Open the app’s settings";
     NoComputerTitle => "Nenhum computador encontrado", "No computer found";
-    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto e na mesma rede Wi-Fi ou cabo que este. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the other computer, check that Swapdesk is open and on the same Wi-Fi or cable as this one. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
+    NoComputerBody => "Confira no outro computador: o Swapdesk está aberto. A busca automática encontra os computadores da mesma rede; se ele está em outra rede, numa VPN ou atrás de um roteador que isola os dispositivos, use Adicionar por endereço com o IP dele.", "On the other computer, check that Swapdesk is open. The automatic search finds computers on the same network; if it is on another network, on a VPN or behind a router that isolates devices, use Add by address with its IP.";
     NoComputerButton => "Adicionar por endereço", "Add by address";
     NoticeServiceButton => "Abrir Ajustes do Sistema", "Open System Settings";
     NoticeMacPermsOne => "Falta 1 permissão no Mac", "1 permission is missing on the Mac";
@@ -521,7 +521,7 @@ strings! {
     ElevConfirm => "Confirmar", "Confirm";
 
     // Waits, appended last as above. `EndedTitle` stays unused further up: a key travels as its index.
-    ConnectingBody => "Abrindo a conexão pela rede local.", "Opening the connection over the local network.";
+    ConnectingBody => "Abrindo a conexão.", "Opening the connection.";
     PromptedBody => "O {0} está mostrando o seu pedido. Quem estiver nele precisa aceitar e escolher o que você pode fazer.", "{0} is showing your request. Someone there has to accept it and choose what you may do.";
     ConnectExpiresIn => "O pedido expira em {0} s", "The request expires in {0} s";
     ConnectEndedTitle => "Não deu para conectar ao {0}", "Could not connect to {0}";
@@ -529,7 +529,7 @@ strings! {
     ConnectWhyBusy => "O {0} já está em outra sessão. Tente de novo quando ela terminar.", "{0} is already in another session. Try again when it ends.";
     ConnectWhyForgotten => "O {0} não reconhece mais este computador. Pareie os dois de novo.", "{0} no longer knows this computer. Pair the two again.";
     ConnectWhyNotPermitted => "O {0} não permite esta conexão.", "{0} does not allow this connection.";
-    ConnectWhyUnreachable => "O {0} não respondeu pela rede. Confira se ele está ligado e nesta mesma rede.", "{0} did not answer over the network. Check that it is on and on this same network.";
+    ConnectWhyUnreachable => "O {0} não respondeu pela rede. Confira se ele está ligado e se o endereço dele é alcançável daqui.", "{0} did not answer over the network. Check that it is on and that its address can be reached from here.";
     SidebarConnecting => "Conectando…", "Connecting…";
     SidebarWaitingAccept => "Esperando aceitar", "Waiting to be accepted";
     SidebarWaking => "Acordando…", "Waking…";
@@ -591,7 +591,7 @@ strings! {
     DisplayOption => "{0}, {1}", "{0}, {1}";
     DisplayOptionPrimary => "{0} (principal), {1}", "{0} (main), {1}";
     GuideTitle => "Bem-vindo ao Swapdesk", "Welcome to Swapdesk";
-    GuideBody => "1. Instale o Swapdesk no outro computador, na mesma rede.\n2. Escolha-o em Na rede e clique em Parear; confira se o código é o mesmo nos dois.\n3. Em Permissões, diga o que ele pode fazer aqui. Depois é só clicar em Controlar.", "1. Install Swapdesk on the other computer, on the same network.\n2. Select it under “On the network” and click Pair. Check that both computers show the same code.\n3. In Permissions, choose what it may do here. Then click Control.";
+    GuideBody => "1. Instale o Swapdesk no outro computador.\n2. Escolha-o em Na rede e clique em Parear; confira se o código é o mesmo nos dois.\n3. Em Permissões, diga o que ele pode fazer aqui. Depois é só clicar em Controlar.", "1. Install Swapdesk on the other computer.\n2. Select it under “On the network” and click Pair. Check that both computers show the same code.\n3. In Permissions, choose what it may do here. Then click Control.";
     GuideSkip => "Pular", "Skip";
     GuideDone => "Entendi", "Got it";
     ExplorerTitle => "Arquivos", "Files";
@@ -805,8 +805,8 @@ phone_strings! {
     HomePairBody => "O celular e o computador se conhecem uma vez, conferindo o mesmo código de 6 dígitos nas duas telas. No computador, abra “Parear este computador”; aqui, toque nele em Na rede.", "The phone and the computer get to know each other once, by checking the same 6-digit code on both screens. On the computer, open “Pair this computer”; here, tap it under “On the network”.";
     HomeAddressHint => "Se o computador não aparece em Na rede, digite o IPv4 dele.", "If the computer does not show up under “On the network”, type its IPv4 address.";
     AddressRefusedWhy => "Esse endereço não é de um computador: é o deste celular, um de loopback ou um de broadcast.", "That address is not a computer’s: it is this phone’s own, a loopback address or a broadcast address.";
-    NoComputerBody => "Confira no computador: o Swapdesk está aberto e na mesma rede Wi-Fi que este celular. Se continuar sem aparecer, o roteador pode estar isolando os dispositivos (rede de convidados ou isolamento de clientes), uma VPN pode estar ligada, ou os dois estão em redes diferentes.", "On the computer, check that Swapdesk is open and on the same Wi-Fi network as this phone. If it still does not show up, the router may be isolating devices (guest network or client isolation), a VPN may be on, or the two are on different networks.";
-    GuideBody => "1. Instale o Swapdesk no computador, na mesma rede Wi-Fi.\n2. Nele, abra “Parear este computador”. Aqui, toque nele em Na rede e em Parear; confira se o código é o mesmo nos dois.\n3. No computador, em Permissões, diga o que este celular pode fazer. Depois é só tocar em Controlar.", "1. Install Swapdesk on the computer, on the same Wi-Fi network.\n2. On it, open “Pair this computer”. Here, tap it under “On the network” and tap Pair. Check that both show the same code.\n3. On the computer, in Permissions, choose what this phone may do. Then tap Control.";
+    NoComputerBody => "Confira no computador: o Swapdesk está aberto. A busca automática encontra os computadores da mesma rede; se ele está em outra rede, numa VPN ou atrás de um roteador que isola os dispositivos, use Adicionar por endereço com o IP dele.", "On the computer, check that Swapdesk is open. The automatic search finds computers on the same network; if it is on another network, on a VPN or behind a router that isolates devices, use Add by address with its IP.";
+    GuideBody => "1. Instale o Swapdesk no computador.\n2. Nele, abra “Parear este computador”. Aqui, toque nele em Na rede e em Parear; confira se o código é o mesmo nos dois.\n3. No computador, em Permissões, diga o que este celular pode fazer. Depois é só tocar em Controlar.", "1. Install Swapdesk on the computer.\n2. On it, open “Pair this computer”. Here, tap it under “On the network” and tap Pair. Check that both show the same code.\n3. On the computer, in Permissions, choose what this phone may do. Then tap Control.";
 
     // A computer's page
     DeviceCaptionThis => "Este celular", "This phone";
@@ -1022,9 +1022,9 @@ mod tests {
     #[test]
     fn arguments_are_replaced_and_missing_ones_are_empty() {
         let msg = Msg::new(MsgKey::NetworkLine).with("Wi-Fi Casa").with("192.168.0.12");
-        assert_eq!(text(Language::PtBr, &msg), "Só na rede local: Wi-Fi Casa, 192.168.0.12");
-        assert_eq!(text(Language::En, &msg), "Local network only: Wi-Fi Casa, 192.168.0.12");
-        assert_eq!(text(Language::PtBr, &Msg::new(MsgKey::NetworkLine)), "Só na rede local: , ");
+        assert_eq!(text(Language::PtBr, &msg), "Rede: Wi-Fi Casa, 192.168.0.12");
+        assert_eq!(text(Language::En, &msg), "Network: Wi-Fi Casa, 192.168.0.12");
+        assert_eq!(text(Language::PtBr, &Msg::new(MsgKey::NetworkLine)), "Rede: , ");
     }
 
     #[test]
