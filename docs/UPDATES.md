@@ -179,6 +179,8 @@ The owner signs what the workflow built. That protects against a taken-over acco
 6. The new service, once its pipes and endpoints are up, writes `committed <new>` into the journal. The applier waits 60 s for it (GUESS).
 7. Committed: the applier deletes the staging copy and exits; the new service relaunches `Swapdesk.exe --after-update` in the recorded sessions as their users (the `WTSQueryUserToken` and `CreateProcessAsUserW` path that starts the user helper), writes the Event Log entry 1002 and deletes `rollback\` at its next start.
 
+Firewall rules (D94): the swap does not run `install.ps1`; the installed service sets the two rules of the group `Swapdesk` to its own version's shape at every start (`firewall.rs`), so a release that changes them can still ship with `apply auto`.
+
 ### 6.3 Files and permissions
 
 - `%ProgramData%\Swapdesk\update\` is made by the service with the data folder's rules (C5.2): owner SYSTEM, SYSTEM and Administrators only, a folder with another owner or a reparse point moved aside, never followed. A standard user can neither read the download nor swap it between check and install.

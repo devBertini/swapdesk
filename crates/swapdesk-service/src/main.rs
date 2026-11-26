@@ -18,11 +18,13 @@
 //!   LAN socket, no mDNS) and accepts loopback peers; another instance is added with `AddByAddress` as
 //!   `127.0.0.1:<its session port>`. Never use it on a machine that should be reachable.
 //!
-//! No firewall rule and no install: the installer owns both. The command line parser is in [`options`].
+//! No install: the installer owns it, and the firewall rules it made, which the installed service brings to this
+//! version's shape at every start ([`firewall`], D94). The command line parser is in [`options`].
 
 // Outside tests an unwrap is a crash of the service: return the error or use `expect` with the reason.
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 
+mod firewall;
 mod options;
 
 #[cfg(windows)]

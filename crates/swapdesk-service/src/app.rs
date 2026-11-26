@@ -289,6 +289,9 @@ pub fn run(opts: Options, ctx: ServiceContext) -> u32 {
         }
     };
     let trace = Arc::clone(&env.trace);
+    if !opts.console {
+        crate::firewall::bring_up_to_date(Arc::clone(&trace));
+    }
     match run_with(&opts, ctx, env) {
         Ok(()) => 0,
         Err(e) => {
