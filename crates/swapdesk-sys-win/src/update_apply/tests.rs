@@ -462,3 +462,68 @@ fn a_program_starts_from_a_claimed_file() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// The owner's PC, 25/11/2026: the 1.1.0 applier started the service while it still held the installed files with
+/// `DELETE` access, so the SCM's load of the image (an open that shares read, not delete) failed with error 32, for the
+/// new service and then for the old one. The hold is let go before a start: at the moment the service starts, its image
+/// opens the way a loader opens it.
+#[test]
+fn the_service_starts_with_its_image_free_of_the_hold() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    fill(&layout.install, "1.1.0");
+    fill(&layout.staging(), "1.1.1");
+    let install = layout.install.clone();
+    let opened: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = Arc::clone(&opened);
+    let on_start: OnStart = Box::new(move |version| {
+        let r =
+            fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(install.join("swapdesk-service.exe"));
+        seen.lock()
+            .unwrap()
+            .push(format!("{version} {}", r.map(|_| "ok".to_string()).unwrap_or_else(|e| e.to_string())));
+    });
+    let (mut m, _log) = machine_with(&layout, &temp.0, true, Some(on_start));
+    assert_eq!(apply(&mut m, &v("1.1.0"), &v("1.1.1")), Outcome::Committed);
+    assert_eq!(*opened.lock().unwrap(), vec!["1.1.1 ok".to_string()], "the image opens as the loader opens it");
+}
+
+/// A start the system refuses with a sharing violation (a scanner on the new image) is tried again, and one that
+/// fails for another reason is not.
+#[test]
+fn a_start_refused_with_a_sharing_violation_is_tried_again() {
+    struct Flaky {
+        left: u32,
+        calls: Arc<Mutex<u32>>,
+        why: &'static str,
+    }
+    impl ServiceControl for Flaky {
+        fn stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn start(&mut self) -> Result<(), String> {
+            *self.calls.lock().unwrap() += 1;
+            if self.left == 0 {
+                return Ok(());
+            }
+            self.left -= 1;
+            Err(self.why.to_string())
+        }
+        fn running(&mut self) -> bool {
+            true
+        }
+    }
+    let temp = Temp::new();
+    let layout = folders(&temp);
+    for (why, left, want_calls, ok) in
+        [("StartServiceW: Os (32) Win32 error 32", 3, 4, true), ("StartServiceW: Os (5) Win32 error 5", 3, 1, false)]
+    {
+        let calls: Arc<Mutex<u32>> = Arc::default();
+        let (mut m, _log) = machine_with(&layout, &temp.0, false, None);
+        m.control = Box::new(Flaky { left, calls: Arc::clone(&calls), why });
+        assert_eq!(m.start_service().is_ok(), ok, "{why}");
+        assert_eq!(*calls.lock().unwrap(), want_calls, "{why}");
+    }
+}

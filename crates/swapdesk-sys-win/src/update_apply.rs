@@ -66,6 +66,9 @@ pub trait ServiceControl {
     fn running(&mut self) -> bool;
 }
 
+/// How long a start the system refuses with a sharing violation (a scanner reading the new image) is tried again.
+pub const START_RETRY: Duration = Duration::from_secs(20);
+
 /// The real service, through the SCM.
 pub struct Scm {
     pub name: String,
@@ -298,8 +301,24 @@ impl Machine for WinMachine {
         self.put_from(&dir)
     }
 
+    /// The hold is let go first: a handle with `DELETE` access refuses every open that does not share delete, and the
+    /// SCM's load of the service's image is one, so a start under the hold fails with error 32 (seen on the owner's PC
+    /// on 25/11/2026, the 1.1.0 applier: the new service and then the old one refused to start, and the machine was left
+    /// with none). The files are in place by then; the hold guards the swap only. A start that a scanner still refuses
+    /// (error 32 too) is tried again for [`START_RETRY`].
     fn start_service(&mut self) -> Result<(), String> {
-        self.control.start()
+        if let Some(mut held) = self.held.take() {
+            held.release();
+        }
+        let begin = Instant::now();
+        loop {
+            match self.control.start() {
+                Err(e) if e.contains("Win32 error 32") && begin.elapsed() < START_RETRY => {
+                    std::thread::sleep(self.poll.max(Duration::from_millis(20)));
+                }
+                other => return other,
+            }
+        }
     }
 
     fn wait_commit(&mut self, new: &Version, limit: Duration) -> bool {
