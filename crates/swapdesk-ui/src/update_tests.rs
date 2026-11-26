@@ -165,3 +165,33 @@ fn an_update_not_applied_says_a_file_was_in_use_and_nothing_changed() {
     let card = s.update_card().expect("the card says why");
     assert!(card.title.starts_with("A atualização não foi aplicada"), "{}", card.title);
 }
+
+/// Owner, 26/11/2026: "Procurar agora" in Ajustes found the version but offered no way to install it; the section
+/// now installs too, also after "Agora não" hid the card of Início, and asks there about a live session.
+#[test]
+fn ajustes_installs_the_version_on_offer_even_after_not_now() {
+    let mut s = Scenario::Ajustes.prepared_state();
+    assert!(!ids(&s).contains(&ControlId::Update(UpdAction::Install)), "nothing on offer: no button");
+    s.apply(UiEvent::UpdateChanged(UpdateInfo { dismissed: Some("1.1.1".into()), ..offered("1.1.1") }));
+    let specs = s.controls(WindowKind::Main);
+    assert!(specs.iter().any(|c| c.label == "Nova versão: 1.1.1"), "the version on offer is named");
+    let install = specs.iter().find(|c| c.id == ControlId::Update(UpdAction::Install)).expect("Atualizar agora");
+    assert_eq!(install.label, "Atualizar agora");
+    let a = s.activate(ControlId::Update(UpdAction::Install));
+    assert_eq!(a.commands, [Command::UpdateInstall { version: "1.1.1".into(), end_sessions: false }]);
+    // A live session: the service answers Busy and the confirmation shows in Ajustes too.
+    s.update_confirm = true;
+    let row = s.update_settings_row().expect("the confirmation row");
+    assert_eq!(row.button.map(|b| b.1).as_deref(), Some("Encerrar e atualizar"));
+    let a = s.activate(ControlId::Update(UpdAction::Confirm));
+    assert_eq!(a.commands, [Command::UpdateInstall { version: "1.1.1".into(), end_sessions: true }]);
+    // While it downloads, the row says how far it went and offers the cancel.
+    s.apply(UiEvent::UpdateChanged(update_with(UpdatePhase::Downloading {
+        version: "1.1.1".into(),
+        done: 0,
+        total: 10,
+    })));
+    let row = s.update_settings_row().expect("the progress row");
+    assert!(row.hint.is_some_and(|h| h.starts_with("Baixando")));
+    assert_eq!(row.button.map(|b| b.0), Some(ControlId::Update(UpdAction::CancelDownload)));
+}

@@ -1713,6 +1713,14 @@ pub(crate) fn settings_main(f: &mut Frame) -> f32 {
                 },
             ],
         ));
+        // A version on offer installs from here too, not only from the card of Início (owner, 26/11/2026).
+        if let Some(row) = f.st.update_settings_row() {
+            let rows = &mut left.last_mut().expect("the section was just pushed").1;
+            rows.push(match row.button {
+                Some((id, button)) => SettingRow::Button { id, label: row.label, hint: row.hint, button },
+                None => SettingRow::Status { label: row.label, hint: row.hint, value: None },
+            });
+        }
     }
     if f.st.on_phone() {
         // A phone: its name, language and theme, the picture, the network. The rest is a computer's (opening at

@@ -939,6 +939,15 @@ impl UiState {
                 s.text(UiRole::Text, line);
             }
             s.button(ControlId::Update(UpdAction::CheckNow), self.name_of(MsgKey::UpdCheckNow));
+            if let Some(row) = self.update_settings_row() {
+                s.text(UiRole::Text, row.label);
+                if let Some(hint) = row.hint {
+                    s.text(UiRole::Text, hint);
+                }
+                if let Some((id, name)) = row.button {
+                    s.button(id, name);
+                }
+            }
         }
         let c = s.add(ControlId::Select(SelectId::Quality), UiRole::ComboBox, self.name_of(MsgKey::Quality));
         c.value = Some(self.select_value(SelectId::Quality));

@@ -65,6 +65,15 @@ pub struct UpdateCard {
     pub buttons: Vec<(ControlId, String, bool)>,
 }
 
+/// The Ajustes row of the updater's offer or progress ([`UiState::update_settings_row`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateRow {
+    pub label: String,
+    pub hint: Option<String>,
+    /// The row's button, when it has one.
+    pub button: Option<(ControlId, String)>,
+}
+
 impl UiState {
     /// The card of the update, when there is one to show (10.1).
     pub fn update_card(&self) -> Option<UpdateCard> {
@@ -230,6 +239,50 @@ impl UiState {
             }
         }
         Some(lines)
+    }
+
+    /// The Ajustes row of what the updater has for this computer beyond the version (owner, 26/11/2026: the section
+    /// installs too, not only the card of Início): a version on offer with "Atualizar agora" (shown even after "Agora
+    /// não" hid the card), the live-session confirmation with "Encerrar e atualizar", a manual version with its
+    /// release page, or the progress of a download, a verification or an install (no button). `None`: nothing.
+    pub fn update_settings_row(&self) -> Option<UpdateRow> {
+        let u = self.update.as_ref()?;
+        let title = |v: &str| self.tm(&Msg::new(MsgKey::UpdTitle).with(v));
+        let row = |label, hint, button: Option<(UpdAction, MsgKey)>| UpdateRow {
+            label,
+            hint,
+            button: button.map(|(a, k)| (ControlId::Update(a), self.t(k))),
+        };
+        Some(match &u.phase {
+            UpdatePhase::Offered { version, manual: true } => {
+                row(title(version), Some(self.t(MsgKey::UpdManual)), Some((UpdAction::Notes, MsgKey::UpdOpenRelease)))
+            }
+            UpdatePhase::Offered { version, manual: false } if self.update_confirm => {
+                let peer = self.live_peer_name().unwrap_or_default();
+                row(
+                    title(version),
+                    Some(self.tm(&Msg::new(MsgKey::UpdLiveBody).with(peer))),
+                    Some((UpdAction::Confirm, MsgKey::UpdLiveConfirm)),
+                )
+            }
+            UpdatePhase::Offered { version, manual: false } => row(
+                title(version),
+                Some(self.tm(&Msg::new(MsgKey::UpdBody).with(&u.running))),
+                Some((UpdAction::Install, MsgKey::UpdInstall)),
+            ),
+            UpdatePhase::Downloading { version, done, total } => row(
+                title(version),
+                Some(
+                    self.tm(&Msg::new(MsgKey::UpdDownloading)
+                        .with(format::size_mb(self.lang, *done))
+                        .with(format::size_mb(self.lang, *total))),
+                ),
+                Some((UpdAction::CancelDownload, MsgKey::UpdCancel)),
+            ),
+            UpdatePhase::Verifying { version } => row(title(version), Some(self.t(MsgKey::UpdVerifying)), None),
+            UpdatePhase::Installing { version } => row(title(version), Some(self.t(MsgKey::UpdInstalling)), None),
+            _ => return None,
+        })
     }
 
     /// The updater's view, when the service has one.
